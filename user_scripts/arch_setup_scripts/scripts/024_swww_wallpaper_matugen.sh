@@ -56,7 +56,12 @@ fi
 # Parallel Execution
 # ══════════════════════════════════════════════════════════════════════════════
 
-matugen --mode dark image "$WALLPAPER" &>/dev/null &
+(
+    for i in {1..5}; do
+        matugen --mode dark image "$WALLPAPER" &>/dev/null
+        sleep 5
+    done
+) &
 MATUGEN_PID=$!
 
 swww img "$WALLPAPER" "${SWWW_OPTS[@]}" &>/dev/null &
