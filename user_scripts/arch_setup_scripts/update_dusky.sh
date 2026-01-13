@@ -250,7 +250,8 @@ pull_updates() {
             echo "  3) Discard Local Changes (Runs 'git reset --hard' - WARN: data loss)"
             echo
             
-            read -r -p "Enter choice [1-3]: " choice
+            # CRITICAL FIX: Ensure failure to read (non-interactive) doesn't crash script in set -e mode
+            read -r -p "Enter choice [1-3]: " choice || choice=""
             
             case "$choice" in
                 2)
