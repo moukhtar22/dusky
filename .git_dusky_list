@@ -19,6 +19,7 @@
 .config/swayosd/
 .config/swappy/
 .config/uwsm/
+.config/waybar/horizontal_block/
 .config/waybar/horizontal_minimal/
 .config/waybar/horizontal_nerdy_modern/
 .config/waybar/horizontal_nerdy_modern_compact/
