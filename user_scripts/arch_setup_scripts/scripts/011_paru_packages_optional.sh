@@ -114,6 +114,9 @@ detect_aur_helper() {
 select_packages() {
     local -a pkg_names=() pkg_descs=() pkg_groups=() pkg_status=()
     local group pkg desc
+    # Added loop variables to local scope
+    local total i selected_count last_group mark color input idx
+    local start end range_i
 
     # Parse data efficienty
     while IFS='|' read -r group pkg desc; do
@@ -130,16 +133,15 @@ select_packages() {
         pkg_status+=(0)
     done <<< "$RAW_PKG_DATA"
 
-    local total=${#pkg_names[@]}
-    local selected_count=0 last_group="" mark color input idx
-    local i # Loop variable declared once
+    total=${#pkg_names[@]}
 
     while true; do
         # Clear screen via stderr
         printf '%s' "$TERM_CLEAR" >&2
         
         printf '%s:: Optional Package Selector%s\n' "${C_BOLD}${C_MAGENTA}" "$C_RESET" >&2
-        printf '%s   [1-%d] Toggle | [a] All | [n] None | [q] Quit | [ENTER] Install%s\n' \
+        # Display logic remains as requested (no mention of ranges)
+        printf '%s   [1-%d] Toggle (e.g. 1,3,5) | [n] None | [q] Quit | [ENTER] Install%s\n' \
             "$C_DIM" "$total" "$C_RESET" >&2
 
         last_group=""
@@ -184,18 +186,43 @@ select_packages() {
                 log_warn "Selection cancelled."
                 return 1
                 ;;
-            a|all)
-                for ((i = 0; i < total; i++)); do pkg_status[i]=1; done
-                ;;
             n|none)
                 for ((i = 0; i < total; i++)); do pkg_status[i]=0; done
                 ;;
             *)
-                if [[ "$input" =~ ^[0-9]+$ ]] && ((input >= 1 && input <= total)); then
-                    idx=$((input - 1))
-                    # Toggle 0/1 using bitwise XOR or math
-                    ((pkg_status[idx] = 1 - pkg_status[idx]))
-                fi
+                # Logic Update: Handle comma/space separated lists AND hidden range support
+                # 1. Replace commas with spaces
+                local normalized_input="${input//,/ }"
+                
+                # 2. Iterate through items
+                for selection in $normalized_input; do
+                    
+                    # A. Handle Ranges (Hidden feature: 5-12)
+                    if [[ "$selection" =~ ^([0-9]+)-([0-9]+)$ ]]; then
+                        start="${BASH_REMATCH[1]}"
+                        end="${BASH_REMATCH[2]}"
+
+                        # Safety: Swap if start > end
+                        if ((start > end)); then
+                            local temp=$start
+                            start=$end
+                            end=$temp
+                        fi
+
+                        # Toggle loop
+                        for ((range_i = start; range_i <= end; range_i++)); do
+                            if ((range_i >= 1 && range_i <= total)); then
+                                idx=$((range_i - 1))
+                                ((pkg_status[idx] = 1 - pkg_status[idx]))
+                            fi
+                        done
+
+                    # B. Handle Single Numbers
+                    elif [[ "$selection" =~ ^[0-9]+$ ]] && ((selection >= 1 && selection <= total)); then
+                        idx=$((selection - 1))
+                        ((pkg_status[idx] = 1 - pkg_status[idx]))
+                    fi
+                done
                 ;;
         esac
     done
