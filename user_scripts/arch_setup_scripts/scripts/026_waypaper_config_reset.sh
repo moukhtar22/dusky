@@ -57,7 +57,7 @@ main() {
     cat > "$CONFIG_FILE" <<'EOF'
 [Settings]
 language = en
-folder = ~/Pictures/wallpapers
+folder = ~/Pictures/wallpapers/active_theme/
 monitors = All
 wallpaper = ~/Pictures/wallpapers/dusk_default.jpg
 show_path_in_tooltip = True
