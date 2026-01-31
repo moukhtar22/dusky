@@ -117,7 +117,7 @@
         "on-scroll-down": "swayosd-client --brightness lower"
     },
     "clock": {
-        "format": "{:%H:%M}",
+        "format": "{:%I:%M %p}",
         "tooltip-format": "{:%A, %B %d, %Y}",
         "on-click": "gnome-clocks",
         "on-click-middle": "kitty --class clock -e peaclock"
