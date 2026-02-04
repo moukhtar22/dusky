@@ -740,7 +740,7 @@ class ToggleRow(StateMonitorMixin, BaseActionRow):
 
         if key := self.properties.get("key"):
             utility.save_setting(
-                str(key).strip(), state ^ self.key_inverse, self.save_as_int
+                str(key).strip(), state ^ self.key_inverse, as_int=self.save_as_int
             )
 
         return False
