@@ -194,6 +194,9 @@ class RowProperties(TypedDict, total=False):
     icon: IconConfig
     style: str
     button_text: str
+    button_text_file: str
+    button_text_map: dict[str, str]
+    style_map: dict[str, str]
     interval: int
     key: str
     key_inverse: bool
@@ -729,22 +732,55 @@ class ButtonRow(BaseActionRow):
     ) -> None:
         super().__init__(properties, on_press, context)
 
-        style = str(properties.get("style", "default")).lower()
-        btn = Gtk.Button(label=str(properties.get("button_text", "Run")))
-        btn.add_css_class("run-btn")
-        btn.set_valign(Gtk.Align.CENTER)
+        self.btn = Gtk.Button(label=str(properties.get("button_text", "Run")))
+        self.btn.set_valign(Gtk.Align.CENTER)
+        self.btn.add_css_class("run-btn")
+        
+        self.base_style = str(properties.get("style", "default")).lower()
+        self._apply_base_style(self.base_style)
+        
+        # Dynamic State (Text & Color)
+        self.text_file = properties.get("button_text_file")
+        if self.text_file:
+            self.text_map = properties.get("button_text_map", {})
+            self.style_map = properties.get("style_map", {})
+            self._start_dynamic_poll()
 
+        self.btn.connect("clicked", self._on_button_clicked)
+        self.add_suffix(self.btn)
+        self.set_activatable_widget(self.btn)
+
+    def _apply_base_style(self, style: str) -> None:
+        for s in ["suggested-action", "destructive-action", "default-action"]:
+            self.btn.remove_css_class(s)
         match style:
-            case "destructive":
-                btn.add_css_class("destructive-action")
-            case "suggested":
-                btn.add_css_class("suggested-action")
-            case _:
-                btn.add_css_class("default-action")
+            case "destructive": self.btn.add_css_class("destructive-action")
+            case "suggested": self.btn.add_css_class("suggested-action")
+            case _: self.btn.add_css_class("default-action")
 
-        btn.connect("clicked", self._on_button_clicked)
-        self.add_suffix(btn)
-        self.set_activatable_widget(btn)
+    def _start_dynamic_poll(self) -> None:
+        self._update_dynamic_state()
+        with self._state.lock:
+            if not self._state.is_destroyed:
+                self._state.update_source_id = GLib.timeout_add_seconds(2, self._update_dynamic_state)
+
+    def _update_dynamic_state(self) -> bool:
+        try:
+            path = Path(self.text_file).expanduser()
+            if not path.exists(): return True
+            val = path.read_text().strip()
+            
+            # Update Label
+            new_label = self.text_map.get(val, self.text_map.get("default", self.btn.get_label()))
+            if self.btn.get_label() != new_label:
+                self.btn.set_label(new_label)
+            
+            # Update Style
+            new_style = self.style_map.get(val, self.style_map.get("default", self.base_style))
+            self._apply_base_style(new_style)
+                
+        except Exception: pass
+        return True
 
     def _on_button_clicked(self, _button: Gtk.Button) -> None:
         """Handle button click: execute command or redirect."""

@@ -85,6 +85,8 @@ pages:
   - type: section
     properties:
       title: Power Management
+      icon: ''
+      description: ''
     items:
     - type: selection
       properties:
@@ -102,6 +104,8 @@ pages:
   - type: section
     properties:
       title: Quick Controls
+      icon: ''
+      description: ''
     items:
     - type: slider
       properties:
@@ -135,6 +139,8 @@ pages:
   - type: section
     properties:
       title: Live System Status
+      icon: ''
+      description: ''
     items:
     - type: label
       properties:
@@ -184,6 +190,8 @@ pages:
   - type: section
     properties:
       title: Reset Dusky (takes 5 minutes)
+      icon: ''
+      description: ''
     items:
     - type: button
       properties:
@@ -211,6 +219,8 @@ pages:
   - type: section
     properties:
       title: Git Backup
+      icon: ''
+      description: ''
     items:
     - type: button
       properties:
@@ -236,17 +246,35 @@ pages:
   - type: section
     properties:
       title: Dusky Updates
+      icon: ''
+      description: ''
     items:
     - type: button
       properties:
-        title: System Updater
-        description: Update packages and Dusky configurations
+        title: Dusky Updater
+        description: Update Dusky specific configuration files
         icon: system-software-update-symbolic
-        style: suggested
-        button_text: "Update"
+        badge_file: ~/.config/dusky/settings/dusky_update_behind_commit
+        button_text_file: ~/.config/dusky/settings/dusky_update_behind_commit
+        button_text_map:
+          "0": "Updated"
+          "default": "Available"
+        style_map:
+          "0": "normal"
+          "default": "suggested"
       on_press:
         type: exec
         command: kitty --class update_dusky.sh --title "System Updater" --hold sh -c "$HOME/user_scripts/update_dusky/update_dusky.sh"
+        terminal: false
+    - type: button
+      properties:
+        title: Arch Updater
+        description: Pacman and AUR packages update
+        icon: system-software-update-symbolic
+        button_text: "Update"
+      on_press:
+        type: exec
+        command: kitty --class arch_update --title "Arch Linux Updater" --hold sh -c "paru -Syu"
         terminal: false
     - type: button
       properties:
@@ -371,6 +399,7 @@ pages:
         type: exec
         command: kitty --class change_ftp_directory_server.sh --hold sh -c $HOME/user_scripts/ftp/change_ftp_directory_server.sh
         terminal: false
+
 - id: network
   title: Network
   icon: network-workgroup-symbolic
@@ -462,6 +491,7 @@ pages:
         type: exec
         command: kitty --class 02_openssh_setup.sh --hold sh -c $HOME/user_scripts/networking/02_openssh_setup.sh
         terminal: false
+
 - id: hardware
   title: Hardware
   icon: input-keyboard-symbolic
@@ -510,6 +540,7 @@ pages:
           type: exec
           command: $HOME/user_scripts/desktop_apps/mouse_button_reverse.sh --right
           terminal: false
+
 - id: display
   title: Display
   icon: video-display-symbolic
@@ -577,6 +608,7 @@ pages:
         type: exec
         command: $HOME/user_scripts/hypr/screen_rotate.sh +90
         terminal: false
+
 - id: audio
   title: Audio
   icon: audio-volume-high-symbolic
@@ -669,6 +701,7 @@ pages:
         type: exec
         command: $HOME/user_scripts/wayclick/wayclick.sh
         terminal: false
+
 - id: visuals
   title: Visuals
   icon: applications-graphics-symbolic
@@ -805,6 +838,7 @@ pages:
         type: exec
         command: $HOME/user_scripts/rofi/shader_menu.sh
         terminal: false
+
 - id: components
   title: Components
   icon: emblem-system-symbolic
@@ -887,6 +921,7 @@ pages:
         type: exec
         command: $HOME/user_scripts/waybar/toggle_hypridle.sh
         terminal: false
+
 - id: services
   title: Services
   icon: system-run-symbolic
@@ -918,6 +953,7 @@ pages:
         type: exec
         command: kitty --class performance.sh --hold sh -c "$HOME/user_scripts/performance/services_and_process_terminator.sh"
         terminal: false
+
 - id: configs
   title: Configs
   icon: emblem-documents-symbolic
@@ -1053,6 +1089,7 @@ pages:
         type: exec
         command: gnome-text-editor "$HOME/.config/hypr/source/window_rules.conf"
         terminal: false
+
 - id: keybinds
   title: Keybinds
   icon: input-keyboard-symbolic
@@ -1084,6 +1121,7 @@ pages:
         command: kitty --class dusky_keybinds.sh --hold
           sh -c "$HOME/user_scripts/hypr/dusky_keybinds.sh"
         terminal: false
+
 - id: tools_and_ai
   title: Tools & AI
   icon: utilities-terminal-symbolic
@@ -1202,6 +1240,7 @@ pages:
     properties:
       title: About Dusky
       description: Version and details about Dusky System
+      icon: ''
     items:
     - type: label
       properties:
@@ -1220,6 +1259,7 @@ pages:
     properties:
       title: System Information
       description: Key details about your system
+      icon: ''
     items:
     - type: label
       properties:
