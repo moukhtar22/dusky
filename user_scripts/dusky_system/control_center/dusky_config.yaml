@@ -619,10 +619,12 @@ pages:
         icon: object-rotate-right-symbolic
         buttons:
           - icon: object-rotate-right-symbolic
+            button_text: "Clockwise"
             on_press:
               type: exec
               command: $HOME/user_scripts/hypr/screen_rotate.sh -90
           - icon: object-rotate-left-symbolic
+            button_text: "Counter Clockwise"
             on_press:
               type: exec
               command: $HOME/user_scripts/hypr/screen_rotate.sh +90
