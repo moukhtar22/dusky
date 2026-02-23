@@ -38,9 +38,8 @@
 		"custom/left_div#6",
 		"group/pulseaudio",
 		"custom/left_div#7",
-		"backlight",
+		"group/backlight-drawer",
 		"custom/left_div#8",
-		"battery",
 		"custom/left_inv#2",
 		"custom/power"
 	],
@@ -76,7 +75,7 @@
 		"format": "󰍜",
 		"min-length": 4,
 		"max-length": 4,
-		"tooltip-format": "No command set"
+		"tooltip-format": "System Tray"
 	},
 
 	"hyprland/workspaces": {
@@ -84,9 +83,6 @@
 		"format-icons": {
 			"active": "",
 			"default": ""
-		},
-		"persistent-workspaces": {
-			"*": 5
 		},
 		"on-scroll-up": "hyprctl dispatch workspace +1",
 		"on-scroll-down": "hyprctl dispatch workspace -1",
@@ -320,6 +316,17 @@
 		"drawer": {
 			"transition-left-to-right": false
 		}
+	},
+
+	"group/backlight-drawer": {
+		"orientation": "horizontal",
+		"drawer": {
+			"transition-left-to-right": false
+		},
+		"modules": [
+			"battery",
+			"backlight"
+		]
 	},
 
 	"pulseaudio#output": {

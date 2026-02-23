@@ -173,6 +173,7 @@ class ItemProperties(TypedDict, total=False):
     default: float
     debounce: bool
     options: list[str]
+    options_map: dict[str, str]
     placeholder: str
     path: str  # For directory generator
     sort: str  # For directory generator
@@ -522,10 +523,16 @@ class DuskyControlCenter(Adw.Application):
     def _on_close_request(self, window: Adw.Window) -> bool:
         """
         Intercept window close. Return True to prevent destruction.
-        Hide window and GC to free RAM.
+        Hide window and GC to free RAM without freezing the compositor unmap animation.
         """
         window.set_visible(False)
-        gc.collect()  # Explicitly free memory while hidden
+
+        def _deferred_gc() -> bool:
+            gc.collect()
+            return GLib.SOURCE_REMOVE
+
+        # Explicitly free memory 500ms after hidden to avoid stuttering
+        GLib.timeout_add(500, _deferred_gc)
         return True
 
     def _on_key_pressed(

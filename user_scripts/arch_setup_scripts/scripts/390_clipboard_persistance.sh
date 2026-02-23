@@ -271,14 +271,30 @@ else
 fi
 
 # =============================================================================
-# Post-Process
+# Post-Process (Live Daemon Reload)
 # =============================================================================
 if command -v uwsm >/dev/null 2>&1; then
     printf '\n'
-    log_info "Changes saved."
-    log_info "To apply changes immediately, log out and back in, or restart at a later time."
+    log_info "Changes saved. Live-reloading clipboard daemons..."
+
+    # 1. Determine the path to export for the new daemons
+    if [[ "$_TARGET_MODE" == "ephemeral" || "${choice:-}" == "1" ]]; then
+        export CLIPHIST_DB_PATH="${XDG_RUNTIME_DIR}/cliphist.db"
+    else
+        # Unsetting forces cliphist to fall back to the default ~/.cache location
+        unset CLIPHIST_DB_PATH
+    fi
+
+    # 2. Terminate existing watchers securely (regex match to avoid killing random manual wl-paste tasks)
+    pkill -f "wl-paste.*cliphist" 2>/dev/null || :
+
+    # 3. Respawn the daemons detached from the script's lifecycle
+    uwsm app -- wl-paste --type text --watch cliphist store >/dev/null 2>&1 &
+    uwsm app -- wl-paste --type image --watch cliphist store >/dev/null 2>&1 &
+    disown -a
+
+    log_success "Daemons reloaded. New persistence mode is now active."
 else
     log_warn "uwsm command not found in PATH. Ensure you are in a UWSM session."
+    log_info "You will need to log out and back in for changes to take effect."
 fi
-
-exit 0

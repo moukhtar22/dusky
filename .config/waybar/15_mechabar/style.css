@@ -239,7 +239,7 @@ tooltip label {
 	color: @surface_container_high;
 }
 #battery {
-	background-color: @surface_container_high;
+	background-color: @surface;
 }
 #custom-left_inv.2 {
 	color: @surface_container_high;
@@ -328,4 +328,10 @@ tooltip {
 }
 tooltip > box {
 	padding: 0 6px;
+}
+
+menu {
+	background-color: @background;
+	border: 2px solid @on_background;
+	border-radius: 10px;
 }

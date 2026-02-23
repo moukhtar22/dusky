@@ -87,10 +87,10 @@ update_public_state() {
 
     [[ -d "$STATE_DIR" ]] || mkdir -p "$STATE_DIR"
 
-    if [[ "$mode" == "light" ]]; then
-        state_val=1
+    if [[ "$mode" == "dark" ]]; then
+        state_val="true"
     else
-        state_val=0
+        state_val="false"
     fi
 
     printf '%s\n' "$state_val" > "${PUBLIC_STATE_FILE}.tmp"

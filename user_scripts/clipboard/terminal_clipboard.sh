@@ -502,6 +502,7 @@ show_menu() {
     # SAFETY: Only kill the parent process if we are reasonably sure it is
     # the ephemeral kitty window we spawned.
     if [[ -n "${KITTY_PID:-}" || "${TERM:-}" == *kitty* ]]; then
+        sleep 0.05  # Allow wl-copy time to handshake with Wayland
         kill -15 $PPID 2>/dev/null || :
     fi
 }

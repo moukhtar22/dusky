@@ -7,7 +7,7 @@
 
 # Group 1: dusky_update
 pkgs_productivity=(
-  "tlp" "tlp-pd" "gpu-screen-recorder"
+  "wl-clip-persist"
 )
 
 # --------------------------------------------------------------------------

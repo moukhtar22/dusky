@@ -53,7 +53,7 @@ pkgs_dev=(
 
 # Group 10: Multimedia
 pkgs_multimedia=(
-"ffmpeg" "mpv" "mpv-mpris" "swappy" "swayimg" "resvg" "imagemagick" "libheif" "ffmpegthumbnailer" "grim" "slurp" "wl-clipboard" "cliphist" "tesseract-data-eng"
+"ffmpeg" "mpv" "mpv-mpris" "swappy" "swayimg" "resvg" "imagemagick" "libheif" "ffmpegthumbnailer" "grim" "slurp" "wl-clipboard" "wl-clip-persist" "cliphist" "tesseract-data-eng"
 )
 
 # Group 11: Sys Admin

@@ -55,6 +55,7 @@ readonly PACKAGES=(
   "otf-atkinson-hyperlegible-next"
   "fluent-icon-theme-git"
   "python-pywalfox"
+  "python-pyquery"
   "hyprshade"
   "waypaper"
   "peaclock"

@@ -180,7 +180,7 @@ declare -ra UPDATE_SEQUENCE=(
     "U | waypaper_config_reset.sh"
     "U | copy_service_files.sh --default"
     "U | update_checker.sh --num"
-#    "S | package_installation.sh"
+    "S | package_installation.sh"
     "U | cc_restart.sh --quiet"
     "S | dusky_service_manager.sh"
 )
