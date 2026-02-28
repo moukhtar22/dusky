@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
 # -----------------------------------------------------------------------------
-# Dusky TUI Engine - Master v3.9.5
+# Dusky TUI Engine - Master v3.9.6
 # -----------------------------------------------------------------------------
 # Target: Arch Linux / Hyprland / UWSM / Wayland
+#
+# v3.9.6 CHANGELOG:
+#   - FEAT: Added responsive window resizing (trap 'draw_ui' WINCH).
+#   - FIX: Hardened main input loop to handle signal interruptions (prevent crash on resize).
 #
 # v3.9.5 CHANGELOG:
 #   - SECURITY: Switched to ENVIRON-based awk passing to prevent injection.
@@ -50,7 +54,7 @@ shopt -s extglob
 # POINT THIS TO YOUR REAL CONFIG FILE
 declare -r CONFIG_FILE="${HOME}/.config/hypr/change_me.conf"
 declare -r APP_TITLE="Input Config Editor"
-declare -r APP_VERSION="v3.9.5 (Hardened)"
+declare -r APP_VERSION="v3.9.6 (Stable)"
 
 # Dimensions & Layout
 declare -ri MAX_DISPLAY_ROWS=14
@@ -1149,10 +1153,16 @@ main() {
     printf '%s%s%s%s' "$MOUSE_ON" "$CURSOR_HIDE" "$CLR_SCREEN" "$CURSOR_HOME"
     load_active_values
 
+    # FEATURE: Responsive Window Resizing
+    # The trap draws the UI immediately. The loop below handles the read interruption.
+    trap 'draw_ui' WINCH
+
     local key
     while true; do
         draw_ui
-        IFS= read -rsn1 key || break
+        # CRITICAL FIX: If read is interrupted by WINCH signal, it returns non-zero.
+        # We MUST continue to prevent the script from exiting (due to set -e or break).
+        if ! IFS= read -rsn1 key; then continue; fi
         handle_input_router "$key"
     done
 }

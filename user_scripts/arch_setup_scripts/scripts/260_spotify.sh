@@ -1,10 +1,8 @@
 #!/usr/bin/env bash
-# installs spotify with ad block
 # -----------------------------------------------------------------------------
 # Script: 044_spotify.sh
-# Description: Installs Spotify via Paru or Yay and runs SpotX verbatim.
-#              Does NOT delete SpotX backups.
-#              Asks for user confirmation before proceeding.
+# Description: Installs Spotify via Paru/Yay and runs SpotX for ad-blocking.
+#              Optimized for Arch Linux (Bash 5.3+).
 # -----------------------------------------------------------------------------
 
 # --- Strict Error Handling ---
@@ -19,70 +17,110 @@ readonly C_SUCCESS=$'\033[32m' # Green
 readonly C_ERR=$'\033[31m'     # Red
 readonly C_WARN=$'\033[33m'    # Yellow
 
-# --- Logging Helpers (Stdout only, no log files) ---
-log_info() { printf "${C_BOLD}${C_INFO}[INFO]${C_RESET} %s\n" "$1"; }
+# --- Configuration ---
+readonly SPOTX_URL="https://spotx-official.github.io/run.sh"
+SPOTX_TMP=""
+
+# --- Logging Helpers ---
+log_info()    { printf "${C_BOLD}${C_INFO}[INFO]${C_RESET} %s\n" "$1"; }
 log_success() { printf "${C_BOLD}${C_SUCCESS}[OK]${C_RESET} %s\n" "$1"; }
-log_error() { printf "${C_BOLD}${C_ERR}[ERROR]${C_RESET} %s\n" "$1" >&2; }
+log_error()   { printf "${C_BOLD}${C_ERR}[ERROR]${C_RESET} %s\n" "$1" >&2; }
 
 # --- Cleanup Trap ---
 cleanup() {
     local exit_code=$?
+    if [[ -n "$SPOTX_TMP" && -f "$SPOTX_TMP" ]]; then
+        rm -f "$SPOTX_TMP"
+    fi
     if [[ $exit_code -ne 0 ]]; then
         log_error "Script failed with exit code $exit_code."
     fi
-    # No variable unsetting or file deletion needed here.
 }
 trap cleanup EXIT
 
 # --- Global Variables ---
 AUR_HELPER=""
 
-# --- Prerequisite Checks ---
-check_environment() {
+# --- Functions ---
+
+detect_aur_helper() {
     if [[ $EUID -eq 0 ]]; then
         log_error "Do not run as root. AUR helpers require a non-root user."
         exit 1
     fi
 
-    # Check for paru, then yay, else fail
     if command -v paru &>/dev/null; then
         AUR_HELPER="paru"
     elif command -v yay &>/dev/null; then
         AUR_HELPER="yay"
     else
-        log_error "Neither 'paru' nor 'yay' was found. Please install an AUR helper first."
+        log_error "Required AUR helper not found. Install 'paru' or 'yay' first."
         exit 1
     fi
 }
 
+install_packages() {
+    local helper="$1"
+    shift
+    local packages=("$@")
+
+    # Local IFS override to ensure log formatting is clean (space-separated)
+    log_info "Installing/Verifying packages: $(IFS=' '; echo "${packages[*]}")"
+    
+    # --needed: Idempotency (skip if installed)
+    # --noconfirm: Automated install
+    if "$helper" -S --needed --noconfirm "${packages[@]}"; then
+        log_success "Packages installed/verified."
+    else
+        log_error "Failed to install packages via $helper."
+        exit 1
+    fi
+}
+
+run_spotx() {
+    log_info "Preparing SpotX installation..."
+    SPOTX_TMP=$(mktemp)
+    
+    log_info "Downloading SpotX from official source..."
+    # -s: Silent, -S: Show errors, -L: Follow redirects, -f: Fail on HTTP error
+    if curl -sSLf "$SPOTX_URL" -o "$SPOTX_TMP"; then
+        log_success "Download complete."
+    else
+        log_error "Failed to download SpotX script. Check internet connection."
+        exit 1
+    fi
+
+    log_info "Executing SpotX..."
+    
+    # CRITICAL FIX 1: Use <(cat ...) to force "Pipe Mode" behavior.
+    # This prevents SpotX from detecting it's a file and failing 'Client Detection'.
+    #
+    # CRITICAL FIX 2: Add '-f' (Force) flag.
+    # Because we use '--needed' above, Spotify is NOT reinstalled if up-to-date.
+    # Without '-f', SpotX sees the existing patch, exits with Code 1 (Warning),
+    # and crashes our script. '-f' forces a re-run/overwrite and exits Code 0.
+    bash <(cat "$SPOTX_TMP") -f
+}
+
 # --- Main Logic ---
 
-check_environment
-
-# 0. User Confirmation
-# Using printf to maintain color consistency with the prompt
-printf "${C_BOLD}${C_WARN}[?]${C_RESET} Do you want to install Spotify? [y/N] "
+# 1. User Confirmation
+printf "${C_BOLD}${C_WARN}[?]${C_RESET} Do you want to install/update Spotify? [y/N] "
 read -r response
 
-# Check if response starts with y or Y. Default is No.
-if [[ ! "$response" =~ ^[yY](es)?$ ]]; then
-    log_info "Okay, I won't install Spotify."
+if [[ "${response,,}" != "y" && "${response,,}" != "yes" ]]; then
+    log_info "Operation cancelled by user."
     exit 0
 fi
 
-# 1. Install/Reinstall Spotify
-log_info "Installing Spotify via $AUR_HELPER..."
-if "$AUR_HELPER" -S --noconfirm spotify; then
-    log_success "Spotify installed successfully."
-else
-    log_error "$AUR_HELPER failed to install Spotify."
-    exit 1
-fi
+# 2. Environment Setup
+detect_aur_helper
 
-# 2. Run SpotX Verbatim
-log_info "Executing SpotX script..."
-# Using 'curl -sSL' ensures we follow redirects silently, piped directly to bash.
-# We do not interfere with the script's internal logic or backups.
-bash <(curl -sSL https://spotx-official.github.io/run.sh)
+# 3. Install Spotify + Dependencies
+# Explicitly including 'unzip' and 'perl' as SpotX hard dependencies
+install_packages "$AUR_HELPER" spotify unzip perl
+
+# 4. Run SpotX
+run_spotx
 
 log_success "Process finished. Spotify is ready."

@@ -1,28 +1,22 @@
 #!/usr/bin/env bash
 # =============================================================================
-# ELITE HYPRLAND FILE MANAGER SWITCHER - PLATINUM EDITION (v6.2)
+# ELITE HYPRLAND TERMINAL SWITCHER - PLATINUM EDITION (v6.2)
 # =============================================================================
 #
 # BASED ON: Dusky TUI Engine v3.9.6 (Template Aligned)
 # TARGET:   Arch Linux / Hyprland / UWSM / Wayland
-
+#
 # =============================================================================
-# HOW TO ADD NEW FILE MANAGERS
+# HOW TO ADD NEW TERMINALS
 # =============================================================================
-# 1. Locate the 'FM_CATALOG' array in the USER CONFIGURATION section.
+# 1. Locate the 'TERM_CATALOG' array in the USER CONFIGURATION section.
 # 2. Add a new line inside the parentheses following this exact syntax:
 #    "key|type|desktop_file|display_name"
 #
-#    - KEY: The string that will be written to $fileManager in your config.
-#    - TYPE: '0' for GUI (Direct exec) | '1' for Terminal (Wrapped in terminal).
-#    - DESKTOP_FILE: The filename (e.g., dolphin.desktop) for MIME association.
+#    - KEY: The string that will be written to $terminal in your config.
+#    - TYPE: Kept for catalog consistency (set to '0').
+#    - DESKTOP_FILE: The filename for potential future MIME/app matching.
 #    - DISPLAY_NAME: The friendly name shown in the TUI menu.
-#
-# EXAMPLE: To add 'Dolphin', you would add:
-#    "dolphin|0|org.kde.dolphin.desktop|Dolphin (KDE)"
-#
-# NOTE: The script handles all atomic writes, keybind updates, and UI 
-# scrolling automatically. No further logic changes are required.
 # =============================================================================
 
 set -euo pipefail
@@ -32,33 +26,28 @@ shopt -s extglob
 # ▼ USER CONFIGURATION ▼
 # =============================================================================
 
-# Catalog Format: "Key|Type|DesktopFile|DisplayName"
-# Type 0 = GUI (exec, uwsm-app $fileManager)
-# Type 1 = Terminal (exec, uwsm-app -- $terminal -e $fileManager)
-declare -ra FM_CATALOG=(
-    "nemo|0|nemo.desktop|Nemo (GUI)"
-    "yazi|1|yazi.desktop|Yazi (Terminal)"
-    "thunar|0|thunar.desktop|Thunar (GUI)"
-    "dolphin|0|org.kde.dolphin.desktop|Dolphin (GUI)"
-    "nautilus|0|org.gnome.Nautilus.desktop|Nautilus (GUI)"
-    "pcmanfm|0|pcmanfm.desktop|PCManFM (GUI)"
-    "ranger|1|ranger.desktop|Ranger (Terminal)"
-    "lf|1|lf.desktop|Lf (Terminal)"
-    "superfile|1|superfile.desktop|Superfile (Terminal)"
+declare -ra TERM_CATALOG=(
+    "kitty|0|kitty.desktop|Kitty"
+    "foot|0|org.codeberg.dnkl.foot.desktop|Foot"
+    "alacritty|0|Alacritty.desktop|Alacritty"
+    "wezterm|0|org.wezfurlong.wezterm.desktop|WezTerm"
+    "ghostty|0|com.mitchellh.ghostty.desktop|Ghostty"
+    "konsole|0|org.kde.konsole.desktop|Konsole"
+    "gnome-terminal|0|org.gnome.Terminal.desktop|GNOME Terminal"
 )
 
 # Paths
 declare -r CONF_VARS="${HOME}/.config/hypr/edit_here/source/default_apps.conf"
 declare -r CONF_BINDS="${HOME}/.config/hypr/edit_here/source/keybinds.conf"
-declare -r STATE_FILE="${HOME}/.config/dusky/settings/filemanager_switch"
+declare -r STATE_FILE="${HOME}/.config/dusky/settings/terminal_switch"
 
 # UI Configuration (Template Aligned)
-declare -r APP_TITLE="Dusky File Manager"
+declare -r APP_TITLE="Dusky Terminal Manager"
 declare -r APP_VERSION="v6.2 (Stable)"
 declare -ri BOX_INNER_WIDTH=60
 declare -ri MAX_DISPLAY_ROWS=10
-declare -ri ITEM_PADDING=38  # Width for label column
-declare -ri ADJUST_THRESHOLD=38 # Click boundary for applying vs selecting
+declare -ri ITEM_PADDING=38  
+declare -ri ADJUST_THRESHOLD=38 
 declare -ri HEADER_ROWS=4
 declare -ri ITEM_START_ROW=$(( HEADER_ROWS + 1 ))
 
@@ -97,7 +86,7 @@ declare -r ESC_READ_TIMEOUT=0.10
 declare -i SELECTED_ROW=0
 declare -i SCROLL_OFFSET=0
 declare -i IN_TUI=0
-declare CURRENT_FM_KEY="unknown"
+declare CURRENT_TERM_KEY="unknown"
 declare STATUS_MSG=""
 declare ORIGINAL_STTY=""
 
@@ -106,7 +95,6 @@ declare ORIGINAL_STTY=""
 log_info() { printf '%s[INFO]%s %s\n' "$C_CYAN" "$C_RESET" "$1"; }
 log_err()  { printf '%s[ERROR]%s %s\n' "$C_RED" "$C_RESET" "$1" >&2; }
 
-# Dual-purpose logging: stdout for CLI, inline STATUS_MSG for TUI
 log_action() {
     local is_error="${1:-0}"
     local msg="$2"
@@ -146,20 +134,19 @@ atomic_write() {
     
     tmp_file=$(mktemp "${target}.tmp.XXXXXXXXXX") || return 1
     
-    # Robust Write-Sync-Move pattern
     if ! { printf '%s\n' "$content" > "$tmp_file" && sync "$tmp_file" && mv -f "$tmp_file" "$target"; }; then
         rm -f "$tmp_file"
         return 1
     fi
 }
 
-switch_file_manager() {
+switch_terminal() {
     local target="$1"
     local t_type="" t_desktop="" t_name="" found=0
     local entry
 
     # 1. Catalog Lookup
-    for entry in "${FM_CATALOG[@]}"; do
+    for entry in "${TERM_CATALOG[@]}"; do
         IFS='|' read -r k t d n <<< "$entry"
         if [[ "$k" == "$target" ]]; then
             t_type="$t"
@@ -171,7 +158,7 @@ switch_file_manager() {
     done
 
     if [[ $found -eq 0 ]]; then
-        log_action 1 "File manager '$target' not found in catalog."
+        log_action 1 "Terminal '$target' not found in catalog."
         return 1
     fi
 
@@ -184,13 +171,13 @@ switch_file_manager() {
     local new_vars
     new_vars=$(awk -v val="$target" '
         BEGIN { found=0 }
-        /^[\t ]*\$fileManager[\t ]*=/ {
-            print "$fileManager = " val
+        /^[\t ]*\$terminal[\t ]*=/ {
+            print "$terminal = " val
             found=1
             next
         }
         { print }
-        END { if(!found) print "$fileManager = " val }
+        END { if(!found) print "$terminal = " val }
     ' "$CONF_VARS")
     atomic_write "$CONF_VARS" "$new_vars"
 
@@ -200,17 +187,11 @@ switch_file_manager() {
         return 1
     fi
 
-    local exec_cmd
-    if [[ "$t_type" == "1" ]]; then
-        exec_cmd="uwsm-app -- \$terminal -e \$fileManager"
-    else
-        exec_cmd="uwsm-app \$fileManager"
-    fi
-
+    local exec_cmd="uwsm-app -- \$terminal"
     local new_binds
     new_binds=$(awk -v new_cmd="$exec_cmd" '
         BEGIN { found=0 }
-        /bindd[ \t]*=.*,[ \t]*File Manager[ \t]*,/ {
+        /bindd[ \t]*=.*,[ \t]*Launch Terminal[ \t]*,/ {
             split($0, parts, ",")
             printf "%s,%s,%s, exec, %s\n", parts[1], parts[2], parts[3], new_cmd
             found=1
@@ -220,47 +201,39 @@ switch_file_manager() {
         END {
             if(!found) {
                 print ""
-                print "# Auto-generated by FM Switcher"
-                print "bindd = $mainMod, E, File Manager, exec, " new_cmd
+                print "# Auto-generated by Terminal Switcher"
+                print "bindd = $mainMod, Q, Launch Terminal, exec, " new_cmd
             }
         }
     ' "$CONF_BINDS")
     atomic_write "$CONF_BINDS" "$new_binds"
 
-    # 4. Update MIME Defaults
-    if command -v xdg-mime &>/dev/null; then
-        xdg-mime default "$t_desktop" inode/directory 2>/dev/null || true
-    fi
-
-    # 5. Update State Files
+    # 4. Update State Files
     local legacy_state="false"
-    [[ "$t_type" == "1" ]] && legacy_state="true"
+    [[ "$target" == "kitty" ]] && legacy_state="true"
     atomic_write "$STATE_FILE" "$legacy_state"
     atomic_write "${STATE_FILE}.smart" "$target"
 
-    CURRENT_FM_KEY="$target"
+    CURRENT_TERM_KEY="$target"
     log_action 0 "$t_name"
     return 0
 }
 
 detect_current() {
-    # Robust grep/cut to find current variable
     if [[ -f "$CONF_VARS" ]]; then
-        CURRENT_FM_KEY=$(grep -m1 '^[[:space:]]*\$fileManager[[:space:]]*=' "$CONF_VARS" | cut -d'=' -f2 | tr -d ' "' || echo "unknown")
-        CURRENT_FM_KEY="${CURRENT_FM_KEY//[[:space:]]/}"
+        CURRENT_TERM_KEY=$(grep -m1 '^[[:space:]]*\$terminal[[:space:]]*=' "$CONF_VARS" | cut -d'=' -f2 | tr -d ' "' || echo "unknown")
+        CURRENT_TERM_KEY="${CURRENT_TERM_KEY//[[:space:]]/}"
         
-        # Safe check for empty strings under set -e
-        if [[ -z "$CURRENT_FM_KEY" ]]; then
-             CURRENT_FM_KEY="unknown"
+        if [[ -z "$CURRENT_TERM_KEY" ]]; then
+             CURRENT_TERM_KEY="unknown"
         fi
     else
-        CURRENT_FM_KEY="unknown"
+        CURRENT_TERM_KEY="unknown"
     fi
 }
 
 # --- UI Rendering Engine ---
 
-# Derived from Dusky Template
 strip_ansi() {
     local v="$1"
     v="${v//$'\033'\[*([0-9;:?<=>])@([@A-Z\[\\\]^_\`a-z\{|\}~])/}"
@@ -320,13 +293,12 @@ render_scroll_indicator() {
 draw_ui() {
     local buf="" pad_buf=""
     local -i vis_len left_pad right_pad
-    local -i count=${#FM_CATALOG[@]}
+    local -i count=${#TERM_CATALOG[@]}
     local -i _vis_start _vis_end
     local item k t d n indicator padded_label
 
     buf+="${CURSOR_HOME}"
     
-    # 1. Header
     buf+="${C_MAGENTA}┌${H_LINE}┐${C_RESET}${CLR_EOL}"$'\n'
 
     strip_ansi "$APP_TITLE"; local -i t_len=${#REPLY}
@@ -340,32 +312,29 @@ draw_ui() {
     printf -v pad_buf '%*s' "$right_pad" ''
     buf+="${pad_buf}│${C_RESET}${CLR_EOL}"$'\n'
 
-    # Sub-header
-    local curr_txt="Current: ${CURRENT_FM_KEY}"
+    local curr_txt="Current: ${CURRENT_TERM_KEY}"
     strip_ansi "$curr_txt"; local -i c_len=${#REPLY}
     left_pad=$(( (BOX_INNER_WIDTH - c_len) / 2 ))
     right_pad=$(( BOX_INNER_WIDTH - c_len - left_pad ))
     printf -v pad_buf '%*s' "$left_pad" ''
-    buf+="${C_MAGENTA}│${pad_buf}${C_GREY}Current: ${C_GREEN}${CURRENT_FM_KEY}${C_MAGENTA}"
+    buf+="${C_MAGENTA}│${pad_buf}${C_GREY}Current: ${C_GREEN}${CURRENT_TERM_KEY}${C_MAGENTA}"
     printf -v pad_buf '%*s' "$right_pad" ''
     buf+="${pad_buf}│${C_RESET}${CLR_EOL}"$'\n'
     
     buf+="${C_MAGENTA}└${H_LINE}┘${C_RESET}${CLR_EOL}"$'\n'
 
-    # 2. List Items
     compute_scroll_window "$count"
     render_scroll_indicator buf "above" "$count" "$_vis_start"
 
     for (( i = _vis_start; i < _vis_end; i++ )); do
-        IFS='|' read -r k t d n <<< "${FM_CATALOG[$i]}"
+        IFS='|' read -r k t d n <<< "${TERM_CATALOG[$i]}"
         
-        if [[ "$k" == "$CURRENT_FM_KEY" ]]; then
+        if [[ "$k" == "$CURRENT_TERM_KEY" ]]; then
             indicator="${C_GREEN}● ACTIVE${C_RESET}"
         else
             indicator="${C_GREY}○${C_RESET}"
         fi
 
-        # Ellipsis Truncation
         local max_len=$(( ITEM_PADDING - 1 ))
         if (( ${#n} > ITEM_PADDING )); then
             printf -v padded_label "%-${max_len}s…" "${n:0:max_len}"
@@ -387,7 +356,6 @@ draw_ui() {
 
     render_scroll_indicator buf "below" "$count" "$_vis_end"
 
-    # 3. Footer (Template Aligned)
     if [[ -n "$STATUS_MSG" ]]; then
         buf+="  ${STATUS_MSG}${CLR_EOL}"$'\n'
     else
@@ -400,18 +368,18 @@ draw_ui() {
     printf '%s' "$buf"
 }
 
-# --- Input Handling (Template Aligned) ---
+# --- Input Handling ---
 
 navigate() {
     local -i dir=$1
-    local -i count=${#FM_CATALOG[@]}
+    local -i count=${#TERM_CATALOG[@]}
     SELECTED_ROW=$(( (SELECTED_ROW + dir + count) % count ))
-    STATUS_MSG="" # Clear status on navigation
+    STATUS_MSG=""
 }
 
 navigate_page() {
     local -i dir=$1
-    local -i count=${#FM_CATALOG[@]}
+    local -i count=${#TERM_CATALOG[@]}
     SELECTED_ROW=$(( SELECTED_ROW + dir * MAX_DISPLAY_ROWS ))
     if (( SELECTED_ROW < 0 )); then SELECTED_ROW=0; fi
     if (( SELECTED_ROW >= count )); then SELECTED_ROW=$(( count - 1 )); fi
@@ -419,8 +387,8 @@ navigate_page() {
 }
 
 navigate_end() {
-    local -i target=$1 # 0=top, 1=bottom
-    local -i count=${#FM_CATALOG[@]}
+    local -i target=$1 
+    local -i count=${#TERM_CATALOG[@]}
     if (( target == 0 )); then SELECTED_ROW=0; else SELECTED_ROW=$(( count - 1 )); fi
     STATUS_MSG=""
 }
@@ -446,23 +414,19 @@ handle_mouse() {
 
     if [[ "$terminator" != "M" ]]; then return 0; fi
 
-    # Hit Test
     local -i effective_start=$(( ITEM_START_ROW + 1 ))
     if (( y >= effective_start && y < effective_start + MAX_DISPLAY_ROWS )); then
         local -i clicked_idx=$(( y - effective_start + SCROLL_OFFSET ))
-        local -i count=${#FM_CATALOG[@]}
+        local -i count=${#TERM_CATALOG[@]}
         
         if (( clicked_idx >= 0 && clicked_idx < count )); then
             SELECTED_ROW=$clicked_idx
             
-            # THE CRITICAL TEMPLATE FIX:
-            # Only apply if clicking the RIGHT side of the screen (the indicator circle)
             if (( x > ADJUST_THRESHOLD )); then
                 if (( button == 0 )); then
                     apply_selection
                 fi
             else
-                # Just selecting the row, clear any existing success message
                 STATUS_MSG=""
             fi
         fi
@@ -486,8 +450,8 @@ read_escape_seq() {
 
 apply_selection() {
     local k
-    IFS='|' read -r k _ <<< "${FM_CATALOG[$SELECTED_ROW]}"
-    switch_file_manager "$k"
+    IFS='|' read -r k _ <<< "${TERM_CATALOG[$SELECTED_ROW]}"
+    switch_terminal "$k"
     detect_current
 }
 
@@ -503,7 +467,6 @@ handle_input() {
         fi
     fi
 
-    # Mouse & Special Keys
     case "$key" in
         '[A'|'OA')           navigate -1; return ;;
         '[B'|'OB')           navigate 1; return ;;
@@ -514,7 +477,6 @@ handle_input() {
         '['*'<'*[Mm])        handle_mouse "$key"; return ;;
     esac
 
-    # Vim / Standard Keys
     case "$key" in
         k|K)            navigate -1 ;;
         j|J)            navigate 1 ;;
@@ -534,9 +496,9 @@ run_tui() {
     detect_current
 
     local i
-    for (( i = 0; i < ${#FM_CATALOG[@]}; i++ )); do
-        IFS='|' read -r k _ <<< "${FM_CATALOG[$i]}"
-        if [[ "$k" == "$CURRENT_FM_KEY" ]]; then
+    for (( i = 0; i < ${#TERM_CATALOG[@]}; i++ )); do
+        IFS='|' read -r k _ <<< "${TERM_CATALOG[$i]}"
+        if [[ "$k" == "$CURRENT_TERM_KEY" ]]; then
             SELECTED_ROW=$i
             break
         fi
@@ -563,12 +525,12 @@ main() {
         run_tui
     else
         case "$1" in
-            --nemo)   switch_file_manager "nemo" ;;
-            --yazi)   switch_file_manager "yazi" ;;
-            --thunar) switch_file_manager "thunar" ;;
+            --kitty) switch_terminal "kitty" ;;
+            --foot)  switch_terminal "foot" ;;
+            --wezterm) switch_terminal "wezterm" ;;
             --set)
                 if [[ -n "${2:-}" ]]; then
-                    switch_file_manager "$2"
+                    switch_terminal "$2"
                 else
                     log_err "Usage: --set <name>"
                     exit 1
@@ -576,12 +538,12 @@ main() {
                 ;;
             --apply-state)
                 if [[ -f "${STATE_FILE}.smart" ]]; then
-                    switch_file_manager "$(< "${STATE_FILE}.smart")"
+                    switch_terminal "$(< "${STATE_FILE}.smart")"
                 elif [[ -f "$STATE_FILE" ]]; then
                     if grep -q "true" "$STATE_FILE"; then
-                        switch_file_manager "yazi"
+                        switch_terminal "kitty"
                     else
-                        switch_file_manager "nemo"
+                        switch_terminal "foot"
                     fi
                 else
                     log_info "No state file found."

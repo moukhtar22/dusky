@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
-# This script installs ALL PACKAGEES, you can inspect this script manually to remove/add anything you might want.
+# This script installs ALL PACKAGES, you can inspect this script manually to remove/add anything you might want.
 # --------------------------------------------------------------------------
 # Arch Linux / Hyprland / UWSM - Elite System Installer (v3.1 - Smart Fallback)
 # --------------------------------------------------------------------------
 
-
 # Group 1: dusky_update
 pkgs_productivity=(
   "wl-clip-persist"
+
+  # nemo
+  "nemo" "nemo-fileroller" "file-roller" "gvfs" "gvfs-smb" "gvfs-mtp" "gvfs-gphoto2" "gvfs-google" "gvfs-nfs" "gvfs-afc" "gvfs-dnssd" "ffmpegthumbnailer" "webp-pixbuf-loader" "poppler-glib" "libgsf" "gnome-epub-thumbnailer" "resvg" "nemo-python" "nemo-compare" "meld" "nemo-media-columns" "nemo-audio-tab" "nemo-image-converter" "nemo-emblems" "nemo-repairer" "nemo-share" "python-gobject" "dconf-editor" "xreader" "gst-libav" "gst-plugins-good" "nemo-fileroller" "nemo-audio-tab" "nemo-compare" "nemo-pastebin"
+# "nemo-terminal"
 )
 
 # --------------------------------------------------------------------------
@@ -57,9 +60,9 @@ install_group() {
     # If this works, it means there was no conflict for THIS specific package.
     if pacman -S --needed --noconfirm "$pkg" >/dev/null 2>&1; then
       printf "  ${GREEN}[+] Installed:${RESET} %s\n" "$pkg"
-    
+
     # Try 2: Interactive (Verbose)
-    # If Auto failed, it's likely a conflict (e.g., tldr vs tealdeer). 
+    # If Auto failed, it's likely a conflict (e.g., tldr vs tealdeer).
     # We run without --noconfirm so you can intervene.
     else
       printf "  ${YELLOW}[?] Intervention Needed:${RESET} %s\n" "$pkg"

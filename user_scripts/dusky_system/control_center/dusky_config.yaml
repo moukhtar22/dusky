@@ -11,31 +11,31 @@ pages:
       properties:
         title: Bluetooth
         icon: bluetooth-active-symbolic
-        state_command: "bluetoothctl show | grep 'Powered: yes' | awk '{print $2}'"
+        state_command: "rfkill list bluetooth | grep -q 'Soft blocked: no' && echo yes"
         interval: 5
       on_toggle:
         enabled:
           type: exec
-          command: bluetoothctl power on && notify-send 'Bluetooth' 'Bluetooth Turned ON'
+          command: rfkill unblock bluetooth && notify-send 'Bluetooth' 'Bluetooth Turned ON'
           terminal: false
         disabled:
           type: exec
-          command: bluetoothctl power off && notify-send 'Bluetooth' 'Bluetooth Turned OFF'
+          command: rfkill block bluetooth && notify-send 'Bluetooth' 'Bluetooth Turned OFF'
           terminal: false
     - type: toggle_card
       properties:
         title: Wi-Fi
         icon: network-wireless-symbolic
-        state_command: nmcli radio wifi
+        state_command: "rfkill list wifi | grep -q 'Soft blocked: no' && echo yes"
         interval: 5
       on_toggle:
         enabled:
           type: exec
-          command: nmcli radio wifi on && notify-send 'Wi-Fi' 'Wireless Radio Turned ON'
+          command: rfkill unblock wifi && notify-send 'Wi-Fi' 'Wireless Radio Turned ON'
           terminal: false
         disabled:
           type: exec
-          command: nmcli radio wifi off && notify-send 'Wi-Fi' 'Wireless Radio Turned OFF'
+          command: rfkill block wifi && notify-send 'Wi-Fi' 'Wireless Radio Turned OFF'
           terminal: false
     - type: toggle_card
       properties:
@@ -60,12 +60,18 @@ pages:
         type: exec
         command: $HOME/user_scripts/dusky_system/reload_cc/cc_restart.sh
         terminal: false
-    - type: button
+    - type: grid_card
       properties:
         title: Dusky
         icon: system-software-update-symbolic
-        style: suggested
         badge_file: ~/.config/dusky/settings/dusky_update_behind_commit
+        button_text_file: ~/.config/dusky/settings/dusky_update_behind_commit
+        button_text_map:
+          "0": "Updated"
+          "default": "Available"
+        style_map:
+          "0": "default"
+          "default": "suggested"
       on_press:
         type: exec
         command: kitty --class update_dusky.sh --title "System Updater" --hold sh -c "$HOME/user_scripts/update_dusky/update_dusky.sh"
@@ -91,11 +97,16 @@ pages:
         title: Active Profile
         description: Select performance mode
         icon: power-profile-balanced-symbolic
-        key: power_profile_state
+        value_command: "tlpctl get"
+        interval: 2
         options:
         - Balanced
         - Performance
         - Power Saver
+        options_map:
+          "balanced": "Balanced"
+          "performance": "Performance"
+          "power-saver": "Power Saver"
       on_change:
         Balanced:
           type: exec
@@ -106,7 +117,6 @@ pages:
         Power Saver:
           type: exec
           command: tlpctl power-saver && notify-send 'Power Profile' 'Switched to Power Saver'
-
   - type: section
     properties:
       title: Quick Controls
@@ -359,11 +369,11 @@ pages:
                     type: exec
                     command: kitty --class yazi --title "Backup Viewer" --hold sh -c "yazi $HOME/Documents/dusky_backups/"
                 - icon: system-file-manager-symbolic
-                  button_text: "Thunar"
+                  button_text: "nemo"
                   style: suggested
                   on_press:
                     type: exec
-                    command: thunar "$HOME/Documents/dusky_backups/"
+                    command: nemo "$HOME/Documents/dusky_backups/"
           - type: button
             properties:
               title: Send Logs
@@ -444,19 +454,22 @@ pages:
     - type: selection
       properties:
         title: File Manager Switch
-        description: 'Choose Default: Thunar (GUI) vs Yazi (TUI)'
+        description: 'Choose Default: Nemo (GUI) vs Yazi (TUI)'
         icon: system-file-manager-symbolic
         key: filemanager_switch
         options:
           - Yazi
-          - Thunar
+          - Nemo
+        options_map:
+          "false": "Nemo"
+          "true": "Yazi"
       on_change:
         Yazi:
           type: exec
-          command: kitty --class 235_file_manager_switch.sh --hold sh -c "$HOME/user_scripts/arch_setup_scripts/scripts/235_file_manager_switch.sh --yazi"
-        Thunar:
+          command: "$HOME/user_scripts/arch_setup_scripts/scripts/235_file_manager_switch.sh --yazi"
+        Nemo:
           type: exec
-          command: kitty --class 235_file_manager_switch.sh --hold sh -c "$HOME/user_scripts/arch_setup_scripts/scripts/235_file_manager_switch.sh --thunar"
+          command: "$HOME/user_scripts/arch_setup_scripts/scripts/235_file_manager_switch.sh --nemo"
   - type: section
     properties:
       title: File Transfer (FTP)
@@ -508,33 +521,33 @@ pages:
           terminal: false
     - type: toggle_card
       properties:
-        title: Wi-Fi
-        icon: network-wireless-symbolic
-        state_command: nmcli radio wifi
+        title: Bluetooth
+        icon: bluetooth-active-symbolic
+        state_command: "rfkill list bluetooth | grep -q 'Soft blocked: no' && echo yes"
         interval: 5
       on_toggle:
         enabled:
           type: exec
-          command: kitty --class wifitui --title "Wi-Fi Manager" --hold sh -c "wifitui"
+          command: rfkill unblock bluetooth && notify-send 'Bluetooth' 'Bluetooth Turned ON'
           terminal: false
         disabled:
           type: exec
-          command: kitty --class wifitui --title "Wi-Fi Manager" --hold sh -c "wifitui"
+          command: rfkill block bluetooth && notify-send 'Bluetooth' 'Bluetooth Turned OFF'
           terminal: false
     - type: toggle_card
       properties:
-        title: Bluetooth
-        icon: bluetooth-active-symbolic
-        state_command: "bluetoothctl show | grep 'Powered: yes' | awk '{print $2}'"
+        title: Wi-Fi
+        icon: network-wireless-symbolic
+        state_command: "rfkill list wifi | grep -q 'Soft blocked: no' && echo yes"
         interval: 5
       on_toggle:
         enabled:
           type: exec
-          command: kitty --class bluetui --title "Bluetooth Manager" --hold sh -c "bluetui"
+          command: rfkill unblock wifi && notify-send 'Wi-Fi' 'Wireless Radio Turned ON'
           terminal: false
         disabled:
           type: exec
-          command: kitty --class bluetui --title "Bluetooth Manager" --hold sh -c "bluetui"
+          command: rfkill block wifi && notify-send 'Wi-Fi' 'Wireless Radio Turned OFF'
           terminal: false
 
   - type: section
@@ -631,11 +644,16 @@ pages:
         title: Active Profile
         description: Select performance mode
         icon: power-profile-balanced-symbolic
-        key: power_profile_state
+        value_command: "tlpctl get"
+        interval: 2
         options:
         - Balanced
         - Performance
         - Power Saver
+        options_map:
+          "balanced": "Balanced"
+          "performance": "Performance"
+          "power-saver": "Power Saver"
       on_change:
         Balanced:
           type: exec
@@ -1239,6 +1257,63 @@ pages:
   layout:
   - type: section
     properties:
+      title: System Defaults
+      icon: preferences-desktop-peripherals-symbolic
+      description: Manage your global application preferences
+    items:
+    - type: navigation
+      properties:
+        title: Default Applications
+        description: Browser, File Manager, Editor, and Terminal
+        icon: applications-system-symbolic
+      layout:
+        - type: section
+          properties:
+            title: Global Defaults
+            description: Select your preferred default software
+          items:
+            - type: button
+              properties:
+                title: File Manager
+                description: Switch system-wide file manager
+                icon: system-file-manager-symbolic
+                button_text: "Switch"
+              on_press:
+                type: exec
+                command: kitty --class 235_file_manager_switch.sh --hold sh -c "$HOME/user_scripts/arch_setup_scripts/scripts/235_file_manager_switch.sh"
+                terminal: false
+            - type: button
+              properties:
+                title: Web Browser
+                description: Set default internet browser
+                icon: web-browser-symbolic
+                button_text: "Switch"
+              on_press:
+                type: exec
+                command: kitty --class 236_browser_switcher.sh --hold sh -c "$HOME/user_scripts/arch_setup_scripts/scripts/236_browser_switcher.sh"
+                terminal: false
+            - type: button
+              properties:
+                title: Text Editor
+                description: Set default code/text editor
+                icon: text-editor-symbolic
+                button_text: "Switch"
+              on_press:
+                type: exec
+                command: kitty --class 237_text_editer_switcher.sh --hold sh -c "$HOME/user_scripts/arch_setup_scripts/scripts/237_text_editer_switcher.sh"
+                terminal: false
+            - type: button
+              properties:
+                title: Terminal Emulator
+                description: Set default system terminal
+                icon: utilities-terminal-symbolic
+                button_text: "Switch"
+              on_press:
+                type: exec
+                command: kitty --class 238_terminal_switcher.sh --hold sh -c "$HOME/user_scripts/arch_setup_scripts/scripts/238_terminal_switcher.sh"
+                terminal: false
+  - type: section
+    properties:
       title: Core Configuration
       icon: ''
       description: Main system settings
@@ -1312,13 +1387,27 @@ pages:
 
     - type: navigation
       properties:
-        title: Environment Variables
+        title: Auto setup GPU Environment Variables
         description: UWSM and Hyprland environment settings
         icon: text-x-script-symbolic
       layout:
         - type: section
           properties:
             title: Environment Variables
+          items:
+            - type: button
+              properties:
+                title: Auto Configure GPU
+                description: Detect and set GPU vars (UWSM)
+                icon: preferences-desktop-display-symbolic
+                style: suggested
+                button_text: "Run"
+              on_press:
+                type: exec
+                command: kitty --class 000_configure_uwsm_gpu.sh --hold sh -c "$HOME/user_scripts/arch_setup_scripts/scripts/035_configure_uwsm_gpu.sh"
+        - type: section
+          properties:
+            title: Environment Variable files
           items:
             - type: button
               properties:
@@ -1347,26 +1436,6 @@ pages:
               on_press:
                 type: exec
                 command: gnome-text-editor "$HOME/.config/uwsm/env-hyprland"
-            - type: button
-              properties:
-                title: Auto Configure GPU
-                description: Detect and set GPU vars (UWSM)
-                icon: preferences-desktop-display-symbolic
-                style: suggested
-                button_text: "Run"
-              on_press:
-                type: exec
-                command: kitty --class 000_configure_uwsm_gpu.sh --hold sh -c "$HOME/user_scripts/arch_setup_scripts/scripts/035_configure_uwsm_gpu.sh"
-            - type: button
-              properties:
-                title: Disable GPU Vars
-                description: Comment out all GPU variables
-                icon: edit-delete-symbolic
-                style: destructive
-                button_text: "Run"
-              on_press:
-                type: exec
-                command: kitty --class 000_uwsm_env_comment.sh --hold sh -c "$HOME/user_scripts/arch_setup_scripts/scripts/030_uwsm_env_comment_everything.sh"
 
     - type: navigation
       properties:
@@ -1958,17 +2027,118 @@ pages:
       layout:
         - type: section
           properties:
-            title: Plugins
+            title: Layouts & Workspaces
           items:
             - type: button
               properties:
-                title: HyprExpo
-                description: Workspace overview plugin
+                title: Hyprexpo
+                description: Provides a workspace overview, inspired by macOS Mission Control or GNOME Activities.
                 icon: view-grid-symbolic
                 button_text: "Install"
               on_press:
                 type: exec
-                command: kitty --class 355_hyprexpo_plugin.sh --hold sh -c "$HOME/user_scripts/arch_setup_scripts/scripts/355_hyprexpo_plugin.sh"
+                command: kitty --class 356_dusky_plugin_manager.sh --hold sh -c "$HOME/user_scripts/arch_setup_scripts/scripts/356_dusky_plugin_manager.sh --expo"
+                terminal: false
+            - type: button
+              properties:
+                title: Hyprspace
+                description: An alternative spatial overview providing a zoomed-out, interactive view of all workspaces.
+                icon: view-app-grid-symbolic
+                button_text: "Install"
+              on_press:
+                type: exec
+                command: kitty --class 356_dusky_plugin_manager.sh --hold sh -c "$HOME/user_scripts/arch_setup_scripts/scripts/356_dusky_plugin_manager.sh --space"
+                terminal: false
+            - type: button
+              properties:
+                title: Hyprscrolling
+                description: A layout plugin that allows moving focus and windows like a continuous scrolling column.
+                icon: media-playlist-shuffle-symbolic
+                button_text: "Install"
+              on_press:
+                type: exec
+                command: kitty --class 356_dusky_plugin_manager.sh --hold sh -c "$HOME/user_scripts/arch_setup_scripts/scripts/356_dusky_plugin_manager.sh --scrolling"
+                terminal: false
+            - type: button
+              properties:
+                title: hy3 (i3 Tiling)
+                description: Replaces the default layout with an i3/Sway-like manual tiling engine using container nodes.
+                icon: view-split-left-right-symbolic
+                button_text: "Install"
+              on_press:
+                type: exec
+                command: kitty --class 356_dusky_plugin_manager.sh --hold sh -c "$HOME/user_scripts/arch_setup_scripts/scripts/356_dusky_plugin_manager.sh --hy3"
+                terminal: false
+
+        - type: section
+          properties:
+            title: Visuals & Enhancements
+          items:
+            - type: button
+              properties:
+                title: Hypr-Dynamic-Cursors
+                description: Adds dynamic physics and behaviors to your cursor, including directional tilt and shake to locate.
+                icon: input-mouse-symbolic
+                button_text: "Install"
+              on_press:
+                type: exec
+                command: kitty --class 356_dusky_plugin_manager.sh --hold sh -c "$HOME/user_scripts/arch_setup_scripts/scripts/356_dusky_plugin_manager.sh --cursors"
+                terminal: false
+            - type: button
+              properties:
+                title: Hyprbars
+                description: Adds customizable title bars to individual windows, complete with window management buttons.
+                icon: window-new-symbolic
+                button_text: "Install"
+              on_press:
+                type: exec
+                command: kitty --class 356_dusky_plugin_manager.sh --hold sh -c "$HOME/user_scripts/arch_setup_scripts/scripts/356_dusky_plugin_manager.sh --bars"
+                terminal: false
+            - type: button
+              properties:
+                title: Hyprglass
+                description: Enhanced translucent window styling and blur aesthetics for the Wayland compositor.
+                icon: palette-symbolic
+                button_text: "Install"
+              on_press:
+                type: exec
+                command: kitty --class 356_dusky_plugin_manager.sh --hold sh -c "$HOME/user_scripts/arch_setup_scripts/scripts/356_dusky_plugin_manager.sh --glass"
+                terminal: false
+            - type: button
+              properties:
+                title: Hypr-DarkWindow
+                description: Allows applying specific visual shaders (like invert or tint) to individual active windows.
+                icon: display-brightness-symbolic
+                button_text: "Install"
+              on_press:
+                type: exec
+                command: kitty --class 356_dusky_plugin_manager.sh --hold sh -c "$HOME/user_scripts/arch_setup_scripts/scripts/356_dusky_plugin_manager.sh --darkwindow"
+                terminal: false
+
+        - type: section
+          properties:
+            title: Input & Gestures
+          items:
+            - type: button
+              properties:
+                title: Hypr-Hot-Edge
+                description: Enables responsive screen edge triggers to rapidly toggle special workspaces or panels.
+                icon: object-select-symbolic
+                button_text: "Install"
+              on_press:
+                type: exec
+                command: kitty --class 356_dusky_plugin_manager.sh --hold sh -c "$HOME/user_scripts/arch_setup_scripts/scripts/356_dusky_plugin_manager.sh --hotedge"
+                terminal: false
+            - type: button
+              properties:
+                title: Hyprgrass
+                description: Advanced multi-touch gesture support for Wayland touchscreens, enabling swipe and edge mechanics.
+                icon: input-touchpad-symbolic
+                button_text: "Install"
+              on_press:
+                type: exec
+                command: kitty --class 356_dusky_plugin_manager.sh --hold sh -c "$HOME/user_scripts/arch_setup_scripts/scripts/356_dusky_plugin_manager.sh --grass"
+                terminal: false
                 terminal: false
     - type: navigation
       properties:
@@ -2097,27 +2267,33 @@ pages:
       layout:
         - type: section
           properties:
-            title: Spotify Setup
+            title: Spotify (With Matugen)
+            description: 'Themed installation using Spicetify'
           items:
-            - type: button
-              properties:
-                title: Install Spotify
-                icon: system-software-install-symbolic
-                button_text: "Install"
-              on_press:
-                type: exec
-                command: kitty --class 260_spotify.sh --hold sh -c "$HOME/user_scripts/arch_setup_scripts/scripts/260_spotify.sh"
-                terminal: false
-            - type: button
-              properties:
-                title: Theme Spicetify
-                description: Apply Matugen theme
-                icon: palette-symbolic
-                button_text: "Theme"
-              on_press:
-                type: exec
-                command: kitty --class 405_spicetify_matugen_setup.sh --hold sh -c "$HOME/user_scripts/arch_setup_scripts/scripts/405_spicetify_matugen_setup.sh"
-                terminal: false
+          - type: button
+            properties:
+              title: Install Spotify
+              icon: palette-symbolic
+              button_text: "Install"
+            on_press:
+              type: exec
+              command: kitty --class 405_spicetify_matugen_setup.sh --hold sh -c "$HOME/user_scripts/arch_setup_scripts/scripts/405_spicetify_matugen_setup.sh"
+              terminal: false
+
+        - type: section
+          properties:
+            title: Spotify (Without Matugen)
+            description: 'Standard Spotify installation'
+          items:
+          - type: button
+            properties:
+              title: Install Standard Spotify
+              icon: system-software-install-symbolic
+              button_text: "Install"
+            on_press:
+              type: exec
+              command: kitty --class 260_spotify.sh --hold sh -c "$HOME/user_scripts/arch_setup_scripts/scripts/260_spotify.sh"
+              terminal: false
 
   - type: section
     properties:

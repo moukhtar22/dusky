@@ -1,293 +1,304 @@
 #!/usr/bin/env bash
-# automatically detects your GPU and set the appropriate Environment Variables
 # -----------------------------------------------------------------------------
-# Elite DevOps Arch/Hyprland/UWSM GPU Configurator
+# Elite DevOps Arch/Hyprland/UWSM GPU Configurator (v2026.07-Final)
 # -----------------------------------------------------------------------------
 # Role:       System Architect
-# Objective:  Detect GPU, configure UWSM env vars, and ensure stability.
-# Standards:  Bash 5+, Strict Mode, Idempotent Operations.
+# Objective:  Interactive topology selection + Active Dependency Management.
+# Standards:  Bash 5+, Sysfs Parsing, Atomic Writes, User Choice.
 # -----------------------------------------------------------------------------
 
-# --- 1. STRICT MODE & TRAPS ---
+# --- 1. STRICT MODE ---
 set -euo pipefail
-# Inherit error checking in subshells (Bash 4.4+)
-shopt -s inherit_errexit 2>/dev/null || true
+# Enable extended globbing and nullglob (globs expand to nothing if no match)
+shopt -s extglob nullglob
 
-# --- 2. CONSTANTS ---
+# --- 2. CONFIGURATION PATHS ---
+readonly UWSM_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/uwsm"
+readonly ENV_DIR="$UWSM_CONFIG_DIR/env.d"
+readonly OUTPUT_FILE="$ENV_DIR/gpu"
+
+# --- 3. LOGGING UTILITIES ---
 readonly BOLD=$'\033[1m'
-readonly RED=$'\033[31m'
+readonly BLUE=$'\033[34m'
 readonly GREEN=$'\033[32m'
 readonly YELLOW=$'\033[33m'
-readonly BLUE=$'\033[34m'
+readonly RED=$'\033[31m'
 readonly RESET=$'\033[0m'
 
-readonly CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/uwsm"
-readonly ENV_FILE="$CONFIG_DIR/env"
-readonly ENV_HYPR_FILE="$CONFIG_DIR/env-hyprland"
+log_info() { printf "%s[INFO]%s %s\n" "${BLUE}${BOLD}" "${RESET}" "$*"; }
+log_ok()   { printf "%s[OK]%s %s\n" "${GREEN}${BOLD}" "${RESET}" "$*"; }
+log_warn() { printf "%s[WARN]%s %s\n" "${YELLOW}" "${RESET}" "$*" >&2; }
+log_err()  { printf "%s[ERROR]%s %s\n" "${RED}${BOLD}" "${RESET}" "$*" >&2; }
 
-# --- 3. LOGGING & CLEANUP ---
+# --- 4. ARGUMENT PARSING ---
+AUTO_MODE=0
+for arg in "$@"; do
+    if [[ "$arg" == "--auto" ]]; then
+        AUTO_MODE=1
+    fi
+done
 
-log_info()  { printf "%s[INFO]%s %s\n" "${BLUE}${BOLD}" "${RESET}" "$*"; }
-log_ok()    { printf "%s[OK]%s %s\n" "${GREEN}${BOLD}" "${RESET}" "$*"; }
-log_warn()  { printf "%s[WARN]%s %s\n" "${YELLOW}" "${RESET}" "$*" >&2; }
-log_error() { printf "%s[ERROR]%s %s\n" "${RED}${BOLD}" "${RESET}" "$*" >&2; }
-
-# Automatic cleanup on exit
-cleanup() {
-    local exit_code=$?
-    if [[ $exit_code -ne 0 ]]; then
-        log_error "Script failed on line ${1:-unknown}. Exit code: $exit_code"
-        log_warn "Attempting to restore backups..."
-        # Restore backups if they exist
-        [[ -f "${ENV_FILE}.bak" ]] && mv -f "${ENV_FILE}.bak" "$ENV_FILE" 2>/dev/null || true
-        [[ -f "${ENV_HYPR_FILE}.bak" ]] && mv -f "${ENV_HYPR_FILE}.bak" "$ENV_HYPR_FILE" 2>/dev/null || true
+# --- 5. ACTIVE DEPENDENCY CHECK ---
+check_deps() {
+    local missing=()
+    
+    # CRITICAL FIX: Prevent grep hang by using array to check existence first
+    local vendor_files=(/sys/class/drm/card*/device/vendor)
+    
+    # Check for NVIDIA specifics only if NVIDIA hardware exists
+    if (( ${#vendor_files[@]} > 0 )); then
+        if grep -q "0x10de" "${vendor_files[@]}"; then
+            if ! command -v nvidia-smi &>/dev/null; then
+                missing+=("nvidia-utils")
+            fi
+        fi
+    fi
+    
+    if (( ${#missing[@]} > 0 )); then
+        log_warn "Missing dependencies detected: ${missing[*]}"
+        log_info "Attempting to install via pacman..."
+        
+        # Sudo will handle the auth. If cached, it's instant.
+        if sudo pacman -S --needed --noconfirm "${missing[@]}"; then
+            log_ok "Dependencies installed successfully."
+        else
+            log_err "Failed to install dependencies. Please install manually."
+        fi
     else
-        # Success - remove backups
-        rm -f "${ENV_FILE}.bak" "${ENV_HYPR_FILE}.bak" 2>/dev/null || true
-    fi
-}
-# Pass LINENO to trap to identify where it failed
-trap 'cleanup $LINENO' EXIT
-
-# --- 4. PRE-FLIGHT CHECKS ---
-
-preflight_checks() {
-    # Privilege Check
-    if [[ $EUID -eq 0 ]]; then
-        log_error "Do NOT run this script as root/sudo."
-        printf "%s  -> This script modifies your user configuration in ~/.config\n" "${YELLOW}" >&2
-        printf "  -> Running as root will cause permission errors.\n" >&2
-        printf "  -> Run as: %s./configure_uwsm_gpu.sh%s\n" "${BOLD}" "${RESET}" >&2
-        exit 1
-    fi
-
-    # Dependency Check
-    if ! command -v lspci &>/dev/null; then
-        log_error "'lspci' command not found."
-        printf "Please install pciutils: %ssudo pacman -S pciutils%s\n" "${BOLD}" "${RESET}" >&2
-        exit 1
-    fi
-
-    # Config Check
-    if [[ ! -f "$ENV_FILE" ]]; then
-        log_error "Config file not found: $ENV_FILE"
-        exit 1
-    fi
-    if [[ ! -f "$ENV_HYPR_FILE" ]]; then
-        log_error "Config file not found: $ENV_HYPR_FILE"
-        exit 1
+        log_ok "All dependencies satisfied."
     fi
 }
 
-# --- 5. GPU DETECTION ---
+# --- 6. DETECTION ENGINE ---
 
-declare -a GPU_PATHS
-declare -a GPU_VENDORS
-declare -a GPU_NAMES
+# Global Arrays to store detected paths
+INTEL_CARDS=()
+AMD_CARDS=()
+NVIDIA_CARDS=()
 
-detect_gpus() {
-    log_info "Scanning for Graphics Processing Units..."
-
-    shopt -s nullglob
-    # Scan card0-9 and card10-99. Ignores connectors like card0-HDMI-A-1
-    for card in /sys/class/drm/card[0-9] /sys/class/drm/card[1-9][0-9]; do
-        # Verify it is a directory and has a vendor ID
-        [[ -d "$card" && -r "$card/device/vendor" ]] || continue
-
-        local card_path="/dev/dri/${card##*/}"
-        # Read vendor ID (using bash builtin for speed)
+detect_topology() {
+    log_info "Scanning GPU Topology via Sysfs..."
+    
+    # Robust Loop: Only matches card0, card1... (No connectors)
+    for card_path in /sys/class/drm/card+([0-9]); do
+        local vendor_file="$card_path/device/vendor"
+        if [[ ! -r "$vendor_file" ]]; then continue; fi
+        
         local vendor_id
-        vendor_id=$(<"$card/device/vendor")
-        # Trim potential whitespace
-        vendor_id="${vendor_id//[[:space:]]/}"
-
-        local vendor_name
+        vendor_id=$(cat "$vendor_file")
+        vendor_id=${vendor_id,,} # Lowercase
+        
+        local dev_node="/dev/dri/${card_path##*/}"
+        
         case "$vendor_id" in
-            "0x8086") vendor_name="intel" ;;
-            "0x10de") vendor_name="nvidia" ;;
-            "0x1002") vendor_name="amd" ;;
-            *)        vendor_name="unknown" ;;
+            "0x8086") INTEL_CARDS+=("$dev_node") ;;
+            "0x1002") AMD_CARDS+=("$dev_node") ;;
+            "0x10de") NVIDIA_CARDS+=("$dev_node") ;;
         esac
+    done
+    
+    # DIAGNOSTIC: Check if any GPU was found
+    if [[ ${#INTEL_CARDS[@]} -eq 0 && ${#AMD_CARDS[@]} -eq 0 && ${#NVIDIA_CARDS[@]} -eq 0 ]]; then
+        log_err "No GPUs detected in /sys/class/drm. Is kernel mode setting (KMS) enabled?"
+        # We allow the script to proceed to generate a minimal config, but this is suspicious.
+    fi
+}
 
-        # Get Human Readable Name via lspci
-        local pretty_name="Unknown Device"
-        if [[ -L "$card/device" ]]; then
-            local pci_slot
-            pci_slot=$(basename "$(readlink "$card/device")")
-            # Robust lspci parsing: Expects "Key: Value" format with tabs
-            if val=$(lspci -vmm -s "$pci_slot" 2>/dev/null | awk -F$'\t' '/^Device:/{print $2; exit}'); then
-                [[ -n "$val" ]] && pretty_name="$val"
+is_nvidia_modern() {
+    if ! command -v nvidia-smi &>/dev/null; then return 1; fi
+    local cc
+    cc=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader,nounits 2>/dev/null | head -n1 | tr -d '[:space:]' || echo "0.0")
+    if [[ ! "$cc" =~ ^[0-9]+\.[0-9]+$ ]]; then return 1; fi
+    local major=${cc%.*}
+    local minor=${cc#*.}
+    
+    # Modern = Turing (7.5) or newer (8.0+)
+    if (( major >= 8 )); then return 0; fi
+    if (( major == 7 && minor >= 5 )); then return 0; fi
+    return 1
+}
+
+# --- 7. INTELLIGENT SELECTION LOGIC ---
+
+select_mode() {
+    local has_intel=0
+    local has_amd=0
+    local has_nvidia=0
+    [[ ${#INTEL_CARDS[@]} -gt 0 ]] && has_intel=1
+    [[ ${#AMD_CARDS[@]} -gt 0 ]] && has_amd=1
+    [[ ${#NVIDIA_CARDS[@]} -gt 0 ]] && has_nvidia=1
+
+    echo ""
+    echo "${BOLD}--- GPU Topology Detected ---${RESET}"
+    (( has_intel )) && echo "  • INTEL:  ${INTEL_CARDS[*]}"
+    (( has_amd ))   && echo "  • AMD:    ${AMD_CARDS[*]}"
+    (( has_nvidia )) && echo "  • NVIDIA: ${NVIDIA_CARDS[*]}"
+    echo ""
+
+    # SCENARIO 1: Single Vendor (No choice needed)
+    if (( has_intel && !has_amd && !has_nvidia )); then
+        SELECTED_MODE="intel_only"
+        return
+    elif (( !has_intel && has_amd && !has_nvidia )); then
+        SELECTED_MODE="amd_only"
+        return
+    elif (( !has_intel && !has_amd && has_nvidia )); then
+        SELECTED_MODE="nvidia_only"
+        return
+    fi
+
+    # SCENARIO 2: Auto Mode Forced
+    if (( AUTO_MODE == 1 )); then
+        log_info "Auto Mode enabled: Defaulting to Integrated Priority (Hybrid)."
+        SELECTED_MODE="hybrid"
+        return
+    fi
+
+    # SCENARIO 3: Hybrid / Interactive
+    echo "Select Configuration Mode:"
+    echo "  1) ${GREEN}Hybrid / Power Saver${RESET} (Recommended)"
+    echo "     - Integrated GPU drives Hyprland."
+    echo "     - Dedicated GPU available for games via 'prime-run'."
+    echo ""
+    
+    # Only show NVIDIA option if NVIDIA card exists
+    if (( has_nvidia )); then
+        echo "  2) ${RED}NVIDIA Performance${RESET} (Desktop Mode)"
+        echo "     - NVIDIA drives Hyprland."
+        echo "     - Higher power consumption."
+        echo ""
+    fi
+    
+    read -rp "Enter choice: " choice
+    case "${choice:-1}" in
+        1) SELECTED_MODE="hybrid" ;;
+        2) 
+            if (( has_nvidia )); then
+                SELECTED_MODE="nvidia_pri"
+            else
+                log_warn "Invalid selection. Defaulting to Hybrid."
+                SELECTED_MODE="hybrid"
+            fi
+            ;;
+        *) SELECTED_MODE="hybrid" ;;
+    esac
+}
+
+# --- 8. CONFIG GENERATOR ---
+
+generate_config() {
+    local primary_vendor=""
+    local aq_device_string=""
+    local sorted_devices=()
+
+    # Determine Priority based on selection
+    if [[ "$SELECTED_MODE" == "nvidia_pri" || "$SELECTED_MODE" == "nvidia_only" ]]; then
+        primary_vendor="nvidia"
+        sorted_devices+=("${NVIDIA_CARDS[@]}")
+        sorted_devices+=("${INTEL_CARDS[@]}")
+        sorted_devices+=("${AMD_CARDS[@]}")
+    elif [[ "$SELECTED_MODE" == "amd_only" ]]; then
+        primary_vendor="amd"
+        sorted_devices+=("${AMD_CARDS[@]}")
+    elif [[ "$SELECTED_MODE" == "intel_only" ]]; then
+        primary_vendor="intel"
+        sorted_devices+=("${INTEL_CARDS[@]}")
+    else
+        # Hybrid/Default: Integrated First
+        sorted_devices+=("${INTEL_CARDS[@]}")
+        sorted_devices+=("${AMD_CARDS[@]}")
+        sorted_devices+=("${NVIDIA_CARDS[@]}")
+        
+        # Determine primary for VAAPI settings
+        if [[ ${#INTEL_CARDS[@]} -gt 0 ]]; then primary_vendor="intel";
+        elif [[ ${#AMD_CARDS[@]} -gt 0 ]]; then primary_vendor="amd";
+        else primary_vendor="nvidia"; fi
+    fi
+
+    # Build AQ string
+    if [[ ${#sorted_devices[@]} -gt 0 ]]; then
+        aq_device_string=$(IFS=:; echo "${sorted_devices[*]}")
+    fi
+
+    # --- ATOMIC WRITE ---
+    [[ ! -d "$ENV_DIR" ]] && mkdir -p "$ENV_DIR"
+    local temp_file
+    temp_file=$(mktemp "$ENV_DIR/.gpu.XXXXXX")
+    trap 'rm -f "$temp_file"' EXIT
+
+    {
+        echo "# -----------------------------------------------------------------"
+        echo "# UWSM GPU Config | Mode: ${SELECTED_MODE^^} | $(date)"
+        echo "# -----------------------------------------------------------------"
+        echo "export ELECTRON_OZONE_PLATFORM_HINT=auto"
+        echo "export MOZ_ENABLE_WAYLAND=1"
+        echo ""
+        
+        if [[ -n "$aq_device_string" ]]; then
+            echo "# Hyprland GPU Priority (First = Compositor)"
+            echo "export AQ_DRM_DEVICES=\"$aq_device_string\""
+        fi
+        echo ""
+
+        # Vendor Specifics
+        if [[ ${#INTEL_CARDS[@]} -gt 0 ]]; then
+            echo "# --- Intel ---"
+            # NOTE: Removed MESA_LOADER_DRIVER_OVERRIDE=iris
+            # Modern Mesa auto-selects Iris. Hardcoding it breaks AMD hybrid setups.
+            
+            if [[ "$primary_vendor" == "intel" ]]; then
+                echo "export LIBVA_DRIVER_NAME=iHD"
             fi
         fi
 
-        GPU_PATHS+=("$card_path")
-        GPU_VENDORS+=("$vendor_name")
-        GPU_NAMES+=("$pretty_name ($vendor_name)")
-    done
-    shopt -u nullglob
-}
-
-# --- 6. USER SELECTION ---
-
-SELECTED_VENDOR=""
-SELECTED_CARD=""
-
-select_gpu() {
-    local count=${#GPU_PATHS[@]}
-    local choice confirm idx
-
-    if [[ $count -eq 0 ]]; then
-        log_warn "No GPU automatically detected via sysfs."
-        printf "Please manually select your driver:\n"
-        printf "  1) Intel\n  2) AMD\n  3) Nvidia\n"
-        
-        # Handle Ctrl+D or empty input
-        if ! read -rp "Selection [1-3]: " choice; then
-             printf "\n"; log_warn "Input cancelled."; exit 1
+        if [[ ${#AMD_CARDS[@]} -gt 0 ]]; then
+            echo "# --- AMD ---"
+            if [[ "$primary_vendor" == "amd" ]]; then
+                echo "export LIBVA_DRIVER_NAME=radeonsi"
+            fi
         fi
 
-        case "$choice" in
-            1) SELECTED_VENDOR="intel"; SELECTED_CARD="" ;; 
-            2) SELECTED_VENDOR="amd"; SELECTED_CARD="" ;;
-            3) SELECTED_VENDOR="nvidia"; SELECTED_CARD="" ;;
-            *) log_error "Invalid selection."; exit 1 ;;
-        esac
-
-    elif [[ $count -eq 1 ]]; then
-        log_ok "Detected: ${GPU_NAMES[0]} at ${GPU_PATHS[0]}"
-        
-        if ! read -rp "Confirm configuration for this GPU? [Y/n] " confirm; then
-            printf "\n"; confirm="n"
+        if [[ ${#NVIDIA_CARDS[@]} -gt 0 ]]; then
+            if [[ "$primary_vendor" == "nvidia" ]]; then
+                echo "# --- NVIDIA (Primary) ---"
+                echo "export LIBVA_DRIVER_NAME=nvidia"
+                echo "export GBM_BACKEND=nvidia-drm"
+                echo "export __GLX_VENDOR_LIBRARY_NAME=nvidia"
+                
+                if is_nvidia_modern; then
+                    echo "export NVD_BACKEND=direct"
+                else
+                    echo "# Legacy Nvidia Detected"
+                    echo "# Add 'cursor { no_hardware_cursors = true }' to hyprland.conf"
+                    echo "export AQ_NO_HARDWARE_CURSORS=1"
+                    echo "export NVD_BACKEND=egl"
+                fi
+            else
+                echo "# --- NVIDIA (Secondary/Hybrid) ---"
+                echo "# Env vars hidden to ensure Intel/AMD handles desktop session."
+            fi
         fi
-        
-        if [[ "${confirm,,}" =~ ^n ]]; then
-            log_warn "Operation cancelled by user."; exit 0
-        fi
-        SELECTED_VENDOR="${GPU_VENDORS[0]}"
-        SELECTED_CARD="${GPU_PATHS[0]}"
+    } > "$temp_file"
 
-    else
-        log_ok "Multiple GPUs detected:"
-        for i in "${!GPU_NAMES[@]}"; do
-            printf "  %s%d)%s %s  [%s]\n" "${BOLD}" "$((i+1))" "${RESET}" "${GPU_NAMES[$i]}" "${GPU_PATHS[$i]}"
-        done
-        
-        printf "\n%sWhich GPU should drive the Hyprland Session?%s\n" "${YELLOW}" "${RESET}"
-        printf "(Note: Integrated GPU is usually recommended for the compositor on laptops)\n"
-        
-        if ! read -rp "Select Number [1-$count]: " choice; then
-            printf "\n"; log_warn "Input cancelled."; exit 1
-        fi
-        
-        if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= count )); then
-            idx=$((choice-1))
-            SELECTED_VENDOR="${GPU_VENDORS[$idx]}"
-            SELECTED_CARD="${GPU_PATHS[$idx]}"
-        else
-            log_error "Invalid selection '$choice'."
-            exit 1
-        fi
-    fi
+    chmod 644 "$temp_file"
+    mv "$temp_file" "$OUTPUT_FILE"
+    trap - EXIT
+    log_ok "Config written to: $OUTPUT_FILE"
 }
 
-# --- 7. CONFIGURATION LOGIC ---
-
-# Helper to escape strings for use in sed regex patterns
-escape_sed() {
-    printf '%s\n' "$1" | sed 's/[][\.*^$(){}?+|/]/\\&/g'
-}
-
-disable_section() {
-    local start_marker="$1"
-    local end_marker="$2"
-    local s_esc e_esc
-    s_esc=$(escape_sed "$start_marker")
-    e_esc=$(escape_sed "$end_marker")
-    
-    # Comment out lines starting with 'export' inside the block
-    sed -i "/${s_esc}/,/${e_esc}/ s/^[[:space:]]*export /# export /" "$ENV_FILE"
-}
-
-enable_section() {
-    local start_marker="$1"
-    local end_marker="$2"
-    local s_esc e_esc
-    s_esc=$(escape_sed "$start_marker")
-    e_esc=$(escape_sed "$end_marker")
-    
-    # Uncomment lines: handles "# export", "# # export", etc.
-    sed -i "/${s_esc}/,/${e_esc}/ s/^#[#[:space:]]*export /export /" "$ENV_FILE"
-}
-
-apply_config() {
-    printf "\n%s[CONFIG] Applying configurations for: %s%s\n" "${BLUE}${BOLD}" "${SELECTED_VENDOR^^}" "${RESET}"
-
-    # 1. CREATE BACKUPS (handled by trap if we fail)
-    cp -p "$ENV_FILE" "${ENV_FILE}.bak"
-    cp -p "$ENV_HYPR_FILE" "${ENV_HYPR_FILE}.bak"
-
-    # 2. UPDATE ENV FILE
-    printf "  -> Updating %s...\n" "$ENV_FILE"
-    
-    # Reset all
-    disable_section "### HARDWARE: INTEL ###" "### HARDWARE: AMD ###"
-    disable_section "### HARDWARE: AMD ###" "### HARDWARE: NVIDIA ###"
-    disable_section "### HARDWARE: NVIDIA ###" "# 6. VIRTUALIZATION"
-
-    # Enable selected
-    case "$SELECTED_VENDOR" in
-        "intel")
-            enable_section "### HARDWARE: INTEL ###" "### HARDWARE: AMD ###"
-            ;;
-        "amd")
-            enable_section "### HARDWARE: AMD ###" "### HARDWARE: NVIDIA ###"
-            ;;
-        "nvidia")
-            enable_section "### HARDWARE: NVIDIA ###" "# 6. VIRTUALIZATION"
-            ;;
-        *)
-            log_warn "Vendor '$SELECTED_VENDOR' unknown. No env sections enabled."
-            ;;
-    esac
-
-    # 3. UPDATE ENV-HYPRLAND FILE
-    printf "  -> Updating %s...\n" "$ENV_HYPR_FILE"
-
-    if [[ -n "$SELECTED_CARD" ]]; then
-        # Escape special chars in the path for sed (just in case path has odd chars)
-        local card_esc
-        card_esc=$(printf '%s\n' "$SELECTED_CARD" | sed 's/[&/\]/\\&/g')
-
-        if grep -q "AQ_DRM_DEVICES" "$ENV_HYPR_FILE"; then
-            # Replace existing line
-            sed -i "s|^#*[[:space:]]*export AQ_DRM_DEVICES=.*|export AQ_DRM_DEVICES=${card_esc}|" "$ENV_HYPR_FILE"
-        else
-            # Append if missing
-            echo "export AQ_DRM_DEVICES=$SELECTED_CARD" >> "$ENV_HYPR_FILE"
-        fi
-        printf "     Set AQ_DRM_DEVICES to %s%s%s\n" "${BOLD}" "$SELECTED_CARD" "${RESET}"
-    else
-        log_warn "No specific card path derived. AQ_DRM_DEVICES untouched."
-    fi
-}
-
-show_success() {
-    printf "\n%s[SUCCESS] Configuration Complete.%s\n" "${GREEN}${BOLD}" "${RESET}"
-    printf "UWSM Environment set for: %s%s%s\n" "${BOLD}" "${SELECTED_VENDOR^^}" "${RESET}"
-    if [[ -n "$SELECTED_CARD" ]]; then
-        printf "Hyprland Bind:            %s%s%s\n" "${BOLD}" "$SELECTED_CARD" "${RESET}"
-    fi
-    printf "Please restart UWSM/Hyprland for changes to take effect.\n"
-}
-
-# --- 8. EXECUTION ---
+# --- 9. MAIN ---
 main() {
-    preflight_checks
-    detect_gpus
-    select_gpu
-    apply_config
-    show_success
+    log_info "Starting Elite DevOps GPU Configuration..."
+    check_deps
+    detect_topology
+    select_mode
+    generate_config
+    
+    log_info "Previewing generated config:"
+    echo "-------------------------------------"
+    grep -E "AQ_DRM|LIBVA|Mode:" "$OUTPUT_FILE" || true
+    echo "-------------------------------------"
+    log_ok "Done. Please restart your UWSM session."
 }
 
 main "$@"
-exit 0

@@ -77,6 +77,7 @@ declare -A CUSTOM_SCRIPT_PATHS=(
     ["update_checker.sh"]="user_scripts/update_dusky/update_checker/update_checker.sh"
     ["cc_restart.sh"]="user_scripts/dusky_system/reload_cc/cc_restart.sh"
     ["dusky_service_manager.sh"]="user_scripts/services/dusky_service_manager.sh"
+    ["append_defaults_keybinds_edit_here.sh"]="user_scripts/misc_extra/append_defaults_keybinds_edit_here.sh"
 )
 
 # ------------------------------------------------------------------------------
@@ -88,8 +89,7 @@ declare -ra UPDATE_SEQUENCE=(
     "U | 015_set_thunar_terminal_kitty.sh"
     "U | 020_desktop_apps_username_setter.sh --quiet"
 #    "U | 025_configure_keyboard.sh"
-#    "U | 030_uwsm_env_comment_everything.sh --auto"
-#    "U | 035_configure_uwsm_gpu.sh"
+    "U | 035_configure_uwsm_gpu.sh --auto"
 #    "U | 040_long_sleep_timeout.sh"
 #    "S | 045_battery_limiter.sh"
 #    "S | 050_pacman_config.sh --auto"
@@ -108,6 +108,7 @@ declare -ra UPDATE_SEQUENCE=(
 #    "S | 120_create_mount_directories.sh"
 #    "S | 125_pam_keyring.sh"
     "U | 130_copy_service_files.sh --default"
+    "U | 131_dbus_copy_service_files.sh"
 #    "U | 135_battery_notify_service.sh"
 #    "U | 140_fc_cache_fv.sh"
 #    "U | 145_matugen_directories.sh"
@@ -116,7 +117,7 @@ declare -ra UPDATE_SEQUENCE=(
 #    "U | 160_theme_ctl.sh set --defaults"
 #    "U | 165_qtct_config.sh"
     "U | 170_waypaper_config_reset.sh"
-    "U | 175_animation_default.sh"
+#    "U | 175_animation_default.sh"
 #    "S | 180_udev_usb_notify.sh"
 #    "U | 185_terminal_default.sh"
 #    "S | 190_dusk_fstab.sh"
@@ -129,6 +130,9 @@ declare -ra UPDATE_SEQUENCE=(
 #    "S | 225_faillock_timeout.sh"
     "U | 230_non_asus_laptop.sh --auto"
     "U | 235_file_manager_switch.sh --apply-state"
+    "U | 236_browser_switcher.sh --apply-state"
+    "U | 237_text_editer_switcher.sh --apply-state"
+    "U | 238_terminal_switcher.sh --apply-state"
 #    "U | 240_swaync_dgpu_fix.sh --disable"
 #    "S | 245_asusd_service_fix.sh"
 #    "S | 250_ftp_arch.sh"
@@ -151,6 +155,7 @@ declare -ra UPDATE_SEQUENCE=(
 #    "U | 345_faster_whisper_cpu.sh"
 #    "S | 350_dns_systemd_resolve.sh"
 #    "U | 355_hyprexpo_plugin.sh"
+#    "U | 356_dusky_plugin_manager.sh"
 #    "U | 360_obsidian_pensive_vault_configure.sh"
 #    "U | 365_cache_purge.sh"
 #    "S | 370_arch_install_scripts_cleanup.sh"
@@ -177,12 +182,12 @@ declare -ra UPDATE_SEQUENCE=(
 
 #================= CUSTOM=====================
 
-    "U | waypaper_config_reset.sh"
     "U | copy_service_files.sh --default"
     "U | update_checker.sh --num"
     "S | package_installation.sh"
     "U | cc_restart.sh --quiet"
     "S | dusky_service_manager.sh"
+    "U | append_defaults_keybinds_edit_here.sh"
 )
 
 # ==============================================================================

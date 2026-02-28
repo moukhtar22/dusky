@@ -88,8 +88,8 @@ handle_interrupt() {
     printf '\n%s[!] Interrupted by signal.%s\n' "${RED}" "${RESET}" >&2
     exit "$1"
 }
-trap 'handle_interrupt 130' INT    
-trap 'handle_interrupt 143' TERM   
+trap 'handle_interrupt 130' INT
+trap 'handle_interrupt 143' TERM
 
 # ==============================================================================
 # ARGUMENT PARSING
@@ -214,6 +214,17 @@ filter_installed() {
     return 0
 }
 
+# returns 0 if package is NOT required by any installed package (safe to remove),
+# returns 1 if package is required (protected).
+is_required_by_anything() {
+    local -r pkg="$1"
+    local req
+    # "Required By" field exists in pacman -Qi output.
+    # if it is "None", it's not required by installed packages.
+    req="$(pacman -Qi -- "$pkg" 2>/dev/null | awk -F': ' '/^Required By/ {print $2; exit}')"
+    [[ -n "$req" && "$req" != "None" ]]
+}
+
 # ==============================================================================
 # PACKAGE REMOVAL
 # ==============================================================================
@@ -227,7 +238,20 @@ process_removal() {
     local -a active_targets=()
     filter_installed "$targets_name" active_targets
 
-    if (( ${#active_targets[@]} == 0 )); then
+    # skip packages that are required by other installed packages
+    local -a removable_targets=()
+    local pkg
+    for pkg in "${active_targets[@]}"; do
+        if is_required_by_anything "$pkg"; then
+            local reqby
+            reqby="$(pacman -Qi -- "$pkg" 2>/dev/null | awk -F': ' '/^Required By/ {print $2; exit}')"
+            log_warn "Skipping '${CYAN}${pkg}${RESET}': required by installed package(s): ${BOLD}${reqby}${RESET}"
+            continue
+        fi
+        removable_targets+=("$pkg")
+    done
+
+    if (( ${#removable_targets[@]} == 0 )); then
         log_info "No ${label} packages require removal."
         return 0
     fi
@@ -236,10 +260,10 @@ process_removal() {
     (( use_sudo )) && cmd+=(sudo)
     cmd+=("$pkg_cmd" -Rns)
     (( AUTO_CONFIRM )) && cmd+=(--noconfirm)
-    cmd+=(-- "${active_targets[@]}")
+    cmd+=(-- "${removable_targets[@]}")
 
-    log_info "Removing ${BOLD}${#active_targets[@]}${RESET} ${label} package(s):"
-    printf '         %s%s%s\n' "${CYAN}" "${active_targets[*]}" "${RESET}"
+    log_info "Removing ${BOLD}${#removable_targets[@]}${RESET} ${label} package(s):"
+    printf '         %s%s%s\n' "${CYAN}" "${removable_targets[*]}" "${RESET}"
 
     if "${cmd[@]}"; then
         log_ok "${label} package removal completed."

@@ -1,25 +1,24 @@
 #!/usr/bin/env bash
 # =============================================================================
-# ELITE HYPRLAND FILE MANAGER SWITCHER - PLATINUM EDITION (v6.2)
+# ELITE HYPRLAND TEXT EDITOR SWITCHER - PLATINUM EDITION (v6.2)
 # =============================================================================
 #
-# BASED ON: Dusky TUI Engine v3.9.6 (Template Aligned)
 # TARGET:   Arch Linux / Hyprland / UWSM / Wayland
 
 # =============================================================================
-# HOW TO ADD NEW FILE MANAGERS
+# HOW TO ADD NEW TEXT EDITORS
 # =============================================================================
-# 1. Locate the 'FM_CATALOG' array in the USER CONFIGURATION section.
+# 1. Locate the 'EDITOR_CATALOG' array in the USER CONFIGURATION section.
 # 2. Add a new line inside the parentheses following this exact syntax:
 #    "key|type|desktop_file|display_name"
 #
-#    - KEY: The string that will be written to $fileManager in your config.
+#    - KEY: The string that will be written to $textEditor in your config.
 #    - TYPE: '0' for GUI (Direct exec) | '1' for Terminal (Wrapped in terminal).
-#    - DESKTOP_FILE: The filename (e.g., dolphin.desktop) for MIME association.
+#    - DESKTOP_FILE: The filename (e.g., nvim.desktop) for MIME association.
 #    - DISPLAY_NAME: The friendly name shown in the TUI menu.
 #
-# EXAMPLE: To add 'Dolphin', you would add:
-#    "dolphin|0|org.kde.dolphin.desktop|Dolphin (KDE)"
+# EXAMPLE: To add 'Neovim', you would add:
+#    "nvim|1|nvim.desktop|Neovim (Terminal)"
 #
 # NOTE: The script handles all atomic writes, keybind updates, and UI 
 # scrolling automatically. No further logic changes are required.
@@ -33,27 +32,27 @@ shopt -s extglob
 # =============================================================================
 
 # Catalog Format: "Key|Type|DesktopFile|DisplayName"
-# Type 0 = GUI (exec, uwsm-app $fileManager)
-# Type 1 = Terminal (exec, uwsm-app -- $terminal -e $fileManager)
-declare -ra FM_CATALOG=(
-    "nemo|0|nemo.desktop|Nemo (GUI)"
-    "yazi|1|yazi.desktop|Yazi (Terminal)"
-    "thunar|0|thunar.desktop|Thunar (GUI)"
-    "dolphin|0|org.kde.dolphin.desktop|Dolphin (GUI)"
-    "nautilus|0|org.gnome.Nautilus.desktop|Nautilus (GUI)"
-    "pcmanfm|0|pcmanfm.desktop|PCManFM (GUI)"
-    "ranger|1|ranger.desktop|Ranger (Terminal)"
-    "lf|1|lf.desktop|Lf (Terminal)"
-    "superfile|1|superfile.desktop|Superfile (Terminal)"
+# Type 0 = GUI (exec, uwsm-app $textEditor)
+# Type 1 = Terminal (exec, uwsm-app -- $terminal --class $key -e $textEditor)
+declare -ra EDITOR_CATALOG=(
+    "gnome-text-editor|0|org.gnome.TextEditor.desktop|GNOME Text Editor (GUI)"
+    "nvim|1|nvim.desktop|Neovim (Terminal)"
+    "nano|1|nano.desktop|Nano (Terminal)"
+    "code|0|code.desktop|VS Code (GUI)"
+    "zed|0|dev.zed.Zed.desktop|Zed (GUI)"
+    "helix|1|helix.desktop|Helix (Terminal)"
+    "kate|0|org.kde.kate.desktop|Kate (GUI)"
+    "emacs|0|emacs.desktop|Emacs (GUI)"
+    "micro|1|micro.desktop|Micro (Terminal)"
 )
 
 # Paths
 declare -r CONF_VARS="${HOME}/.config/hypr/edit_here/source/default_apps.conf"
 declare -r CONF_BINDS="${HOME}/.config/hypr/edit_here/source/keybinds.conf"
-declare -r STATE_FILE="${HOME}/.config/dusky/settings/filemanager_switch"
+declare -r STATE_FILE="${HOME}/.config/dusky/settings/texteditor_switch"
 
 # UI Configuration (Template Aligned)
-declare -r APP_TITLE="Dusky File Manager"
+declare -r APP_TITLE="Dusky Text Editor Switcher"
 declare -r APP_VERSION="v6.2 (Stable)"
 declare -ri BOX_INNER_WIDTH=60
 declare -ri MAX_DISPLAY_ROWS=10
@@ -97,7 +96,7 @@ declare -r ESC_READ_TIMEOUT=0.10
 declare -i SELECTED_ROW=0
 declare -i SCROLL_OFFSET=0
 declare -i IN_TUI=0
-declare CURRENT_FM_KEY="unknown"
+declare CURRENT_EDITOR_KEY="unknown"
 declare STATUS_MSG=""
 declare ORIGINAL_STTY=""
 
@@ -153,13 +152,13 @@ atomic_write() {
     fi
 }
 
-switch_file_manager() {
+switch_text_editor() {
     local target="$1"
     local t_type="" t_desktop="" t_name="" found=0
     local entry
 
     # 1. Catalog Lookup
-    for entry in "${FM_CATALOG[@]}"; do
+    for entry in "${EDITOR_CATALOG[@]}"; do
         IFS='|' read -r k t d n <<< "$entry"
         if [[ "$k" == "$target" ]]; then
             t_type="$t"
@@ -171,7 +170,7 @@ switch_file_manager() {
     done
 
     if [[ $found -eq 0 ]]; then
-        log_action 1 "File manager '$target' not found in catalog."
+        log_action 1 "Text editor '$target' not found in catalog."
         return 1
     fi
 
@@ -184,13 +183,13 @@ switch_file_manager() {
     local new_vars
     new_vars=$(awk -v val="$target" '
         BEGIN { found=0 }
-        /^[\t ]*\$fileManager[\t ]*=/ {
-            print "$fileManager = " val
+        /^[\t ]*\$textEditor[\t ]*=/ {
+            print "$textEditor = " val
             found=1
             next
         }
         { print }
-        END { if(!found) print "$fileManager = " val }
+        END { if(!found) print "$textEditor = " val }
     ' "$CONF_VARS")
     atomic_write "$CONF_VARS" "$new_vars"
 
@@ -202,15 +201,15 @@ switch_file_manager() {
 
     local exec_cmd
     if [[ "$t_type" == "1" ]]; then
-        exec_cmd="uwsm-app -- \$terminal -e \$fileManager"
+        exec_cmd="uwsm-app -- \$terminal --class $target -e \$textEditor"
     else
-        exec_cmd="uwsm-app \$fileManager"
+        exec_cmd="uwsm-app \$textEditor"
     fi
 
     local new_binds
     new_binds=$(awk -v new_cmd="$exec_cmd" '
         BEGIN { found=0 }
-        /bindd[ \t]*=.*,[ \t]*File Manager[ \t]*,/ {
+        /bindd[ \t]*=.*,[ \t]*Open Text Editor[ \t]*,/ {
             split($0, parts, ",")
             printf "%s,%s,%s, exec, %s\n", parts[1], parts[2], parts[3], new_cmd
             found=1
@@ -220,8 +219,8 @@ switch_file_manager() {
         END {
             if(!found) {
                 print ""
-                print "# Auto-generated by FM Switcher"
-                print "bindd = $mainMod, E, File Manager, exec, " new_cmd
+                print "# Auto-generated by Text Editor Switcher"
+                print "bindd = $mainMod, R, Open Text Editor, exec, " new_cmd
             }
         }
     ' "$CONF_BINDS")
@@ -229,7 +228,7 @@ switch_file_manager() {
 
     # 4. Update MIME Defaults
     if command -v xdg-mime &>/dev/null; then
-        xdg-mime default "$t_desktop" inode/directory 2>/dev/null || true
+        xdg-mime default "$t_desktop" text/plain 2>/dev/null || true
     fi
 
     # 5. Update State Files
@@ -238,7 +237,7 @@ switch_file_manager() {
     atomic_write "$STATE_FILE" "$legacy_state"
     atomic_write "${STATE_FILE}.smart" "$target"
 
-    CURRENT_FM_KEY="$target"
+    CURRENT_EDITOR_KEY="$target"
     log_action 0 "$t_name"
     return 0
 }
@@ -246,15 +245,15 @@ switch_file_manager() {
 detect_current() {
     # Robust grep/cut to find current variable
     if [[ -f "$CONF_VARS" ]]; then
-        CURRENT_FM_KEY=$(grep -m1 '^[[:space:]]*\$fileManager[[:space:]]*=' "$CONF_VARS" | cut -d'=' -f2 | tr -d ' "' || echo "unknown")
-        CURRENT_FM_KEY="${CURRENT_FM_KEY//[[:space:]]/}"
+        CURRENT_EDITOR_KEY=$(grep -m1 '^[[:space:]]*\$textEditor[[:space:]]*=' "$CONF_VARS" | cut -d'=' -f2 | tr -d ' "' || echo "unknown")
+        CURRENT_EDITOR_KEY="${CURRENT_EDITOR_KEY//[[:space:]]/}"
         
         # Safe check for empty strings under set -e
-        if [[ -z "$CURRENT_FM_KEY" ]]; then
-             CURRENT_FM_KEY="unknown"
+        if [[ -z "$CURRENT_EDITOR_KEY" ]]; then
+             CURRENT_EDITOR_KEY="unknown"
         fi
     else
-        CURRENT_FM_KEY="unknown"
+        CURRENT_EDITOR_KEY="unknown"
     fi
 }
 
@@ -320,7 +319,7 @@ render_scroll_indicator() {
 draw_ui() {
     local buf="" pad_buf=""
     local -i vis_len left_pad right_pad
-    local -i count=${#FM_CATALOG[@]}
+    local -i count=${#EDITOR_CATALOG[@]}
     local -i _vis_start _vis_end
     local item k t d n indicator padded_label
 
@@ -341,12 +340,12 @@ draw_ui() {
     buf+="${pad_buf}│${C_RESET}${CLR_EOL}"$'\n'
 
     # Sub-header
-    local curr_txt="Current: ${CURRENT_FM_KEY}"
+    local curr_txt="Current: ${CURRENT_EDITOR_KEY}"
     strip_ansi "$curr_txt"; local -i c_len=${#REPLY}
     left_pad=$(( (BOX_INNER_WIDTH - c_len) / 2 ))
     right_pad=$(( BOX_INNER_WIDTH - c_len - left_pad ))
     printf -v pad_buf '%*s' "$left_pad" ''
-    buf+="${C_MAGENTA}│${pad_buf}${C_GREY}Current: ${C_GREEN}${CURRENT_FM_KEY}${C_MAGENTA}"
+    buf+="${C_MAGENTA}│${pad_buf}${C_GREY}Current: ${C_GREEN}${CURRENT_EDITOR_KEY}${C_MAGENTA}"
     printf -v pad_buf '%*s' "$right_pad" ''
     buf+="${pad_buf}│${C_RESET}${CLR_EOL}"$'\n'
     
@@ -357,9 +356,9 @@ draw_ui() {
     render_scroll_indicator buf "above" "$count" "$_vis_start"
 
     for (( i = _vis_start; i < _vis_end; i++ )); do
-        IFS='|' read -r k t d n <<< "${FM_CATALOG[$i]}"
+        IFS='|' read -r k t d n <<< "${EDITOR_CATALOG[$i]}"
         
-        if [[ "$k" == "$CURRENT_FM_KEY" ]]; then
+        if [[ "$k" == "$CURRENT_EDITOR_KEY" ]]; then
             indicator="${C_GREEN}● ACTIVE${C_RESET}"
         else
             indicator="${C_GREY}○${C_RESET}"
@@ -404,14 +403,14 @@ draw_ui() {
 
 navigate() {
     local -i dir=$1
-    local -i count=${#FM_CATALOG[@]}
+    local -i count=${#EDITOR_CATALOG[@]}
     SELECTED_ROW=$(( (SELECTED_ROW + dir + count) % count ))
     STATUS_MSG="" # Clear status on navigation
 }
 
 navigate_page() {
     local -i dir=$1
-    local -i count=${#FM_CATALOG[@]}
+    local -i count=${#EDITOR_CATALOG[@]}
     SELECTED_ROW=$(( SELECTED_ROW + dir * MAX_DISPLAY_ROWS ))
     if (( SELECTED_ROW < 0 )); then SELECTED_ROW=0; fi
     if (( SELECTED_ROW >= count )); then SELECTED_ROW=$(( count - 1 )); fi
@@ -420,7 +419,7 @@ navigate_page() {
 
 navigate_end() {
     local -i target=$1 # 0=top, 1=bottom
-    local -i count=${#FM_CATALOG[@]}
+    local -i count=${#EDITOR_CATALOG[@]}
     if (( target == 0 )); then SELECTED_ROW=0; else SELECTED_ROW=$(( count - 1 )); fi
     STATUS_MSG=""
 }
@@ -450,7 +449,7 @@ handle_mouse() {
     local -i effective_start=$(( ITEM_START_ROW + 1 ))
     if (( y >= effective_start && y < effective_start + MAX_DISPLAY_ROWS )); then
         local -i clicked_idx=$(( y - effective_start + SCROLL_OFFSET ))
-        local -i count=${#FM_CATALOG[@]}
+        local -i count=${#EDITOR_CATALOG[@]}
         
         if (( clicked_idx >= 0 && clicked_idx < count )); then
             SELECTED_ROW=$clicked_idx
@@ -486,8 +485,8 @@ read_escape_seq() {
 
 apply_selection() {
     local k
-    IFS='|' read -r k _ <<< "${FM_CATALOG[$SELECTED_ROW]}"
-    switch_file_manager "$k"
+    IFS='|' read -r k _ <<< "${EDITOR_CATALOG[$SELECTED_ROW]}"
+    switch_text_editor "$k"
     detect_current
 }
 
@@ -534,9 +533,9 @@ run_tui() {
     detect_current
 
     local i
-    for (( i = 0; i < ${#FM_CATALOG[@]}; i++ )); do
-        IFS='|' read -r k _ <<< "${FM_CATALOG[$i]}"
-        if [[ "$k" == "$CURRENT_FM_KEY" ]]; then
+    for (( i = 0; i < ${#EDITOR_CATALOG[@]}; i++ )); do
+        IFS='|' read -r k _ <<< "${EDITOR_CATALOG[$i]}"
+        if [[ "$k" == "$CURRENT_EDITOR_KEY" ]]; then
             SELECTED_ROW=$i
             break
         fi
@@ -563,12 +562,12 @@ main() {
         run_tui
     else
         case "$1" in
-            --nemo)   switch_file_manager "nemo" ;;
-            --yazi)   switch_file_manager "yazi" ;;
-            --thunar) switch_file_manager "thunar" ;;
+            --nvim)              switch_text_editor "nvim" ;;
+            --gnome-text-editor) switch_text_editor "gnome-text-editor" ;;
+            --nano)              switch_text_editor "nano" ;;
             --set)
                 if [[ -n "${2:-}" ]]; then
-                    switch_file_manager "$2"
+                    switch_text_editor "$2"
                 else
                     log_err "Usage: --set <name>"
                     exit 1
@@ -576,12 +575,13 @@ main() {
                 ;;
             --apply-state)
                 if [[ -f "${STATE_FILE}.smart" ]]; then
-                    switch_file_manager "$(< "${STATE_FILE}.smart")"
+                    switch_text_editor "$(< "${STATE_FILE}.smart")"
                 elif [[ -f "$STATE_FILE" ]]; then
+                    # Legacy state handling: 'true' -> nvim, 'false' -> gnome-text-editor
                     if grep -q "true" "$STATE_FILE"; then
-                        switch_file_manager "yazi"
+                        switch_text_editor "nvim"
                     else
-                        switch_file_manager "nemo"
+                        switch_text_editor "gnome-text-editor"
                     fi
                 else
                     log_info "No state file found."
