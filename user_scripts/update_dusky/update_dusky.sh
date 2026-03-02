@@ -78,6 +78,7 @@ declare -A CUSTOM_SCRIPT_PATHS=(
     ["cc_restart.sh"]="user_scripts/dusky_system/reload_cc/cc_restart.sh"
     ["dusky_service_manager.sh"]="user_scripts/services/dusky_service_manager.sh"
     ["append_defaults_keybinds_edit_here.sh"]="user_scripts/misc_extra/append_defaults_keybinds_edit_here.sh"
+    ["append_sourcing_line_workspace.sh"]="user_scripts/misc_extra/delete_in_3_weeks/append_sourcing_line_workspace.sh"
 )
 
 # ------------------------------------------------------------------------------
@@ -188,6 +189,7 @@ declare -ra UPDATE_SEQUENCE=(
     "U | cc_restart.sh --quiet"
     "S | dusky_service_manager.sh"
     "U | append_defaults_keybinds_edit_here.sh"
+    "U | append_sourcing_line_workspace.sh"
 )
 
 # ==============================================================================

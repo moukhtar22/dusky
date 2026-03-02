@@ -18,6 +18,7 @@
 # Directories to search for scripts (in order — first match wins)
 SCRIPT_SEARCH_DIRS=(
     "${HOME}/user_scripts/arch_setup_scripts/scripts"
+    "${HOME}/user_scripts/arch_setup_scripts"
     # "${HOME}/my_other_scripts"
     # "/opt/shared_team_scripts"
 )
@@ -26,6 +27,7 @@ SCRIPT_SEARCH_DIRS=(
 POST_SCRIPT_DELAY=0
 
 INSTALL_SEQUENCE=(
+    "U | deploy_dotfiles.sh"
     "U | 005_hypr_custom_config_setup.sh"
     "U | 010_package_removal.sh"
     "U | 015_set_thunar_terminal_kitty.sh"

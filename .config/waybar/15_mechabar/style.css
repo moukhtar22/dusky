@@ -18,6 +18,7 @@
 #window label,
 #mpris,
 tooltip label {
+	font-family: sans-serif;
 	font-weight: normal;
 }
 
@@ -28,13 +29,14 @@ tooltip label {
 }
 
 #custom-power {
-	font-size: 18px;
+	font-size: 16px;
 }
 
 #custom-left_div,
 #custom-left_inv,
 #custom-right_div,
 #custom-right_inv {
+	font-family: "JetBrainsMono Nerd Font";
 	font-size: 22px;
 }
 
@@ -197,7 +199,8 @@ tooltip label {
     media info
 ----------------*/
 
-#custom-cava {
+#cava {
+	font-family: "JetBrainsMono Nerd Font";
 	letter-spacing: 2px;
 	padding-right: 8px;
 }

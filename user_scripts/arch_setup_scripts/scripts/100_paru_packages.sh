@@ -57,6 +57,7 @@ readonly PACKAGES=(
   "python-pywalfox"
   "python-pyquery"
   "hyprshade"
+  "hyprshutdown"
   "waypaper"
   "peaclock"
   "tray-tui"

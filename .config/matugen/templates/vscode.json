@@ -18,7 +18,7 @@
   "window.controlsStyle": "hidden",
   "workbench.colorTheme": "Material Code",
   "material-code.colors": {
-    "primary": "{{colors.surface.dark.hex}}",
+    "primary": "{{colors.primary.dark.hex}}",
     "foreground": "{{colors.on_surface.dark.hex}}",
     "mutedForeground": "{{colors.primary.dark.hex}}",
     "background": "{{colors.surface.dark.hex}}",
@@ -42,8 +42,8 @@
     "syntax.function": "{{colors.primary.dark.hex}}",
     "syntax.constant": "{{colors.tertiary.dark.hex}}",
     "syntax.bracket1": "{{colors.secondary_fixed.dark.hex}}",
-    "syntax.bracket2": "{{colors.secondary_fixed.dark.hex}}",
-    "syntax.bracket3": "{{colors.secondary_fixed.dark.hex}}",
-    "syntax.bracket4": "{{colors.secondary_fixed.dark.hex}}"
+    "syntax.bracket2": "{{colors.tertiary.dark.hex}}",
+    "syntax.bracket3": "{{colors.tertiary_container.dark.hex}}",
+    "syntax.bracket4": "{{colors.primary_container.dark.hex}}"
   }
 }

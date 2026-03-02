@@ -1,18 +1,16 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# Hyprland Keybind Manager - System Architect Edition
+# Hyprland Keybind Manager - System Architect Edition (v2026-Golden)
 # ==============================================================================
 #
 # ARCHITECTURE & SAFETY PROTOCOLS:
 # 1. Zero-Subprocess Parsing: Uses Bash mapfile and native ERE regex.
 # 2. Intent & Comment Respect: Regex intentionally matches commented-out binds. 
-#    If a user comments out a bind to disable it, the script respects that 
-#    intent and will NOT aggressively re-inject it.
-# 3. Atomic Write-Sync-Move: Guarantees zero file corruption.
-# 4. Strict Error Handling: Bypasses Bash arithmetic evaluation traps and 
-#    prevents compound command exit-code masking.
-# 5. Cascading Signal Traps: Ensures deterministic temp file cleanup even 
-#    under SIGINT/SIGTERM without allowing script continuation.
+# 3. Symlink Preservation: Resolves canonical paths to prevent Stow/Chezmoi breakage.
+# 4. True Metadata Cloning: Uses `cp -pf` to guarantee ACL/Ownership retention.
+# 5. Surgical Append: Appends without destructing/reconstructing the source file.
+# 6. Atomic Write-Sync-Move: Guarantees zero file corruption.
+# 7. Cascading Signal Traps: Ensures deterministic temp file cleanup.
 #
 # ==============================================================================
 # ==============================================================================
@@ -106,13 +104,21 @@ declare -a INJECTIONS=(
 # ------------------------------------------------------------------------------
 
 main() {
-    local target_dir="${TARGET_FILE%/*}"
-    [[ -d "$target_dir" ]] || mkdir -p "$target_dir"
-    [[ -f "$TARGET_FILE" ]] || touch "$TARGET_FILE"
+    # 1. Path Resolution (Symlink / Dotfile Manager Safety)
+    local actual_target="$TARGET_FILE"
+    if [[ -L "$TARGET_FILE" ]]; then
+        # -m ensures it resolves safely even if the final file doesn't exist yet
+        actual_target=$(realpath -m "$TARGET_FILE")
+        log_info "Symlink detected. Operating on true target: $actual_target"
+    fi
 
-    # 1. Load entire file into memory instantly
+    local target_dir="${actual_target%/*}"
+    [[ -d "$target_dir" ]] || mkdir -p "$target_dir"
+    [[ -f "$actual_target" ]] || touch "$actual_target"
+
+    # 2. Load entire file into memory instantly (Read Phase Only)
     local lines=()
-    mapfile -t lines < "$TARGET_FILE"
+    mapfile -t lines < "$actual_target"
 
     # Pure Bash in-memory evaluation
     pattern_exists() {
@@ -130,7 +136,7 @@ main() {
     local additions=0
     local regex header bind item
 
-    # 2. Evaluate Matrix
+    # 3. Evaluate Matrix
     for item in "${INJECTIONS[@]}"; do
         IFS="$DELIM" read -r regex header bind <<< "$item"
         
@@ -145,40 +151,41 @@ main() {
         fi
     done
 
-    # 3. Atomic Write Execution
+    # 4. Atomic Write Execution
     if (( additions > 0 )); then
-        local tmp_file=""
-        
-        # Proper Signal Cascading: Signal traps strictly exit, triggering the EXIT trap.
-        trap '[[ -n "${tmp_file:-}" && -f "$tmp_file" ]] && rm -f "$tmp_file"' EXIT
-        trap 'exit 129' HUP
-        trap 'exit 130' INT
-        trap 'exit 143' TERM
-        
-        tmp_file=$(mktemp "${TARGET_FILE}.tmp.XXXXXXXXXX") || {
+        local tmp_file
+        tmp_file=$(mktemp "${target_dir}/.${actual_target##*/}.tmp.XXXXXX") || {
             log_err "Failed to create temporary file."
             exit 1
         }
+        
+        # Proper Signal Cascading: Evaluated immediately via double quotes
+        trap "[[ -f \"$tmp_file\" ]] && rm -f \"$tmp_file\"" EXIT
+        trap 'exit 129' HUP
+        trap 'exit 130' INT
+        trap 'exit 143' TERM
 
-        # Match original file permissions (mktemp uses strict 0600)
-        chmod --reference="$TARGET_FILE" "$tmp_file" 2>/dev/null || chmod 0644 "$tmp_file"
+        # Perfectly clone all metadata and original content (bypassing aliases)
+        command cp -pf "$actual_target" "$tmp_file"
 
-        # Pure Bash I/O: Chained with && to prevent exit-code masking inside the brace group
-        if ! {
-            { (( ${#lines[@]} == 0 )) || printf "%s\n" "${lines[@]}"; } && \
-            printf "%s\n" "${output_buffer[@]}"
-        } > "$tmp_file"; then
-            log_err "I/O failure during in-memory buffer flush."
+        # Surgical newline padding: If file has content but lacks a trailing newline, pad it
+        if [[ -s "$tmp_file" ]] && [[ -n "$(tail -c 1 "$tmp_file" | tr -d '\n')" ]]; then
+            printf "\n" >> "$tmp_file"
+        fi
+
+        # Pure Bash Append: Safely append the output buffer to the temp file
+        if ! printf "%s\n" "${output_buffer[@]}" >> "$tmp_file"; then
+            log_err "I/O failure during buffer flush."
             exit 1
         fi
 
         # Flush buffer to physical disk, then atomically replace original file
-        if ! { sync "$tmp_file" && mv -f "$tmp_file" "$TARGET_FILE"; }; then
+        if ! { sync "$tmp_file" && command mv -f "$tmp_file" "$actual_target"; }; then
             log_err "Atomic write failed during physical sync or mv operation."
             exit 1
         fi
 
-        log_success "Injected $additions missing keybind(s) into ${TARGET_FILE}"
+        log_success "Injected $additions missing keybind(s) into ${actual_target}"
     else
         log_info "All configured bindings exist. Integrity verified."
     fi
