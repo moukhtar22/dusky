@@ -79,12 +79,21 @@ declare -A CUSTOM_SCRIPT_PATHS=(
     ["dusky_service_manager.sh"]="user_scripts/services/dusky_service_manager.sh"
     ["append_defaults_keybinds_edit_here.sh"]="user_scripts/misc_extra/append_defaults_keybinds_edit_here.sh"
     ["append_sourcing_line_workspace.sh"]="user_scripts/misc_extra/delete_in_3_weeks/append_sourcing_line_workspace.sh"
+    ["append_gaps_line_in_appearance.sh"]="user_scripts/misc_extra/delete_in_3_weeks/append_gaps_line_in_appearance.sh"
+    ["dusky_commands_before.sh"]="user_scripts/misc_extra/dusky_commands_before.sh"
+    ["dusky_commands_after.sh"]="user_scripts/misc_extra/dusky_commands_after.sh"
 )
 
 # ------------------------------------------------------------------------------
 # UPDATE SEQUENCE — Scripts to execute after sync
 # ------------------------------------------------------------------------------
 declare -ra UPDATE_SEQUENCE=(
+
+#================= CUSTOM=====================
+    "U | dusky_commands_before.sh"
+
+#================= Scripts =====================
+
     "U | 005_hypr_custom_config_setup.sh"
     "U | 010_package_removal.sh --auto"
     "U | 015_set_thunar_terminal_kitty.sh"
@@ -190,6 +199,9 @@ declare -ra UPDATE_SEQUENCE=(
     "S | dusky_service_manager.sh"
     "U | append_defaults_keybinds_edit_here.sh"
     "U | append_sourcing_line_workspace.sh"
+    "U | append_gaps_line_in_appearance.sh"
+    "U | dusky_commands_after.sh"
+
 )
 
 # ==============================================================================

@@ -22,15 +22,13 @@ set -o pipefail
 
 declare -ra FLEET_COMMANDS=(
     # --- UI & Theming ---
-    "U | gsettings set org.gnome.desktop.interface icon-theme 'Fluent-teal-dark'"
-    "U | gsettings set org.cinnamon.desktop.default-applications.terminal exec 'kitty'"
-    
+#    "U | gsettings set org.gnome.desktop.interface icon-theme 'Fluent-teal-dark'"
+#    "U | gsettings set org.cinnamon.desktop.default-applications.terminal exec 'kitty'"
+
     # --- System Services ---
-    "U | systemctl --user disable dusky.service || true"
-    "S | systemctl enable --now tlp.service || true"
-    
-    # --- Package Management ---
-    "S | pacman -Syyu --noconfirm"
+#    "U | systemctl --user disable dusky.service || true"
+#    "S | systemctl enable --now tlp.service || true"
+
 )
 
 # ==============================================================================

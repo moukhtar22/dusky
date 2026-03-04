@@ -69,6 +69,14 @@ register_items() {
         register $tab_idx "Font Hinting"        'org.gnome.desktop.interface|font-hinting|cycle|none,slight,medium,full||' "slight"
         register $tab_idx "System Sounds"       'org.gnome.desktop.sound|event-sounds|bool|||' "true"
         
+        # CSD & Titlebar Tweaks
+        if grep -q "^org.gnome.desktop.wm.preferences$" <<< "$installed_schemas"; then
+            register $tab_idx "CSD Button Layout" 'org.gnome.desktop.wm.preferences|button-layout|cycle|:,appmenu:,appmenu:close,appmenu:minimize,maximize,close||' ":"
+            register $tab_idx "CSD Double-Click"  'org.gnome.desktop.wm.preferences|action-double-click-titlebar|cycle|toggle-maximize,minimize,none,lower,menu||' "none"
+            register $tab_idx "CSD Middle-Click"  'org.gnome.desktop.wm.preferences|action-middle-click-titlebar|cycle|toggle-maximize,minimize,none,lower,menu||' "none"
+            register $tab_idx "CSD Right-Click"   'org.gnome.desktop.wm.preferences|action-right-click-titlebar|cycle|toggle-maximize,minimize,none,lower,menu||' "menu"
+        fi
+
         tab_idx+=1
     fi
 
@@ -93,23 +101,31 @@ register_items() {
         tab_idx+=1
     fi
 
-    # 3. FILE MANAGERS
-    if grep -q "^org.nemo.preferences$" <<< "$installed_schemas"; then
-        TABS+=("Nemo")
-        declare -ga "TAB_ITEMS_${tab_idx}=()"
-        register $tab_idx "Show Hidden Files"   'org.nemo.preferences|show-hidden-files|bool|||' "false"
-        register $tab_idx "Folders First"       'org.nemo.preferences|sort-directories-first|bool|||' "true"
-        register $tab_idx "Default View"        'org.nemo.preferences|default-folder-viewer|cycle|icon-view,list-view,compact-view||' "icon-view"
-        if grep -q "^org.nemo.desktop$" <<< "$installed_schemas"; then
-            register $tab_idx "Show Desktop Icons" 'org.nemo.desktop|show-desktop-icons|bool|||' "true"
+    # 3. FILE MANAGERS & MEDIA
+    if grep -q "^org.nemo.preferences$" <<< "$installed_schemas" || grep -q "^org.gnome.nautilus.preferences$" <<< "$installed_schemas"; then
+        if grep -q "^org.nemo.preferences$" <<< "$installed_schemas"; then
+            TABS+=("Nemo")
+            declare -ga "TAB_ITEMS_${tab_idx}=()"
+            register $tab_idx "Show Hidden Files"   'org.nemo.preferences|show-hidden-files|bool|||' "false"
+            register $tab_idx "Folders First"       'org.nemo.preferences|sort-directories-first|bool|||' "true"
+            register $tab_idx "Default View"        'org.nemo.preferences|default-folder-viewer|cycle|icon-view,list-view,compact-view||' "icon-view"
+            if grep -q "^org.nemo.desktop$" <<< "$installed_schemas"; then
+                register $tab_idx "Show Desktop Icons" 'org.nemo.desktop|show-desktop-icons|bool|||' "true"
+            fi
+        else
+            TABS+=("Nautilus")
+            declare -ga "TAB_ITEMS_${tab_idx}=()"
+            register $tab_idx "Show Hidden Files"   'org.gnome.nautilus.preferences|show-hidden-files|bool|||' "false"
+            register $tab_idx "Folders First"       'org.gnome.nautilus.preferences|sort-directories-first|bool|||' "true"
+            register $tab_idx "Default View"        'org.gnome.nautilus.preferences|default-folder-viewer|cycle|icon-view,list-view||' "icon-view"
         fi
-        tab_idx+=1
-    elif grep -q "^org.gnome.nautilus.preferences$" <<< "$installed_schemas"; then
-        TABS+=("Nautilus")
-        declare -ga "TAB_ITEMS_${tab_idx}=()"
-        register $tab_idx "Show Hidden Files"   'org.gnome.nautilus.preferences|show-hidden-files|bool|||' "false"
-        register $tab_idx "Folders First"       'org.gnome.nautilus.preferences|sort-directories-first|bool|||' "true"
-        register $tab_idx "Default View"        'org.gnome.nautilus.preferences|default-folder-viewer|cycle|icon-view,list-view||' "icon-view"
+
+        # Media Handling (Automounting USBs/Drives)
+        if grep -q "^org.gnome.desktop.media-handling$" <<< "$installed_schemas"; then
+            register $tab_idx "Automount Drives" 'org.gnome.desktop.media-handling|automount|bool|||' "true"
+            register $tab_idx "Automount Open"   'org.gnome.desktop.media-handling|automount-open|bool|||' "true"
+        fi
+
         tab_idx+=1
     fi
 
@@ -130,13 +146,17 @@ register_items() {
         tab_idx+=1
     fi
 
-    # 5. PRIVACY
+    # 5. PRIVACY & TELEMETRY
     if grep -q "^org.gnome.desktop.privacy$" <<< "$installed_schemas"; then
         TABS+=("Privacy")
         declare -ga "TAB_ITEMS_${tab_idx}=()"
-        register $tab_idx "Remember Recent"     'org.gnome.desktop.privacy|remember-recent-files|bool|||' "true"
-        register $tab_idx "Recent Days"         'org.gnome.desktop.privacy|recent-files-max-age|int|-1|365|1' "30"
-        register $tab_idx "Disable Camera"      'org.gnome.desktop.privacy|disable-camera|bool|||' "false"
+        register $tab_idx "Remember Recent"      'org.gnome.desktop.privacy|remember-recent-files|bool|||' "true"
+        register $tab_idx "Recent Days"          'org.gnome.desktop.privacy|recent-files-max-age|int|-1|365|1' "30"
+        register $tab_idx "Disable Camera"       'org.gnome.desktop.privacy|disable-camera|bool|||' "false"
+        
+        # Anti-Telemetry additions
+        register $tab_idx "Send Usage Stats"     'org.gnome.desktop.privacy|send-software-usage-stats|bool|||' "false"
+        register $tab_idx "Report Tech Problems" 'org.gnome.desktop.privacy|report-technical-problems|bool|||' "false"
         tab_idx+=1
     fi
 
