@@ -813,11 +813,11 @@ pages:
       on_toggle:
         enabled:
           type: exec
-          command: $HOME/user_scripts/audio/mono_audio_pipewire.sh
+          command: $HOME/user_scripts/audio/mono_audio_pipewire.py
           terminal: false
         disabled:
           type: exec
-          command: $HOME/user_scripts/audio/mono_audio_pipewire.sh
+          command: $HOME/user_scripts/audio/mono_audio_pipewire.py
           terminal: false
     - type: grid_card
       properties:
@@ -1142,7 +1142,7 @@ pages:
       properties:
         title: ZRam Configuration
         description: Manage compressed memory swap
-        icon: am-memory-symbolic
+        icon: memory-symbolic
       layout:
         - type: section
           properties:
@@ -2532,21 +2532,21 @@ pages:
     - type: label
       properties:
         title: Kernel Version
-        icon: mintupdate-type-kernel-symbolic
+        icon: computer-symbolic
       value:
         type: system
         key: kernel_version
     - type: label
       properties:
         title: Processor
-        icon: am-cpu-symbolic
+        icon: cpu-symbolic
       value:
         type: system
         key: cpu_model
     - type: label
       properties:
         title: Memory
-        icon: am-memory-symbolic
+        icon: memory-symbolic
       value:
         type: system
         key: memory_total

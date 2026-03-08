@@ -19,6 +19,7 @@
 SCRIPT_SEARCH_DIRS=(
     "${HOME}/user_scripts/arch_setup_scripts/scripts"
     "${HOME}/user_scripts/arch_setup_scripts"
+    "${HOME}/user_scripts/rofi"
     # "${HOME}/my_other_scripts"
     # "/opt/shared_team_scripts"
 )
@@ -27,7 +28,12 @@ SCRIPT_SEARCH_DIRS=(
 POST_SCRIPT_DELAY=0
 
 INSTALL_SEQUENCE=(
-    "U | deploy_dotfiles.sh"
+
+# ------ CUSTOM PATH SCRIPTS -------
+#    "U | deploy_dotfiles.sh"
+
+# ------ Setup SCRIPTS -------
+
     "U | 005_hypr_custom_config_setup.sh"
     "U | 010_package_removal.sh"
     "U | 015_set_thunar_terminal_kitty.sh"
@@ -124,6 +130,12 @@ INSTALL_SEQUENCE=(
     "S | 465_sddm_setup.sh"
     "U | 470_vesktop_matugen.sh"
     "U | 475_reverting_sleep_timeout.sh"
+    "U | 480_dusky_commands.sh"
+    "S | 485_sudoers_nopassword.sh"
+
+# ------ CUSTOM PATH SCRIPTS -------
+
+    "U | rofi_wallpaper_selctor.sh --cache-only --progress"
 )
 
 # ==============================================================================

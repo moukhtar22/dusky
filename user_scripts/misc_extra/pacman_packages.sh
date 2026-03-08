@@ -7,107 +7,54 @@
 
 # --- 1. CONFIGURATION ---
 
-# Group 1: Graphics & Drivers
-declare -ar pkgs_graphics=(
-  "intel-media-driver" "vpl-gpu-rt" "mesa" "vulkan-intel" "mesa-utils" "intel-gpu-tools" "libva" "libva-utils" "vulkan-icd-loader" "vulkan-tools" "sof-firmware" "linux-firmware" "acpi_call-dkms"
+# Group 1: "Misc"
+declare -ar pkgs_misc=(
+    "wl-clip-persist"
+
+    # nemo
+    "nemo"
+    "nemo-fileroller"
+    "file-roller"
+    "gvfs"
+    "gvfs-smb"
+    "gvfs-mtp"
+    "gvfs-gphoto2"
+    "gvfs-google"
+    "gvfs-nfs"
+    "gvfs-afc"
+    "gvfs-dnssd"
+    "ffmpegthumbnailer"
+    "webp-pixbuf-loader"
+    "poppler-glib"
+    "libgsf"
+    "gnome-epub-thumbnailer"
+    "resvg"
+    "nemo-python"
+    "nemo-compare"
+    "meld"
+    "nemo-media-columns"
+    "nemo-audio-tab"
+    "nemo-image-converter"
+    "nemo-emblems"
+    "nemo-repairer"
+    "nemo-share"
+    "python-gobject"
+    "dconf-editor"
+    "xreader"
+    "gst-libav"
+    "gst-plugins-good"
+    "nemo-pastebin"
+
+    # "nemo-terminal"
 )
 
-# Group 2: Hyprland Core
-declare -ar pkgs_hyprland=(
-  "hyprland" "uwsm" "xorg-xwayland" "xdg-desktop-portal-hyprland" "xdg-desktop-portal-gtk" "xorg-xhost" "polkit" "hyprpolkitagent" "xdg-utils" "socat" "inotify-tools" "file"
-)
-
-# Group 3: GUI, Toolkits & Fonts
-declare -ar pkgs_appearance=(
-  "qt5-wayland" "qt6-wayland" "gtk3" "gtk4" "nwg-look" "qt5ct" "qt6ct" "qt6-svg" "qt6-multimedia-ffmpeg" "adw-gtk-theme" "matugen" "ttf-font-awesome" "ttf-jetbrains-mono-nerd" "noto-fonts-emoji" "sassc"
-)
-
-# Group 4: Desktop Experience
-declare -ar pkgs_desktop=(
-  "waybar" "swww" "hyprlock" "hypridle" "hyprsunset" "hyprpicker" "swaync" "swayosd" "rofi" "libdbusmenu-qt5" "libdbusmenu-glib" "brightnessctl"
-)
-
-# Group 5: Audio & Bluetooth
-declare -ar pkgs_audio=(
-  "pipewire" "wireplumber" "pipewire-pulse" "playerctl" "bluez" "bluez-utils" "blueman" "bluetui" "pavucontrol" "gst-plugin-pipewire" "libcanberra" "songrec" "sox"
-)
-
-# Group 6: Filesystem & Archives
-declare -ar pkgs_filesystem=(
-  "btrfs-progs" "compsize" "zram-generator" "udisks2" "udiskie" "dosfstools" "ntfs-3g" "gvfs" "gvfs-mtp" "gvfs-nfs" "gvfs-smb" "xdg-user-dirs" "usbutils" "gnome-disk-utility" "unzip" "zip" "unrar" "7zip" "cpio" "file-roller" "rsync"
-
-  # thunar
-  # "thunar" "thunar-archive-plugin" "thunar-volman" "tumbler" "ffmpegthumbnailer" "webp-pixbuf-loader" "poppler-glib"
-
-  # nemo
-  "nemo" "nemo-fileroller" "file-roller" "gvfs" "gvfs-smb" "gvfs-mtp" "gvfs-gphoto2" "gvfs-google" "gvfs-nfs" "gvfs-afc" "gvfs-dnssd" "ffmpegthumbnailer" "webp-pixbuf-loader" "poppler-glib" "libgsf" "gnome-epub-thumbnailer" "resvg" "nemo-terminal" "nemo-python" "nemo-compare" "meld" "nemo-media-columns" "nemo-audio-tab" "nemo-image-converter" "nemo-emblems" "nemo-repairer" "nemo-share" "python-gobject" "dconf-editor" "xreader" "gst-libav" "gst-plugins-good" "nemo-fileroller" "nemo-audio-tab" "nemo-compare" "nemo-pastebin"
-)
-
-# Group 7: Network & Internet
-declare -ar pkgs_network=(
-  "networkmanager" "iwd" "nm-connection-editor" "inetutils" "wget" "curl" "openssh" "firewalld" "vsftpd" "reflector" "bmon" "ethtool" "httrack" "wavemon" "firefox" "network-manager-applet"
-)
-
-# Group 8: Terminal & Shell
-declare -ar pkgs_terminal=(
-  "kitty" "foot" "zsh" "zsh-syntax-highlighting" "starship" "fastfetch" "bat" "eza" "fd" "yazi" "gum" "tree" "fzf" "less" "ripgrep" "expac" "zsh-autosuggestions" "iperf3" "pkgstats" "libqalculate" "moreutils"
-)
-
-# Group 9: Development
-declare -ar pkgs_dev=(
-  "neovim" "git" "git-delta" "meson" "cmake" "clang" "uv" "rq" "jq" "bc" "viu" "chafa" "ueberzugpp" "ccache" "mold" "shellcheck" "fd" "ripgrep" "fzf" "shfmt" "stylua" "prettier" "tree-sitter-cli" "nano"
-)
-
-# Group 10: Multimedia
-declare -ar pkgs_multimedia=(
-  "ffmpeg" "mpv" "mpv-mpris" "swappy" "swayimg" "resvg" "imagemagick" "libheif" "ffmpegthumbnailer" "grim" "slurp" "wl-clipboard" "wl-clip-persist" "cliphist" "tesseract-data-eng"
-)
-
-# Group 11: Sys Admin
-declare -ar pkgs_sysadmin=(
-  "btop" "htop" "dgop" "nvtop" "inxi" "sysstat" "sysbench" "logrotate" "acpid" "tlp" "tlp-pd" "tlp-rdw" "thermald" "powertop" "gdu" "iotop" "iftop" "lshw" "wev" "pacman-contrib" "gnome-keyring" "libsecret" "seahorse" "yad" "dysk" "fwupd"
-)
-
-# Group 12: Gnome Utilities
-declare -ar pkgs_gnome=(
-  "snapshot" "cameractrls" "loupe" "gnome-text-editor" "gnome-calculator" "gnome-clocks"
-)
-
-# Group 13: Productivity
-declare -ar pkgs_productivity=(
-  "zathura" "zathura-pdf-mupdf" "cava"
-)
 
 declare -ar GROUP_LABELS=(
-  "Graphics & Drivers"
-  "Hyprland Core"
-  "GUI Appearance"
-  "Desktop Experience"
-  "Audio & Bluetooth"
-  "Filesystem Tools"
-  "Networking"
-  "Terminal & CLI"
-  "Development"
-  "Multimedia"
-  "System Admin"
-  "Gnome Utilities"
-  "Productivity"
+  "Misc"
 )
 
 declare -ar GROUP_ARRAYS=(
-  pkgs_graphics
-  pkgs_hyprland
-  pkgs_appearance
-  pkgs_desktop
-  pkgs_audio
-  pkgs_filesystem
-  pkgs_network
-  pkgs_terminal
-  pkgs_dev
-  pkgs_multimedia
-  pkgs_sysadmin
-  pkgs_gnome
-  pkgs_productivity
+  pkgs_misc
 )
 
 # --- 2. EARLY ROOT CHECK ---
@@ -411,8 +358,7 @@ print_summary() {
 
   if (( ${#FAILED_PACKAGES[@]} == 0 )); then
     printf '\n%s%s:: INSTALLATION COMPLETE ::%s\n' "$BOLD" "$GREEN" "$RESET"
-    printf 'Reboot is recommended to load newly installed drivers.\n'
-    printf 'This script installs packages only; it does not enable services automatically.\n'
+    printf 'Sometimes a Reboot is necessory to load newly installed drivers.\n'
     return 0
   fi
 
@@ -443,7 +389,7 @@ main() {
   acquire_script_lock
   ensure_keyring
   refresh_keyring_package
-  upgrade_system
+ # upgrade_system
 
   for i in "${!GROUP_LABELS[@]}"; do
     install_group "${GROUP_LABELS[i]}" "${GROUP_ARRAYS[i]}"

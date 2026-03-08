@@ -22,10 +22,10 @@ set -o pipefail
 
 declare -ra FLEET_COMMANDS=(
     # --- UI & Theming ---
-#    "U | gsettings set org.gnome.desktop.interface icon-theme 'Fluent-teal-dark'"
+#    "U | gsettings set org.gnome.desktop.interface icon-theme 'Papirus'"
     "U | gsettings set org.cinnamon.desktop.default-applications.terminal exec 'kitty'"
     "U | rm -f ~/.config/hypr/edit_here/source/workspace_rules.conf || true"
-
+    "U | sed -i 's/^zen$/zen-browser/' ~/.config/dusky/settings/browser_switch.smart || true"
     # --- System Services ---
 #    "U | systemctl --user disable dusky.service || true"
 #    "S | systemctl enable --now tlp.service || true"

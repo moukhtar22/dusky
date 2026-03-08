@@ -19,15 +19,25 @@ set -o pipefail
 #
 # PRO TIP: Append ' || true' to commands that might fail on some hardware but
 # shouldn't halt the patch sequence (e.g., removing a non-existent cache).
+# double quotes will work too but single quotes allows for also having a set of double quites withing the command eg:
+# 'U | gsettings set org.gnome.desktop.interface icon-theme "Papirus"'
 
 declare -ra FLEET_COMMANDS=(
-    # --- UI & Theming ---
-#    "U | gsettings set org.gnome.desktop.interface icon-theme 'Papirus'"
-#    "U | gsettings set org.cinnamon.desktop.default-applications.terminal exec 'kitty'"
+    'U | gsettings set org.gnome.desktop.interface icon-theme "Papirus"'
+    'U | gsettings set org.gnome.desktop.interface gtk-theme "adw-gtk3"'
+    'U | gsettings set org.cinnamon.desktop.default-applications.terminal exec "kitty"'
+    'U | mkdir -p "$HOME/.config/gtk-3.0" "$HOME/.config/gtk-4.0"'
+    'U | ln -nfs "$HOME/.config/matugen/generated/gtk-3.css" "$HOME/.config/gtk-3.0/gtk.css"'
+    'U | ln -nfs "$HOME/.config/matugen/generated/gtk-4.css" "$HOME/.config/gtk-4.0/gtk.css"'
+    'U | ln -nfs "/usr/share/themes/adw-gtk3/gtk-4.0/libadwaita.css" "$HOME/.config/gtk-4.0/libadwaita.css"'
+    'U | ln -nfs "/usr/share/themes/adw-gtk3/gtk-4.0/libadwaita-tweaks.css" "$HOME/.config/gtk-4.0/libadwaita-tweaks.css"'
+    'U | "$HOME/user_scripts/dusky_system/reload_cc/cc_restart.sh" --quiet &'
+    'U | "$HOME/user_scripts/sliders/reload_sliders/reload_sliders.sh" --quiet &'
 
     # --- System Services ---
 #    "U | systemctl --user disable dusky.service || true"
 #    "S | systemctl enable --now tlp.service || true"
+
 )
 
 # ==============================================================================

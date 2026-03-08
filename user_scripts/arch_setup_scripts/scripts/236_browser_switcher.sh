@@ -29,7 +29,7 @@ shopt -s extglob
 declare -ra BROWSER_CATALOG=(
     "firefox|0|firefox.desktop|Firefox"
     "chromium|0|chromium.desktop|Chromium"
-    "zen|0|zen-browser.desktop|Zen Browser"
+    "zen-browser|0|zen.desktop|Zen Browser"
     "brave|0|brave-browser.desktop|Brave"
     "librewolf|0|librewolf.desktop|LibreWolf"
     "edge|0|microsoft-edge.desktop|Microsoft Edge"
@@ -565,7 +565,7 @@ main() {
         case "$1" in
             --firefox)  switch_browser "firefox" ;;
             --chromium) switch_browser "chromium" ;;
-            --zen)      switch_browser "zen" ;;
+            --zen-browser)      switch_browser "zen-browser" ;;
             --set)
                 if [[ -n "${2:-}" ]]; then
                     switch_browser "$2"

@@ -1,75 +1,30 @@
 #!/usr/bin/env bash
 # -----------------------------------------------------------------------------
-# Dusky TUI Engine - STRESS TEST EXTREME EDITION
+# Dusky TUI Engine - Master v4.1.0
 # -----------------------------------------------------------------------------
-# STRICT ADHERENCE: Engine logic is 100% identical to the master template.
-# ONLY the environment generation and User Configuration block are modified.
+# Target: Arch Linux / Hyprland / UWSM / Wayland
+#
+# v4.1.0 CHANGELOG:
+#   - FIX: Missing exact-scope keys can now be inserted natively.
+#   - FIX: Tightened scope parser to avoid brace mis-tracking from value text.
+#   - FIX: Atomic writes now preserve the target file mode.
+#   - FIX: Removed unsafe non-atomic truncation fallback writes.
+#   - FIX: Write failures now surface in the UI footer.
+#   - FIX: Post-write hook now runs only after actual file changes.
+#   - FIX: Touchpad submenu entries now target the correct exact scope path.
 # -----------------------------------------------------------------------------
 
 set -euo pipefail
 shopt -s extglob
 
-# --- PRE-RUN: GENERATE HOSTILE CONFIG ENVIRONMENT ---
-declare -r SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-declare -r CONFIG_FILE="${SCRIPT_DIR}/stress_test_extreme.conf"
-
-if [[ ! -f "$CONFIG_FILE" ]]; then
-    cat << 'EOF' > "$CONFIG_FILE"
-# Auto-generated Extreme Stress Test Config
-performance = true
-
-wall {
-    # Populated dynamically by the engine on first run if unset
-}
-
-l1 {
-    l2 {
-        l3 {
-            l4 {
-                l5 {
-                    # Trap: braces in comments { }
-                    l6 {
-                        val_l6 = 100
-                    }
-                }
-            }
-        }
-    }
-}
-
-minefield {
-    octal_8 = 08
-    octal_9 = 09
-    float_micro = 0.00001
-    float_neg = -50.5
-    val_empty = 
-    # val_missing is completely absent
-}
-
-palette {
-    hex_std = #ffffff
-    hex_short = #fff
-    hex_caps = #AABBCC
-    hex_space_after = # 998877
-    hex_cmt_spc = #ff0000 # comment
-    hex_cmt_tgt = #00ff00#comment
-    hex_quoted = "#123456"
-    legacy_0x = 0xff00ff
-}
-
-awkward {
-    awk_1 = ~!@$%^&*()_+
-    awk_2 = string_with_underscores
-}
-EOF
-fi
-
 # =============================================================================
 # ▼ USER CONFIGURATION (EDIT THIS SECTION) ▼
 # =============================================================================
 
-declare -r APP_TITLE="Dusky Engine Stress Test"
-declare -r APP_VERSION="v4.1.0-EXTREME"
+# POINT THIS TO YOUR REAL CONFIG FILE
+declare -r CONFIG_FILE="${HOME}/.config/hypr/change_me.conf"
+declare -r APP_TITLE="Input Config Editor"
+declare -r APP_VERSION="v4.1.0 (Stable)"
 
 # Dimensions & Layout
 declare -ri MAX_DISPLAY_ROWS=14
@@ -81,54 +36,43 @@ declare -ri HEADER_ROWS=4
 declare -ri TAB_ROW=3
 declare -ri ITEM_START_ROW=$(( HEADER_ROWS + 1 ))
 
-declare -ra TABS=("The Wall" "The Abyss" "Minefield" "Menus" "Palette" "Root" "Void" "Awk-ward")
+declare -ra TABS=("General" "Input" "Display" "Misc")
 
 # Item Registration
+# Config field format:
+#   'key|type|block|min|max|step'
+#
+# Block semantics are exact scope paths:
+#   ''                 = top-level key
+#   'general'          = key inside general { ... }
+#   'input/touchpad'   = key inside input { touchpad { ... } }
 register_items() {
-    # Tab 0: The Wall (Massive load test)
-    local i
-    for (( i=1; i<=250; i++ )); do
-        register 0 "Wall Item $i" "wall_${i}|int|wall|0|1000|1" "50"
-    done
+    # Tab 0: General
+    register 0 "Enable Logs"    'logs_enabled|bool|general|||'          "true"
+    register 0 "Timeout (ms)"   'timeout|int|general|0|1000|50'         "100"
 
-    # Tab 1: The Abyss (Deep nesting check)
-    register 1 "Level 6 (Depth 6)" 'val_l6|int|l1/l2/l3/l4/l5/l6|0|200|1' "100"
+    # Tab 1: Input
+    register 1 "Sensitivity"    'sensitivity|float|input|-1.0|1.0|0.1'  "0.0"
+    register 1 "Accel Profile"  'accel_profile|cycle|input|flat,adaptive,custom||' "adaptive"
 
-    # Tab 2: Minefield (Math and missing data traps)
-    register 2 "Octal 08 (Trap)"   'octal_8|int|minefield|0|20|1'           "08"
-    register 2 "Octal 09 (Trap)"   'octal_9|int|minefield|0|20|1'           "09"
-    register 2 "Float Micro"       'float_micro|float|minefield|0.0|1.0|0.00001' "0.00001"
-    register 2 "Float Negative"    'float_neg|float|minefield|-100.0|100.0|0.1'  "-50.5"
-    register 2 "Explicit Empty"    'val_empty|cycle|minefield|one,two,three||'   "one"
-    register 2 "Missing Key"       'val_missing|bool|minefield|||'          "true"
+    # Tab 2: Display
+    register 2 "Border Size"    'border_size|int||0|10|1'               "2"
+    register 2 "Blur Enabled"   'blur|bool|decoration|||'               "true"
 
-    # Tab 3: Menus (Context/Drilldown)
-    register 3 "Deep Controls >"   'deep_menu|menu||||'                     ""
-    register_child "deep_menu" "Deep Value L6" 'val_l6|int|l1/l2/l3/l4/l5/l6|0|200|1' "100"
+    # Tab 3: Misc
+    register 3 "Advanced Settings" 'advanced_settings|menu||||'         ""
 
-    # Tab 4: Palette (Regex comment stripping tests)
-    register 4 "Hex Standard"      'hex_std|cycle|palette|#ffffff,#000000||' "#ffffff"
-    register 4 "Hex Short"         'hex_short|cycle|palette|#fff,#000||'     "#fff"
-    register 4 "Hex Caps"          'hex_caps|cycle|palette|#AABBCC,#112233||' "#AABBCC"
-    register 4 "Hex Space Trap"    'hex_space_after|cycle|palette|# 998877,# 111111||' "# 998877"
-    register 4 "Hex Cmt Spc"       'hex_cmt_spc|cycle|palette|#ff0000,#0000ff||' "#ff0000"
-    register 4 "Hex Cmt Tgt"       'hex_cmt_tgt|cycle|palette|#00ff00#comment,#111111#comment||' "#00ff00#comment"
-    register 4 "Hex Quoted Dbl"    'hex_quoted|cycle|palette|"#123456","#654321"||' '"#123456"'
-    register 4 "Legacy 0x"         'legacy_0x|cycle|palette|0xff00ff,0x00ff00||' "0xff00ff"
+    # Submenu Items (registered to parent ID "advanced_settings")
+    register_child "advanced_settings" "Touchpad Enable" 'enabled|bool|input/touchpad|||'                  "true"
+    register_child "advanced_settings" "Scroll Factor"   'scroll_factor|float|input/touchpad|0.1|5.0|0.1' "1.0"
+    register_child "advanced_settings" "Tap to Click"    'tap-to-click|bool|input/touchpad|||'            "true"
 
-    # Tab 5: Root (Top level key writing)
-    register 5 "Root Performance"  'performance|bool||||'                   "true"
-
-    # Tab 6: Void (Intentionally left empty to test array boundaries)
-
-    # Tab 7: Awk-ward (Special shell and regex characters)
-    register 7 "Awk Char Trap 1"   'awk_1|cycle|awkward|~!@$%^&*()_+,<>?{}||' "~!@$%^&*()_+"
-    register 7 "Awk Underscores"   'awk_2|cycle|awkward|string_with_underscores,another_string||' "string_with_underscores"
+    register 3 "Shadow Color"   'col.shadow|cycle|general|0xee1a1a1a,0xff000000||' "0xee1a1a1a"
 }
 
 # Post-Write Hook
 post_write_action() {
-    : # No-op for stress test
+    : # Reload command here
 }
 
 # =============================================================================

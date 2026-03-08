@@ -87,22 +87,8 @@ trap 'abort_with_signal SIGTERM 143' TERM
 # "bibata-cursor-theme-bin"
 
 declare -ar PACKAGES=(
-  "wlogout"
-  "adwaita-qt6"
-  "adwaita-qt5"
-  "otf-atkinson-hyperlegible-next"
-  "python-pywalfox"
-  "python-pyquery"
-  "hyprshade"
-  "hyprshutdown"
-  "waypaper"
-  "peaclock"
-  "tray-tui"
-  "wifitui-bin"
-  "xdg-terminal-exec"
   "papirus-icon-theme-git"
   "papirus-folders-git"
-# "fluent-icon-theme-git"
 )
 
 # Delay before auto-retrying
@@ -176,10 +162,6 @@ preflight_checks() {
 # ------------------------------------------------------------------------------
 # 6. HELPERS
 # ------------------------------------------------------------------------------
-aur_full_update() {
-  "${AUR_HELPER}" -Syu --noconfirm
-}
-
 aur_install_auto() {
   "${AUR_HELPER}" -S --needed --noconfirm -- "$@"
 }
@@ -206,24 +188,6 @@ collect_uninstalled_packages() {
 
   # Optimized array processing: executes pacman once for the entire array
   mapfile -t output_ref < <(pacman -T "${input_ref[@]}" 2>/dev/null || true)
-}
-
-run_full_update_with_retry() {
-  local -i attempt
-
-  for (( attempt = 1; attempt <= MAX_ATTEMPTS; attempt++ )); do
-    if aur_full_update; then
-      return 0
-    fi
-
-    if (( attempt < MAX_ATTEMPTS )); then
-      log_warn "System update failed (attempt ${attempt}/${MAX_ATTEMPTS}). Retrying in ${TIMEOUT_SEC}s..."
-      sleep "${TIMEOUT_SEC}"
-    fi
-  done
-
-  log_err "System update failed after ${MAX_ATTEMPTS} attempts. Aborting to avoid an unsafe install run."
-  return 1
 }
 
 prompt_package_action() {
@@ -307,18 +271,9 @@ main() {
   log_info "Retry Policy: ${MAX_ATTEMPTS} total attempts | ${TIMEOUT_SEC}s delay"
 
   # --------------------------------------------------------------------------
-  # STEP 1: Full System Update
+  # STEP 1: Filter Missing Packages
   # --------------------------------------------------------------------------
-  log_task "Synchronizing Repositories & Updating System..."
-
-  if ! run_full_update_with_retry; then
-    return 1
-  fi
-
-  # --------------------------------------------------------------------------
-  # STEP 2: Filter Missing Packages
-  # --------------------------------------------------------------------------
-  log_info "Checking installation status..."
+  log_task "Checking installation status..."
 
   local -a to_install=()
   collect_uninstalled_packages PACKAGES to_install
@@ -332,7 +287,7 @@ main() {
   log_info "Packages to install: ${total_requested}"
 
   # --------------------------------------------------------------------------
-  # STEP 3: Batch Installation Strategy
+  # STEP 2: Batch Installation Strategy
   # --------------------------------------------------------------------------
   log_task "Attempting Batch Installation..."
 
@@ -346,7 +301,7 @@ main() {
   log_warn "Batch installation failed. Switching to granular fallback mode."
 
   # --------------------------------------------------------------------------
-  # STEP 4: Granular Fallback Strategy
+  # STEP 3: Granular Fallback Strategy
   # --------------------------------------------------------------------------
   local -a remaining=()
   local -a failed_pkgs=()
