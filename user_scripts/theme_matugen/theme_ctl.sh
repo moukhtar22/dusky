@@ -10,7 +10,7 @@
 # Architecture:
 #   1. INTERNAL STATE: ~/.config/dusky/settings/dusky_theme/state.conf
 #   2. PUBLIC STATE:   ~/.config/dusky/settings/dusky_theme/state (true/false)
-#   3. LOCKING:        Single global flock across all mutating operations
+#   3. LOCKING:        Explicit FD locking across mutating operations. Released early for concurrency.
 #   4. DIRECTORY OPS:  Swaps stored folders into wallpaper_root/active_theme
 #
 # Usage:
@@ -51,6 +51,7 @@ THEME_MODE=""
 MATUGEN_TYPE=""
 MATUGEN_CONTRAST=""
 STATE_NEEDS_REWRITE=0
+LOCK_FD=""
 
 # --- CLEANUP TRACKING ---
 _TEMP_FILE=""
@@ -60,6 +61,7 @@ cleanup() {
     if [[ -n "${_TEMP_FILE:-}" && -e "$_TEMP_FILE" ]]; then
         rm -f -- "$_TEMP_FILE"
     fi
+    release_lock
     trap - EXIT
     exit "$exit_code"
 }
@@ -100,6 +102,21 @@ check_deps() {
     done
 
     (( ${#missing[@]} == 0 )) || die "Missing required commands: ${missing[*]}"
+}
+
+# --- LOCKING ---
+
+acquire_lock() {
+    ensure_dir "${LOCK_FILE%/*}"
+    exec {LOCK_FD}>> "$LOCK_FILE"
+    flock -w "$FLOCK_TIMEOUT_SEC" -x "$LOCK_FD" || die "Could not acquire lock"
+}
+
+release_lock() {
+    if [[ -n "${LOCK_FD:-}" ]]; then
+        exec {LOCK_FD}>&- 2>/dev/null || true
+        LOCK_FD=""
+    fi
 }
 
 # --- STATE MANAGEMENT ---
@@ -652,10 +669,11 @@ cmd_set() {
 
     if (( ! skip_wall )) && (( mode_changed || same_mode_requested )); then
         move_directories "$THEME_MODE"
+        release_lock
         apply_random_wallpaper
     else
         (( mode_changed )) && move_directories "$THEME_MODE"
-
+        release_lock
         if (( do_refresh || same_mode_requested || mode_changed )); then
             regenerate_current
         fi
@@ -664,23 +682,8 @@ cmd_set() {
 
 random_command() {
     move_directories "$THEME_MODE"
+    release_lock
     apply_random_wallpaper
-}
-
-run_locked() {
-    local fn="$1"
-    shift
-    local lock_fd
-
-    ensure_dir "${LOCK_FILE%/*}"
-
-    exec {lock_fd}>> "$LOCK_FILE"
-    flock -w "$FLOCK_TIMEOUT_SEC" -x "$lock_fd" || die "Could not acquire lock"
-
-    init_state
-    "$fn" "$@"
-
-    exec {lock_fd}>&-
 }
 
 # --- MAIN ---
@@ -693,18 +696,28 @@ case "${1:-}" in
             exit 0
         fi
         check_deps
-        run_locked cmd_set "$@"
+        acquire_lock
+        init_state
+        cmd_set "$@"
         ;;
     random)
         check_deps
-        run_locked random_command
+        acquire_lock
+        init_state
+        random_command
         ;;
     refresh|apply)
         check_deps
-        run_locked regenerate_current
+        acquire_lock
+        init_state
+        release_lock
+        regenerate_current
         ;;
     get)
-        run_locked cmd_get
+        acquire_lock
+        init_state
+        cmd_get
+        release_lock
         ;;
     -h|--help|help)
         usage

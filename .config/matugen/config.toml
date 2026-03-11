@@ -188,6 +188,20 @@ bash -c '
 '
 '''
 
+[templates.obs]
+input_path  = '~/.config/matugen/templates/obs.obt'
+output_path = '~/.config/matugen/generated/obs.obt'
+post_hook   = '''
+bash -c '
+{
+  if command -v obs >/dev/null 2>&1; then
+    mkdir -p "$HOME/.config/obs-studio/themes"
+    ln -nfs "$HOME/.config/matugen/generated/obs.obt" "$HOME/.config/obs-studio/themes/matugen.obt"
+  fi
+} >/dev/null 2>&1 </dev/null & disown
+'
+'''
+
 [templates.vesktop]
 input_path  = '~/.config/matugen/templates/midnight-discord.css'
 output_path = '~/.config/matugen/generated/midnight-discord.css'

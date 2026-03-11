@@ -1,0 +1,376 @@
+~ ❯ asusctl --help                                                                                                                                             
+Usage: asusctl <command> [<args>]
+
+asusctl command-line options
+
+Options:
+  --help, help      display usage information
+
+Commands:
+  aura              aura device commands
+  leds              keyboard brightness control
+  profile           profile management
+  fan-curve         fan curve commands
+  anime             anime commands
+  slash             slash ledbar commands
+  scsi              scsi LED commands
+  armoury           armoury / firmware attributes
+  backlight         backlight options
+  battery           battery options
+  info              show program version and system info
+
+~ ❯ asusctl aura --help                                                                                                                                        
+Usage: asusctl aura <command> [<args>]
+
+aura device commands
+
+Options:
+  --help, help      display usage information
+
+Commands:
+  power             aura power
+  power-tuf         aura power (old ROGs and TUF laptops)
+  effect            led mode commands
+
+~ ❯ asusctl aura power --help                                                                                                                                  
+Usage: asusctl aura power [<command>] [<args>]
+
+aura power
+
+Options:
+  --help, help      display usage information
+
+Commands:
+  keyboard          set power states for keyboard zone
+  logo              set power states for logo zone
+  lightbar          set power states for lightbar zone
+  lid               set power states for lid zone
+  rear-glow         set power states for rear glow zone
+  ally              set power states for ally zone
+
+~ ❯ asusctl aura power keyboard --help                                                                                                                         
+Usage: asusctl aura power keyboard [--boot] [--awake] [--sleep] [--shutdown]
+
+set power states for keyboard zone
+
+Options:
+  --boot            defaults to false if option unused
+  --awake           defaults to false if option unused
+  --sleep           defaults to false if option unused
+  --shutdown        defaults to false if option unused
+  --help, help      display usage information
+
+~ ❯ asusctl aura power logo --help                                                                                                                             
+Usage: asusctl aura power logo [--boot] [--awake] [--sleep] [--shutdown]
+
+set power states for logo zone
+
+Options:
+  --boot            defaults to false if option unused
+  --awake           defaults to false if option unused
+  --sleep           defaults to false if option unused
+  --shutdown        defaults to false if option unused
+  --help, help      display usage information
+
+~ ❯ asusctl aura power lightbar --help                                                                                                                         
+Usage: asusctl aura power lightbar [--boot] [--awake] [--sleep] [--shutdown]
+
+set power states for lightbar zone
+
+Options:
+  --boot            enable power while device is booting
+  --awake           enable power while device is awake
+  --sleep           enable power while device is sleeping
+  --shutdown        enable power while device is shutting down or hibernating
+  --help, help      display usage information
+
+~ ❯ asusctl aura power lid --help                                                                                                                              
+Usage: asusctl aura power lid [--boot] [--awake] [--sleep] [--shutdown]
+
+set power states for lid zone
+
+Options:
+  --boot            defaults to false if option unused
+  --awake           defaults to false if option unused
+  --sleep           defaults to false if option unused
+  --shutdown        defaults to false if option unused
+  --help, help      display usage information
+
+~ ❯ asusctl aura power rear-glow --help                                                                                                                        
+Usage: asusctl aura power rear-glow [--boot] [--awake] [--sleep] [--shutdown]
+
+set power states for rear glow zone
+
+Options:
+  --boot            defaults to false if option unused
+  --awake           defaults to false if option unused
+  --sleep           defaults to false if option unused
+  --shutdown        defaults to false if option unused
+  --help, help      display usage information
+
+~ ❯ asusctl aura power ally --help                                                                                                                             
+Usage: asusctl aura power ally [--boot] [--awake] [--sleep] [--shutdown]
+
+set power states for ally zone
+
+Options:
+  --boot            defaults to false if option unused
+  --awake           defaults to false if option unused
+  --sleep           defaults to false if option unused
+  --shutdown        defaults to false if option unused
+  --help, help      display usage information
+
+~ ❯ asusctl aura power power-tuf --help                                                                                                                        
+Unrecognized argument: power-tuf
+
+Run asusctl --help for more information.
+~ ❯ asusctl aura power-tuf --help                                                                                                                              
+Usage: asusctl aura power-tuf [--awake <awake>] [--keyboard] [--lightbar] [--boot <boot>] [--sleep <sleep>]
+
+aura power (old ROGs and TUF laptops)
+
+Options:
+  --awake           control if LEDs enabled while awake <true/false>
+  --keyboard        use with awake option; if excluded defaults to false
+  --lightbar        use with awake option; if excluded defaults to false
+  --boot            control boot animations <true/false>
+  --sleep           control suspend animations <true/false>
+  --help, help      display usage information
+
+~ ❯ asusctl aura effect --help                                                                                                                                 
+Usage: asusctl aura effect [--next-mode] [--prev-mode] [<command>] [<args>]
+
+led mode commands
+
+Options:
+  --next-mode       switch to next aura mode
+  --prev-mode       switch to previous aura mode
+  --help, help      display usage information
+
+Commands:
+  static            static single-colour effect
+  breathe           two-colour breathing effect
+  rainbow-cycle     single speed-based effect
+  rainbow-wave      single speed effect with direction
+  stars             two-colour star effect
+  rain              single speed-based rain effect
+  highlight         single-colour effect with speed
+  laser             single-colour effect with speed
+  ripple            single-colour effect with speed
+  pulse             single-colour pulse effect
+  comet             single-colour comet effect
+  flash             single-colour flash effect
+
+~ ❯ asusctl aura leds --help                                                                                                                                   
+Unrecognized argument: leds
+
+Run asusctl --help for more information.
+~ ❯ asusctl leds --help                                                                                                                                        
+Usage: asusctl leds <command> [<args>]
+
+keyboard brightness control
+
+Options:
+  --help, help      display usage information
+
+Commands:
+  set               set keyboard brightness <off, low, med, high>
+  get               get current keyboard brightness
+  next              toggle to next keyboard brightness
+  prev              toggle to previous keyboard brightness
+
+~ ❯ asusctl profile --help                                                                                                                                     
+Usage: asusctl profile <command> [<args>]
+
+profile management
+
+Options:
+  --help, help      display usage information
+
+Commands:
+  next              toggle to next profile in list
+  list              list available profiles
+  get               get profile
+  set               set profile
+
+~ ❯ asusctl profile next --help                                                                                                                                
+Usage: asusctl profile next
+
+toggle to next profile in list
+
+Options:
+  --help, help      display usage information
+
+~ ❯ asusctl profile list --help                                                                                                                                
+Usage: asusctl profile list
+
+list available profiles
+
+Options:
+  --help, help      display usage information
+
+~ ❯ asusctl profile list                                                                                                                                       
+Quiet
+Balanced
+Performance
+~ ❯ asusctl profile get                                                                                                                                        
+Active profile: Quiet
+
+AC profile Performance
+Battery profile Performance
+~ ❯ asusctl profile set --help                                                                                                                                 
+Usage: asusctl profile set [-a] [-b] [--] <profile>
+
+set profile
+
+Positional Arguments:
+  profile           profile to set
+
+Options:
+  -a, --ac          set the profile to use on AC power
+  -b, --battery     set the profile to use on battery power
+  --help, help      display usage information
+
+~ ❯ asusctl profile fan-curve --help                                                                                                                           
+Unrecognized argument: fan-curve
+
+Run asusctl --help for more information.
+~ ❯ asusctl fan-curve --help                                                                                                                                   
+Usage: asusctl fan-curve [--get-enabled] [--default] [--mod-profile <mod-profile>] [--enable-fan-curves <enable-fan-curves>] [--enable-fan-curve <enable-fan-curve>] [--fan <fan>] [--data <data>]
+
+fan curve commands
+
+Options:
+  --get-enabled     get enabled fan profiles
+  --default         set the active profile's fan curve to default
+  --mod-profile     profile to modify fan-curve for. shows data if no options
+                    provided
+  --enable-fan-curves
+                    enable or disable <true/false> fan all curves for a profile;
+                    --mod_profile required
+  --enable-fan-curve
+                    enable or disable <true/false> a single fan curve for a
+                    profile; --mod_profile and --fan required
+  --fan             select fan <cpu/gpu/mid> to modify; --mod_profile required
+  --data            data format = 30c:1%,49c:2%,...; --mod-profile required. If
+                    '%' is omitted the fan range is 0-255
+  --help, help      display usage information
+
+~ ❯ asusctl slash --help                                                                                                                                       
+Usage: asusctl slash [--enable] [--disable] [-l <brightness>] [--interval <interval>] [--mode <mode>] [--list] [-B <show-on-boot>] [-S <show-on-shutdown>] [-s <show-on-sleep>] [-b <show-on-battery>] [-w <show-battery-warning>]
+
+slash ledbar commands
+
+Options:
+  --enable          enable the Slash Ledbar
+  --disable         disable the Slash Ledbar
+  -l, --brightness  set brightness value <0-255>
+  --interval        set interval value <0-5>
+  --mode            set SlashMode (use 'list' for options)
+  --list            list available animations
+  -B, --show-on-boot
+                    show the animation on boot
+  -S, --show-on-shutdown
+                    show the animation on shutdown
+  -s, --show-on-sleep
+                    show the animation on sleep
+  -b, --show-on-battery
+                    show the animation on battery
+  -w, --show-battery-warning
+                    show the low-battery warning animation
+  --help, help      display usage information
+
+~ ❯ asusctl scsi --help                                                                                                                                        
+Usage: asusctl scsi [--enable <enable>] [--mode <mode>] [--speed <speed>] [--direction <direction>] [--colours <colours...>] [--list]
+
+scsi LED commands
+
+Options:
+  --enable          enable the SCSI drive LEDs
+  --mode            set LED mode (use 'list' for all options)
+  --speed           set LED mode speed <slowest, slow, med, fast, fastest>
+  --direction       set LED mode direction <forward, reverse>
+  --colours         set LED colours <hex>, specify up to 4 with repeated arg
+  --list            list available animations
+  --help, help      display usage information
+
+~ ❯ asusctl armoury --help                                                                                                                                     
+Usage: asusctl armoury <command> [<args>]
+
+armoury / firmware attributes
+
+Options:
+  --help, help      display usage information
+
+Commands:
+  set               set an asus-armoury firmware-attribute
+  get               get a firmware-attribute from asus-armoury
+  list              list all firmware-attributes supported by asus-armoury
+
+~ ❯ asusctl armoury list                                                                                                                                       
+Multiple asusd interfaces devices found
+charge_mode:
+  current: [0,(1),2]
+
+dgpu_disable:
+  current: [(0),1]
+
+gpu_mux_mode:
+  current: [0,(1)]
+
+nv_dynamic_boost:
+  current: 5..[15]..15
+  default: 15
+
+panel_overdrive:
+  current: [0,(1)]
+
+ppt_pl1_spl:
+  current: 28..[90]..90
+  default: 90
+
+ppt_pl2_sppt:
+  current: 28..[135]..135
+  default: 135
+
+~ ❯ asusctl armoury get                                                                                                                                        
+Required positional arguments not provided:
+    property
+
+Run asusctl --help for more information.
+~ ❯ asusctl backlight --help                                                                                                                                   
+Usage: asusctl backlight [--screenpad-brightness <screenpad-brightness>] [--screenpad-gamma <screenpad-gamma>] [--sync-screenpad-brightness <sync-screenpad-brightness>]
+
+backlight options
+
+Options:
+  --screenpad-brightness
+                    set screen brightness <0-100>
+  --screenpad-gamma set screenpad gamma brightness 0.5 - 2.2, 1.0 == linear
+  --sync-screenpad-brightness
+                    set screenpad brightness to sync with primary display
+  --help, help      display usage information
+
+~ ❯ asusctl battery --help                                                                                                                                     
+Usage: asusctl battery <command> [<args>]
+
+battery options
+
+Options:
+  --help, help      display usage information
+
+Commands:
+  limit             set battery charge limit <20-100>
+  oneshot           one-shot full charge (optional percent)
+  info              show current battery charge limit
+
+~ ❯ asusctl limit --help                                                                                                                                       
+Unrecognized argument: limit
+
+Run asusctl --help for more information.
+~ ❯ asusctl info                                                                                                                                               
+asusctl v6.3.4
+
+Software version: 6.3.4
+  Product family: ASUS TUF Gaming F15
+      Board name: FX507ZE

@@ -63,7 +63,7 @@ pages:
     - type: grid_card
       properties:
         title: Dusky
-        icon: system-software-update-symbolic
+        icon: software-update-available-symbolic
         badge_file: ~/.config/dusky/settings/dusky_update_behind_commit
         button_text_file: ~/.config/dusky/settings/dusky_update_behind_commit
         button_text_map:
@@ -241,7 +241,7 @@ pages:
       properties:
         title: System Updates & Logs
         description: Update system and manage backups
-        icon: system-software-update-symbolic
+        icon: folder-download-symbolic
       layout:
         - type: section
           properties:
@@ -251,7 +251,7 @@ pages:
             properties:
               title: Dusky Updater
               description: Update Dusky specific configuration files
-              icon: system-software-update-symbolic
+              icon: software-update-available-symbolic
               badge_file: ~/.config/dusky/settings/dusky_update_behind_commit
               button_text_file: ~/.config/dusky/settings/dusky_update_behind_commit
               button_text_map:
@@ -268,7 +268,7 @@ pages:
             properties:
               title: Arch Updater
               description: Pacman and AUR packages update
-              icon: system-software-update-symbolic
+              icon: folder-download-symbolic
               button_text: "Update"
             on_press:
               type: exec
@@ -283,7 +283,7 @@ pages:
             properties:
               title: View Backups
               description: Browse ~/Documents/dusky_backups/
-              icon: folder-documents-symbolic
+              icon: edit-copy-symbolic
               buttons:
                 - icon: utilities-terminal-symbolic
                   button_text: "Yazi"
@@ -300,7 +300,7 @@ pages:
             properties:
               title: Send Logs
               description: Generate system logs and copy link to clipboard
-              icon: edit-copy-symbolic
+              icon: mail-send-symbolic
               button_text: "Send"
             on_press:
               type: exec
@@ -1076,7 +1076,7 @@ pages:
       properties:
         title: GSettings & GTK
         description: Manage GNOME/GTK settings via TUI or GUI
-        icon: preferences-desktop-peripherals-symbolic
+        icon: input-mouse-symbolic
         buttons:
           - icon: text-x-script-symbolic
             button_text: "Dconf"
@@ -1340,7 +1340,7 @@ pages:
       properties:
         title: User Customizations
         description: Main Hyprland config
-        icon: preferences-desktop-symbolic
+        icon: text-editor-symbolic
       layout:
         - type: section
           properties:
@@ -1407,7 +1407,7 @@ pages:
       properties:
         title: Auto setup GPU Environment Variables
         description: UWSM and Hyprland environment settings
-        icon: text-x-script-symbolic
+        icon: video-display-symbolic
       layout:
         - type: section
           properties:

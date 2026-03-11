@@ -1,4 +1,5 @@
 .config/alacritty/alacritty.toml
+.config/autostart/
 .config/btop/btop.conf
 .config/cava/config
 .config/dusky/version
@@ -22,6 +23,8 @@
 .config/matugen/templates/
 .config/matugen/presets/
 .config/mpv/mpv.conf
+.config/opencode/opencode.json
+.config/obs-studio/user.ini
 .config/pacman/makepkg.conf
 .config/pacseek/
 .config/swaync/
@@ -55,7 +58,7 @@
 .config/yazi/
 .config/zellij/
 .config/zathura/
-.config/autostart/
+.config/zshrc/
 .zshrc
 .git_dusky_list
 .gitignore
