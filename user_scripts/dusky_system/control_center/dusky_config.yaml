@@ -967,7 +967,7 @@ pages:
                 icon: palette-symbolic
               on_press:
                 type: exec
-                command: $HOME/user_scripts/theme_matugen/theme_ctl.sh random
+                command: $HOME/user_scripts/theme_matugen/theme_ctl.sh next
                 terminal: false
             - type: button
               properties:

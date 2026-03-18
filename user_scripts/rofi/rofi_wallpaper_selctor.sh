@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # -----------------------------------------------------------------------------
-# Rofi Wallpaper Selector
+# Rofi Wallpaper Selector (Matugen V4 Aligned & UWSM Patched)
 # Target: Arch Linux / Hyprland / Dusky / UWSM
 # -----------------------------------------------------------------------------
 
@@ -13,7 +13,10 @@ readonly LOCK_FILE="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/rofi-wallpaper-select
 
 readonly WALLPAPER_DIR="$HOME/Pictures/wallpapers"
 readonly SETTINGS_DIR="$HOME/.config/dusky/settings"
-readonly FAVORITES_FILE="$SETTINGS_DIR/wal_fav_rofi"
+readonly FAVORITES_FILE="$SETTINGS_DIR/dusky_theme/wal_fav_rofi"
+readonly STATE_FILE="$SETTINGS_DIR/dusky_theme/state.conf"
+readonly FAV_STATE_FILE="$SETTINGS_DIR/dusky_theme/current_fav"
+readonly THEME_CTL="${HOME}/user_scripts/theme_matugen/theme_ctl.sh"
 
 readonly THUMB_SIZE=300
 readonly CACHE_VERSION=4
@@ -28,10 +31,9 @@ readonly ROFI_THEME="$HOME/.config/rofi/wallpaper.rasi"
 readonly LOG_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/rofi-wallpaper-selector"
 readonly LOG_FILE="$LOG_DIR/wallpaper-selector.log"
 
-readonly -a MATUGEN_ARGS=(--mode dark)
-
 declare -ag TEMP_FILES=()
 declare -gi SHOW_FAVORITES=0
+declare -gi CYCLE_FAV=0
 declare -gi FORCE_REBUILD=0
 declare -gi SHOW_PROGRESS=0
 declare -gi CACHE_ONLY=0
@@ -144,11 +146,18 @@ acquire_lock() {
   fi
 }
 
+release_lock() {
+  exec 200>&- 2>/dev/null || true
+}
+
 parse_args() {
   while (($#)); do
     case $1 in
       fav|favorites|--favorites)
         SHOW_FAVORITES=1
+        ;;
+      --next-fav|next-fav)
+        CYCLE_FAV=1
         ;;
       --rebuild-cache|rebuild-cache|--regenerate|regenerate)
         FORCE_REBUILD=1
@@ -160,7 +169,7 @@ parse_args() {
         CACHE_ONLY=1
         ;;
       -h|--help)
-        printf 'Usage: %s [fav|favorites] [--rebuild-cache|--regenerate] [--progress|-p] [--cache-only|--no-menu]\n' "$SCRIPT_NAME"
+        printf 'Usage: %s [fav|--next-fav] [--rebuild-cache] [--progress|-p] [--cache-only]\n' "$SCRIPT_NAME"
         exit 0
         ;;
       *)
@@ -175,7 +184,7 @@ check_dependencies() {
   local -a missing=()
   local cmd
 
-  for cmd in rofi swww magick matugen uwsm-app setsid flock sha256sum find sort xargs cmp stat nproc gawk; do
+  for cmd in rofi swww magick matugen uwsm-app setsid flock sha256sum find sort xargs cmp stat nproc gawk mktemp; do
     command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
   done
 
@@ -202,7 +211,8 @@ validate_config() {
     "$THUMB_DIR" \
     "$SETTINGS_DIR" \
     "$(dirname -- "$LOCK_FILE")" \
-    "$LOG_DIR"
+    "$LOG_DIR" \
+    "${SETTINGS_DIR}/dusky_theme"
 }
 
 ensure_placeholder() {
@@ -247,7 +257,6 @@ find_wallpapers() {
 
 scan_candidate_files() {
   local out_file=$1
-
   if ! find_wallpapers -print0 | LC_ALL=C sort -z >"$out_file"; then
     return 1
   fi
@@ -255,7 +264,6 @@ scan_candidate_files() {
 
 write_source_state() {
   local out_file=$1
-
   if ! find_wallpapers -printf '%P\t%s\t%T@\t%i\0' | LC_ALL=C sort -z >"$out_file"; then
     return 1
   fi
@@ -280,7 +288,6 @@ cache_is_current() {
 thumb_path() {
   local rel=$1
   local digest
-
   digest=$(printf '%s' "$rel" | sha256sum)
   printf '%s/%s.png\n' "$THUMB_DIR" "${digest%% *}"
 }
@@ -502,7 +509,8 @@ write_favorites_file() {
     printf '%s\n' "$fav" >>"$tmp"
   done
 
-  mv -f -- "$tmp" "$FAVORITES_FILE"
+  # Atomic write ported from theme_ctl.sh
+  mv -fT -- "$tmp" "$FAVORITES_FILE"
   return 0
 }
 
@@ -533,7 +541,8 @@ build_favorites_cache() {
       "${rel##*/}" "$thumb" "$rel" >>"$tmp"
   done
 
-  mv -f -- "$tmp" "$FAVORITES_CACHE_FILE"
+  # Atomic write ported from theme_ctl.sh
+  mv -fT -- "$tmp" "$FAVORITES_CACHE_FILE"
   printf '%s\n' "$FAVORITES_CACHE_FILE"
   return 0
 }
@@ -624,7 +633,8 @@ cache_info_by_index() {
 get_active_wallpaper_filename() {
   local swww_out current_image
 
-  if IFS= read -r swww_out < <(swww query 2>/dev/null); then
+  # UWSM Wrap applied
+  if IFS= read -r swww_out < <(uwsm-app -- swww query 2>/dev/null); then
     if [[ $swww_out == *image:* ]]; then
       current_image=${swww_out##*image: }
       current_image="${current_image#"${current_image%%[![:space:]]*}"}"
@@ -636,6 +646,87 @@ get_active_wallpaper_filename() {
   fi
 
   return 1
+}
+
+# --- STATE TRACKING FUNCTIONS ---
+
+get_theme_mode() {
+  local mode="dark"
+  if [[ -f "$STATE_FILE" ]]; then
+    local val
+    val=$(grep '^THEME_MODE=' "$STATE_FILE" | cut -d= -f2 | tr -d '"'\''' || true)
+    [[ -n "$val" ]] && mode="$val"
+  fi
+  printf "%s" "$mode"
+}
+
+update_tracker() {
+  local rel_path="$1"
+  local mode
+  mode=$(get_theme_mode)
+  local track_file="${SETTINGS_DIR}/dusky_theme/${mode}_wal"
+  
+  # Atomic write ported from theme_ctl.sh
+  local tmp_track
+  tmp_track=$(mktemp "${SETTINGS_DIR}/dusky_theme/track.tmp.XXXXXX")
+  register_temp "$tmp_track"
+
+  printf "%s\n" "${rel_path##*/}" > "$tmp_track"
+  mv -fT -- "$tmp_track" "$track_file"
+}
+
+update_fav_state() {
+  local fav_rel="$1"
+  
+  # Atomic write ported from theme_ctl.sh
+  local tmp_state
+  tmp_state=$(mktemp "${SETTINGS_DIR}/dusky_theme/current_fav.tmp.XXXXXX")
+  register_temp "$tmp_state"
+  
+  printf '%s\n' "${fav_rel##*/}" > "$tmp_state"
+  mv -fT -- "$tmp_state" "$FAV_STATE_FILE"
+}
+
+cycle_next_favorite() {
+  local -a favs=()
+  collect_favorites favs || true
+
+  if (( ${#favs[@]} == 0 )); then
+    notify "No Favorites" "You haven't liked any wallpapers yet."
+    log INFO "Cannot cycle favorites: list is empty."
+    exit 0
+  fi
+
+  local current_fav=""
+  if [[ -f "$FAV_STATE_FILE" ]]; then
+    current_fav=$(<"$FAV_STATE_FILE")
+  fi
+
+  local -a sorted_favs=()
+  # Null-delimited (-z) array population + Version sort (-V) ported from theme_ctl.sh
+  mapfile -d '' sorted_favs < <(printf '%s\0' "${favs[@]}" | LC_ALL=C sort -z -V)
+
+  local next_fav="${sorted_favs[0]}"
+  local -i i=0
+  local -i len=${#sorted_favs[@]}
+
+  if [[ -n "$current_fav" ]]; then
+    for (( i=0; i<len; i++ )); do
+      if [[ "${sorted_favs[$i]##*/}" == "$current_fav" ]]; then
+        local next_idx=$(( (i + 1) % len ))
+        next_fav="${sorted_favs[$next_idx]}"
+        break
+      fi
+    done
+  fi
+
+  update_fav_state "$next_fav"
+  
+  local full_path="$WALLPAPER_DIR/$next_fav"
+  log INFO "Cycling to next favorite: $next_fav"
+  
+  apply_selection "$full_path" "$next_fav"
+  exit 0
 }
 
 show_menu() {
@@ -657,8 +748,9 @@ show_menu() {
       message="Enter: Apply | Alt+U: Like | Alt+Y: Regenerate | Alt+T: Show Liked"
     fi
 
+    # UWSM Wrap applied
     rofi_cmd=(
-      rofi
+      uwsm-app -- rofi
       -dmenu
       -no-custom
       -i
@@ -757,11 +849,19 @@ show_menu() {
 
 apply_selection() {
   local full_path=$1
+  local selection=$2
   local output
 
   log INFO "Applying wallpaper: $full_path"
 
-  if ! output=$(swww img "$full_path" \
+  # Sync tracker BEFORE theme_ctl runs so chronological order is maintained
+  update_tracker "$selection"
+  
+  # Also sync the favorite state so the next `--next-fav` starts from the wallpaper we just applied via GUI
+  update_fav_state "$selection"
+
+  # UWSM Wrap applied
+  if ! output=$(uwsm-app -- swww img "$full_path" \
     --transition-type grow \
     --transition-duration 2 \
     --transition-fps 60 2>&1); then
@@ -770,11 +870,17 @@ apply_selection() {
 
   [[ -n $output ]] && log_output INFO "swww: " "$output"
 
-  if ! output=$(setsid uwsm-app -- matugen "${MATUGEN_ARGS[@]}" image "$full_path" 2>&1); then
-    die "Failed to apply Matugen theme." "$output"
+  if [[ ! -x "$THEME_CTL" ]]; then
+    die "Theme controller not found or not executable." "$THEME_CTL"
   fi
 
-  [[ -n $output ]] && log_output INFO "matugen: " "$output"
+  log INFO "Triggering theme_ctl to synchronize Matugen..."
+  
+  if ! output=$("$THEME_CTL" refresh 2>&1); then
+    die "Failed to apply theme via theme_ctl." "$output"
+  fi
+
+  [[ -n $output ]] && log_output INFO "theme_ctl: " "$output"
 }
 
 ensure_cache() {
@@ -803,6 +909,11 @@ main() {
   validate_config
   acquire_lock
   ensure_placeholder
+
+  if ((CYCLE_FAV)); then
+    release_lock
+    cycle_next_favorite
+  fi
 
   ensure_cache
 
@@ -844,7 +955,10 @@ main() {
     die "Failed to resolve wallpaper path." "$selection"
   fi
 
-  apply_selection "$full_path"
+  # Release the lock BEFORE spawning swww/matugen and their background hooks
+  release_lock
+
+  apply_selection "$full_path" "$selection"
   log INFO "Wallpaper applied successfully."
 }
 

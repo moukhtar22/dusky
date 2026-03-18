@@ -7,7 +7,7 @@ if pgrep -x "spotify" > /dev/null; then
     hyprctl dispatch togglespecialworkspace music
 else
     # If not running, launch it
-    spotify-launcher &
+    spotify &
 
     # Wait for the window to actually appear (timeout after 5 seconds)
     count=0

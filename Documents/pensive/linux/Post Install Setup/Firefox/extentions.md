@@ -1,0 +1,1 @@
+https://gitflic.ru/project/magnolia1234/bypass-paywalls-firefox-clean/release/0facfab5-936b-43ab-8b88-be067ee6a81a

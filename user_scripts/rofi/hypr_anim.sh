@@ -16,6 +16,8 @@ readonly CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}"
 readonly ANIM_DIR="$CONFIG_DIR/hypr/source/animations"
 readonly LINK_DIR="$ANIM_DIR/active"
 readonly DEST_FILE="$LINK_DIR/active.conf"
+readonly STATE_FILE="$CONFIG_DIR/dusky/settings/dusky_animiation"
+readonly FALLBACK_ANIM="horizontal_dusky.conf"
 
 # Visual Assets (Nerd Fonts)
 readonly ICON_ACTIVE=""   # Checkmark
@@ -43,7 +45,6 @@ reload_hyprland() {
 }
 
 # Sanitize filenames for Rofi's Pango markup
-# Converts '&' -> '&amp;', '<' -> '&lt;', etc.
 escape_markup() {
     local s="$1"
     s="${s//&/&amp;}"
@@ -55,15 +56,52 @@ escape_markup() {
 }
 
 # -----------------------------------------------------------------------------
-# EXECUTION LOGIC (Selection Made)
+# EXECUTION LOGIC (Selection Made or Flags)
 # -----------------------------------------------------------------------------
+
+# Handle the --current restoration flag (with fallback logic)
+if [[ "${1:-}" == "--current" ]]; then
+    target_anim=""
+
+    # 1. Attempt to read existing valid state
+    if [[ -f "$STATE_FILE" ]]; then
+        saved_anim=$(<"$STATE_FILE")
+        if [[ -n "$saved_anim" && -f "$saved_anim" ]]; then
+            target_anim="$saved_anim"
+        fi
+    fi
+
+    # 2. Fallback if no valid state was found
+    if [[ -z "$target_anim" ]]; then
+        target_anim="$ANIM_DIR/$FALLBACK_ANIM"
+        if [[ ! -f "$target_anim" ]]; then
+            notify_user "Error" "Fallback animation missing: $target_anim" "critical"
+            exit 1
+        fi
+    fi
+
+    # 3. Apply target_anim and save state
+    mkdir -p -- "$LINK_DIR" 2>/dev/null
+    rm -f -- "$DEST_FILE"
+    
+    if cp -- "$target_anim" "$DEST_FILE"; then
+        # Ensure state directory exists and write current state
+        mkdir -p -- "${STATE_FILE%/*}" 2>/dev/null
+        printf '%s\n' "$target_anim" > "$STATE_FILE"
+
+        reload_hyprland
+        exit 0
+    else
+        notify_user "Failure" "Could not re-apply configuration." "critical"
+        exit 1
+    fi
+fi
 
 selection="${ROFI_INFO:-}"
 
 # Fallback: Handle manual CLI usage or older Rofi versions
 if [[ -z "$selection" && -n "${1:-}" ]]; then
     # Use printf to safely handle inputs starting with dashes
-    # xargs -r prevents execution on empty input
     clean_name=$(printf '%s' "$1" | sed 's/<[^>]*>//g' | xargs -r)
     selection="$ANIM_DIR/$clean_name"
 fi
@@ -81,11 +119,13 @@ if [[ -n "$selection" ]]; then
     fi
 
     # ATOMIC-ISH UPDATE
-    # 1. Remove existing file (rm -f ignores non-existent files)
     rm -f -- "$DEST_FILE"
 
-    # 2. Copy the new file
     if cp -- "$selection" "$DEST_FILE"; then
+        # Save state for the --current flag
+        mkdir -p -- "${STATE_FILE%/*}" 2>/dev/null
+        printf '%s\n' "$selection" > "$STATE_FILE"
+
         # Use parameter expansion for basename (faster than subshell)
         filename="${selection##*/}"
         reload_hyprland
@@ -102,9 +142,6 @@ fi
 # -----------------------------------------------------------------------------
 
 # Rofi Protocol Headers
-# FIX: Use escape sequences directly in the format string.
-# Passing them as arguments (via %s and $'\0...') fails because Bash 
-# truncates strings at the first null byte.
 printf '\0prompt\x1fAnimations\n'
 printf '\0markup-rows\x1ftrue\n'
 printf '\0no-custom\x1ftrue\n'
@@ -127,10 +164,8 @@ if [[ ${#files[@]} -eq 0 ]]; then
 fi
 
 # Determine Active File via Content Comparison
-# Initialize as integer
 active_index=-1
 
-# Only run cmp if destination exists
 if [[ -f "$DEST_FILE" ]]; then
     for i in "${!files[@]}"; do
         if cmp -s "${files[$i]}" "$DEST_FILE"; then
@@ -150,15 +185,12 @@ for i in "${!files[@]}"; do
     file="${files[$i]}"
     filename="${file##*/}"
     
-    # Escape filename for display to prevent Pango errors
     escaped_name=$(escape_markup "$filename")
 
     if (( i == active_index )); then
-        # Active State
         printf "<span weight='bold'>%s</span> <span size='small' style='italic'>(Active)</span>\0icon\x1f%s\x1finfo\x1f%s\n" \
             "$escaped_name" "$ICON_ACTIVE" "$file"
     else
-        # Inactive State
         printf '%s\0icon\x1f%s\x1finfo\x1f%s\n' \
             "$escaped_name" "$ICON_FILE" "$file"
     fi

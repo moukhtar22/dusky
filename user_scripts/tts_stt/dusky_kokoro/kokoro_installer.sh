@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # ==============================================================================
-# DUSKY KOKORO INSTALLER V35 (AMD Fix + Final Polish)
+# DUSKY KOKORO INSTALLER V36 (AMD Fix + Model Precision + Final Polish)
 # ==============================================================================
 
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -11,10 +11,12 @@ readonly MODEL_DIR="$ENV_DIR/models"
 readonly TRIGGER_DIR="$HOME/user_scripts/tts_stt/dusky_kokoro"
 readonly TARGET_TRIGGER="$TRIGGER_DIR/trigger.sh"
 
-readonly MODEL_URL="https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files/kokoro-v0_19.onnx"
-readonly VOICES_URL="https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files/voices.bin"
+readonly URL_F32="https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx"
+readonly URL_FP16="https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.fp16.onnx"
+readonly URL_INT8="https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.int8.onnx"
+readonly VOICES_URL="https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin"
 
-echo ":: [V35] Initializing Dusky Kokoro Setup..."
+echo ":: [V36] Initializing Dusky Kokoro Setup..."
 
 # --- 1. Hardware Detection Report ---
 echo "--------------------------------------------------------"
@@ -64,6 +66,31 @@ else
 fi
 
 echo ":: Selected Mode: ${MODE^^}"
+
+# --- 2.5 Model Precision Selection ---
+echo "--------------------------------------------------------"
+echo "Select which Kokoro precision models to download:"
+echo "  1) FP16 (169MB) - Recommended (Best balance of fidelity and VRAM)"
+echo "  2) INT8 (88MB)  - Lightweight (Fastest, lowest VRAM)"
+echo "  3) F32  (310MB) - Maximum Fidelity (Original uncompressed weights)"
+echo "  4) ALL          - Download all three (Allows instant toggling in Python)"
+echo ""
+
+MODEL_CHOICE=""
+read -p "Enter choice [1-4]: " MODEL_CHOICE || true
+
+DL_FP16=false
+DL_INT8=false
+DL_F32=false
+
+case "$MODEL_CHOICE" in
+    1) DL_FP16=true; echo ":: Selected: FP16" ;;
+    2) DL_INT8=true; echo ":: Selected: INT8" ;;
+    3) DL_F32=true; echo ":: Selected: F32" ;;
+    4) DL_FP16=true; DL_INT8=true; DL_F32=true; echo ":: Selected: ALL Models" ;;
+    *) echo ":: Invalid choice. Defaulting to FP16."; DL_FP16=true ;;
+esac
+echo "--------------------------------------------------------"
 
 # --- 3. Environment Setup ---
 mkdir -p "$ENV_DIR" "$MODEL_DIR" "$TRIGGER_DIR"
@@ -118,13 +145,24 @@ case "$MODE" in
 esac
 
 # --- 5. Model Downloads ---
-if [[ ! -f "$MODEL_DIR/kokoro-v0_19.onnx" ]]; then
-    echo ":: Downloading ONNX Model..."
-    curl -L "$MODEL_URL" -o "$MODEL_DIR/kokoro-v0_19.onnx"
+if [[ "$DL_F32" == true && ! -f "$MODEL_DIR/kokoro-v1.0.onnx" ]]; then
+    echo ":: Downloading F32 Model..."
+    curl -L "$URL_F32" -o "$MODEL_DIR/kokoro-v1.0.onnx"
 fi
-if [[ ! -f "$MODEL_DIR/voices.bin" ]]; then
+
+if [[ "$DL_FP16" == true && ! -f "$MODEL_DIR/kokoro-v1.0.fp16.onnx" ]]; then
+    echo ":: Downloading FP16 Model..."
+    curl -L "$URL_FP16" -o "$MODEL_DIR/kokoro-v1.0.fp16.onnx"
+fi
+
+if [[ "$DL_INT8" == true && ! -f "$MODEL_DIR/kokoro-v1.0.int8.onnx" ]]; then
+    echo ":: Downloading INT8 Model..."
+    curl -L "$URL_INT8" -o "$MODEL_DIR/kokoro-v1.0.int8.onnx"
+fi
+
+if [[ ! -f "$MODEL_DIR/voices-v1.0.bin" ]]; then
     echo ":: Downloading Voices..."
-    curl -L "$VOICES_URL" -o "$MODEL_DIR/voices.bin"
+    curl -L "$VOICES_URL" -o "$MODEL_DIR/voices-v1.0.bin"
 fi
 
 # --- 6. Generate Trigger ---

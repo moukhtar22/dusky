@@ -175,6 +175,9 @@ declare -A CUSTOM_SCRIPT_PATHS=(
     ["dusky_commands_before.sh"]="user_scripts/misc_extra/dusky_commands_before.sh"
     ["dusky_commands_after.sh"]="user_scripts/misc_extra/dusky_commands_after.sh"
     ["rofi_wallpaper_selctor.sh"]="user_scripts/rofi/rofi_wallpaper_selctor.sh"
+    ["hypr_anim.sh"]="user_scripts/rofi/hypr_anim.sh"
+    ["dusky_matugen_config_tui.sh"]="user_scripts/theme_matugen/dusky_matugen_config_tui.sh"
+    ["dusky_firefox_tui.sh"]="user_scripts/theme_matugen/dusky_firefox_tui.sh"
 )
 
 # ------------------------------------------------------------------------------
@@ -231,7 +234,7 @@ declare -ra UPDATE_SEQUENCE=(
 #    "U | 145_matugen_directories.sh"
 #    "U | 150_wallpapers_download.sh"
 #    "U | 155_blur_shadow_opacity.sh"
-    "U | ignore-fail | 160_theme_ctl.sh refresh"
+#    "U | ignore-fail | 160_theme_ctl.sh"
 #    "U | 165_qtct_config.sh"
     "U | 170_waypaper_config_reset.sh"
 #    "U | 175_animation_default.sh"
@@ -309,7 +312,9 @@ declare -ra UPDATE_SEQUENCE=(
     "U | append_sourcing_line_workspace.sh"
     "U | append_gaps_line_in_appearance.sh"
     "U | dusky_commands_after.sh"
-
+    "U | ignore-fail | dusky_matugen_config_tui.sh --smart"
+#    "U | ignore-fail | dusky_firefox_tui.sh --sync --all"
+    "U | ignore-fail | hypr_anim.sh --current"
 )
 
 # ==============================================================================

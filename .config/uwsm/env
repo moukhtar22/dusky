@@ -74,7 +74,7 @@ export VISUAL=nvim
 # -----------------------------------------------------------------------------
 # 4. APP SPECIFIC FLAGS
 # -----------------------------------------------------------------------------
-export SDL_VIDEODRIVER=wayland
+export SDL_VIDEODRIVER="wayland,x11"
 export CLUTTER_BACKEND=wayland
 
 # Clipboard Persistence

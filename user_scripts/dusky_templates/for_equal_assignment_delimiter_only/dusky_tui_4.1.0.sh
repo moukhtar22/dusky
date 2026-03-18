@@ -3,15 +3,6 @@
 # Dusky TUI Engine - Master v4.1.0
 # -----------------------------------------------------------------------------
 # Target: Arch Linux / Hyprland / UWSM / Wayland
-#
-# v4.1.0 CHANGELOG:
-#   - FIX: Missing exact-scope keys can now be inserted natively.
-#   - FIX: Tightened scope parser to avoid brace mis-tracking from value text.
-#   - FIX: Atomic writes now preserve the target file mode.
-#   - FIX: Removed unsafe non-atomic truncation fallback writes.
-#   - FIX: Write failures now surface in the UI footer.
-#   - FIX: Post-write hook now runs only after actual file changes.
-#   - FIX: Touchpad submenu entries now target the correct exact scope path.
 # -----------------------------------------------------------------------------
 
 set -euo pipefail
@@ -488,11 +479,6 @@ write_value_to_file() {
         return s
     }
 
-    function leading_ws(s) {
-        match(s, /^[[:space:]]*/)
-        return substr(s, RSTART, RLENGTH)
-    }
-
     function current_scope(    i, out) {
         out = ""
         for (i = 1; i <= depth; i++) {
@@ -513,57 +499,32 @@ write_value_to_file() {
         }
     }
 
-    function note_target_close() {
-        if (current_scope() == ENVIRON["TARGET_SCOPE"]) {
-            target_close_nr = NR
-            if (current_block_insert_indent != "") {
-                target_insert_indent = current_block_insert_indent
-            } else {
-                target_insert_indent = current_target_open_indent "    "
-            }
-        }
-    }
-
     function consume_leading_structure(s,    token, block_str) {
-        leading_structure_seen = 0
-
         while (1) {
             if (match(s, /^[[:space:]]*\}/)) {
-                leading_structure_seen = 1
-                note_target_close()
                 pop_block()
                 s = substr(s, RSTART + RLENGTH)
                 continue
             }
 
             if (match(s, /^[[:space:]]*[a-zA-Z0-9_.:-]+[[:space:]]*\{/)) {
-                leading_structure_seen = 1
                 token = substr(s, RSTART, RLENGTH)
                 block_str = token
                 sub(/^[[:space:]]*/, "", block_str)
                 sub(/[[:space:]]*\{$/, "", block_str)
-
                 push_block(trim(block_str))
-
-                if (current_scope() == ENVIRON["TARGET_SCOPE"]) {
-                    current_target_open_indent = leading_ws(lines[NR])
-                    current_block_insert_indent = ""
-                }
-
                 s = substr(s, RSTART + RLENGTH)
                 continue
             }
 
             break
         }
-
         return s
     }
 
     function consume_trailing_closes(s) {
         while (match(s, /[[:space:]]*\}[[:space:]]*$/)) {
             sub(/[[:space:]]*\}[[:space:]]*$/, "", s)
-            note_target_close()
             pop_block()
         }
         return s
@@ -597,10 +558,6 @@ write_value_to_file() {
     BEGIN {
         depth = 0
         target_nr = 0
-        target_close_nr = 0
-        target_insert_indent = ""
-        current_target_open_indent = ""
-        current_block_insert_indent = ""
     }
 
     {
@@ -633,10 +590,6 @@ write_value_to_file() {
                     target_nr = NR
                 }
 
-                if (assignment_scope == ENVIRON["TARGET_SCOPE"] && current_block_insert_indent == "" && !leading_structure_seen) {
-                    current_block_insert_indent = leading_ws(lines[NR])
-                }
-
                 v = consume_trailing_closes(v)
             }
             next
@@ -654,35 +607,16 @@ write_value_to_file() {
             }
             exit 0
         }
-
-        if (ENVIRON["TARGET_SCOPE"] == "") {
-            for (i = 1; i <= NR; i++) {
-                print lines[i]
-            }
-            print ENVIRON["TARGET_KEY"] " = " ENVIRON["NEW_VALUE"]
-            exit 0
-        }
-
-        if (!target_close_nr) {
-            exit 1
-        }
-
-        for (i = 1; i <= NR; i++) {
-            if (i == target_close_nr) {
-                print target_insert_indent ENVIRON["TARGET_KEY"] " = " ENVIRON["NEW_VALUE"]
-            }
-            print lines[i]
-        }
+        
+        # If we made it here, the key wasn't found in the scope. 
+        # Exit with 1 to refuse writing, exactly like the old script.
+        exit 1
     }
     ' "$CONFIG_FILE" > "$_TMPFILE" || {
         rm -f -- "$_TMPFILE" 2>/dev/null || :
         _TMPFILE=""
         _TMPMODE=""
-        if [[ -n "$block" ]]; then
-            set_status "Scope not found: ${block}"
-        else
-            set_status "Write failed: ${key}"
-        fi
+        set_status "Key not found: ${key}"
         return 1
     }
 
@@ -692,7 +626,7 @@ write_value_to_file() {
         _TMPMODE=""
         set_status "Refusing empty write."
         return 1
-    fi
+    }
 
     commit_tmpfile || {
         rm -f -- "$_TMPFILE" 2>/dev/null || :

@@ -1,94 +1,139 @@
-# Accessing BitLocker Drives on Arch Linux
+## Main corrections
 
-This guide provides a step-by-step process for unlocking and mounting a BitLocker-encrypted drive on Arch Linux. We will use the `cryptsetup` utility, a powerful and standard tool for managing encrypted volumes in Linux.
+### 1. Use `lsblk -f`, not plain `lsblk`
+A locked BitLocker partition often does **not** appear as `ntfs` until after unlocking. It may show up as `BitLocker` or without a normal filesystem type.
 
-> [!NOTE] Why `cryptsetup`?
-> While tools like `dislocker` exist, `cryptsetup` offers a more integrated and modern approach, leveraging the kernel's device-mapper framework directly for better performance and stability.
+Use:
+
+```bash
+lsblk -f
+```
+
+or:
+
+```bash
+sudo blkid
+```
+
+### 2. Prefer `cryptsetup open --type bitlk`
+This is the more standard form and works even where the `bitlkOpen` alias may not.
+
+```bash
+sudo cryptsetup open --type bitlk /dev/sdXn bitlk_device
+```
+
+### 3. The unlocked filesystem may not always be NTFS
+It often is, but BitLocker volumes can also contain other filesystems. After unlocking, you can check:
+
+```bash
+lsblk -f /dev/mapper/bitlk_device
+```
+
+### 4. Windows hibernation / Fast Startup can block read-write mounts
+If the volume was not cleanly shut down in Windows, Linux may refuse a writable mount.
+
+If that happens:
+- fully shut down Windows, or
+- mount read-only:
+
+```bash
+sudo mount -o ro /dev/mapper/bitlk_device /mnt/bitlk
+```
 
 ---
 
-## Step 1: Identify the BitLocker Drive
+## Suggested revised version
 
-First, you must identify the device name of your BitLocker-encrypted partition. You can do this by listing all block devices connected to your system.
+### Accessing a BitLocker Drive on Arch Linux
 
-> [!TIP]
-> For more detailed information on identifying disks, you can refer to the [[Disk Partitioning]] note.
-
-```bash
-lsblk
-```
-
-Look for the partition that corresponds to your BitLocker drive. It will likely be an `ntfs` partition, and you can identify it by its size and label. For this guide, we will assume the drive is `/dev/sdXn`.
-
-## Step 2: Unlock the Drive
-
-With the device identified, use `cryptsetup` to unlock it. This command will prompt you for your BitLocker recovery key or password and create a decrypted mapping of the device in `/dev/mapper/`.
+#### 1. Identify the encrypted partition
 
 ```bash
-sudo cryptsetup bitlkOpen /dev/<drive> bitlk_device
+lsblk -f
 ```
 
-> [!ATTENTION] Command Breakdown
-> - `/dev/<drive>`: Replace this with your target partition (e.g., `/dev/sdb1`).
-> - `bitlk_device`: This is a temporary name you choose for the unlocked device mapper. You can name it anything, but using a descriptive name is good practice.
+Look for the partition by size and filesystem type. A locked BitLocker volume may appear as `BitLocker`.
 
-After running this command, you will be prompted to enter your BitLocker password.
-
-## Step 3: Mount the Unlocked Drive
-
-Once unlocked, the decrypted volume is available at `/dev/mapper/bitlk_device`. To access the files, you must mount this mapped device to a directory on your system.
-
-#### 1. Create a Mount Point
-
-First, create a directory that will serve as the mount point. A common location is within the `/mnt` directory.
+Assume the target partition is:
 
 ```bash
-sudo mkdir /mnt/bitlk
+/dev/sdXn
 ```
 
-#### 2. Mount the Filesystem
+#### 2. Unlock the BitLocker volume
 
-Now, mount the unlocked device to the directory you just created.
+```bash
+sudo cryptsetup open --type bitlk /dev/sdXn bitlk_device
+```
+
+You’ll be prompted for the BitLocker password or recovery key.
+
+After unlocking, the decrypted device will appear as:
+
+```bash
+/dev/mapper/bitlk_device
+```
+
+#### 3. Create a mount point
+
+```bash
+sudo mkdir -p /mnt/bitlk
+```
+
+#### 4. Mount the unlocked filesystem
 
 ```bash
 sudo mount /dev/mapper/bitlk_device /mnt/bitlk
 ```
 
-Your files are now accessible at `/mnt/bitlk`.
+If you want to confirm the inner filesystem first:
 
-## Step 4: Clean Up (Unmount and Close)
+```bash
+lsblk -f /dev/mapper/bitlk_device
+```
 
-When you are finished accessing the files, it is crucial to properly unmount and close the encrypted device to ensure data integrity and security.
+#### 5. Access your files
 
-> [!WARNING] Important
-> Always perform these cleanup steps before physically disconnecting the drive. Failure to do so can result in data corruption.
+Your files will now be available at:
 
-#### 1. Unmount the Drive
+```bash
+/mnt/bitlk
+```
 
-First, unmount the filesystem from your mount point.
+#### 6. Clean up when done
+
+Unmount the filesystem:
 
 ```bash
 sudo umount /mnt/bitlk
 ```
 
-#### 2. Close the Encrypted Device
-
-Finally, close the `cryptsetup` mapping to lock the drive.
+Then close the BitLocker mapping:
 
 ```bash
 sudo cryptsetup close bitlk_device
 ```
 
-The drive is now securely locked and can be safely disconnected.
+---
+
+## Optional Arch-specific note
+
+If `cryptsetup` is not installed:
+
+```bash
+sudo pacman -S cryptsetup
+```
 
 ---
 
-### Quick Reference
+## Quick reference
 
 | Action | Command |
 |---|---|
-| **Unlock Drive** | `sudo cryptsetup bitlkOpen /dev/<drive> bitlk_device` |
-| **Create Mount Point** | `sudo mkdir /mnt/bitlk` |
-| **Mount Drive** | `sudo mount /dev/mapper/bitlk_device /mnt/bitlk` |
-| **Unmount Drive** | `sudo umount /mnt/bitlk` |
-| **Close/Lock Drive** | `sudo cryptsetup close bitlk_device` |
+| Identify partitions | `lsblk -f` |
+| Unlock BitLocker | `sudo cryptsetup open --type bitlk /dev/sdXn bitlk_device` |
+| Create mount point | `sudo mkdir -p /mnt/bitlk` |
+| Mount unlocked volume | `sudo mount /dev/mapper/bitlk_device /mnt/bitlk` |
+| Unmount | `sudo umount /mnt/bitlk` |
+| Close mapping | `sudo cryptsetup close bitlk_device` |
+

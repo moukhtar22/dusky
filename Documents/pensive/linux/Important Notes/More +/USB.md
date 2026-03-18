@@ -1,138 +1,674 @@
+# USB Runtime Power Management on Arch Linux
 
-# Mastering USB Power Management in Arch Linux
+USB autosuspend is the USB-specific part of Linux **runtime power management (runtime PM)**. It allows the kernel to suspend an **idle USB device while the system is still running**. This can reduce power draw significantly on laptops, but some devices resume poorly and may exhibit lag, disconnects, missed wake events, or full resets.
 
-USB autosuspend is a critical kernel feature for power saving, particularly on laptops. It automatically places idle USB devices into a low-power state. While highly effective for extending battery life, it can sometimes cause issues with peripherals like mice or keyboards that may lag upon waking.
+> [!note]
+> This note covers **per-device USB runtime PM** on Arch Linux. It is **not** about system sleep (`suspend`, `hibernate`) and it is **not** specific to Wayland, Hyprland, or UWSM.
 
-This guide provides a comprehensive walkthrough for diagnosing, troubleshooting, and persistently configuring USB power states on your Arch Linux systems.
-
-> [!TIP] Relation to Overall Power Management
-> USB power settings are one component of a larger strategy. For a complete overview, refer to the main [[Power Management]] guide, which covers tools like TLP and Powertop that can manage these settings globally.
+> [!tip] Related power-policy tools
+> `udev`, TLP, Powertop, and kernel command-line parameters can all influence USB runtime PM. Use **one clear source of truth** for persistent policy, or document precisely which tool is expected to win.
 
 ---
 
-## 1. Diagnosing the Current USB Power State
+## When to Use Which Method
 
-Before making any changes, you must first inspect the current configuration of your USB devices. The following commands query the kernel's `sysfs` filesystem to reveal the live power management status.
+| Goal | Best method |
+|---|---|
+| Test whether autosuspend is causing a problem | Write directly to `/sys/.../power/control` |
+| Permanently disable autosuspend for one specific device | `udev` rule |
+| Permanently change autosuspend delay for one device | `udev` rule |
+| Manage USB policy on laptops already using TLP | TLP configuration |
+| Disable USB autosuspend globally | Kernel command line: `usbcore.autosuspend=-1` |
 
-### 1.1. Check Autosuspend Status (`power/control`)
+> [!warning]
+> **Bus numbers** and **device numbers** from `lsusb` are **not stable identifiers**. They can change across boots, reconnects, and hub topology changes. For persistent matching, prefer:
+> - `idVendor` + `idProduct`
+> - `serial` when available
+> - physical port path only when intentionally binding policy to a port
 
-This command iterates through all USB devices and checks whether the kernel is permitted to manage their power state.
+---
 
-*   `auto`: Autosuspend is **enabled**. The kernel can suspend the device when idle.
-*   `on`: Autosuspend is **disabled**. The device is always kept fully powered.
+## Runtime PM Model and Relevant Sysfs Files
+
+For a USB device such as `/sys/bus/usb/devices/1-4`, these files are the most important:
+
+| Sysfs file | Meaning | Typical values |
+|---|---|---|
+| `power/control` | Runtime PM policy for the device | `auto`, `on` |
+| `power/runtime_status` | Current runtime PM state | `active`, `suspended`, `suspending`, `resuming`, `unsupported` |
+| `power/autosuspend_delay_ms` | Idle delay before autosuspend if policy is `auto` | integer milliseconds |
+| `power/wakeup` | Whether the device may wake the system | `enabled`, `disabled` |
+
+### Semantics
+
+- `power/control=auto`  
+  Runtime PM is allowed. The kernel may autosuspend the device when idle if the driver supports it.
+
+- `power/control=on`  
+  Runtime PM is disabled for the device. The kernel should keep it active.
+
+- `power/autosuspend_delay_ms=5000`  
+  If `power/control=auto`, the device must be idle for 5 seconds before autosuspend is attempted.
+
+- Negative `power/autosuspend_delay_ms`  
+  A negative delay disables autosuspend by idle timeout. In practice, **`power/control=on` is the clearer and stronger setting** when the goal is “never autosuspend this device”.
+
+> [!note]
+> Old guides may refer to `power/level`. That interface is obsolete. Use **`power/control`**.
+
+> [!tip]
+> `power/wakeup` is **separate** from autosuspend. A device can have autosuspend disabled and still be unable to wake the system, or vice versa.
+
+---
+
+## Prerequisites
+
+### Required package
 
 ```bash
-#!/bin/bash
-# Script to check the power/control state for all USB devices.
-
-for devpath in /sys/bus/usb/devices/*-* ; do
-    if [ -f "$devpath/power/control" ]; then
-        device_name=$(lsusb -s $(basename $devpath) | cut -d ' ' -f 7-)
-        printf "Device: %s\n" "$device_name"
-        printf "  Path: %s\n" "$devpath/power/control"
-        printf "  State: %s\n\n" "$(cat "$devpath/power/control")"
-    fi
-done
+sudo pacman -S usbutils
 ```
 
-### 1.2. Check Autosuspend Delay (`autosuspend_delay_ms`)
+This provides `lsusb`.
 
-If a device's `power/control` is set to `auto`, this value determines how long (in milliseconds) the device must be idle before the kernel suspends it. The default is typically `2000` (2 seconds).
+### Built-in tools
+
+- `udevadm` is provided by `systemd`
+- `journalctl` is provided by `systemd`
+- `realpath`, `grep`, `printf`, `tee`, `cat` are in the base system
+
+---
+
+## Inspect the Current USB Power State
+
+## Quick Checks
+
+### Show the global USB autosuspend default
 
 ```bash
-#!/bin/bash
-# Script to check the autosuspend delay for all applicable USB devices.
-
-for devpath in /sys/bus/usb/devices/*-* ; do
-    if [ -f "$devpath/power/autosuspend_delay_ms" ]; then
-        device_name=$(lsusb -s $(basename $devpath) | cut -d ' ' -f 7-)
-        printf "Device: %s\n" "$device_name"
-        printf "  Path: %s\n" "$devpath/power/autosuspend_delay_ms"
-        printf "  Delay: %s\n\n" "$(cat "$devpath/power/autosuspend_delay_ms")"
-    fi
-done
+cat /sys/module/usbcore/parameters/autosuspend
 ```
 
----
+This value is in **seconds** and represents the default idle delay applied by `usbcore` when devices are enumerated, unless overridden later by drivers or userspace policy.
 
-## 2. Manual Configuration (Temporary)
+- `2` is a common default
+- negative values disable USB autosuspend globally
 
-You can manually change these settings for testing purposes. This is useful for quickly diagnosing if autosuspend is the cause of a problem with a specific device.
-
-> [!WARNING] Temporary Changes
-> Any changes made directly to `sysfs` files are temporary and will be **reset upon reboot**. For a permanent solution, see the `udev` rules section below.
-
-**Step 1: Identify the Device Path**
-Run the diagnostic script from section 1.1 to find the path for your target device (e.g., `/sys/bus/usb/devices/1-4`).
-
-**Step 2: Change the Power State**
-Use the following command, replacing the path with your device's path.
-
-*   **To disable autosuspend (force the device on):**
-    ```bash
-    echo 'on' | sudo tee /sys/bus/usb/devices/1-4/power/control
-    ```
-*   **To enable autosuspend:**
-    ```bash
-    echo 'auto' | sudo tee /sys/bus/usb/devices/1-4/power/control
-    ```
-
----
-
-## 3. Persistent Configuration with `udev` Rules
-
-The correct, professional method for managing device-specific power settings is to use `udev` rules. This ensures your configuration is automatically applied every time the device is connected or the system boots. This is the ideal solution for permanently disabling autosuspend for a problematic mouse, keyboard, or other peripheral.
-
-### Step-by-Step Guide to Creating a `udev` Rule
-
-**1. Find the Device's Vendor and Product ID**
-
-Use the `lsusb` command to list all connected USB devices. Find your target device and note its `ID`. The format is `vendorID:productID`.
+### List USB devices
 
 ```bash
 lsusb
 ```
-*Example Output:*
-```
-Bus 001 Device 004: ID 046d:c52b Logitech, Inc. Unifying Receiver
-```
-In this example, the `idVendor` is `046d` and the `idProduct` is `c52b`.
 
-**2. Create a New `udev` Rule File**
-
-Rule files are stored in `/etc/udev/rules.d/`. The name should start with a number (to control ordering) and end in `.rules`.
+### Show the USB topology and bound drivers
 
 ```bash
-sudo nvim /etc/udev/rules.d/50-usb-power-settings.rules
+lsusb -t
 ```
 
-**3. Write the Rule**
+This is useful for identifying whether the problem might actually be the **hub**, **dock**, or **controller path**, not just the child device.
 
-Add a line to the file using the IDs you found. The following rule disables autosuspend for the Logitech Unifying Receiver from the example.
+---
+
+## Enumerate USB Devices and Their Runtime PM State
+
+The following Bash script reads directly from sysfs and does **not** rely on incorrect `lsusb -s` assumptions.
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+shopt -s nullglob
+
+read_file() {
+    local file=$1
+    local default=${2:--}
+
+    if [[ -r $file ]]; then
+        tr -d '\n' <"$file"
+    else
+        printf '%s' "$default"
+    fi
+}
+
+printf '%-10s %-9s %-9s %-12s %-8s %-8s %s\n' \
+    'SYSNAME' 'BUS:DEV' 'VID:PID' 'CONTROL' 'STATUS' 'WAKEUP' 'DEVICE'
+
+for dev in /sys/bus/usb/devices/*; do
+    [[ -r $dev/idVendor && -r $dev/idProduct ]] || continue
+
+    sysname=${dev##*/}
+    vendor=$(read_file "$dev/idVendor")
+    product_id=$(read_file "$dev/idProduct")
+
+    busnum_raw=$(read_file "$dev/busnum" 0)
+    devnum_raw=$(read_file "$dev/devnum" 0)
+    busnum=$(printf '%03d' "$((10#$busnum_raw))")
+    devnum=$(printf '%03d' "$((10#$devnum_raw))")
+
+    control=$(read_file "$dev/power/control")
+    status=$(read_file "$dev/power/runtime_status" "unsupported")
+    wakeup=$(read_file "$dev/power/wakeup")
+    manufacturer=$(read_file "$dev/manufacturer" "")
+    product=$(read_file "$dev/product" "")
+    name="${manufacturer:+$manufacturer }${product:-"(no product string)"}"
+
+    printf '%-10s %-9s %-9s %-12s %-8s %-8s %s\n' \
+        "$sysname" \
+        "$busnum:$devnum" \
+        "$vendor:$product_id" \
+        "$control" \
+        "$status" \
+        "$wakeup" \
+        "$name"
+done
+```
+
+### Notes on the script
+
+- It skips non-device entries such as interface nodes like `1-4:1.0`
+- It reads identifiers from sysfs, which is the authoritative source for runtime PM state
+- `BUS:DEV` is only for cross-checking with `lsusb`; do **not** use it for persistent matching
+
+---
+
+## Inspect One Specific Device
+
+If you already know the sysfs name, for example `1-4`:
+
+```bash
+dev=/sys/bus/usb/devices/1-4
+
+for f in \
+    idVendor \
+    idProduct \
+    manufacturer \
+    product \
+    power/control \
+    power/runtime_status \
+    power/autosuspend_delay_ms \
+    power/wakeup
+do
+    [[ -r "$dev/$f" ]] && printf '%-30s %s\n' "$f" "$(tr -d '\n' <"$dev/$f")"
+done
+```
+
+### Find matchable attributes for `udev`
+
+```bash
+udevadm info --attribute-walk --path="$(realpath /sys/bus/usb/devices/1-4)"
+```
+
+This is the best way to discover stable match keys such as:
+
+- `ATTR{idVendor}`
+- `ATTR{idProduct}`
+- `ATTR{serial}`
+- sometimes parent attributes if matching by topology is necessary
+
+---
+
+## Temporary Changes for Testing
+
+Changes written directly to sysfs are **not persistent**. They are lost after reboot and may also be overwritten later by TLP, Powertop, or other policy managers.
+
+> [!warning]
+> `sudo echo on > /sys/.../power/control` does **not** work reliably because the shell performs the redirection before `sudo` runs. Use `sudo tee` or a root shell.
+
+### Disable autosuspend for one device
+
+```bash
+echo on | sudo tee /sys/bus/usb/devices/1-4/power/control
+```
+
+### Re-enable autosuspend for one device
+
+```bash
+echo auto | sudo tee /sys/bus/usb/devices/1-4/power/control
+```
+
+### Set autosuspend delay to 5 seconds
+
+```bash
+echo 5000 | sudo tee /sys/bus/usb/devices/1-4/power/autosuspend_delay_ms
+echo auto  | sudo tee /sys/bus/usb/devices/1-4/power/control
+```
+
+### Verify the result
+
+```bash
+cat /sys/bus/usb/devices/1-4/power/control
+cat /sys/bus/usb/devices/1-4/power/runtime_status
+cat /sys/bus/usb/devices/1-4/power/autosuspend_delay_ms
+```
+
+> [!note]
+> Setting `power/control=auto` does **not** force an immediate suspend. It only allows autosuspend once the device becomes idle.
+
+---
+
+## Persistent Per-Device Configuration with `udev`
+
+For Arch systems that are **not** delegating USB policy to TLP, `udev` is the correct mechanism for stable, device-specific runtime PM policy.
+
+### Recommended rule file
+
+```bash
+sudo install -Dm0644 /dev/null /etc/udev/rules.d/90-local-usb-runtime-pm.rules
+sudo nvim /etc/udev/rules.d/90-local-usb-runtime-pm.rules
+```
+
+`90-...` is a good local rule prefix because it runs late enough to override most vendor-supplied rules in `/usr/lib/udev/rules.d/`.
+
+---
+
+## Example: Disable Autosuspend for a Specific Device
+
+Example device:
+
+```text
+046d:c52b  Logitech Unifying Receiver
+```
+
+Rule:
 
 ```udev
-# Disable autosuspend for the Logitech Unifying Receiver to prevent mouse lag
-ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="046d", ATTR{idProduct}=="c52b", TEST=="power/control", ATTR{power/control}="on"
+ACTION=="add", SUBSYSTEM=="usb", DEVTYPE=="usb_device", ATTR{idVendor}=="046d", ATTR{idProduct}=="c52b", TEST=="power/control", ATTR{power/control}="on"
 ```
 
-**Rule Breakdown:**
+### Why this rule is correct
 
 | Component | Purpose |
 |---|---|
-| `ACTION=="add"` | Triggers the rule when the device is connected. |
-| `SUBSYSTEM=="usb"` | Specifies that this rule only applies to USB devices. |
-| `ATTR{idVendor}=="046d"` | Matches the device's Vendor ID. |
-| `ATTR{idProduct}=="c52b"` | Matches the device's Product ID. |
-| `TEST=="power/control"` | Checks if the `power/control` file exists, preventing errors. |
-| `ATTR{power/control}="on"` | The action: writes `on` to the `power/control` file. |
+| `ACTION=="add"` | Apply when the USB device appears |
+| `SUBSYSTEM=="usb"` | Restrict to USB |
+| `DEVTYPE=="usb_device"` | Match the device node, not its individual interfaces |
+| `ATTR{idVendor}=="046d"` | Match vendor ID |
+| `ATTR{idProduct}=="c52b"` | Match product ID |
+| `TEST=="power/control"` | Only apply if the attribute exists |
+| `ATTR{power/control}="on"` | Disable runtime PM for that device |
 
-**4. Reload `udev` Rules**
+> [!tip]
+> If multiple identical devices share the same `VID:PID`, add a more specific match if available, for example:
+> - `ATTR{serial}=="..."` for a unique unit
+> - physical port matching only when intentionally tied to a port
 
-Apply the new rule without needing to reboot.
+---
 
-```bash
-sudo udevadm control --reload-rules
+## Example: Keep Autosuspend Enabled but Use a Longer Delay
+
+```udev
+ACTION=="add", SUBSYSTEM=="usb", DEVTYPE=="usb_device", ATTR{idVendor}=="1234", ATTR{idProduct}=="5678", TEST=="power/control", ATTR{power/control}="auto"
+ACTION=="add", SUBSYSTEM=="usb", DEVTYPE=="usb_device", ATTR{idVendor}=="1234", ATTR{idProduct}=="5678", TEST=="power/autosuspend_delay_ms", ATTR{power/autosuspend_delay_ms}="5000"
 ```
 
-Your device's power settings will now be applied automatically and persistently across reboots. You can create multiple lines in this file for different devices.
+This keeps runtime PM enabled but delays autosuspend by 5 seconds.
 
+> [!note]
+> Some devices or drivers do not expose `power/autosuspend_delay_ms`. In that case, only `power/control` can be managed.
+
+---
+
+## Reload and Apply `udev` Rules
+
+### Reload rules
+
+```bash
+sudo udevadm control --reload
+```
+
+### Re-apply to currently attached USB devices
+
+Apply to all USB devices:
+
+```bash
+sudo udevadm trigger --subsystem-match=usb --action=add
+sudo udevadm settle
+```
+
+Or apply only to one known device, for example `1-4`:
+
+```bash
+sudo udevadm trigger --sysname-match=1-4 --action=add
+sudo udevadm settle
+```
+
+### Verify rule evaluation
+
+```bash
+sudo udevadm test "$(realpath /sys/bus/usb/devices/1-4)"
+```
+
+Then inspect the live state:
+
+```bash
+cat /sys/bus/usb/devices/1-4/power/control
+cat /sys/bus/usb/devices/1-4/power/runtime_status
+```
+
+> [!tip]
+> `udevadm test` is excellent for debugging rule matching. It shows which rules are parsed and what assignments are made.
+
+---
+
+## Global USB Autosuspend Policy
+
+If the goal is to change the **default behavior for all USB devices**, use the kernel command line.
+
+### Disable USB autosuspend globally
+
+```text
+usbcore.autosuspend=-1
+```
+
+### Set the global default idle delay to 5 seconds
+
+```text
+usbcore.autosuspend=5
+```
+
+### Check the live value
+
+```bash
+cat /sys/module/usbcore/parameters/autosuspend
+```
+
+> [!warning]
+> Global disable is a blunt instrument. It may increase idle power draw and reduce battery life noticeably on laptops.
+
+### Arch-specific note
+
+On Arch, `usbcore` is typically built into the kernel, so a `modprobe.d` option is **not** the preferred method for setting `usbcore.autosuspend`. Use the **kernel command line** instead.
+
+How to set the kernel command line depends on your boot setup:
+
+- **GRUB**: edit `/etc/default/grub`, then regenerate `grub.cfg`
+- **systemd-boot**: edit the relevant loader entry or your unified-kernel-image command-line source, depending on your setup
+
+---
+
+## Interaction with TLP and Powertop
+
+## TLP
+
+If TLP is installed and enabled, it may manage USB autosuspend and **override manual or `udev`-applied settings** later, especially on boot, resume, or AC/BAT transitions.
+
+### Inspect TLP USB policy
+
+```bash
+sudo tlp-stat -u
+```
+
+### Recommended TLP configuration pattern
+
+Edit:
+
+```bash
+sudo nvim /etc/tlp.conf
+```
+
+Example:
+
+```ini
+USB_AUTOSUSPEND=1
+USB_DENYLIST="046d:c52b"
+```
+
+Then apply:
+
+```bash
+sudo systemctl restart tlp.service
+```
+
+> [!tip]
+> If TLP already owns system-wide laptop power policy, prefer using **TLP’s native USB options** instead of layering separate `udev` overrides.
+
+## Powertop
+
+`powertop --auto-tune` changes live runtime PM settings but is **not a configuration system** by itself. If you run it automatically at boot, it may override previous USB power settings.
+
+> [!warning]
+> Do not combine unmanaged Powertop autotuning with TLP and custom `udev` rules unless you have explicitly defined precedence and verified the resulting state.
+
+---
+
+## Troubleshooting
+
+## The device still suspends even though the rule looks correct
+
+Check for overrides from higher-level tools:
+
+```bash
+systemctl is-enabled tlp.service
+systemctl is-active tlp.service
+ps -ef | grep -E 'powertop|tlp'
+```
+
+Then inspect the live values again:
+
+```bash
+cat /sys/bus/usb/devices/1-4/power/control
+cat /sys/bus/usb/devices/1-4/power/runtime_status
+```
+
+If `power/control` reverts after boot or resume, another manager is writing to sysfs.
+
+---
+
+## The wrong sysfs node was targeted
+
+Do **not** target interface nodes like:
+
+```text
+1-4:1.0
+```
+
+Target the USB **device** node:
+
+```text
+1-4
+```
+
+Use:
+
+```bash
+ls -1 /sys/bus/usb/devices/
+```
+
+or the inventory script above to confirm.
+
+---
+
+## The problem is actually the hub or dock
+
+A child device may be innocent; the suspend/resume issue can be caused by the **USB hub**, **dock**, or **receiver** upstream.
+
+Use:
+
+```bash
+lsusb -t
+```
+
+Common examples:
+
+- flaky wireless input devices -> the **receiver** is the device to tune
+- devices behind a dock -> the **dock or hub** may need autosuspend disabled
+- entire branch disconnects -> inspect the parent hub/controller path
+
+---
+
+## Wake from sleep does not work
+
+This is usually related to **wakeup policy**, not just autosuspend.
+
+Check:
+
+```bash
+cat /sys/bus/usb/devices/1-4/power/wakeup
+```
+
+Enable if appropriate:
+
+```bash
+echo enabled | sudo tee /sys/bus/usb/devices/1-4/power/wakeup
+```
+
+Also remember:
+
+- firmware/BIOS settings may block USB wake
+- not every sleep state supports every wake source
+- enabling wake does not guarantee a broken device will resume cleanly from runtime suspend
+
+---
+
+## `runtime_status` stays `active`
+
+This does **not** necessarily mean configuration failed.
+
+Possible reasons:
+
+- the device is genuinely busy
+- the driver does not support runtime PM
+- the device is marked active due to periodic traffic
+- autosuspend delay has not elapsed
+- another policy manager forced `power/control=on`
+
+Check:
+
+```bash
+cat /sys/bus/usb/devices/1-4/power/control
+cat /sys/bus/usb/devices/1-4/power/runtime_status
+```
+
+If `runtime_status` is `unsupported`, the device/driver does not participate in runtime PM in the expected way.
+
+---
+
+## Watch kernel and udev events live
+
+### Kernel log
+
+```bash
+sudo journalctl -kf
+```
+
+### udev event monitor
+
+```bash
+sudo udevadm monitor --udev --property
+```
+
+Useful search in the current boot log:
+
+```bash
+journalctl -k -b | grep -Ei 'usb|xhci|reset|runtime suspend|runtime resume|autosuspend'
+```
+
+Look for:
+
+- repeated resets
+- disconnect/reconnect loops
+- xHCI or hub errors
+- resume failures after idle
+
+---
+
+## Stable Matching Strategies
+
+Use the most stable matching key available.
+
+### Preferred order
+
+1. `idVendor` + `idProduct`
+2. `serial` if multiple identical devices exist
+3. physical port only if the policy should follow the port
+
+### Match by serial example
+
+```udev
+ACTION=="add", SUBSYSTEM=="usb", DEVTYPE=="usb_device", ATTR{idVendor}=="1234", ATTR{idProduct}=="5678", ATTR{serial}=="ABCDEF012345", TEST=="power/control", ATTR{power/control}="on"
+```
+
+### Match by physical port example
+
+```udev
+ACTION=="add", SUBSYSTEM=="usb", DEVTYPE=="usb_device", KERNEL=="1-4", TEST=="power/control", ATTR{power/control}="on"
+```
+
+> [!warning]
+> Port-based matching is topology-dependent. It may break if you move the device, insert a hub, change docks, or update hardware.
+
+---
+
+## Minimal Reference Commands
+
+### Show all USB devices and drivers
+
+```bash
+lsusb
+lsusb -t
+```
+
+### Show global USB autosuspend default
+
+```bash
+cat /sys/module/usbcore/parameters/autosuspend
+```
+
+### Disable autosuspend temporarily for one device
+
+```bash
+echo on | sudo tee /sys/bus/usb/devices/1-4/power/control
+```
+
+### Re-enable autosuspend temporarily
+
+```bash
+echo auto | sudo tee /sys/bus/usb/devices/1-4/power/control
+```
+
+### Set per-device delay temporarily
+
+```bash
+echo 5000 | sudo tee /sys/bus/usb/devices/1-4/power/autosuspend_delay_ms
+```
+
+### Inspect one device
+
+```bash
+udevadm info --attribute-walk --path="$(realpath /sys/bus/usb/devices/1-4)"
+```
+
+### Reload and trigger `udev`
+
+```bash
+sudo udevadm control --reload
+sudo udevadm trigger --subsystem-match=usb --action=add
+sudo udevadm settle
+```
+
+### Test a `udev` rule
+
+```bash
+sudo udevadm test "$(realpath /sys/bus/usb/devices/1-4)"
+```
+
+---
+
+## Recommended Practice Summary
+
+- Use **sysfs writes** only for short-lived testing
+- Use **`udev`** for persistent per-device policy on systems not managed by TLP
+- Use **TLP native configuration** if TLP is already your power-policy owner
+- Use **kernel command-line `usbcore.autosuspend=`** only for global defaults
+- Verify live behavior using:
+  - `power/control`
+  - `power/runtime_status`
+  - `lsusb -t`
+  - `udevadm test`
+  - `journalctl -kf`
+
+> [!success]
+> For a flaky USB mouse, keyboard receiver, audio interface, webcam, serial adapter, or dock, the most reliable fix is usually:
+> 1. identify the exact USB device or hub,
+> 2. test with `power/control=on`,
+> 3. persist the result with a targeted `udev` rule or TLP denylist entry.

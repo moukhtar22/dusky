@@ -179,16 +179,17 @@ systemctl enable tailscaled
 # Mitigate IPC socket race condition
 log_info "Awaiting tailscaled IPC socket readiness..."
 sock_timeout=15
-while ! tailscale status >/dev/null 2>&1 && (( sock_timeout > 0 )); do
+declare -r TS_SOCKET="/run/tailscale/tailscaled.sock"
+
+while [[ ! -S "$TS_SOCKET" ]] && (( sock_timeout > 0 )); do
     sleep 0.5
     ((sock_timeout--))
 done
 
-# Evaluate actual command state instead of just the timeout counter
-if ! tailscale status >/dev/null 2>&1; then
-    die "Tailscaled daemon started, but IPC socket is unresponsive."
+if [[ ! -S "$TS_SOCKET" ]]; then
+    die "Tailscaled daemon started, but IPC socket ($TS_SOCKET) was not created."
 fi
-log_succ "Tailscale daemon is active and responding."
+log_succ "Tailscale IPC socket is ready."
 
 log_info "Applying firewall policies..."
 if cmd_exists firewall-cmd && svc_active firewalld; then

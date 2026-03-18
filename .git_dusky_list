@@ -32,7 +32,7 @@
 .config/swappy/
 .config/uwsm/
 .config/waybar/01_horizontal_block/
-.config/waybar/02_horizontal_block_translucent/
+.config/waybar/02_horizontal_material/
 .config/waybar/03_horizontal_block_compact/
 .config/waybar/04_horizontal_circular/
 .config/waybar/05_horizontal_minimal/
@@ -56,6 +56,7 @@
 .config/xdg-terminals.list
 .config/xsettingsd/
 .config/yazi/
+.config/zed/settings.json
 .config/zellij/
 .config/zathura/
 .config/zshrc/

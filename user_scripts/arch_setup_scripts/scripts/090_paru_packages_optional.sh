@@ -29,6 +29,7 @@ Tools       | grsync                | GUI rsync frontend for backups
 Tools       | caligula              | User-friendly, lightweight disk imager
 Tools       | collision             | Verifies file hashes (MD5, SHA, etc.)
 Tools       | impression            | Tool to create bootable drives from ISOs
+Tools       | xembed-sni-proxy-standalone-git            | Fix proton/wine apps tray icons
 Tools       | showmethekey          | Screen keystroke visualizer for screencasts
 Tools       | identity              | Compare images and videos side-by-side
 Tools       | zellij                | Modern terminal workspace/multiplexer (Rust)

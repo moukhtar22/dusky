@@ -35,18 +35,8 @@
 - [[#29. System Services]]
 - [[#30. Concluding & First Reboot]]
 - [[#31. First Boot Verification]]
-- [[#32. Install Snapper and snap-pac]]
-- [[#33. Create Snapper Configs and Redirect Snapshot Storage]]
-- [[#34. Tune Snapper Settings]]
-- [[#35. Configure snap-pac]]
-- [[#36. Allow Your User to Use Snapper]]
-- [[#37. Disable BTRFS Quotas (Performance Optimization)]]
-- [[#38. Enable Snapper Services]]
-- [[#39. Kernel Backup Pacman Hook — Rollback Safety Net]]
-- [[#40. Test — Create and Verify a Snapshot]]
-- [[#41. Rollback Procedures]]
-- [[#42. Ongoing Maintenance]]
-- [[#43. Quick-Reference Cheat Sheet]]
+- [[#32. Ongoing Maintenance]]
+- [[#33. Quick-Reference Cheat Sheet]]
 - [[#Final System Architecture]]
 - [[#Troubleshooting]]
 
@@ -115,15 +105,14 @@
 
 > [!important] Cross-check your [[Package Installation]] list. Add any of these that are missing.
 
-| Package | Repo | Installed When | Purpose |
-|---|---|---|---|
-| `cryptsetup` | `core` | pacstrap (Step 13) | LUKS2 encryption — **not** in `base`, must be explicit |
-| `btrfs-progs` | `core` | pacstrap (Step 13) | BTRFS tools |
-| `dosfstools` | `core` | pacstrap (Step 13) | FAT32 ESP tools |
-| `limine` | `extra` | pacman (Step 25) | Bootloader |
-| `efibootmgr` | `core` | pacman (Step 25) | UEFI boot entry management |
-| `snapper` | `extra` | pacman (Step 32) | BTRFS snapshot manager |
-| `snap-pac` | `extra` | pacman (Step 32) | Auto pre/post snapshots on pacman |
+| Package       | Repo    | Installed When     | Purpose                                                |
+| ------------- | ------- | ------------------ | ------------------------------------------------------ |
+| `cryptsetup`  | `core`  | pacstrap (Step 13) | LUKS2 encryption — **not** in `base`, must be explicit |
+| `btrfs-progs` | `core`  | pacstrap (Step 13) | BTRFS tools                                            |
+| `dosfstools`  | `core`  | pacstrap (Step 13) | FAT32 ESP tools                                        |
+| `limine`      | `extra` | pacman (Step 25)   | Bootloader                                             |
+| `efibootmgr`  | `core`  | pacman (Step 25)   | UEFI boot entry management                             |
+
 
 ---
 
@@ -458,9 +447,9 @@ btrfs subvolume list /mnt
 > ID 263 gen ... top level 5 path @var_lib_libvirt
 > ID 264 gen ... top level 5 path @swap
 > ```
-> All must show `top level 5` — top-level subvolumes, not nested. This is critical for snapshot isolation.
+> All must show `top level 5` — top-level subvolumes, not nested. This is critical for snapshot isolation later on
 
-> [!tip]- **Why `top level 5` matters**
+> [!tip]- **Why `top level 5` matters (this is just for info) **
 > When Snapper snapshots `@` (root), it only captures data **inside** the `@` subvolume. Because `@var_log`, `@var_lib_libvirt`, etc. are sibling subvolumes at the top level, they are automatically excluded from root snapshots.
 >
 > If you roll back `@` to an earlier snapshot, your logs, VM images, home data, and snapshot metadata are completely unaffected.
@@ -1370,643 +1359,25 @@ sudo btrfs device stats /
 ```
 
 ```bash
-# 8. Verify snapshot subvolumes are ready
+# 8. Verify snapshot subvolumes are ready for future configuration
 ls -la /.snapshots /home/.snapshots
-# Both directories should exist (empty until Snapper is configured)
+# Both directories should exist 
 ```
 
 - [ ] Status
 
 ---
 
-### 32. Install Snapper and snap-pac
+### 32. Ongoing Maintenance
 
-```bash
-sudo pacman -S snapper snap-pac
-```
-
-> [!note]- What these packages do
-> | Package | Purpose |
-> |---|---|
-> | `snapper` | BTRFS snapshot manager — create, list, compare, delete, undo changes |
-> | `snap-pac` | Pacman hooks that automatically create Snapper pre/post snapshot pairs on every `pacman -S`, `-R`, `-U` |
-
-- [ ] Status
-
----
-
-### 33. Create Snapper Configs and Redirect Snapshot Storage
-
-> [!danger] **This is the most critical Snapper step. Do not skip sub-steps.**
->
-> When Snapper runs `create-config`, it creates a **nested** `.snapshots` subvolume inside the target. We must delete those and redirect Snapper to our dedicated **top-level** `@snapshots` and `@home_snapshots` subvolumes. If you skip this, rolling back `@` will also roll back the snapshot metadata — Snapper loses track of everything.
-
-#### 33a. Unmount the Pre-Mounted Snapshot Subvolumes
-
-These were mounted from fstab at boot. We need to clear them so Snapper can run `create-config`.
-
-```bash
-sudo umount /.snapshots
-```
-
-```bash
-sudo umount /home/.snapshots
-```
-
-#### 33b. Remove the Empty Mount Point Directories
-
-```bash
-sudo rmdir /.snapshots
-```
-
-```bash
-sudo rmdir /home/.snapshots
-```
-
-> [!note] `rmdir` only works on empty directories. If either fails with "Directory not empty", check what's inside with `ls -la` — nothing should be there after first boot.
-
-#### 33c. Create Snapper Configurations
-
-```bash
-sudo snapper -c root create-config /
-```
-
-```bash
-sudo snapper -c home create-config /home
-```
-
-> [!note]- What `create-config` does
-> For each config, Snapper:
-> 1. Creates a config file at `/etc/snapper/configs/<name>`
-> 2. Adds the config name to `SNAPPER_CONFIGS` in `/etc/conf.d/snapper`
-> 3. Creates a **nested** `.snapshots` subvolume inside the target (e.g., `@/.snapshots` inside `@`)
->
-> Step 3 is what we undo next — we want `@snapshots` (top-level sibling of `@`), not `@/.snapshots` (nested inside `@`).
-
-#### 33d. Delete the Nested Subvolumes Snapper Auto-Created
-
-```bash
-sudo btrfs subvolume delete /.snapshots
-```
-
-```bash
-sudo btrfs subvolume delete /home/.snapshots
-```
-
-#### 33e. Recreate the Mount Point Directories
-
-```bash
-sudo mkdir /.snapshots
-```
-
-```bash
-sudo mkdir /home/.snapshots
-```
-
-#### 33f. Remount the Dedicated Top-Level Subvolumes
-
-```bash
-sudo mount -a
-```
-
-#### 33g. Set Correct Permissions
-
-```bash
-sudo chmod 750 /.snapshots
-```
-
-```bash
-sudo chmod 750 /home/.snapshots
-```
-
-#### 33h. Verify Everything Is Correct
-
-```bash
-sudo snapper list-configs
-```
-
-> [!note]- Expected output
-> ```
-> Config │ Subvolume
-> ───────┼──────────
-> home   │ /home
-> root   │ /
-> ```
-
-```bash
-findmnt /.snapshots /home/.snapshots
-```
-
-> [!note]- Expected: both mounted from the dedicated subvolumes
-> ```
-> TARGET            SOURCE                                  FSTYPE OPTIONS
-> /.snapshots       /dev/mapper/cryptroot[/@snapshots]       btrfs  ...
-> /home/.snapshots  /dev/mapper/cryptroot[/@home_snapshots]  btrfs  ...
-> ```
->
-> **Critical check:** The `SOURCE` column must show `[/@snapshots]` and `[/@home_snapshots]` (top-level subvolumes), **not** `[/@/.snapshots]` or `[/@home/.snapshots]` (nested).
-
-```bash
-sudo btrfs subvolume list / | grep -E 'snapshots'
-```
-
-> [!note]- Should only show your top-level subvolumes
-> ```
-> ID 258 gen ... top level 5 path @snapshots
-> ID 259 gen ... top level 5 path @home_snapshots
-> ```
->
-> You should **not** see `path @/.snapshots` or `path @home/.snapshots`. If you do, the nested subvolume was not deleted — go back to step 33d.
-
-- [ ] Status
-
----
-
-### 34. Tune Snapper Settings
-
-> [!info] **Strategy:** No automatic timeline snapshots. Snapshots are created only by `snap-pac` (on pacman operations) or manually by you. Maximum control, no accumulation. We use strict count-based retention (keeping the last 10 snapshots) to avoid the I/O penalty of space-based calculations.
-
-**Recommended** (one-liners via SSH)
-
-*Configure the Root subvolume:*
-```bash
-sudo sed -i -e 's/^TIMELINE_CREATE=.*/TIMELINE_CREATE="no"/' -e 's/^NUMBER_LIMIT=.*/NUMBER_LIMIT="10"/' -e 's/^NUMBER_LIMIT_IMPORTANT=.*/NUMBER_LIMIT_IMPORTANT="5"/' -e 's/^SPACE_LIMIT=.*/SPACE_LIMIT="0"/' -e 's/^FREE_LIMIT=.*/FREE_LIMIT="0"/' /etc/snapper/configs/root
-```
-
-*Configure the Home subvolume:*
-```bash
-sudo sed -i -e 's/^TIMELINE_CREATE=.*/TIMELINE_CREATE="no"/' -e 's/^NUMBER_LIMIT=.*/NUMBER_LIMIT="10"/' -e 's/^NUMBER_LIMIT_IMPORTANT=.*/NUMBER_LIMIT_IMPORTANT="5"/' -e 's/^SPACE_LIMIT=.*/SPACE_LIMIT="0"/' -e 's/^FREE_LIMIT=.*/FREE_LIMIT="0"/' /etc/snapper/configs/home
-```
-OR edit each file manually
-
-```bash
-sudo nvim /etc/snapper/configs/root
-```
-
-```bash
-sudo nvim /etc/snapper/configs/home
-```
-
->[!note] **Set these values in both files:**
->
->```ini
->TIMELINE_CREATE="no"
->NUMBER_LIMIT="10"
->NUMBER_LIMIT_IMPORTANT="5"
->SPACE_LIMIT="0"
->FREE_LIMIT="0"
->```
-
-> [!note]- What these settings mean
->
-> | Setting | Value | Meaning |
-> |---|---|---|
-> | `TIMELINE_CREATE` | `"no"` | No automatic hourly/daily snapshots (prevents silent disk fill-up). |
-> | `NUMBER_LIMIT` | `"10"` | Keep exactly the last 10 pre/post snapshots generated by `snap-pac`. |
-> | `NUMBER_LIMIT_IMPORTANT` | `"5"` | Keep exactly 5 manually created snapshots (using the `-c important` flag). |
-> | `SPACE_LIMIT` | `"0"` | Disabled. We disabled BTRFS quotas for maximum SSD performance, so space limits cannot be used. |
-> | `FREE_LIMIT` | `"0"` | Disabled. (Same reason as above). |
-
-
-- [ ] Status
-
----
-
-### 35. Configure snap-pac
-
-Pacman only modifies files under `/` (root). It never touches `/home`. Without configuration, `snap-pac` will snapshot **both** root and home on every pacman transaction — the home snapshots would be identical and pointless.
-
-```bash
-cat << 'EOF' | sudo tee /etc/snap-pac.ini
-[home]
-snapshot = no
-EOF
-```
-
-> [!note] `snap-pac` reads from `/etc/snap-pac.ini` — a single config file. It does **not** support a drop-in directory.
-
-- [ ] Status
-
----
-
-### 36. Allow Your User to Use Snapper *(Optional)*
-
-This lets your user list snapshots, view diffs, and create manual snapshots without `sudo` for most read operations.
-
-```bash
-sudo sed -i "s/^ALLOW_USERS=.*/ALLOW_USERS=\"your_username\"/" /etc/snapper/configs/root
-```
-
-```bash
-sudo sed -i "s/^ALLOW_USERS=.*/ALLOW_USERS=\"your_username\"/" /etc/snapper/configs/home
-```
-
-> [!note] Replace `your_username` with your actual username. Some operations (delete, undochange) still require `sudo`.
-
-- [ ] Status
-
----
-### 37. Disable BTRFS Quotas (Performance Optimization) 
-
-> [!important] **Why we disable quotas:**
-> BTRFS quotas (qgroups) allow Snapper to measure how much disk space snapshots are taking up. However, calculating these quotas requires intense filesystem tree searches. On systems with heavy write loads (like running virtual machines, compiling packages, or gaming), this creates severe I/O bottlenecks and system stutters.
-> 
-> Because we configured Snapper in Step 34 to use strict count-based limits (`NUMBER_LIMIT="10"`) instead of space limits, we can safely kill quotas entirely for maximum SSD performance.
-
-*Ensure quotas are disabled for the entire BTRFS filesystem:*
-```bash
-sudo btrfs quota disable /
-```
-
-- [ ] Status
-
----
-
-### 38. Enable Snapper Services
-
-```bash
-sudo systemctl enable --now snapper-cleanup.timer
-```
-
-> [!note] `snapper-cleanup.timer` runs periodically and enforces `NUMBER_LIMIT`, `SPACE_LIMIT`, and `FREE_LIMIT` rules. Old snapshots are automatically deleted when limits are exceeded.
-
-*Verify:*
-
-```bash
-systemctl status snapper-cleanup.timer
-```
-
-- [ ] Status
-
----
-
-### 39. Kernel Backup Pacman Hook — Rollback Safety Net
-
-> [!important] **Why this is critical**
-> Your ESP (`/boot`) is FAT32 — **not** part of any BTRFS snapshot. When you roll back `@` to a pre-update state:
-> - `/usr/lib/modules/` → **old** modules (from rolled-back `@`) ✅
-> - `/boot/vmlinuz-linux` → **new** kernel binary (unchanged on ESP) ❌
-> - **Mismatch → boot failure** (missing modules, kernel panic)
->
-> This hook copies the **current** kernel + initramfs to backup filenames **before** every kernel upgrade. After a rollback, you boot the backup kernel that matches the rolled-back modules.
-
-#### 39a. Create the Pacman Hook
-
-```bash
-sudo mkdir -p /etc/pacman.d/hooks
-```
-
-```bash
-cat << 'HOOKEOF' | sudo tee /etc/pacman.d/hooks/50-kernel-backup.hook
-[Trigger]
-Type = Path
-Operation = Install
-Operation = Upgrade
-Target = usr/lib/modules/*/vmlinuz
-
-[Action]
-Description = Backing up current kernel and initramfs before upgrade...
-When = PreTransaction
-Exec = /usr/bin/bash -c 'if [ -f /boot/vmlinuz-linux ]; then cp /boot/vmlinuz-linux /boot/vmlinuz-linux-previous && cp /boot/initramfs-linux.img /boot/initramfs-linux-previous.img && cp /boot/initramfs-linux-fallback.img /boot/initramfs-linux-previous-fallback.img && echo "Kernel backup complete."; fi'
-HOOKEOF
-```
-
-> [!note]- Why `50-` prefix?
-> Pacman hooks run in alphabetical order. `50-` ensures this runs **before** `90-` or `99-` hooks (like the Limine EFI update hook). The kernel backup must happen before the new kernel is installed.
-
-#### 39b. Add a Previous-Kernel Boot Entry to Limine
-
-```bash
-cat << 'EOF' | sudo tee -a /boot/limine.conf
-
-/Arch Linux (Previous Kernel — for post-rollback boot)
-    protocol: linux
-    kernel_path: boot():/vmlinuz-linux-previous
-    cmdline: rd.luks.name=LUKS-UUID=cryptroot rd.luks.options=discard root=/dev/mapper/cryptroot rootflags=subvol=@ rw
-    module_path: boot():/initramfs-linux-previous.img
-EOF
-```
-
-**Substitute your actual LUKS UUID:**
-
-```bash
-LUKS_UUID=$(sudo blkid -s UUID -o value /dev/root_partition)
-sudo sed -i "s/LUKS-UUID/$LUKS_UUID/g" /boot/limine.conf
-```
-
-> [!important] Replace `/dev/root_partition` with your actual encrypted partition (e.g., `/dev/nvme0n1p2`).
-
-#### 39c. Verify
-
-```bash
-cat /boot/limine.conf
-```
-
-> [!note]- Expected: 3 boot entries
-> ```
-> timeout: 5
-> verbose: no
->
-> /Arch Linux
->     protocol: linux
->     kernel_path: boot():/vmlinuz-linux
->     cmdline: rd.luks.name=<UUID>=cryptroot rd.luks.options=discard root=/dev/mapper/cryptroot rootflags=subvol=@ rw quiet
->     module_path: boot():/initramfs-linux.img
->
-> /Arch Linux (Fallback)
->     protocol: linux
->     kernel_path: boot():/vmlinuz-linux
->     cmdline: rd.luks.name=<UUID>=cryptroot rd.luks.options=discard root=/dev/mapper/cryptroot rootflags=subvol=@ rw
->     module_path: boot():/initramfs-linux-fallback.img
->
-> /Arch Linux (Previous Kernel — for post-rollback boot)
->     protocol: linux
->     kernel_path: boot():/vmlinuz-linux-previous
->     cmdline: rd.luks.name=<UUID>=cryptroot rd.luks.options=discard root=/dev/mapper/cryptroot rootflags=subvol=@ rw
->     module_path: boot():/initramfs-linux-previous.img
-> ```
-
-> [!danger] **🚨 "FILE NOT FOUND" PANIC WARNING 🚨**
-> Do not panic if you select the "Previous Kernel" entry right now and it fails to boot. 
-> 
-> **Why?** The fallback files (`vmlinuz-linux-previous` and `initramfs-linux-previous.img`) **do not exist yet**. They are only created *automatically* the very first time you run `pacman -Syu` and a kernel update is downloaded. 
-> 
-> For now, just boot the normal "Arch Linux" entry. The safety net will deploy itself silently in the background during your future updates.
-
-- [ ] Status
-
----
-
-### 40. Test — Create and Verify a Snapshot
-
-> [!tip] Do this now to confirm the entire snapshot pipeline works before you actually need it.
-
-#### 40a. Create Manual Snapshots
-
-```bash
-sudo snapper -c root create -c number -d "Initial working state — setup complete"
-```
-
-```bash
-sudo snapper -c home create -c number -d "Initial working state — setup complete"
-```
-
-#### 40b. List Snapshots
-
-```bash
-sudo snapper -c root list
-```
-
-```bash
-sudo snapper -c home list
-```
-
-> [!note]- Expected output
-> ```
->  # │ Type   │ Pre # │ Date                    │ User │ Cleanup │ Description                                │ Userdata
-> ───┼────────┼───────┼─────────────────────────┼──────┼─────────┼────────────────────────────────────────────┼─────────
-> 0  │ single │       │                         │ root │         │ current                                    │
-> 1  │ single │       │ Wed 12 Mar 2026 14:30:00│ root │ number  │ Initial working state — setup complete      │
-> ```
-
-#### 40c. Verify Snapshot Storage Location
-
-```bash
-sudo btrfs subvolume list / | grep snapshots
-```
-
-> [!note]- Expected: snapshot under @snapshots, NOT under @
-> ```
-> ID 258 gen ... top level 5 path @snapshots
-> ID 259 gen ... top level 5 path @home_snapshots
-> ID 300 gen ... top level 258 path @snapshots/1/snapshot
-> ```
->
-> The snapshot `@snapshots/1/snapshot` has `top level 258` (the ID of `@snapshots`), confirming it lives inside the dedicated snapshot subvolume, **not** nested inside `@`. Rolling back `@` will never affect snapshot metadata. ✅
-
-#### 40d. Test snap-pac by Installing a Harmless Package
-
-```bash
-sudo pacman -S --needed cowsay
-```
-
-```bash
-sudo snapper -c root list
-```
-
-> [!note]- Expected: snap-pac created a pre/post pair automatically
-> ```
->  # │ Type   │ Pre # │ Date                    │ User │ Cleanup │ Description                                │ Userdata
-> ───┼────────┼───────┼─────────────────────────┼──────┼─────────┼────────────────────────────────────────────┼─────────
-> 0  │ single │       │                         │ root │         │ current                                    │
-> 1  │ single │       │ Wed 12 Mar 2026 14:30:00│ root │ number  │ Initial working state — setup complete      │
-> 2  │ pre    │       │ Wed 12 Mar 2026 14:35:00│ root │ number  │ pacman -S --needed cowsay                   │
-> 3  │ post   │   2   │ Wed 12 Mar 2026 14:35:01│ root │ number  │ pacman -S --needed cowsay                   │
-> ```
-
-#### 40e. View What Changed Between Pre/Post
-
-```bash
-sudo snapper -c root status 2..3
-```
-
-> [!note] Shows every file added, modified, or deleted by the pacman operation. Extremely useful for diagnosing which update broke something.
-
-#### 40f. Clean Up the Test
-
-```bash
-sudo pacman -R cowsay
-```
-
-- [ ] Status
-
----
-
-### 41. Rollback Procedures
-
-> [!important] **Two methods, in order of preference.** Use the simplest one that applies to your situation.
-
----
-
-#### Method A — *From the Running System:* `snapper undochange`
-
-> [!tip] **Use when:** The system is running fine, but a recent pacman update broke something specific (a service, an app, a config). You want to revert the changes without a full rollback or reboot.
-
-**This is the fastest and safest method.** It diffs two snapshots and copies the old files back over the current ones. No subvolume replacement, no reboot needed (usually).
-
-##### A1. Identify the Pre/Post Pair
-
-```bash
-sudo snapper -c root list
-```
-
-Find the pre/post snapshot numbers for the operation you want to undo (e.g., `4` is `pre`, `5` is `post`).
-
-##### A2. Preview What Will Be Reverted
-
-```bash
-sudo snapper -c root status 4..5
-```
-
-##### A3. Undo the Changes
-
-```bash
-sudo snapper -c root undochange 4..5
-```
-
-> [!note] This copies all files from snapshot `4` (pre-update state) back into the live filesystem, effectively reverting everything that changed between snapshots 4 and 5.
-
-##### A4. If the Undo Involved Kernel Modules
-
-```bash
-sudo mkinitcpio -P
-```
-
-Then reboot.
-
-> [!warning] If the change involved critical system files (glibc, systemd, kernel modules), you may need to reboot. If the system becomes unstable, use Method B.
-
----
-
-#### Method B — *From Live USB:* Full Subvolume Replacement
-
-> [!tip] **Use when:** The system is completely unbootable. This is the nuclear option — replaces the entire `@` subvolume with a snapshot. Always works.
-
-##### B1. Boot from Arch Linux Live USB
-
-##### B2. Open the LUKS Volume
-
-```bash
-cryptsetup open /dev/root_partition cryptroot
-```
-
-##### B3. Mount the Top-Level BTRFS Volume
-
-```bash
-mount -o subvolid=5 /dev/mapper/cryptroot /mnt
-```
-
-##### B4. List Available Snapshots
-
-```bash
-btrfs subvolume list /mnt | grep @snapshots
-```
-
-> [!note]- Example output
-> ```
-> ID 258 gen ... top level 5 path @snapshots
-> ID 300 gen ... top level 258 path @snapshots/1/snapshot
-> ID 305 gen ... top level 258 path @snapshots/2/snapshot
-> ID 306 gen ... top level 258 path @snapshots/3/snapshot
-> ```
->
-> Check dates if needed:
-> ```bash
-> btrfs subvolume show /mnt/@snapshots/1/snapshot | grep "Creation time"
-> ```
-
-##### B5. Move the Broken Root Out of the Way
-
-```bash
-mv /mnt/@ /mnt/@.broken
-```
-
-##### B6. Create a Writable Snapshot as the New Root
-
-```bash
-btrfs subvolume snapshot /mnt/@snapshots/1/snapshot /mnt/@
-```
-
-> [!note] Replace `1` with your desired snapshot number. This creates a **writable** copy — your new `@` is a full read-write subvolume.
-
-##### B7. Unmount and Reboot
-
-```bash
-umount /mnt
-```
-
-```bash
-reboot
-```
-
-##### B8. Select the Correct Kernel at Limine Menu
-
-> [!important] **Which Limine entry to select:**
-> - If the snapshot is from **before** a kernel update → select **"Arch Linux (Previous Kernel)"**
-> - If the snapshot is from **after** a kernel update (or no kernel update happened) → select **"Arch Linux"** (normal entry)
-> - If unsure → try normal first, if it kernel panics, reboot and try previous kernel
-
-##### B9. After Confirming the Restored System Works
-
-**add `mkdir -p` before the mount:**
-
-```bash
-sudo mkdir -p /mnt/btrfs-root
-```
-
-```bash
-sudo mount -o subvolid=5 /dev/mapper/cryptroot /mnt/btrfs-root
-```
-
-```bash
-sudo btrfs subvolume delete /mnt/btrfs-root/@.broken
-```
-
-```bash
-sudo umount /mnt/btrfs-root
-```
-
-> [!tip]- **Why does this work?**
-> - `@snapshots` is a **sibling** of `@` at the top level (both have `top level 5`)
-> - Deleting/replacing `@` does **not** affect `@snapshots`, `@home`, `@var_log`, or any other subvolume
-> - Your home directory, logs, libvirt VMs, and all snapshot metadata survive the rollback completely intact
-
-> [!warning] **About /home during root rollback**
-> A root rollback does **not** revert `/home`. If you also need to roll back `/home`, repeat steps B5–B6 for `@home` using snapshots from `@home_snapshots`:
-> ```bash
-> mv /mnt/@home /mnt/@home.broken
-> btrfs subvolume snapshot /mnt/@home_snapshots/1/snapshot /mnt/@home
-> ```
-
-- [ ] Status
-
----
-
-### 42. Ongoing Maintenance
-
-#### 42a. Keep Snapshots in Check
-
-```bash
-# List all root snapshots
-sudo snapper -c root list
-
-# List all home snapshots
-sudo snapper -c home list
-
-# Manual cleanup (enforces limits immediately)
-sudo snapper -c root cleanup number
-
-# Delete a specific snapshot
-sudo snapper -c root delete 3
-
-# Delete a range
-sudo snapper -c root delete 3-7
-```
-
-#### 42b. Check Disk Usage
+#### 32a. Check Disk Usage
 
 ```bash
 # Overall filesystem usage
 sudo btrfs filesystem usage /
 ```
 
-- Quotas are disabled so this is not needed
-```bash
-# Space used by quota groups (if quotas enabled)
-sudo btrfs qgroup show / -reF
-```
-
-#### 42c. BTRFS Scrub — Periodic Integrity Check
+#### 32b. BTRFS Scrub — Periodic Integrity Check
 
 > [!tip] Run a scrub monthly. It reads all data and metadata, verifying checksums. On a single-disk setup it detects corruption but cannot auto-repair (no redundancy). Still valuable for early detection.
 
@@ -2024,45 +1395,15 @@ sudo btrfs scrub status /
 > ```
 > Runs monthly by default.
 
-#### 42d. After Each Kernel Update — Verify Backup Exists
-
-```bash
-ls -la /boot/vmlinuz-linux-previous /boot/initramfs-linux-previous.img
-```
-
-If these files exist, the kernel backup hook is working. You can safely roll back and boot with the previous kernel.
-
-#### 42e. Create Manual Snapshots Before Major Changes
-
-```bash
-sudo snapper -c root create -c important -d "Before major system change"
-```
-
-> [!note] `-c important` cleanup class means this snapshot follows `NUMBER_LIMIT_IMPORTANT` rules (separate from regular `number` snapshots). Use it for snapshots you want to keep longer.
-
-- [ ] Status
 
 ---
 
-### 43. Quick-Reference Cheat Sheet
+### 33. Quick-Reference Cheat Sheet
 
 ```bash
-# ─── Snapshot Operations ─────────────────────────────────────────
-sudo snapper -c root create -c number -d "description"    # Create snapshot
-sudo snapper -c root create -c important -d "description"  # Create important snapshot
-sudo snapper -c root list                                   # List root snapshots
-sudo snapper -c home list                                   # List home snapshots
-sudo snapper -c root status N1..N2                          # Show diff between snapshots
-sudo snapper -c root undochange N1..N2                      # Revert changes (Method A)
-sudo snapper -c root delete N                               # Delete snapshot N
-sudo snapper -c root delete N1-N2                           # Delete range N1 through N2
-sudo snapper -c root cleanup number                         # Manual cleanup
-
 # ─── BTRFS Operations ───────────────────────────────────────────
 sudo btrfs subvolume list /                                 # List all subvolumes
 sudo btrfs filesystem usage /                               # Disk usage
-# quotas are disabled so this command shoudln't be run
-sudo btrfs qgroup show / -reF                               # Quota group info
 sudo btrfs scrub start /                                    # Start integrity check
 sudo btrfs scrub status /                                   # Check scrub progress
 sudo btrfs device stats /                                   # Check error counters
@@ -2090,19 +1431,8 @@ swapon --show                                               # Show active swap d
 cat /proc/sys/vm/swappiness                                 # Current swappiness value
 
 # ─── Service Status ─────────────────────────────────────────────
-systemctl status snapper-cleanup.timer                      # Snapshot cleanup timer
-systemctl list-timers --all | grep -E 'snapper|fstrim|scrub' # All relevant timers
+systemctl list-timers --all | grep -E 'fstrim|scrub' # All relevant timers
 
-# ─── Emergency: Full Rollback from Live USB ─────────────────────
-# 1. Boot live USB
-# 2. cryptsetup open /dev/root_partition cryptroot
-# 3. mount -o subvolid=5 /dev/mapper/cryptroot /mnt
-# 4. btrfs subvolume list /mnt | grep @snapshots
-# 5. mv /mnt/@ /mnt/@.broken
-# 6. btrfs subvolume snapshot /mnt/@snapshots/N/snapshot /mnt/@
-# 7. umount /mnt && reboot
-# 8. Select "Previous Kernel" at Limine menu if needed
-# 9. After confirming: delete @.broken
 ```
 
 ---
@@ -2113,16 +1443,16 @@ systemctl list-timers --all | grep -E 'snapper|fstrim|scrub' # All relevant time
 ┌──────────────────────────────────────────────────────────────────────┐
 │                         UEFI Firmware                                │
 │                              │                                       │
-│                     ┌────────▼────────┐                              │
-│                     │  Limine (ESP)   │                              │
-│                     │  /boot          │                              │
-│                     │  ├── limine.conf│                              │
-│                     │  ├── vmlinuz-linux                             │
-│                     │  ├── vmlinuz-linux-previous                    │
-│                     │  ├── initramfs-linux.img                       │
-│                     │  ├── initramfs-linux-previous.img              │
-│                     │  └── EFI/BOOT/BOOTX64.EFI                      │
-│                     └────────┬────────┘                              │
+│                     ┌────────▼─────────────────────────────┐         │
+│                     │  Limine (ESP)                        │         │
+│                     │  /boot                               │         │
+│                     │  ├── limine.conf                     │         │
+│                     │  ├── vmlinuz-linux                   │         │
+│                     │  ├── vmlinuz-linux-previous          │         │
+│                     │  ├── initramfs-linux.img             │         │
+│                     │  ├── initramfs-linux-previous.img    │         │
+│                     │  └── EFI/BOOT/BOOTX64.EFI            │         │
+│                     └────────┬─────────────────────────────┘         │
 │                              │ rd.luks.name=UUID=cryptroot           │
 │                     ┌────────▼────────┐                              │
 │                     │   LUKS2 Layer   │                              │
@@ -2136,22 +1466,21 @@ systemctl list-timers --all | grep -E 'snapper|fstrim|scrub' # All relevant time
 │  Snapshotted:│  @ ──────────► /              │                       │
 │              │  @home ──────► /home          │                       │
 │              │                               │                       │
-│  Excluded:   │  @snapshots ─► /.snapshots    │ ◄── Snapper metadata  │
-│  (no snapshot│  @home_snap ─► /home/.snap    │ ◄── Snapper metadata  │
+│  Excluded:   │  @snapshots ─► /.snapshots    │ ◄── Future metadata   │
+│  (no snapshot│  @home_snap ─► /home/.snap    │ ◄── Future metadata   │
 │   bloat)     │  @var_log ──► /var/log        │ ◄── Logs              │
-│              │  @var_cache ► /var/cache       │ ◄── Pacman cache     │
-│              │  @var_tmp ──► /var/tmp         │ ◄── Temp files       │
-│              │  @var_lib_   ► /var/lib/       │ ◄── VM disk images   │
-│              │    libvirt      libvirt        │                      │
-│              │  @swap ─────► /swap            │ ◄── NOCOW swap file  │
+│              │  @var_cache ► /var/cache      │ ◄── Pacman cache      │
+│              │  @var_tmp ──► /var/tmp        │ ◄── Temp files        │
+│              │  @var_lib_   ► /var/lib/      │ ◄── VM disk images    │
+│              │    libvirt      libvirt       │                       │
+│              │  @swap ─────► /swap           │ ◄── NOCOW swap file   │
 │              │                               │                       │
 │  Swap:       │  ZRAM (priority 100)          │ ◄── Primary swap      │
-│              │  /swap/swapfile (priority 10)  │ ◄── Fallback swap    │
+│              │  /swap/swapfile (priority 10) │ ◄── Fallback swap     │
 │              └───────────────────────────────┘                       │
 │                                                                      │
-│  Pacman hooks:  50-kernel-backup.hook  ◄── Pre-upgrade kernel save   │
-│                 limine-update.hook     ◄── Sync EFI binary           │
-│                 snap-pac (zz-snap-pac) ◄── Pre/post snapshots        │
+│  Pacman hooks: limine-update.hook     ◄── Sync EFI binary            │
+│                                                                      │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -2169,8 +1498,6 @@ systemctl enable NetworkManager.service tlp.service udisks2.service \
 # TLP masks (Step 29, during chroot)
 systemctl mask systemd-rfkill.service systemd-rfkill.socket
 
-# Snapper cleanup (Step 38, after first boot)
-sudo systemctl enable --now snapper-cleanup.timer
 ```
 
 ---
@@ -2248,53 +1575,10 @@ sudo systemctl enable --now snapper-cleanup.timer
 > # Compare with UUIDs in fstab
 > ```
 
-> [!note]- **Snapper error: "No snapper config found"**
-> ```bash
-> ls /etc/snapper/configs/
-> sudo snapper list-configs
->
-> # If configs are missing, recreate — redo Step 33 entirely
-> ```
-
-> [!note]- **Snapshots using too much disk space**
-> ```bash
-> sudo btrfs filesystem usage /
-> sudo snapper -c root cleanup number
-> sudo snapper -c root list
-> sudo snapper -c root delete <number>
-> ```
-
-> [!note]- **Snapshot subvolumes nested incorrectly**
-> ```bash
-> # Make sure the mount exists
-> sudo mkdir -p /mnt/btrfs-root
-> # Mount top-level to check
-> sudo mount -o subvolid=5 /dev/mapper/cryptroot /mnt/btrfs-root
-> sudo btrfs subvolume list /mnt/btrfs-root
->
-> # @snapshots should be at TOP LEVEL (top level 5), NOT nested under @
-> # Correct:  ID 258 gen ... top level 5 path @snapshots
-> # Wrong:    ID 258 gen ... top level 256 path @/.snapshots
->
-> sudo umount /mnt/btrfs-root
->
-> # If wrong, redo Step 33 (delete nested, remount top-level)
-> ```
-
-> [!note]- **Previous kernel entry doesn't work**
-> The "Previous Kernel" Limine entry only works **after** the first kernel upgrade. Before that, the backup files (`vmlinuz-linux-previous`, `initramfs-linux-previous.img`) don't exist. Run a kernel update (`sudo pacman -Syu`) and verify the files were created:
-> ```bash
-> ls -la /boot/vmlinuz-linux-previous /boot/initramfs-linux-previous.img
-> ```
-
 ---
 
 > [!tip] **Installation complete.** Your Arch Linux system has:
 > - ✅ Full-disk LUKS2 encryption
 > - ✅ BTRFS with 9 granular subvolumes (libvirt isolated)
-> - ✅ Limine bootloader with 3 boot entries (normal, fallback, previous kernel)
-> - ✅ Automatic pre/post snapshots on every pacman operation
-> - ✅ Kernel backup safety net for safe rollbacks
-> - ✅ Two rollback methods (running system undochange, live USB full replacement)
+> - ✅ Limine bootloader
 > - ✅ ZRAM primary swap + disk-based fallback swap
-> - ✅ Automatic snapshot cleanup with predictable count-based retention
