@@ -17,6 +17,8 @@ declare -ar DEFAULT_BINARIES=(
 
 #    "/usr/bin/powertop"
     "/usr/bin/papirus-folders"
+    "~/user_scripts/btrfs_snapshots/cc/04_dusky_snapshot_manager.py"
+    "~/user_scripts/btrfs_snapshots/cc/bash_wrapper_for_cc.sh"
 )
 
 declare -r SCRIPT_PATH="${BASH_SOURCE[0]}"
@@ -587,7 +589,7 @@ main() {
     parse_cli "$@"
     auto_elevate "$@"
 
-    require_commands visudo sha256sum mktemp flock mv chmod chown cmp id grep rm
+    require_commands visudo sha256sum mktemp flock mv chmod chown cmp id grep rm getent
 
     [[ -d "${SUDOERS_DIR}" ]] || fail "CRITICAL: ${SUDOERS_DIR} does not exist."
     [[ -w "${SUDOERS_DIR}" ]] || fail "CRITICAL: ${SUDOERS_DIR} is not writable."
@@ -597,6 +599,10 @@ main() {
     local target_user
     target_user="$(resolve_target_user "${REQUESTED_USER}")"
     validate_target_user "${target_user}"
+
+    # Fetch the actual absolute home directory of the target user
+    local user_home
+    user_home="$(getent passwd "${target_user}" | cut -d: -f6)"
 
     local -a execution_queue=("${DEFAULT_BINARIES[@]}")
     if (( ${#CLI_BINARIES[@]} > 0 )); then
@@ -622,9 +628,16 @@ main() {
     local rc=0
     local -i failure_count=0
     local -i skipped_count=0
+    local resolved_bin
 
     for bin in "${unique_queue[@]}"; do
-        if process_binary "${bin}" "${target_user}"; then
+        # Dynamically replace a leading literal ~/ with the user's absolute home directory
+        resolved_bin="${bin}"
+        if [[ "${resolved_bin}" == "~/"* ]]; then
+            resolved_bin="${user_home}/${resolved_bin#"~/"}"
+        fi
+
+        if process_binary "${resolved_bin}" "${target_user}"; then
             :
         else
             rc=$?

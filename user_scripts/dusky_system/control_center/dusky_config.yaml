@@ -51,7 +51,7 @@ pages:
           type: exec
           command: $HOME/user_scripts/theme_matugen/theme_ctl.sh set --mode light
           terminal: false
-    - type: button
+    - type: grid_card
       properties:
         title: Reload CC
         icon: system-reboot-symbolic
@@ -76,7 +76,7 @@ pages:
         type: exec
         command: kitty --class update_dusky.sh --title "System Updater" --hold sh -c "$HOME/user_scripts/update_dusky/update_dusky.sh"
         terminal: false
-    - type: button
+    - type: grid_card
       properties:
         title: Power
         icon: system-log-out-symbolic
@@ -231,6 +231,111 @@ pages:
         type: exec
         command: kitty --class ORCHESTRA.sh --hold sh -c $HOME/user_scripts/arch_setup_scripts/ORCHESTRA.sh
         terminal: false
+
+
+  - type: section
+    properties:
+      title: System Recovery & Backup
+      icon: ''
+      description: ''
+    items:
+    - type: navigation
+      properties:
+        title: Btrfs Snapshot Manager
+        description: Create and restore system and data states
+        icon: document-revert-symbolic
+      layout:
+        - type: section
+          properties:
+            title: Create Snapshots
+            description: Type a description and hit Create.
+          items:
+            - type: entry
+              properties:
+                title: "Create Combined Snapshot"
+                description: "Takes a synced snapshot of both Root and Home."
+                icon: camera-photo-symbolic
+                button_text: "Create"
+              on_action:
+                type: exec
+                # Executes both sequentially. The Python script will inject the quoted description into {value}.
+                command: "sudo ~/user_scripts/btrfs_snapshots/cc/04_dusky_snapshot_manager.py -c root -C {value} && sudo ~/user_scripts/btrfs_snapshots/cc/04_dusky_snapshot_manager.py -c home -C {value}"
+            - type: entry
+              properties:
+                title: "Create Root Snapshot"
+                description: "Takes a snapshot of the root filesystem only."
+                icon: drive-harddisk-system-symbolic
+                button_text: "Create"
+              on_action:
+                type: exec
+                command: "sudo ~/user_scripts/btrfs_snapshots/cc/04_dusky_snapshot_manager.py -c root -C {value}"
+            - type: entry
+              properties:
+                title: "Create Home Snapshot"
+                description: "Takes a snapshot of your personal data only."
+                icon: user-home-symbolic
+                button_text: "Create"
+              on_action:
+                type: exec
+                command: "sudo ~/user_scripts/btrfs_snapshots/cc/04_dusky_snapshot_manager.py -c home -C {value}"
+
+        - type: section
+          properties:
+            title: Full System Recovery
+            description: Safest option. Reverts Root and Home simultaneously to keep configs and data synced.
+          items:
+            - type: async_selector
+              properties:
+                title: "Combined Recovery (Root + Home)"
+                description: "Select an exact timestamp. Requires immediate reboot."
+                icon: system-reboot-symbolic
+                list_command: "sudo ~/user_scripts/btrfs_snapshots/cc/04_dusky_snapshot_manager.py -c root -l --json"
+                display_template: "[{date}] {description}"
+                button_text: "Restore Both"
+                style: "destructive"
+                sort: "reverse"
+                auto_refresh: true
+                display_max_length: 45
+              on_action:
+                type: "exec"
+                command: "sudo ~/user_scripts/btrfs_snapshots/cc/bash_wrapper_for_cc.sh '{raw_date}' '{description}'"
+
+        - type: section
+          properties:
+            title: Advanced Recovery (Partial)
+            description: Revert specific subvolumes individually.
+          items:
+            - type: async_selector
+              properties:
+                title: "System Recovery (Root Only)"
+                description: "Revert pacman updates or system configs. Requires reboot."
+                icon: drive-harddisk-system-symbolic
+                list_command: "sudo ~/user_scripts/btrfs_snapshots/cc/04_dusky_snapshot_manager.py -c root -l --json"
+                display_template: "[{id}] {date} | {description}"
+                button_text: "Restore Root"
+                style: "destructive"
+                sort: "reverse"
+                auto_refresh: true
+                display_max_length: 45
+              on_action:
+                type: "exec"
+                command: "sudo ~/user_scripts/btrfs_snapshots/cc/04_dusky_snapshot_manager.py -c root -R {id}"
+            - type: async_selector
+              properties:
+                title: "Data Recovery (Home Only)"
+                description: "Revert personal files. Hot-reloads instantly (no reboot)."
+                icon: user-home-symbolic
+                list_command: "sudo ~/user_scripts/btrfs_snapshots/cc/04_dusky_snapshot_manager.py -c home -l --json"
+                display_template: "[{id}] {date} | {description}"
+                button_text: "Restore Home"
+                style: "suggested"
+                sort: "reverse"
+                auto_refresh: true
+                display_max_length: 45
+              on_action:
+                type: "exec"
+                command: "sudo ~/user_scripts/btrfs_snapshots/cc/04_dusky_snapshot_manager.py -c home -R {id}"
+
   - type: section
     properties:
       title: Dusky Updates

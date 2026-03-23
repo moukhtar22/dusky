@@ -566,6 +566,15 @@ gestures {
     # TUI: Toggle [true/false] - "Swipe Forever" (Don't clamp at neighbors)
     workspace_swipe_forever = false
 }
+
+# -------------------------------------------------------------------------------------------------
+# 7. TABLET CONFIGURATION
+# -------------------------------------------------------------------------------------------------
+# device {
+#    name = wacom-intuos-s-2-pen
+#    output = DP-1  # <-- Change this to your monitor name (e.g., eDP-1, DP-1)
+# }
+
 EOF
             ;;
         *)

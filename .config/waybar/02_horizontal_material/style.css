@@ -25,6 +25,7 @@ tooltip {
 #clock,
 #custom-countdown,
 #backlight,
+#battery,
 #pulseaudio.output,
 #pulseaudio.input,
 #custom-snip,
@@ -107,6 +108,7 @@ tooltip {
 
 /* Modules: Hover Effects */
 #backlight:hover,
+#battery:hover,
 #cava:hover,
 #clock:hover,
 #mpris:hover,

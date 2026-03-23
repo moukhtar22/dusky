@@ -17,10 +17,11 @@ declare -a ACTIVE_TEMP_MOUNTS=()
 declare -a ACTIVE_TEMP_FILES=()
 declare -a ROLLBACK_CMDS=()
 SUDO_PID=""
+ROLLBACK_ON_EXIT=false
 
 cleanup() {
     local cmd mnt f
-    if (( ${#ROLLBACK_CMDS[@]} > 0 )); then
+    if [[ "$ROLLBACK_ON_EXIT" == true ]] && (( ${#ROLLBACK_CMDS[@]} > 0 )); then
         warn "Executing transactional rollbacks..."
         for cmd in "${ROLLBACK_CMDS[@]}"; do eval "$cmd" 2>/dev/null || true; done
     fi
@@ -35,12 +36,12 @@ cleanup() {
 }
 
 trap_exit() { cleanup; }
-trap_interrupt() { cleanup; printf '\n\033[1;31m[FATAL]\033[0m Script interrupted.\n' >&2; exit 130; }
-trap 'printf "\n\033[1;31m[FATAL]\033[0m Script failed at line %d. Command: %s\n" "$LINENO" "$BASH_COMMAND" >&2; cleanup' ERR
+trap_interrupt() { ROLLBACK_ON_EXIT=true; cleanup; printf '\n\033[1;31m[FATAL]\033[0m Script interrupted.\n' >&2; exit 130; }
+trap 'ROLLBACK_ON_EXIT=true; printf "\n\033[1;31m[FATAL]\033[0m Script failed at line %d. Command: %s\n" "$LINENO" "$BASH_COMMAND" >&2; cleanup' ERR
 trap trap_exit EXIT
 trap trap_interrupt INT TERM HUP
 
-fatal() { printf '\033[1;31m[FATAL]\033[0m %s\n' "$1" >&2; exit 1; }
+fatal() { ROLLBACK_ON_EXIT=true; printf '\033[1;31m[FATAL]\033[0m %s\n' "$1" >&2; exit 1; }
 info() { printf '\033[1;32m[INFO]\033[0m %s\n' "$1"; }
 warn() { printf '\033[1;33m[WARN]\033[0m %s\n' "$1" >&2; }
 
@@ -82,14 +83,14 @@ atomic_write() {
 load_mount_info() {
     local target="$1"
     [[ -v CACHE_MNT_SOURCE["$target"] ]] && return 0
-    
+
     local findmnt_out source uuid opts fstab_opts
     findmnt_out="$(findmnt -n -e -o SOURCE,UUID,OPTIONS -M "$target" 2>/dev/null || true)"
     [[ -n "$findmnt_out" ]] || fatal "Could not determine mount info for $target"
-    
+
     read -r source uuid opts <<< "$findmnt_out"
     source="${source%%\[*}"
-    
+
     fstab_opts="$(findmnt -s -n -e -o OPTIONS -M "$target" 2>/dev/null || true)"
     [[ -n "$fstab_opts" ]] && opts="$fstab_opts"
 
@@ -97,7 +98,7 @@ load_mount_info() {
         uuid="$(sudo blkid -s UUID -o value "$source" 2>/dev/null || true)"
     fi
     [[ -n "$uuid" ]] || fatal "Could not determine UUID for $target"
-    
+
     CACHE_MNT_SOURCE["$target"]="$source"
     CACHE_MNT_UUID["$target"]="$uuid"
     CACHE_MNT_OPTS["$target"]="$opts"
@@ -142,7 +143,7 @@ verify_snapshots_mount() {
     local snap_info snap_uuid mounted_opts mounted_subvol
     snap_info="$(findmnt -n -e -o UUID,OPTIONS -M "$mount_target" 2>/dev/null || true)"
     read -r snap_uuid mounted_opts <<< "$snap_info"
-    
+
     [[ "$snap_uuid" == "$target_uuid" ]] || fatal "${mount_target} filesystem UUID mismatch."
     mounted_subvol="$(extract_subvol "$mounted_opts" || true)"
     [[ "${mounted_subvol#/}" == "${expected_subvol#/}" ]] || fatal "${mount_target} subvol mismatch."
@@ -152,7 +153,13 @@ verify_snapshots_mount() {
 }
 
 install_packages() { sudo pacman -S --needed --noconfirm snapper btrfs-progs; }
-post_install_checks() { require_cmd btrfs; require_cmd snapper; require_cmd systemctl; }
+
+post_install_checks() {
+    require_cmd btrfs
+    require_cmd snapper
+    require_cmd systemctl
+    path_is_btrfs_subvolume "/home" || fatal "/home is not a Btrfs subvolume."
+}
 
 ensure_snapper_config() {
     local config_name="$1" config_path="$2"
@@ -230,7 +237,7 @@ ensure_fstab_entry_for_snapshots() {
         {
             curr_mp = $2
             if (curr_mp != "/") sub(/\/+$/, "", curr_mp)
-            
+
             if (curr_mp == mp) {
                 if (!done) { print newline; done = 1 }
                 next
@@ -256,7 +263,7 @@ mount_snapshots() {
     sudo mkdir -p "$mount_target"
     mountpoint -q "$mount_target" || sudo mount "$mount_target"
     verify_snapshots_mount "$mount_target" "$expected_subvol" "$base_target"
-    ROLLBACK_CMDS=() 
+    ROLLBACK_CMDS=()
 }
 
 verify_snapper_works() {
@@ -308,5 +315,4 @@ execute "Mount /home/.snapshots" mount_snapshots "/home/.snapshots" "@home_snaps
 execute "Verify Snapper home" verify_snapper_works "home"
 execute "Tune Snapper home" tune_snapper "home"
 
-# FIXED: Function declaration moved outside the execute call
 execute "Apply Global Btrfs Settings" apply_global_btrfs_tuning

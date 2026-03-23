@@ -17,6 +17,7 @@ import sys
 import uuid
 import fcntl
 import unicodedata
+import base64
 from pathlib import Path
 import logging
 
@@ -53,9 +54,9 @@ LOCK_FILE = Path("/tmp/dusky_kokoro.lock")
 # --- VOICE SETUP ---
 # Handled safely by Dusky TUI. Do not use multi-line dicts here.
 BLEND_VOICES = True
-VOICE_1 = "af_sarah"
+VOICE_1 = "af_heart"
 VOICE_1_WEIGHT = 0.4
-VOICE_2 = "af_nicole"
+VOICE_2 = "af_bella"
 
 if BLEND_VOICES:
     # Uses round() to prevent Python floating point errors (e.g. 0.79999999)
@@ -140,6 +141,16 @@ ALLOWED_PUNCTUATION = frozenset({
 def clean_text(text):
     text = RE_MARKDOWN_LINK.sub(r"\1", text)
     text = RE_URL.sub("Link", text)
+    
+    # --- Structural Preservation ---
+    # Convert double newlines (paragraphs) to sentence boundaries
+    text = re.sub(r'\n\s*\n', '. ', text)
+    # Convert Markdown list items (-, *, 1.) to sentence boundaries
+    text = re.sub(r'\n\s*[-*]\s+', '. ', text)
+    text = re.sub(r'\n\s*\d+\.\s+', '. ', text)
+    # Convert remaining single newlines (hard wraps) to spaces
+    text = text.replace('\n', ' ')
+
     if STRIP_SPECIAL_CHARS:
         text = "".join(
             ch if (
@@ -156,19 +167,35 @@ def smart_split(text):
     if not text:
         return []
     chunks = RE_SENTENCE_SPLIT.split(text)
-    if len(chunks) == 1:
-        return [text.strip()] if text.strip() else []
     sentences = []
-    for i in range(0, len(chunks) - 1, 2):
-        sentence = chunks[i].strip()
-        punctuation = chunks[i + 1].strip() if i + 1 < len(chunks) else ""
-        if sentence:
-            sentences.append(f"{sentence}{punctuation}")
-    if len(chunks) % 2 != 0:
-        trailing = chunks[-1].strip()
-        if trailing:
-            sentences.append(trailing)
-    return sentences
+    
+    if len(chunks) == 1:
+        sentences = [text.strip()] if text.strip() else []
+    else:
+        for i in range(0, len(chunks) - 1, 2):
+            sentence = chunks[i].strip()
+            punctuation = chunks[i + 1].strip() if i + 1 < len(chunks) else ""
+            if sentence:
+                sentences.append(f"{sentence}{punctuation}")
+        if len(chunks) % 2 != 0:
+            trailing = chunks[-1].strip()
+            if trailing:
+                sentences.append(trailing)
+
+    # --- Hard Fallback: Prevent ONNX 510-Token Index Crash ---
+    MAX_CHARS = 400
+    safe_sentences = []
+    for sent in sentences:
+        while len(sent) > MAX_CHARS:
+            split_idx = sent.rfind(" ", 0, MAX_CHARS)
+            if split_idx == -1:
+                split_idx = MAX_CHARS
+            safe_sentences.append(sent[:split_idx].strip())
+            sent = sent[split_idx:].strip()
+        if sent:
+            safe_sentences.append(sent)
+            
+    return safe_sentences
 
 
 def generate_filename_slug(text):
@@ -538,6 +565,13 @@ class FifoReader(threading.Thread):
         text = text.strip()
         if not text:
             return
+
+        if text.startswith("B64:"):
+            try:
+                text = base64.b64decode(text[4:]).decode("utf-8", errors="ignore").strip()
+            except Exception as e:
+                logger.error(f"Base64 decode failed: {e}")
+                return
 
         h = hashlib.md5(text.encode("utf-8")).hexdigest()
         now = time.monotonic()

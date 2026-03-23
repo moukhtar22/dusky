@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ==============================================================================
-#  UNIVERSAL DRIVE MANAGER (FSTAB NATIVE)
+#  UNIVERSAL DRIVE MANAGER (FSTAB NATIVE) - v3 (Master)
 #  ------------------------------------------------------------------------------
 #  Usage: ./drive_manager.sh [action] [target]
 #  Example: ./drive_manager.sh unlock browser
@@ -43,7 +43,7 @@ set -o pipefail
 # DRIVES["name"]="SIMPLE|/mnt/path|PARTITION_UUID||"
 
 # ------------------------------------------------------------------------------
-#
+
 declare -A DRIVES
 
 # --- PROTECTED DRIVES ---
@@ -68,8 +68,9 @@ readonly SETTLE_DELAY=1
 readonly SCRIPT_NAME="${0##*/}"
 readonly LOCK_FILE="/tmp/.drive_manager.lock"
 
-# Global config variables (set by validate_config)
+# Global config variables
 declare -g TYPE="" MOUNTPOINT="" OUTER_UUID="" INNER_UUID="" HINT=""
+declare -gi LOCK_FD=-1
 
 # ------------------------------------------------------------------------------
 #  COLOR HANDLING
@@ -96,47 +97,69 @@ print_hint() { printf '%s[HINT]%s  %s\n' "$C_YELLOW" "$C_RESET" "$1"; }
 debug()      { [[ "${DEBUG:-0}" == "1" ]] && printf '%s[DEBUG]%s %s\n' "$C_WHITE" "$C_RESET" "$1" >&2; }
 
 # ------------------------------------------------------------------------------
-#  CLEANUP & SIGNAL HANDLING
+#  CLEANUP & SIGNAL HANDLING (Kernel-level flock)
 # ------------------------------------------------------------------------------
 cleanup() {
-    # Remove lock file if we own it
-    [[ -f "$LOCK_FILE" ]] && rm -f "$LOCK_FILE" 2>/dev/null
+    if (( LOCK_FD >= 0 )); then
+        flock -u "$LOCK_FD" 2>/dev/null || true
+        exec {LOCK_FD}>&- 2>/dev/null || true
+        LOCK_FD=-1
+    fi
 }
 trap cleanup EXIT
 
 acquire_lock() {
-    # Simple file-based locking to prevent concurrent execution
-    if [[ -f "$LOCK_FILE" ]]; then
-        local pid
-        pid=$(<"$LOCK_FILE")
-        if kill -0 "$pid" 2>/dev/null; then
+    exec {LOCK_FD}>>"$LOCK_FILE" || {
+        err "Could not open lock file: $LOCK_FILE"
+        exit 1
+    }
+
+    if ! flock -n "$LOCK_FD"; then
+        local pid=""
+        read -r pid < "$LOCK_FILE" 2>/dev/null || pid=""
+        exec {LOCK_FD}>&- 2>/dev/null || true
+        LOCK_FD=-1
+
+        if [[ "$pid" =~ ^[0-9]+$ ]]; then
             err "Another instance is running (PID: $pid)"
-            exit 1
+        else
+            err "Another instance is running"
         fi
-        # Stale lock file, remove it
-        rm -f "$LOCK_FILE"
+        exit 1
     fi
-    printf '%s' "$$" > "$LOCK_FILE"
+
+    if ! printf '%s\n' "$$" > "$LOCK_FILE"; then
+        err "Could not write lock metadata to: $LOCK_FILE"
+        exit 1
+    fi
 }
 
 # ------------------------------------------------------------------------------
 #  HELPER FUNCTIONS
 # ------------------------------------------------------------------------------
 check_dependencies() {
+    local action="$1"
     local missing=()
-    local deps=(
-        "udisksctl"
-        "mountpoint"
-        "lsblk"
-        "pgrep"
-        "sync"
-        "sudo"
-        "grep"
-        "sleep"
-    )
+    local -a deps=()
+    local cmd
+
+    case "$action" in
+        unlock)
+            deps=(udisksctl mountpoint findmnt pgrep sudo sleep flock)
+            ;;
+        lock)
+            deps=(udisksctl mountpoint findmnt lsblk grep sync sudo sleep flock)
+            ;;
+        status)
+            deps=(findmnt sort)
+            ;;
+        *)
+            return 0
+            ;;
+    esac
 
     for cmd in "${deps[@]}"; do
-        if ! command -v "$cmd" &>/dev/null; then
+        if ! command -v "$cmd" >/dev/null 2>&1; then
             missing+=("$cmd")
         fi
     done
@@ -148,15 +171,48 @@ check_dependencies() {
 }
 
 check_polkit_agent() {
-    local -r polkit_pattern='polkit-gnome-authentication-agent|polkit-kde-authentication-agent|lxqt-policykit|mate-polkit|hyprpolkitagent|polkit-agent-helper'
-    pgrep -f "$polkit_pattern" >/dev/null 2>&1
+    local -r polkit_pattern='gnome-shell|polkit-gnome-authentication-agent-1|polkit-kde-authentication-agent-1|lxqt-policykit|lxqt-policykit-agent|mate-polkit|hyprpolkitagent|xfce-polkit'
+    pgrep -f -- "$polkit_pattern" >/dev/null 2>&1
 }
 
 is_block_device_ready() {
     local device="$1"
-    # Check both that the path exists AND it's a valid block device
-    # This handles broken symlinks in /dev/disk/by-uuid/
     [[ -L "$device" && -b "$device" ]] || [[ -b "$device" ]]
+}
+
+resolve_device_path() {
+    local device="$1"
+    [[ -e "$device" ]] || return 1
+    readlink -f -- "$device"
+}
+
+mounted_source_for_target() {
+    findmnt -no SOURCE --target "$1" 2>/dev/null
+}
+
+mounted_uuid_for_target() {
+    findmnt -no UUID --target "$1" 2>/dev/null
+}
+
+is_expected_mounted_at() {
+    local device="$1"
+    local expected_uuid="$2"
+    local target="$3"
+    local expected_source="" actual_source="" actual_uuid=""
+
+    if expected_source=$(resolve_device_path "$device" 2>/dev/null) &&
+       actual_source=$(mounted_source_for_target "$target" 2>/dev/null); then
+        if [[ "$actual_source" == /dev/* && -e "$actual_source" ]]; then
+            actual_source=$(readlink -f -- "$actual_source" 2>/dev/null || printf '%s\n' "$actual_source")
+        fi
+
+        if [[ "$actual_source" == "$expected_source" ]]; then
+            return 0
+        fi
+    fi
+
+    actual_uuid=$(mounted_uuid_for_target "$target" 2>/dev/null || true)
+    [[ -n "$actual_uuid" && "${actual_uuid^^}" == "${expected_uuid^^}" ]]
 }
 
 show_usage() {
@@ -182,10 +238,9 @@ EOF
 }
 
 show_status() {
-    local name type mountpoint
+    local name type mountpoint outer_uuid inner_uuid expected_dev expected_uuid
     local -a sorted_names
 
-    # Use readarray with process substitution for safe sorting
     readarray -t sorted_names < <(printf '%s\n' "${!DRIVES[@]}" | sort)
 
     printf '\n%s%-14s %-10s %-8s %s%s\n' \
@@ -193,9 +248,17 @@ show_status() {
     printf '%s\n' "------------------------------------------------------"
 
     for name in "${sorted_names[@]}"; do
-        IFS='|' read -r type mountpoint _ _ _ <<< "${DRIVES[$name]}"
+        IFS='|' read -r type mountpoint outer_uuid inner_uuid _ <<< "${DRIVES[$name]}"
 
-        if mountpoint -q "$mountpoint" 2>/dev/null; then
+        if [[ "$type" == "PROTECTED" ]]; then
+            expected_dev="/dev/disk/by-uuid/$inner_uuid"
+            expected_uuid="$inner_uuid"
+        else
+            expected_dev="/dev/disk/by-uuid/$outer_uuid"
+            expected_uuid="$outer_uuid"
+        fi
+
+        if is_expected_mounted_at "$expected_dev" "$expected_uuid" "$mountpoint"; then
             printf '%s●%s %-13s %-10s %-8s %s\n' \
                 "$C_GREEN" "$C_RESET" "$name" "$type" "mounted" "$mountpoint"
         else
@@ -203,23 +266,21 @@ show_status() {
                 "$C_RED" "$C_RESET" "$name" "$type" "unmounted" "$mountpoint"
         fi
     done
+
     printf '\n'
 }
 
 validate_config() {
     local target="$1"
 
-    # Check if key exists in associative array
     if [[ -z "${DRIVES[$target]+_}" ]]; then
         err "Drive '$target' not found in configuration."
         printf 'Available drives: %s\n' "${!DRIVES[*]}" >&2
         exit 1
     fi
 
-    # Parse configuration into global variables
     IFS='|' read -r TYPE MOUNTPOINT OUTER_UUID INNER_UUID HINT <<< "${DRIVES[$target]}"
 
-    # Validate TYPE
     if [[ -z "$TYPE" ]]; then
         err "Configuration error: TYPE is empty for '$target'"
         exit 1
@@ -230,26 +291,22 @@ validate_config() {
         exit 1
     fi
 
-    # Validate MOUNTPOINT
     if [[ -z "$MOUNTPOINT" ]]; then
         err "Configuration error: MOUNTPOINT is empty for '$target'"
         exit 1
     fi
 
-    # Verify mountpoint directory exists
     if [[ ! -d "$MOUNTPOINT" ]]; then
         err "Mountpoint directory does not exist: $MOUNTPOINT"
         err "Create it with: sudo mkdir -p '$MOUNTPOINT'"
         exit 1
     fi
 
-    # Validate OUTER_UUID
     if [[ -z "$OUTER_UUID" ]]; then
         err "Configuration error: OUTER_UUID is empty for '$target'"
         exit 1
     fi
 
-    # PROTECTED drives require INNER_UUID
     if [[ "$TYPE" == "PROTECTED" && -z "$INNER_UUID" ]]; then
         err "Configuration error: PROTECTED drives require INNER_UUID for '$target'"
         exit 1
@@ -263,18 +320,16 @@ wait_for_device() {
     local timeout="$2"
     local elapsed=0
 
-    # Try udevadm settle first for event-based waiting
     if command -v udevadm &>/dev/null; then
         udevadm settle --timeout="$timeout" 2>/dev/null || true
     fi
 
-    # Poll as verification/fallback
     while ! is_block_device_ready "$device"; do
         if ((elapsed >= timeout)); then
             return 1
         fi
         sleep 1
-        ((++elapsed))  # Pre-increment avoids exit code issue with set -e
+        ((++elapsed))
     done
 
     return 0
@@ -285,48 +340,56 @@ wait_for_device() {
 # ------------------------------------------------------------------------------
 do_unlock() {
     local target="$1"
-    local outer_dev inner_dev mount_dev
+    local outer_dev="" inner_dev="" mount_dev="" expected_uuid="" mounted_source=""
     local unlock_attempts=0
-    local unlock_output
-
-    log "Starting unlock process for '$target'..."
-
-    # Check if already mounted
-    if mountpoint -q "$MOUNTPOINT" 2>/dev/null; then
-        success "'$target' is already mounted at $MOUNTPOINT"
-        return 0
-    fi
+    local unlock_output=""
+    local mount_error=""
 
     if [[ "$TYPE" == "PROTECTED" ]]; then
         outer_dev="/dev/disk/by-uuid/$OUTER_UUID"
         inner_dev="/dev/disk/by-uuid/$INNER_UUID"
+        mount_dev="$inner_dev"
+        expected_uuid="$INNER_UUID"
+    else
+        mount_dev="/dev/disk/by-uuid/$OUTER_UUID"
+        expected_uuid="$OUTER_UUID"
+    fi
 
-        # Check if physical disk exists
+    log "Starting unlock process for '$target'..."
+
+    if mountpoint -q "$MOUNTPOINT" 2>/dev/null; then
+        mounted_source=$(mounted_source_for_target "$MOUNTPOINT" || true)
+
+        if is_expected_mounted_at "$mount_dev" "$expected_uuid" "$MOUNTPOINT"; then
+            success "'$target' is already mounted at $MOUNTPOINT"
+            return 0
+        fi
+
+        err "Mountpoint $MOUNTPOINT is already occupied by ${mounted_source:-another filesystem}"
+        exit 1
+    fi
+
+    if [[ "$TYPE" == "PROTECTED" ]]; then
         if ! is_block_device_ready "$outer_dev"; then
             err "Physical drive not found (UUID: $OUTER_UUID)"
             err "Is the drive connected? Check with: lsblk -f"
             exit 1
         fi
 
-        # Check if already unlocked
         if is_block_device_ready "$inner_dev"; then
             log "Container already unlocked (filesystem found)"
         else
             log "Unlocking encrypted container..."
 
-            # Display hint if available
             [[ -n "$HINT" ]] && print_hint "$HINT"
 
-            # Verify polkit agent is running
             if ! check_polkit_agent; then
                 err "No Polkit authentication agent detected"
-                err "Start one with: /usr/lib/polkit-gnome/polkit-gnome-authentication-agent-1 &"
+                err "Start it by running: systemctl --user start hyprpolkitagent.service"
                 exit 1
             fi
 
-            # Unlock with retry limit
             while true; do
-                # Capture both stdout and stderr separately
                 if unlock_output=$(udisksctl unlock --block-device "$outer_dev" 2>&1); then
                     log "$unlock_output"
                     break
@@ -348,7 +411,6 @@ do_unlock() {
                 [[ -n "$HINT" ]] && print_hint "$HINT"
             done
 
-            # Wait for filesystem to appear (race condition fix)
             log "Waiting for filesystem to initialize..."
             if ! wait_for_device "$inner_dev" "$FILESYSTEM_TIMEOUT"; then
                 err "Timeout waiting for filesystem (UUID: $INNER_UUID)"
@@ -356,12 +418,7 @@ do_unlock() {
                 exit 1
             fi
         fi
-
-        mount_dev="$inner_dev"
     else
-        # SIMPLE drive
-        mount_dev="/dev/disk/by-uuid/$OUTER_UUID"
-
         if ! is_block_device_ready "$mount_dev"; then
             err "Drive not found (UUID: $OUTER_UUID)"
             err "Is the drive connected? Check with: lsblk -f"
@@ -369,26 +426,32 @@ do_unlock() {
         fi
     fi
 
-    # Mount the drive
     log "Mounting to $MOUNTPOINT..."
 
-    local mount_error
-
-    # Try udisksctl first (uses polkit, respects fstab)
     if mount_error=$(udisksctl mount --block-device "$mount_dev" 2>&1); then
-        success "'$target' mounted at $MOUNTPOINT"
-        return 0
+        if is_expected_mounted_at "$mount_dev" "$expected_uuid" "$MOUNTPOINT"; then
+            success "'$target' mounted at $MOUNTPOINT"
+            return 0
+        fi
+
+        err "Device was mounted, but not at the expected mountpoint: $MOUNTPOINT"
+        err "udisksctl output: $mount_error"
+        exit 1
     fi
 
     debug "udisksctl mount failed: $mount_error"
 
-    # Fallback to sudo mount
     if mount_error=$(sudo mount "$MOUNTPOINT" 2>&1); then
-        success "'$target' mounted at $MOUNTPOINT"
-        return 0
+        if is_expected_mounted_at "$mount_dev" "$expected_uuid" "$MOUNTPOINT"; then
+            success "'$target' mounted at $MOUNTPOINT"
+            return 0
+        fi
+
+        err "Mount command returned success, but the expected device is not mounted at $MOUNTPOINT"
+        err "sudo mount output: $mount_error"
+        exit 1
     fi
 
-    # Both methods failed
     err "Mount failed with udisksctl and sudo mount"
     err "Last error: $mount_error"
     err "Check /etc/fstab entry for $MOUNTPOINT"
@@ -400,60 +463,69 @@ do_unlock() {
 # ------------------------------------------------------------------------------
 do_lock() {
     local target="$1"
-    local outer_dev inner_dev unmount_target
+    local outer_dev="" inner_dev="" unmount_target="" expected_uuid="" mounted_source=""
     local retries=0
 
     log "Starting lock process for '$target'..."
 
-    # Determine the block device being mounted (needed for udisksctl unmount)
     if [[ "$TYPE" == "PROTECTED" ]]; then
         outer_dev="/dev/disk/by-uuid/$OUTER_UUID"
         inner_dev="/dev/disk/by-uuid/$INNER_UUID"
         unmount_target="$inner_dev"
+        expected_uuid="$INNER_UUID"
     else
-        outer_dev=""  # Not used for simple drives
         unmount_target="/dev/disk/by-uuid/$OUTER_UUID"
+        expected_uuid="$OUTER_UUID"
     fi
 
-    # Unmount phase
     if mountpoint -q "$MOUNTPOINT" 2>/dev/null; then
+        mounted_source=$(mounted_source_for_target "$MOUNTPOINT" || true)
+
+        if ! is_expected_mounted_at "$unmount_target" "$expected_uuid" "$MOUNTPOINT"; then
+            err "Refusing to unmount $MOUNTPOINT because it contains ${mounted_source:-another filesystem}, not '$target'"
+            exit 1
+        fi
+
         log "Unmounting $MOUNTPOINT..."
 
-        # Sync filesystems before unmount
+        # CRITICAL SAFETY: Flush dirty buffers to disk before tearing down mounts
         sync
 
-        # 1. Try udisksctl first (polite request to Thunar/GVFS)
         if ! udisksctl unmount -b "$unmount_target" 2>/dev/null; then
-            # 2. Fallback to sudo if udisks failed (e.g., not user mounted)
             log "Udisks unmount failed, trying sudo umount..."
             if ! sudo umount "$MOUNTPOINT"; then
                 err "Unmount completely failed. Check 'lsof +f -- $MOUNTPOINT'"
                 exit 1
             fi
         fi
+
+        if mountpoint -q "$MOUNTPOINT" 2>/dev/null; then
+            err "Unmount command returned, but $MOUNTPOINT is still mounted"
+            exit 1
+        fi
+
         log "Unmount successful"
     else
         log "$MOUNTPOINT was not mounted"
     fi
 
-    # Lock phase (PROTECTED only)
     if [[ "$TYPE" == "PROTECTED" ]]; then
-        # Check if outer device still exists (wasn't physically removed)
         if [[ ! -e "$outer_dev" ]]; then
-            success "Device removed physically. Done."
+            if is_block_device_ready "$inner_dev"; then
+                err "Backing device was removed, but the decrypted mapping is still active"
+                exit 1
+            fi
+
+            success "Device removed physically and container is no longer active"
             return 0
         fi
 
-        # Give kernel/udev time to update device tree after unmount
         sleep "$SETTLE_DELAY"
 
-        # Wait for udev events to settle
-        if command -v udevadm &>/dev/null; then
+        if command -v udevadm >/dev/null 2>&1; then
             udevadm settle --timeout=5 2>/dev/null || true
         fi
 
-        # Check and lock the container
-        # We verify by checking if TYPE="crypt" exists for this device
         while lsblk -n -r -o TYPE "$outer_dev" 2>/dev/null | grep -q "crypt"; do
             log "Locking container (Attempt $((retries + 1)))..."
 
@@ -467,7 +539,6 @@ do_lock() {
             if ((retries >= LOCK_MAX_RETRIES)); then
                 err "Could not lock device after $LOCK_MAX_RETRIES attempts."
                 err "Mapper is still active. Is something else using /dev/mapper/..?"
-                # Debug info on failure
                 lsblk "$outer_dev" >&2
                 exit 1
             fi
@@ -485,7 +556,6 @@ do_lock() {
 #  MAIN
 # ------------------------------------------------------------------------------
 main() {
-    # Handle no arguments
     if [[ $# -eq 0 ]]; then
         show_usage
         exit 1
@@ -494,36 +564,31 @@ main() {
     local action="${1:-}"
     local target="${2:-}"
 
-    # Handle special actions that don't need target
     case "$action" in
         -h|--help|help)
             show_usage
             exit 0
             ;;
         status)
-            check_dependencies
+            check_dependencies "$action"
             show_status
             exit 0
             ;;
     esac
 
-    # Validate we have both action and target for lock/unlock
     if [[ -z "$target" ]]; then
         err "Missing drive name for '$action' action"
         show_usage
         exit 1
     fi
 
-    # Acquire exclusive lock for lock/unlock operations
+    check_dependencies "$action"
+
+    # Acquire exclusive kernel-level lock before state mutation
     acquire_lock
 
-    # Check dependencies
-    check_dependencies
-
-    # Validate and load config (sets TYPE, MOUNTPOINT, OUTER_UUID, INNER_UUID, HINT)
     validate_config "$target"
 
-    # Execute action
     case "$action" in
         unlock)
             do_unlock "$target"
@@ -539,7 +604,5 @@ main() {
     esac
 }
 
-# Run main with all arguments
 main "$@"
-
 exit 0

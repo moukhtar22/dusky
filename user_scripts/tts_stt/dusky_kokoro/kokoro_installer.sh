@@ -170,8 +170,8 @@ echo ":: Generating Trigger Script..."
 
 cat << EOF > "$TARGET_TRIGGER"
 #!/usr/bin/env bash
-# Dusky Kokoro Trigger V35 ($MODE edition)
-# Features: Universal HW, Robust Detection, Cold Boot Fix, Hard Kill
+# Dusky Kokoro Trigger V36 ($MODE edition)
+# Features: Universal HW, Robust Detection, Cold Boot Fix, Hard Kill, Base64 IPC
 
 readonly APP_DIR="$HOME/contained_apps/uv/dusky_kokoro"
 readonly PID_FILE="/tmp/dusky_kokoro.pid"
@@ -375,12 +375,12 @@ if [[ ! -f "\$READY_FILE" ]]; then
     fi
 fi
 
-# Send Clipboard
+# Send Clipboard via Base64 to preserve absolute formatting across the FIFO pipe
 INPUT_TEXT=\$(timeout 2 wl-paste 2>/dev/null || true)
 if [[ -n "\$INPUT_TEXT" ]]; then
-    CLEAN_TEXT=\$(printf '%s' "\$INPUT_TEXT" | tr '\n' ' ')
+    B64_TEXT=\$(printf '%s' "\$INPUT_TEXT" | base64 -w 0)
 
-    printf '%s\n' "\$CLEAN_TEXT" > "\$FIFO_PATH" &
+    printf 'B64:%s\n' "\$B64_TEXT" > "\$FIFO_PATH" &
     WRITE_PID=\$!
     
     WRITE_OK=false

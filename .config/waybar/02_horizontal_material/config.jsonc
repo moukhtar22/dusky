@@ -21,7 +21,7 @@
 
       "modules-left": ["custom/launcher", "custom/firefox", "custom/terminal", "custom/code", "custom/files", "group/mpris-drawer", "cava"],
       "modules-center": ["wlr/taskbar"],
-      "modules-right": ["group/group-tools", "group/pulseaudio", "backlight", "tray", "clock", "custom/notifs", "group/group-power"],
+      "modules-right": ["group/group-tools", "group/pulseaudio", "group/laptop", "tray", "clock", "custom/notifs", "group/group-power"],
 
 
       ///////////////////////////////////
@@ -36,7 +36,7 @@
           "format": "{icon}",
           "icon-size": 20,
           "tooltip-format": "{title:.50}",
-          "on-click": "minimize-raise",
+          "on-click": "minimize",
           "on-click-middle": "close",
           "on-click-right": "fullscreen"
       },
@@ -94,10 +94,43 @@
       {
           "device": "acpi_video0", // Assuming acpi_video0, adjust if needed
           "tooltip": false,
-          "format": "{percent}% {icon}",
+          "format": "{icon}  {percent}%",
           "format-icons": ["", ""],
           "on-scroll-up": "brightnessctl s +5%",
           "on-scroll-down": "brightnessctl s 5%-"
+      },
+
+      "battery":
+      {
+          "states": {
+              "good": 95,
+              "warning": 30,
+              "critical": 15
+          },
+          "format": "{icon} {capacity}%",
+          "format-charging": "󰂄 {capacity}%",
+          "format-plugged": "󰂄 {capacity}%",
+          "format-alt": "{icon} {capacity}%",
+          "format-icons": ["󰁺", "󰁻", "󰁼", "󰁽", "󰁾", "󰁿", "󰂀", "󰂁", "󰂂", "󰁹"],
+          "tooltip-format": "<b>LMB</b>: Balanced | <b>MMB</b>: Performance | <b>RMB</b>: Power Saver\n\nTime until full: {time}",
+          "on-click": "~/user_scripts/tlpctl/tlpctl.sh set balanced",
+          "on-click-middle": "~/user_scripts/tlpctl/tlpctl.sh set performance",
+          "on-click-right": "~/user_scripts/tlpctl/tlpctl.sh set power-saver"
+      },
+
+      "group/laptop":
+      {
+          "orientation": "inherit",
+          "drawer": {
+              "transition-duration": 500,
+              "children-class": "other-apps",
+              "click-to-reveal": false,
+              "transition-left-to-right": false
+          },
+          "modules": [
+              "battery",
+              "backlight"
+          ]
       },
 
       "pulseaudio#output":

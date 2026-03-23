@@ -9,6 +9,7 @@ shopt -s inherit_errexit
 
 readonly LOCK_FILE="${XDG_RUNTIME_DIR}/rofi-power.lock"
 readonly ACTION_DELAY='0.05'
+readonly SESSION_SCRIPT="$HOME/user_scripts/wlogout/dusky_session.sh"
 
 exec {lock_fd}> "${LOCK_FILE}"
 flock -n "${lock_fd}" || exit 0
@@ -98,7 +99,7 @@ execute() {
             ;;
         logout)
             sleep "${ACTION_DELAY}"
-            exec uwsm stop
+            exec "$SESSION_SCRIPT" logout
             ;;
         suspend)
             sleep "${ACTION_DELAY}"
@@ -106,15 +107,15 @@ execute() {
             ;;
         reboot)
             sleep "${ACTION_DELAY}"
-            exec systemctl reboot
+            exec "$SESSION_SCRIPT" reboot
             ;;
         soft_reboot)
             sleep "${ACTION_DELAY}"
-            exec systemctl soft-reboot
+            exec "$SESSION_SCRIPT" soft-reboot
             ;;
         shutdown)
             sleep "${ACTION_DELAY}"
-            exec systemctl poweroff
+            exec "$SESSION_SCRIPT" poweroff
             ;;
         *)
             exit 1
