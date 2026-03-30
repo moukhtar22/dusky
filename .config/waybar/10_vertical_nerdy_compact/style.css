@@ -61,7 +61,7 @@ box#group-media, box#group-hardware, box#group-utils, box#group-connections, box
 #battery, #cpu, #memory, #temperature,
 #pulseaudio, #backlight, #network, #bluetooth, #tray,
 #custom-theme, #custom-power, #custom-notification, #custom-inhibit-suspend,
-#custom-app-tray, #custom-network, #custom-audiorouter {
+#custom-app-tray, #custom-network, #custom-audiorouter, #custom-cava {
     padding: 0px;
     margin: 3px 0px; /* Locked to rigid 0px geometry to appease GTK and force natural centering */
     background-color: transparent;
@@ -164,9 +164,14 @@ box#group-bottom {
 #custom-audiorouter.active { color: @primary; }
 #custom-audiorouter.inactive { color: @surface_container_highest; }
 
+#custom-cava {
+    color: @tertiary; /* Matugen tertiary color for visual pop */
+}
+
 #battery:hover, #clock:hover, #cpu:hover, #memory:hover, #temperature:hover, 
 #pulseaudio:hover, #backlight:hover, #bluetooth:hover, #custom-network:hover,
-#custom-theme:hover, #custom-power:hover, #custom-notification:hover, #custom-audiorouter:hover, #custom-app-tray:hover {
+#custom-theme:hover, #custom-power:hover, #custom-notification:hover, 
+#custom-audiorouter:hover, #custom-app-tray:hover, #custom-cava:hover {
     color: @primary;
     text-shadow: 0 0 3px alpha(@primary, 0.4);
 }

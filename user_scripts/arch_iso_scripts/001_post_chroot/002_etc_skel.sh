@@ -9,14 +9,13 @@
 # STRICT MODE & SETTINGS
 # =============================================================================
 set -euo pipefail
-# inherit_errexit: Ensures subshells inherit -e
-# nullglob: glob patterns that match nothing expand to nothing
 shopt -s inherit_errexit nullglob 2>/dev/null || true
+
+readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 
 # =============================================================================
 # VISUALS & LOGGING
 # =============================================================================
-# Only use colors if connected to a terminal
 if [[ -t 1 ]]; then
     declare -r BLUE=$'\033[0;34m'
     declare -r GREEN=$'\033[0;32m'
@@ -35,6 +34,13 @@ log_error()   { printf "%s[ERROR]%s %s\n" "$RED" "$NC" "$*" >&2; }
 die()         { log_error "$*"; exit 1; }
 
 # =============================================================================
+# RUNTIME STATE
+# =============================================================================
+declare -i AUTO_MODE=0
+declare -i WARNINGS=0
+declare -i DEPLOYED_COUNT=0
+
+# =============================================================================
 # CONFIGURATION
 # =============================================================================
 # Format: "SOURCE :: DESTINATION"
@@ -51,29 +57,91 @@ declare -a COPY_TASKS=(
     # 2. Zsh Config (Config -> Not Executable)
     "dusky/.zshrc :: /etc/skel/.zshrc"
 
-    # 3. Network Manager Script (New Addition)
-    "dusky/user_scripts/network_manager/nmcli_wifi_no_gum.sh :: /etc/skel/wifi_connect.sh"
+    # 3. Network Manager Script
+    "dusky/user_scripts/network_manager/dusky_network.sh :: /etc/skel/wifi_connect.sh"
 )
 
 # Files matching these patterns will be forced to be executable (755)
 declare -a EXEC_PATTERNS=("*.sh" "*.bash" "*.pl" "*.py" "deploy_*")
 
 # =============================================================================
+# ARGUMENT PARSING
+# =============================================================================
+usage() {
+    cat <<EOF
+Usage: $(basename "$0") [OPTIONS]
+
+Options:
+  -a, --auto    Run non-interactively; skip prompts
+  -h, --help    Show this help message
+EOF
+}
+
+parse_args() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -a|--auto)
+                AUTO_MODE=1
+                ;;
+            -h|--help)
+                usage
+                exit 0
+                ;;
+            *)
+                die "Unknown argument: $1 (use --help for usage)"
+                ;;
+        esac
+        shift
+    done
+}
+
+# =============================================================================
 # PRE-FLIGHT CHECKS
 # =============================================================================
-
 check_root() {
     if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
         die "This script must be run as root to modify /etc/skel."
     fi
 }
 
+prompt_for_auto_mode() {
+    if (( AUTO_MODE )); then
+        log_info "Auto mode enabled. This script will run without prompts."
+        return
+    fi
+
+    if [[ ! -t 0 ]]; then
+        die "No interactive input available. Re-run with --auto to skip prompts."
+    fi
+
+    local reply
+    if ! read -r -p "Run this script in auto mode and skip prompts? [y/N]: " reply; then
+        die "Failed to read input."
+    fi
+
+    case "${reply,,}" in
+        y|yes)
+            AUTO_MODE=1
+            log_info "Auto mode selected. Remaining prompts will be skipped."
+            ;;
+        *)
+            ;;
+    esac
+}
+
 preflight_confirmation() {
+    if (( AUTO_MODE )); then
+        log_info "Auto mode: skipping interactive chroot confirmation. Ensure you are already inside arch-chroot."
+        return
+    fi
+
     printf "\n%s[CRITICAL CHECK]%s Verify Environment:\n" "$RED" "$NC"
     printf "Have you switched to the chroot environment by running: %sarch-chroot /mnt%s ?\n" "$BLUE" "$NC"
-    
+
     local user_conf
-    read -r -p "Type 'yes' to proceed, or anything else to exit: " user_conf
+    if ! read -r -p "Type 'yes' to proceed, or anything else to exit: " user_conf; then
+        die "Failed to read input."
+    fi
 
     if [[ "${user_conf,,}" != "yes" ]]; then
         printf "\n%s[ABORTING]%s You must be inside the chroot environment.\n" "$RED" "$NC"
@@ -85,39 +153,56 @@ preflight_confirmation() {
 # =============================================================================
 # CORE FUNCTIONS
 # =============================================================================
-
-# Trims whitespace from start/end of a string
 trim() {
     local s="$1"
-    s="${s#"${s%%[![:space:]]*}"}" # trim leading
-    s="${s%"${s##*[![:space:]]}"}" # trim trailing
+    s="${s#"${s%%[![:space:]]*}"}"
+    s="${s%"${s##*[![:space:]]}"}"
     printf '%s' "$s"
 }
 
-# Applies 755 to dirs/scripts, 644 to files
+increment_warning() {
+    WARNINGS=$((WARNINGS + 1))
+}
+
+is_safe_destination() {
+    case "$1" in
+        /etc/skel|/etc/skel/*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+resolve_source_path() {
+    local source_path="$1"
+
+    if [[ -e "$source_path" ]]; then
+        printf '%s' "$source_path"
+        return 0
+    fi
+
+    if [[ "$source_path" != /* && -e "$SCRIPT_DIR/$source_path" ]]; then
+        printf '%s' "$SCRIPT_DIR/$source_path"
+        return 0
+    fi
+
+    return 1
+}
+
 smart_permissions() {
     local target="$1"
-    
-    # 1. Set Ownership to root
+
     chown -R root:root -- "$target"
 
     if [[ -d "$target" ]]; then
-        # It's a directory
-        # Set all directories to 755 (rwx-rx-rx)
         find "$target" -type d -exec chmod 755 {} +
-        # Set all files to 644 (rw-r--r--) initially
         find "$target" -type f -exec chmod 644 {} +
-        
-        # Make specific patterns executable
+
         for pat in "${EXEC_PATTERNS[@]}"; do
             find "$target" -type f -name "$pat" -exec chmod 755 {} + 2>/dev/null || true
         done
     else
-        # It's a file
         local basename="${target##*/}"
         local is_exec=0
-        
-        # Check against patterns
+
         for pat in "${EXEC_PATTERNS[@]}"; do
             # shellcheck disable=SC2053
             if [[ "$basename" == $pat ]]; then
@@ -137,70 +222,74 @@ smart_permissions() {
 deploy_item() {
     local source_path="$1"
     local dest_path="$2"
-
-    # Safety: Ensure destination is actually inside /etc/skel or /root (optional)
-    # This prevents accidents like writing to /etc/passwd if config is wrong
-    if [[ "$dest_path" != /etc/skel* ]]; then
-        log_warn "Destination '$dest_path' is not inside /etc/skel. Skipping for safety."
-        return
-    fi
-
-    if [[ ! -e "$source_path" ]]; then
-        log_warn "Source not found: $source_path"
-        return
-    fi
-
-    # Create parent dir
+    local resolved_source
     local dest_parent
-    dest_parent=$(dirname "$dest_path")
+
+    if ! is_safe_destination "$dest_path"; then
+        log_warn "Destination '$dest_path' is not inside /etc/skel. Skipping for safety."
+        increment_warning
+        return
+    fi
+
+    if ! resolved_source="$(resolve_source_path "$source_path")"; then
+        log_warn "Source not found: $source_path"
+        increment_warning
+        return
+    fi
+
+    dest_parent="$(dirname -- "$dest_path")"
     if [[ ! -d "$dest_parent" ]]; then
         mkdir -p -- "$dest_parent"
     fi
 
-    log_info "Copying: $source_path -> $dest_path"
+    log_info "Copying: $resolved_source -> $dest_path"
+    cp -rfPT -- "$resolved_source" "$dest_path"
 
-    # cp flags:
-    # -r: recursive
-    # -f: force
-    # -P: no-dereference (preserve symlinks as links)
-    # -T: no-target-directory (treat dest as a file/exact dir, not a container)
-    cp -rfPT -- "$source_path" "$dest_path"
-
-    # Apply smart permissions
     smart_permissions "$dest_path"
+    DEPLOYED_COUNT=$((DEPLOYED_COUNT + 1))
 }
 
 # =============================================================================
 # MAIN EXECUTION
 # =============================================================================
-
 main() {
+    parse_args "$@"
     check_root
+    prompt_for_auto_mode
     preflight_confirmation
 
-    # Ensure skel exists
     if [[ ! -d "/etc/skel" ]]; then
-        mkdir -p /etc/skel
+        mkdir -p -- /etc/skel
     fi
 
     log_info "Starting Skeleton Configuration..."
 
     for task in "${COPY_TASKS[@]}"; do
-        # 1. Split string by delimiter
+        if [[ "$task" != *" :: "* ]]; then
+            log_warn "Skipping malformed COPY_TASKS entry: $task"
+            increment_warning
+            continue
+        fi
+
         local src="${task%% :: *}"
         local dest="${task##* :: }"
 
-        # 2. Trim whitespace
-        src=$(trim "$src")
-        dest=$(trim "$dest")
+        src="$(trim "$src")"
+        dest="$(trim "$dest")"
 
-        # 3. Run
         if [[ -n "$src" && -n "$dest" ]]; then
             deploy_item "$src" "$dest"
+        else
+            log_warn "Skipping empty COPY_TASKS entry: $task"
+            increment_warning
         fi
     done
 
-    log_success "Skeleton configuration complete."
+    if (( WARNINGS > 0 )); then
+        log_warn "Skeleton configuration completed with $WARNINGS warning(s). Deployed $DEPLOYED_COUNT item(s)."
+    else
+        log_success "Skeleton configuration complete. Deployed $DEPLOYED_COUNT item(s)."
+    fi
 }
 
 main "$@"

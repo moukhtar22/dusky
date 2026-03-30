@@ -110,7 +110,7 @@
 |**Hyprland & Wayland**|`hyprsunset`|A blue-light filter application for Hyprland (similar to f.lux or Redshift) to reduce eye strain at night.|
 |**Hyprland & Wayland**|`hyprpicker`|A Wayland color picker. Allows you to click anywhere on your screen to grab the HEX or RGB color code of a pixel.|
 |**Hyprland & Wayland**|`waybar`|A highly customizable Wayland bar for Hyprland. Displays workspaces, clock, battery, and custom modules (CSS styled).|
-|**Hyprland & Wayland**|`swww`|A Solution for Wayland Wallpaper. An efficient wallpaper daemon that supports animated GIFs and smooth transition effects.|
+|**Hyprland & Wayland**|`awww`|A Solution for Wayland Wallpaper. An efficient wallpaper daemon that supports animated GIFs and smooth transition effects.|
 |**Hyprland & Wayland**|`rofi`|A window switcher, application launcher, and dmenu replacement. (Note: On Wayland, usually `rofi-wayland` is preferred, but `rofi` runs via XWayland).|
 |**Hyprland & Wayland**|`swaync`|Sway Notification Center. A notification daemon that provides a control center panel (DND, clear all) for Hyprland/Sway.|
 |**Hyprland & Wayland**|`swayosd`|An OSD (On-Screen Display) daemon for brightness, volume, and Caps Lock events. Provides visual feedback when keys are pressed.|

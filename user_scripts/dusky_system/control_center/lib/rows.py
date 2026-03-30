@@ -204,9 +204,10 @@ class ActionExec(TypedDict, total=False):
     terminal: bool
 
 
-class ActionRedirect(TypedDict):
+class ActionRedirect(TypedDict, total=False):
     type: str  # Literal["redirect"]
     page: str
+    subpage: str
 
 
 class ActionToggle(TypedDict, total=False):
@@ -394,20 +395,136 @@ def _is_dynamic_icon(icon_config: object) -> bool:
 
 
 def _perform_redirect(
-    page_id: str,
-    config: Mapping[str, object],
-    sidebar: Gtk.ListBox | None,
+    action: dict[str, Any],
+    context: RowContext,
 ) -> None:
-    if not page_id or sidebar is None:
+    """
+    Process an advanced page redirect. 
+    Handles basic sidebar jumps as well as nested subpage layout traversal, generating
+    and pushing subsequent navigation pages if requested.
+    """
+    page_id = action.get("page")
+    subpage_title = action.get("subpage")
+
+    if not page_id:
         return
+
+    config = context.get("config", {})
+    sidebar = context.get("sidebar")
+    stack = context.get("stack")
+    builder_func = context.get("builder_func")
+
+    if sidebar is None or stack is None:
+        return
+
     pages = config.get("pages")
     if not isinstance(pages, list):
         return
+
+    target_page_idx = -1
+    target_page_config = None
+
     for idx, page in enumerate(pages):
         if isinstance(page, dict) and page.get("id") == page_id:
-            if row := sidebar.get_row_at_index(idx):
-                sidebar.select_row(row)
-            return
+            target_page_idx = idx
+            target_page_config = page
+            break
+
+    if target_page_idx == -1 or not target_page_config:
+        return
+
+    # Select the main page in the sidebar (triggers pop_to_tag -> Root sync)
+    if row := sidebar.get_row_at_index(target_page_idx):
+        sidebar.select_row(row)
+
+    # Force switch stack visible child natively
+    page_name = f"page-{target_page_idx}"
+    stack.set_visible_child_name(page_name)
+
+    if not subpage_title:
+        return
+
+    # Extract target page view container
+    child = stack.get_child_by_name(page_name)
+    if not isinstance(child, Adw.NavigationView):
+        return
+
+    def find_subpage_layout(layout: list[Any], target: str) -> tuple[list[str], list[Any]] | None:
+        for section in layout:
+            if not isinstance(section, dict):
+                continue
+            items = section.get("items", [section]) if "items" in section else [section]
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                if item.get("type") == "navigation":
+                    props = item.get("properties", {})
+                    title = str(props.get("title", "")).strip()
+                    if title == target:
+                        return ([title], item.get("layout", []))
+                    sub_layout = item.get("layout")
+                    if isinstance(sub_layout, list):
+                        res = find_subpage_layout(sub_layout, target)
+                        if res:
+                            return ([title] + res[0], res[1])
+                elif item.get("type") == "expander":
+                    res = find_subpage_layout([{"items": item.get("items", [])}], target)
+                    if res:
+                        return res
+        return None
+
+    layout = target_page_config.get("layout", [])
+    main_title = str(target_page_config.get("title", "Unknown")).strip()
+    found = find_subpage_layout(layout, str(subpage_title))
+
+    if not found or not builder_func:
+        return
+
+    path_suffix, _ = found
+    current_path = [main_title]
+    current_layout = layout
+
+    def make_nav_tag(p: list[str]) -> str:
+        parts = []
+        for raw_part in p:
+            part = "".join(ch if ch.isalnum() else "_" for ch in raw_part.strip())
+            parts.append(part.strip("_") or "page")
+        return f"page_{len(p)}_{'__'.join(parts)}"
+
+    def get_step_layout(lay: list[Any], title: str) -> list[Any] | None:
+        for sec in lay:
+            if not isinstance(sec, dict): continue
+            items = sec.get("items", [sec]) if "items" in sec else [sec]
+            for it in items:
+                if not isinstance(it, dict): continue
+                if it.get("type") == "navigation":
+                    props = it.get("properties", {})
+                    if str(props.get("title", "")).strip() == title:
+                        return it.get("layout", [])
+                elif it.get("type") == "expander":
+                    res = get_step_layout([{"items": it.get("items", [])}], title)
+                    if res is not None:
+                        return res
+        return None
+
+    # Iteratively build and push each section of the found layout path
+    for step_title in path_suffix:
+        current_path.append(step_title)
+        step_layout = get_step_layout(current_layout, step_title)
+        if step_layout is None:
+            break
+
+        current_layout = step_layout
+        tag = make_nav_tag(current_path)
+        page = child.find_page(tag)
+
+        if not page:
+            new_ctx = dict(context)
+            new_ctx["path"] = list(current_path)
+            new_ctx["nav_view"] = child
+            page = builder_func(step_title, current_layout, new_ctx)
+
+        child.push(page)
 
 
 @lru_cache(maxsize=128)
@@ -994,8 +1111,7 @@ class ButtonRow(BaseActionRow):
                 msg = f"{'▶ Launched' if success else '✖ Failed'}: {title}"
                 utility.toast(self.toast_overlay, msg, 2 if success else 4)
         elif t == "redirect":
-            if pid := act.get("page"):
-                _perform_redirect(str(pid), self.config, self.sidebar)
+            _perform_redirect(act, self.context)
 
 
 class ToggleRow(StateMonitorMixin, BaseActionRow):
@@ -2216,8 +2332,7 @@ class AsyncSelectorRow(DynamicIconMixin, Adw.PreferencesRow):
             utility.toast(self.toast_overlay, msg, 2 if success else 4)
 
         elif self.on_action.get("type") == "redirect":
-            if pid := self.on_action.get("page"):
-                _perform_redirect(str(pid), self.config, self.sidebar)
+            _perform_redirect(self.on_action, self.context)
 
     def do_unroot(self) -> None:
         sources = self._state.mark_destroyed_and_get_sources()
@@ -2455,12 +2570,7 @@ class GridCard(DynamicIconMixin, GridCardBase):
                     )
                     utility.toast(self.toast_overlay, "▶ Launched" if success else "✖ Failed")
             case "redirect":
-                if pid := self.on_action.get("page"):
-                    _perform_redirect(
-                        str(pid),
-                        self.context.get("config") or {},
-                        self.context.get("sidebar"),
-                    )
+                _perform_redirect(self.on_action, self.context)
 
 
 class GridToggleCard(DynamicIconMixin, StateMonitorMixin, GridCardBase):

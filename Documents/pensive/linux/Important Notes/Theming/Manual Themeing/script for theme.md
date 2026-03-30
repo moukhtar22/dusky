@@ -145,7 +145,7 @@ $HOME/.config/theming/user_set_theme.txt
 wallaper changing using (There might be more than one wallpaper in each directroy for wallpaper for every theme so pick one at random to keep it fresh, if there is only one wallpaper, then just apply that wallpaepr) replace myTheme with the actual theme name 
 
 ```bash
-swww img $HOME/.config/theming/all_themes/myTheme/wallpaper/* --transition-type grow --transition-duration 2 --transition-fps 60
+awww img $HOME/.config/theming/all_themes/myTheme/wallpaper/* --transition-type grow --transition-duration 2 --transition-fps 60
 ```
 
 # Obsidian

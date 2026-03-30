@@ -200,13 +200,19 @@ declare -ra UPDATE_SEQUENCE=(
 
 #================= CUSTOM=====================
     "U | dusky_commands_before.sh"
-    "U | rofi_wallpaper_selctor.sh --cache-only --progress"
-    "S | pacman_packages.sh"
-    "U | paru_packages.sh"
 #================= Scripts =====================
 
     "U | 005_hypr_custom_config_setup.sh"
     "U | 010_package_removal.sh --auto"
+
+
+#================= CUSTOM=====================
+    "S | pacman_packages.sh"
+    "U | paru_packages.sh"
+    "U | rofi_wallpaper_selctor.sh --cache-only --progress"
+#================= Scripts =====================
+
+
     "U | 015_set_thunar_terminal_kitty.sh"
     "U | 020_desktop_apps_username_setter.sh --quiet"
 #    "U | 025_configure_keyboard.sh"
@@ -1080,8 +1086,7 @@ ensure_free_space_for_bytes() {
 run_logged_command() {
     local -a cmd=( "$@" )
     local rc=0
-    local timestamp="" cmd_string="" arg=""
-    local script_bin=""
+    local timestamp="" arg=""
 
     if [[ -z "$LOG_FILE" || ! -w "$LOG_FILE" ]]; then
         "${cmd[@]}" || rc=$?
@@ -1097,27 +1102,9 @@ run_logged_command() {
         printf '\n'
     } >> "$LOG_FILE"
 
-    if [[ -t 1 ]] && script_bin="$(command -v script 2>/dev/null)"; then
-        if [[ "${cmd[0]}" == "sudo" ]]; then
-            local -a inner_cmd=("${cmd[@]:1}")
-            cmd_string="$(join_quoted_argv "${inner_cmd[@]}")"
+    "${cmd[@]}" > >(tee -a "$LOG_FILE") 2> >(tee -a "$LOG_FILE" >&2) || rc=$?
 
-            if sudo "$script_bin" --quiet --flush --return --command "$cmd_string" /dev/null | tee -a "$LOG_FILE"; then
-                rc=0
-            else
-                rc=${PIPESTATUS[0]}
-            fi
-        else
-            cmd_string="$(join_quoted_argv "${cmd[@]}")"
-            if "$script_bin" --quiet --flush --return --command "$cmd_string" /dev/null | tee -a "$LOG_FILE"; then
-                rc=0
-            else
-                rc=${PIPESTATUS[0]}
-            fi
-        fi
-    else
-        "${cmd[@]}" > >(tee -a "$LOG_FILE") 2> >(tee -a "$LOG_FILE" >&2) || rc=$?
-    fi
+    sleep 0.2
 
     printf -v timestamp '%(%H:%M:%S)T' -1
     printf '[%s] [SCRIPT ] END rc=%d\n' "$timestamp" "$rc" >> "$LOG_FILE"

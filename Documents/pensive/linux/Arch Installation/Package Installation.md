@@ -59,7 +59,7 @@ pacman -S --needed qt5-wayland qt6-wayland gtk3 gtk4 nwg-look qt5ct qt6ct qt6-sv
 _Status bar, wallpaper, lock screen, notifications, launcher, and OSD._
 
 ```
-pacman -S --needed waybar swww hyprlock hypridle hyprsunset hyprpicker swaync swayosd rofi libdbusmenu-qt5 libdbusmenu-glib brightnessctl
+pacman -S --needed waybar awww hyprlock hypridle hyprsunset hyprpicker swaync swayosd rofi libdbusmenu-qt5 libdbusmenu-glib brightnessctl
 ```
 
 - [ ] Status

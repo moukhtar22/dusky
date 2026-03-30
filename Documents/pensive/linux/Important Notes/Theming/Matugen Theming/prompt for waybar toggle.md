@@ -7,7 +7,7 @@ folder = ~/Pictures/wallpapers
 monitors = All
 wallpaper = ~/Pictures/wallpapers/GKusPIEWkAAZAgg.jpg
 show_path_in_tooltip = True
-backend = swww
+backend = awww
 fill = fill
 sort = name
 color = #ffffff
@@ -18,11 +18,11 @@ show_gifs_only = False
 zen_mode = False
 post_command = matugen --mode light image $wallpaper
 number_of_columns = 3
-swww_transition_type = any
-swww_transition_step = 63
-swww_transition_angle = 0
-swww_transition_duration = 2
-swww_transition_fps = 60
+awww_transition_type = any
+awww_transition_step = 63
+awww_transition_angle = 0
+awww_transition_duration = 2
+awww_transition_fps = 60
 mpvpaper_sound = False
 mpvpaper_options = 
 use_xdg_state = False
@@ -38,7 +38,7 @@ it's location is $HOME/.config/waypaper/config.ini
 and oh,   i want you to get the current wallpaper that is already set and insert that in the path to the image's place for the commands above. 
   
   
-  There's another existing script i have that i also want you to change teh light/dark mode for and that is placed in $HOME/user_scripts/swww/swww_random_standalone.sh
+  There's another existing script i have that i also want you to change teh light/dark mode for and that is placed in $HOME/user_scripts/awww/awww_random_standalone.sh
 i want you to edit the variable in it that is on a line with this text 
 eg: if it's dark it'll be 
 "readonly theme_mode="dark" # <-- SET THIS"

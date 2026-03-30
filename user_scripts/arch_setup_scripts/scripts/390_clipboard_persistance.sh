@@ -10,6 +10,7 @@
 #
 # v1.2.0 CHANGELOG:
 #   - FEAT: Added --ram and --disk flags for non-interactive automation.
+#   - FEAT: Added --quiet flag to suppress the final reboot warning.
 #   - REF:  Conditional TTY check (only required for interactive mode).
 # v1.1.0 CHANGELOG:
 #   - CRITICAL: Replaced sed -i with atomic awk + cat to preserve symlinks.
@@ -53,6 +54,7 @@ declare _TMPFILE=""
 # Argument Parsing (v1.2.0)
 # =============================================================================
 declare _TARGET_MODE=""
+declare _QUIET_MODE="false"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -62,6 +64,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --disk)
             _TARGET_MODE="persistent"
+            shift
+            ;;
+        --quiet)
+            _QUIET_MODE="true"
             shift
             ;;
         *)
@@ -303,15 +309,17 @@ fi
 # =============================================================================
 # CRITICAL REBOOT WARNING
 # =============================================================================
-printf '\n'
-printf '\033[1;37;41m%s\033[0m\n' "================================================================================"
-printf '\033[1;37;41m%s\033[0m\n' "||                                                                            ||"
-printf '\033[1;37;41m%s\033[0m\n' "||                      !!! SYSTEM REBOOT REQUIRED !!!                        ||"
-printf '\033[1;37;41m%s\033[0m\n' "||                                                                            ||"
-printf '\033[1;37;41m%s\033[0m\n' "||  THE CLIPBOARD IS NOW IN A TRANSITIONAL STATE AND WILL NOT                 ||"
-printf '\033[1;37;41m%s\033[0m\n' "||  FUNCTION CORRECTLY UNTIL A FULL SYSTEM REBOOT IS PERFORMED.               ||"
-printf '\033[1;37;41m%s\033[0m\n' "||                                                                            ||"
-printf '\033[1;37;41m%s\033[0m\n' "||  PLEASE SAVE ALL YOUR WORK AND REBOOT YOUR COMPUTER AT THE EARLIEST.       ||"
-printf '\033[1;37;41m%s\033[0m\n' "||                                                                            ||"
-printf '\033[1;37;41m%s\033[0m\n' "================================================================================"
-printf '\n'
+if [[ "$_QUIET_MODE" != "true" ]]; then
+    printf '\n'
+    printf '\033[1;37;41m%s\033[0m\n' "================================================================================"
+    printf '\033[1;37;41m%s\033[0m\n' "||                                                                            ||"
+    printf '\033[1;37;41m%s\033[0m\n' "||                      !!! SYSTEM REBOOT REQUIRED !!!                        ||"
+    printf '\033[1;37;41m%s\033[0m\n' "||                                                                            ||"
+    printf '\033[1;37;41m%s\033[0m\n' "||  THE CLIPBOARD IS NOW IN A TRANSITIONAL STATE AND WILL NOT                 ||"
+    printf '\033[1;37;41m%s\033[0m\n' "||  FUNCTION CORRECTLY UNTIL A FULL SYSTEM REBOOT IS PERFORMED.               ||"
+    printf '\033[1;37;41m%s\033[0m\n' "||                                                                            ||"
+    printf '\033[1;37;41m%s\033[0m\n' "||  PLEASE SAVE ALL YOUR WORK AND REBOOT YOUR COMPUTER AT THE EARLIEST.       ||"
+    printf '\033[1;37;41m%s\033[0m\n' "||                                                                            ||"
+    printf '\033[1;37;41m%s\033[0m\n' "================================================================================"
+    printf '\n'
+fi

@@ -22,6 +22,7 @@
         ],
         
         "modules-right": [
+            "custom/cava",
             "group/utils",
             "group/connections",
             "clock",
@@ -270,6 +271,14 @@
             "tooltip": true,
             "tooltip-format": "Power Menu",
             "on-click": "uwsm-app -- \"$HOME/user_scripts/wlogout/wlogout_scale.sh\""
+        },
+
+        "custom/cava": {
+            "format": "{}",
+            "return-type": "json",
+            "exec": "$HOME/user_scripts/waybar/cava.sh --vert --bars 6 --clean",
+            "on-click": "uwsm-app -- kitty --class cava -e cava",
+            "tooltip": false
         },
         
         "tray": {

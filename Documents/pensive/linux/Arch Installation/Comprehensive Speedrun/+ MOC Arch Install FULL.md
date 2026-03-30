@@ -63,7 +63,7 @@
 
 ```
 ┌──────────────────────────────────────────────────────────┐
-│  /dev/sdX                                                │
+│  /dev/sdX (or /dev/nvme0n1)                              │
 ├──────────────────────────────────────────────────────────┤
 │  Partition 1 — ESP (FAT32, ~2-5 GiB)                     │
 │    └── mounted at /boot                                  │
@@ -78,6 +78,8 @@
 │        ├── @var_log           → /var/log                 │
 │        ├── @var_cache         → /var/cache               │
 │        ├── @var_tmp           → /var/tmp                 │
+│        ├── @var_lib_machines  → /var/lib/machines        │
+│        ├── @var_lib_portables → /var/lib/portables       │
 │        ├── @var_lib_libvirt   → /var/lib/libvirt         │
 │        └── @swap              → /swap                    │
 └──────────────────────────────────────────────────────────┘
@@ -87,17 +89,19 @@
 
 ## Subvolume Purpose & Snapshot Behaviour
 
-| Subvolume | Mount Point | Snapshotted? | Why Separate? |
-|---|---|:---:|---|
-| `@` | `/` | ✅ Yes | Root filesystem — the main thing you snapshot & roll back |
-| `@home` | `/home` | ✅ Yes | User data — independent snapshot schedule from root |
-| `@snapshots` | `/.snapshots` | ❌ Excluded | Snapper metadata for `@` — must survive rollbacks |
-| `@home_snapshots` | `/home/.snapshots` | ❌ Excluded | Snapper metadata for `@home` — must survive rollbacks |
-| `@var_log` | `/var/log` | ❌ Excluded | Logs grow constantly, useless in snapshots |
-| `@var_cache` | `/var/cache` | ❌ Excluded | Pacman cache etc. — large, reproducible |
-| `@var_tmp` | `/var/tmp` | ❌ Excluded | Persistent temp files — no value in snapshots |
-| `@var_lib_libvirt` | `/var/lib/libvirt` | ❌ Excluded | VM disk images (qcow2) — **huge**, would bloat snapshots |
-| `@swap` | `/swap` | ❌ Excluded | Fallback disk swap file — must be NOCOW |
+| Subvolume | Mount Point | Top Level | Snapshotted? | Purpose & Optimizations |
+| :--- | :--- | :--- | :--- | :--- |
+| `@` | `/` | 5 | ✅ Yes | Root filesystem. The primary snapshot target and rollback root. |
+| `@home` | `/home` | 5 | ✅ Yes | User data. Independent snapshot schedule to prevent reverting personal files during an OS rollback. |
+| `@snapshots` | `/.snapshots` | 5 | ❌ Excluded | Snapper metadata for `@`. Strictly Top-Level 5 so snapshot history survives if `@` is deleted or replaced. |
+| `@home_snapshots` | `/home/.snapshots` | 5 | ❌ Excluded | Snapper metadata for `@home`. Must survive rollbacks. |
+| `@var_log` | `/var/log` | 5 | ❌ Excluded | System logs. Ensures crash data and journalctl logs are retained after rolling back the OS. |
+| `@var_cache` | `/var/cache` | 5 | ❌ Excluded | Pacman package cache. Excluded to prevent massive, unnecessary disk bloat in root snapshots. |
+| `@var_tmp` | `/var/tmp` | 5 | ❌ Excluded | Persistent temporary files. Zero forensic or recovery value in snapshots. |
+| `@var_lib_machines` | `/var/lib/machines` | 5 | ❌ Excluded | Systemd containers (systemd-nspawn). Flattened to avoid destruction during root rollbacks. |
+| `@var_lib_portables` | `/var/lib/portables` | 5 | ❌ Excluded | Systemd portable services. Flattened to avoid destruction during root rollbacks. |
+| `@var_lib_libvirt` | `/var/lib/libvirt` | 5 | ❌ Excluded | VM disk images (.qcow2). Crucial: Must apply chattr +C (NOCOW) to prevent severe COW I/O fragmentation. |
+| `@swap` | `/swap` | 5 | ❌ Excluded | Fallback disk swap file. Crucial: Must apply chattr +C (NOCOW) before file creation to prevent I/O choking. |
 
 ---
 

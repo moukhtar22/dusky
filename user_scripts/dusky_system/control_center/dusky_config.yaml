@@ -298,7 +298,7 @@ pages:
                 display_max_length: 45
               on_action:
                 type: "exec"
-                command: "sudo ~/user_scripts/btrfs_snapshots/cc/bash_wrapper_for_cc.sh '{raw_date}' '{description}'"
+                command: "sudo ~/user_scripts/btrfs_snapshots/cc/bash_wrapper_for_restore.sh '{raw_date}' '{description}'"
 
         - type: section
           properties:
@@ -335,6 +335,75 @@ pages:
               on_action:
                 type: "exec"
                 command: "sudo ~/user_scripts/btrfs_snapshots/cc/04_dusky_snapshot_manager.py -c home -R {id}"
+
+        - type: section
+          properties:
+            title: Snapshot Cleanup
+            description: Safely remove old or unneeded states.
+          items:
+            - type: async_selector
+              properties:
+                title: "Delete Combined Snapshot (Root + Home)"
+                description: "Removes both synchronized states."
+                icon: edit-delete-symbolic
+                list_command: "sudo ~/user_scripts/btrfs_snapshots/cc/04_dusky_snapshot_manager.py -c root -l --json"
+                display_template: "[{date}] {description}"
+                button_text: "Delete Both"
+                style: "destructive"
+                sort: "reverse"
+                auto_refresh: true
+                display_max_length: 45
+              on_action:
+                type: "exec"
+                command: "sudo ~/user_scripts/btrfs_snapshots/cc/bash_wrapper_for_delete.sh '{raw_date}' '{description}'"
+
+            - type: async_selector
+              properties:
+                title: "Delete System Snapshot (Root Only)"
+                description: "Removes a specific system state."
+                icon: drive-harddisk-system-symbolic
+                list_command: "sudo ~/user_scripts/btrfs_snapshots/cc/04_dusky_snapshot_manager.py -c root -l --json"
+                display_template: "[{id}] {date} | {description}"
+                button_text: "Delete Root"
+                style: "destructive"
+                sort: "reverse"
+                auto_refresh: true
+                display_max_length: 45
+              on_action:
+                type: "exec"
+                command: "sudo ~/user_scripts/btrfs_snapshots/cc/04_dusky_snapshot_manager.py -c root -D {id}"
+
+            - type: async_selector
+              properties:
+                title: "Delete Data Snapshot (Home Only)"
+                description: "Removes a specific personal data state."
+                icon: user-home-symbolic
+                list_command: "sudo ~/user_scripts/btrfs_snapshots/cc/04_dusky_snapshot_manager.py -c home -l --json"
+                display_template: "[{id}] {date} | {description}"
+                button_text: "Delete Home"
+                style: "destructive"
+                sort: "reverse"
+                auto_refresh: true
+                display_max_length: 45
+              on_action:
+                type: "exec"
+                command: "sudo ~/user_scripts/btrfs_snapshots/cc/04_dusky_snapshot_manager.py -c home -D {id}"
+
+        - type: section
+          properties:
+            title: Setup
+            description: Configure BTRFS subvolumes
+          items:
+            - type: button
+              properties:
+                title: BTRFS Sub-volume Setup
+                description: Configure limine, snapper isolation, and pacman hooks
+                icon: preferences-system-symbolic
+                button_text: "Open"
+              on_press:
+                type: redirect
+                page: setup_features
+                subpage: BTRFS Sub-volume Setup
 
   - type: section
     properties:
@@ -1273,6 +1342,30 @@ pages:
                 type: exec
                 command: kitty --class 210_zram_optimize_swappiness.sh --hold sh -c "$HOME/user_scripts/arch_setup_scripts/scripts/210_zram_optimize_swappiness.sh"
                 terminal: false
+
+
+  - type: section
+    properties:
+      title: Clock
+      icon: ''
+      description: ''
+    items:
+    - type: toggle
+      properties:
+        title: 24-Hour Clock
+        description: Toggle between 12hr (AM/PM) and 24hr format
+        icon: preferences-system-time-symbolic
+        key: time_format
+      on_toggle:
+        enabled:
+          type: exec
+          command: "~/user_scripts/waybar/toggle_time.sh --24"
+          terminal: false
+        disabled:
+          type: exec
+          command: "~/user_scripts/waybar/toggle_time.sh --12"
+          terminal: false
+
   - type: section
     properties:
       title: Status Bar & Notifications
@@ -2122,6 +2215,47 @@ pages:
         type: exec
         command: kitty --class 465_sddm_setup.sh --hold sh -c "$HOME/user_scripts/arch_setup_scripts/scripts/465_sddm_setup.sh"
         terminal: false
+
+    - type: navigation
+      properties:
+        title: BTRFS Sub-volume Setup
+        description: Configure BTRFS snapshots and snapper
+        icon: document-save-symbolic
+      layout:
+        - type: section
+          properties:
+            title: BTRFS Setup
+          items:
+            - type: button
+              properties:
+                title: 'Step 1: Limine Setup'
+                description: Configure Limine bootloader for BTRFS
+                icon: computer-symbolic
+                button_text: "Setup"
+              on_press:
+                type: exec
+                command: kitty --class 01_limine_setup.sh --hold sh -c "$HOME/user_scripts/btrfs_snapshots/01_limine_setup.sh --auto"
+                terminal: false
+            - type: button
+              properties:
+                title: 'Step 2: Snapper Isolation Subvolume'
+                description: Configure snapper isolation subvolume
+                icon: drive-harddisk-system-symbolic
+                button_text: "Setup"
+              on_press:
+                type: exec
+                command: kitty --class 02_snapper_isolation_subvolume.sh --hold sh -c "$HOME/user_scripts/btrfs_snapshots/02_snapper_isolation_subvolume.sh --auto"
+                terminal: false
+            - type: button
+              properties:
+                title: 'Step 3: Snapper Pacman Hooks'
+                description: Enable automatic snapshots on pacman operations
+                icon: system-software-install-symbolic
+                button_text: "Setup"
+              on_press:
+                type: exec
+                command: kitty --class 03_snapper_pacman_hooks.sh --hold sh -c "$HOME/user_scripts/btrfs_snapshots/03_snapper_pacman_hooks.sh --auto"
+                terminal: false
 
   - type: section
     properties:

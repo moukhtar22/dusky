@@ -61,8 +61,15 @@ command -v awk >/dev/null 2>&1 || {
 
 case ${CAVA_GLYPHS:-unicode} in
     unicode)
-        c0=$'\u2581'; c1=$'\u2582'; c2=$'\u2583'; c3=$'\u2584'
-        c4=$'\u2585'; c5=$'\u2586'; c6=$'\u2587'; c7=$'\u2588'
+        if (( vert )); then
+            # Vertical mode: Left-to-right filling blocks
+            c0=$'\u258F'; c1=$'\u258E'; c2=$'\u258D'; c3=$'\u258C'
+            c4=$'\u258B'; c5=$'\u258A'; c6=$'\u2589'; c7=$'\u2588'
+        else
+            # Horizontal mode: Bottom-to-top filling blocks
+            c0=$'\u2581'; c1=$'\u2582'; c2=$'\u2583'; c3=$'\u2584'
+            c4=$'\u2585'; c5=$'\u2586'; c6=$'\u2587'; c7=$'\u2588'
+        fi
         ;;
     ascii)
         c0='.'; c1=':'; c2='-'; c3='='
@@ -161,8 +168,10 @@ BEGIN {
     out = ""
 
     if (vert) {
-        for (i = 1; i <= nbars; i++) {
-            if (i > 1) out = out "\\n"
+        # Iterate backwards so high frequencies (treble) are at the top
+        # and low frequencies (bass) are at the bottom of the vertical stack
+        for (i = nbars; i >= 1; i--) {
+            if (i < nbars) out = out "\\n"
             out = out c[prev[i]]
         }
         printf "{\"text\":\"%s\"}\n", out

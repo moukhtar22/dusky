@@ -2,6 +2,13 @@
 # Arch Linux (EFI + Btrfs root) | Limine core setup
 # Bash 5.3+
 
+# --- USER CONFIGURATION ---
+# Set the path to your custom Limine wallpaper here.
+# Note: Limine STRICTLY supports PNG, JPEG, and BMP formats.
+# Example: LIMINE_WALLPAPER_SOURCE="/home/user/Pictures/splash.png"
+LIMINE_WALLPAPER_SOURCE=""
+# --------------------------
+
 set -Eeuo pipefail
 export LC_ALL=C
 
@@ -47,13 +54,16 @@ execute() {
     if [[ "$AUTO_MODE" == true ]]; then "$@"; return 0; fi
     printf '\n\033[1;34m[ACTION]\033[0m %s\n' "$desc"
     read -r -p "Execute this step? [Y/n] " response || fatal "Input closed; aborting."
-    if [[ "${response,,}" =~ ^(n|no)$ ]]; then info "Skipped."; return 0; fi
+    if [[ "${response,,}" =~ ^(n|no)$ ]]; then
+        info "Skipped."
+        return 0
+    fi
     "$@"
 }
 
 backup_file() {
     local file="$1"
-    [[ -e "$file" ]] || return 0
+    sudo test -e "$file" || return 0
     [[ -v BACKED_UP["$file"] ]] && return 0
 
     local stamp
@@ -65,6 +75,23 @@ backup_file() {
 
 require_cmd() {
     command -v "$1" >/dev/null 2>&1 || fatal "Required command not found: $1"
+}
+
+sudo_path_exists() { sudo test -e "$1"; }
+sudo_path_is_file() { sudo test -f "$1"; }
+sudo_path_is_dir() { sudo test -d "$1"; }
+
+sudo_path_mtime() {
+    sudo stat -c %Y -- "$1" 2>/dev/null || return 1
+}
+
+sudo_path_not_older_than() {
+    local lhs="$1" rhs="$2" lhs_m rhs_m slop=2
+    sudo_path_is_file "$lhs" || return 1
+    sudo_path_is_file "$rhs" || return 0
+    lhs_m="$(sudo_path_mtime "$lhs")" || return 1
+    rhs_m="$(sudo_path_mtime "$rhs")" || return 1
+    (( lhs_m + slop >= rhs_m ))
 }
 
 atomic_write() {
@@ -168,17 +195,20 @@ get_effective_hooks() {
     [[ -n "$hooks_str" ]] || fatal "Could not determine the effective mkinitcpio HOOKS array."
     mapfile -t EFFECTIVE_HOOKS <<< "$hooks_str"
     local hook
-    for hook in "${EFFECTIVE_HOOKS[@]}"; do EFFECTIVE_HOOKS_SET["$hook"]=1; done
+    for hook in "${EFFECTIVE_HOOKS[@]}"; do
+        EFFECTIVE_HOOKS_SET["$hook"]=1
+    done
 }
 
 hook_present() { [[ -v EFFECTIVE_HOOKS_SET["$1"] ]]; }
 
 detect_esp_mountpoint() {
     [[ -n "$CACHE_ESP_PATH" ]] && { printf '%s\n' "$CACHE_ESP_PATH"; return 0; }
+
     if command -v bootctl >/dev/null 2>&1; then
         local esp
         esp="$(bootctl --print-esp-path 2>/dev/null || true)"
-        if [[ -n "$esp" && -d "$esp" ]]; then
+        if [[ -n "$esp" ]] && sudo_path_is_dir "$esp"; then
             CACHE_ESP_PATH="$esp"
             printf '%s\n' "$CACHE_ESP_PATH"
             return 0
@@ -204,8 +234,10 @@ detect_esp_mountpoint() {
 get_mount_partuuid() {
     local mountpoint="$1" source
     [[ -n "$CACHE_ESP_PARTUUID" ]] && { printf '%s\n' "$CACHE_ESP_PARTUUID"; return 0; }
+
     source="$(findmnt -M "$mountpoint" -no SOURCE 2>/dev/null || true)"
     [[ -n "$source" ]] || return 1
+
     CACHE_ESP_PARTUUID="$(sudo blkid -s PARTUUID -o value "$source" 2>/dev/null || true)"
     printf '%s\n' "$CACHE_ESP_PARTUUID"
 }
@@ -220,6 +252,38 @@ set_shell_var() {
         sudo sed -i -E "s|^[[:space:]]*${key}=.*|${key}=\"${escaped_value}\"|" "$file"
     else
         printf '%s="%s"\n' "$key" "$value" | sudo tee -a "$file" >/dev/null
+    fi
+}
+
+read_shell_var_from_file() {
+    local file="$1" key="$2"
+    sudo awk -v key="$key" '
+        $0 ~ "^[[:space:]]*" key "=" {
+            line=$0
+            sub(/^[[:space:]]*[^=]+=/, "", line)
+            gsub(/^[[:space:]]*"/, "", line)
+            gsub(/"[[:space:]]*$/, "", line)
+            print line
+            exit
+        }
+    ' "$file" 2>/dev/null || true
+}
+
+shell_var_key_present() {
+    local file="$1" key="$2"
+    sudo grep -qE "^[[:space:]]*${key}=" "$file" 2>/dev/null
+}
+
+ensure_limine_defaults_file() {
+    local limine_defaults="/etc/default/limine"
+    if sudo test -e "$limine_defaults"; then
+        return 0
+    fi
+
+    if [[ -f /etc/limine-entry-tool.conf ]]; then
+        sudo install -m 0644 /etc/limine-entry-tool.conf "$limine_defaults"
+    else
+        sudo install -m 0644 /dev/null "$limine_defaults"
     fi
 }
 
@@ -249,6 +313,7 @@ ensure_aur_build_prereqs() {
         fi
     done
     [[ "$need_java" == true ]] || return 0
+
     provider="$(choose_java_provider)" || fatal "A Java provider for java-environment>=21 is required."
     info "Installing $provider to satisfy Java build dependencies."
     sudo pacman -S --needed --noconfirm "$provider"
@@ -257,15 +322,18 @@ ensure_aur_build_prereqs() {
 install_kernel_headers_if_needed() {
     local has_dkms=false moddir pkgbase headers_pkg shopt_save
     pacman -Q dkms >/dev/null 2>&1 && has_dkms=true
+
     shopt_save=$(shopt -p nullglob || true)
     shopt -s nullglob
     local dkms_dirs=(/var/lib/dkms/*)
     ((${#dkms_dirs[@]} > 0)) && has_dkms=true
     eval "$shopt_save"
+
     [[ "$has_dkms" == true ]] || return 0
 
     moddir="/usr/lib/modules/$(uname -r)"
     [[ ! -r "${moddir}/pkgbase" ]] && return 0
+
     pkgbase="$(<"${moddir}/pkgbase")"
     headers_pkg="${pkgbase}-headers"
 
@@ -437,11 +505,16 @@ limine_state_appears_current() {
     [[ -n "$esp_target" ]] || return 1
     loader_path="${esp_target}/EFI/limine/limine_x64.efi"
 
-    [[ -f /boot/limine.conf ]] || return 1
-    [[ -f "$loader_path" ]] || return 1
+    sudo_path_is_file /boot/limine.conf || return 1
+    sudo_path_is_file "$loader_path" || return 1
 
-    [[ ! -f /etc/kernel/cmdline || /boot/limine.conf -nt /etc/kernel/cmdline ]] || return 1
-    [[ ! -f /etc/default/limine || /boot/limine.conf -nt /etc/default/limine ]] || return 1
+    if sudo_path_is_file /etc/kernel/cmdline; then
+        sudo_path_not_older_than /boot/limine.conf /etc/kernel/cmdline || return 1
+    fi
+
+    if sudo_path_is_file /etc/default/limine; then
+        sudo_path_not_older_than /boot/limine.conf /etc/default/limine || return 1
+    fi
 
     return 0
 }
@@ -559,26 +632,37 @@ configure_cmdline() {
         info "Updated /etc/kernel/cmdline"
         NEEDS_LIMINE_UPDATE=true
     fi
+
     rm -f "$tmp"
     ACTIVE_TEMP_FILES=("${ACTIVE_TEMP_FILES[@]/$tmp}")
 }
 
 configure_limine_defaults() {
-    local limine_defaults="/etc/default/limine" esp_target current_esp
+    local limine_defaults="/etc/default/limine"
+    local esp_target current_esp
 
-    if [[ -f /etc/limine-entry-tool.conf && ! -f "$limine_defaults" ]]; then
-        sudo install -m 0644 /etc/limine-entry-tool.conf "$limine_defaults"
-    else
-        sudo touch "$limine_defaults"
-    fi
+    ensure_limine_defaults_file
 
     esp_target="$(detect_esp_mountpoint)" || fatal "Could not detect a mounted ESP."
-    current_esp="$(grep -E '^[[:space:]]*ESP_PATH=' "$limine_defaults" 2>/dev/null | cut -d= -f2 | tr -d '"' || true)"
 
-    if [[ "$current_esp" != "$esp_target" ]]; then
+    # Do NOT force-add ESP_PATH when absent.
+    # Evidence from your Arch logs shows it does not persist there and causes
+    # needless rewrites + limine-update on every rerun.
+    # Only correct it if an explicit key already exists but is wrong.
+    if shell_var_key_present "$limine_defaults" ESP_PATH; then
+        current_esp="$(read_shell_var_from_file "$limine_defaults" ESP_PATH)"
+        if [[ "$current_esp" != "$esp_target" ]]; then
+            backup_file "$limine_defaults"
+            set_shell_var "$limine_defaults" ESP_PATH "$esp_target"
+            info "Configured ESP_PATH=${esp_target}"
+            NEEDS_LIMINE_UPDATE=true
+        fi
+    fi
+
+    if ! shell_var_key_present "$limine_defaults" BOOT_ORDER; then
         backup_file "$limine_defaults"
-        set_shell_var "$limine_defaults" ESP_PATH "$esp_target"
-        info "Configured ESP_PATH=${esp_target}"
+        set_shell_var "$limine_defaults" BOOT_ORDER "*, *lts, *fallback, Snapshots"
+        info "Configured BOOT_ORDER to prioritize kernels over Snapshots."
         NEEDS_LIMINE_UPDATE=true
     fi
 }
@@ -595,15 +679,26 @@ deploy_limine() {
         canonical_present=true
     fi
 
-    if [[ ! -f "${esp_target}/EFI/limine/limine_x64.efi" || "$canonical_present" == false ]]; then
+    if ! sudo_path_is_file "${esp_target}/EFI/limine/limine_x64.efi" || [[ "$canonical_present" == false ]]; then
         purge_limine_fallback_entries "$esp_partuuid"
         info "Installing Limine EFI entry."
-        sudo limine-install
+
+        if ! sudo limine-install; then
+            warn "Standard limine-install failed. Attempting UEFI fallback installation..."
+            if sudo limine-install --skip-uefi --fallback; then
+                info "Fallback installation successful. Updating /etc/default/limine overrides."
+                set_shell_var "/etc/default/limine" SKIP_UEFI "yes"
+                set_shell_var "/etc/default/limine" ENABLE_LIMINE_FALLBACK "yes"
+            else
+                fatal "Fallback limine-install also failed."
+            fi
+        fi
+
         CACHE_EFIBOOTMGR_OUTPUT=""
         NEEDS_LIMINE_UPDATE=true
     fi
 
-    if [[ "$NEEDS_LIMINE_UPDATE" == true || ! -f /boot/limine.conf ]]; then
+    if [[ "$NEEDS_LIMINE_UPDATE" == true ]] || ! limine_state_appears_current; then
         info "Refreshing Limine configuration..."
         sudo limine-update
     fi
@@ -618,8 +713,68 @@ deploy_limine() {
         warn "No canonical Limine NVRAM entry found; BootOrder left unchanged."
     fi
 
-    [[ -f /boot/limine.conf ]] || fatal "/boot/limine.conf was not created."
+    sudo_path_is_file /boot/limine.conf || fatal "/boot/limine.conf was not created."
     info "Limine deployment completed."
+}
+
+limine_conf_has_theme_directives() {
+    local conf="$1"
+    sudo grep -qE '^[[:space:]]*(term_palette(_bright)?|term_background(_bright)?|term_foreground(_bright)?|wallpaper(_style)?|interface_branding(_color)?):' "$conf" 2>/dev/null
+}
+
+apply_limine_theme() {
+    local conf="/boot/limine.conf"
+    sudo_path_is_file "$conf" || return 0
+
+    local theme_marker="# --- UI Theme ---"
+    if sudo grep -qF "$theme_marker" "$conf"; then
+        return 0
+    fi
+
+    if limine_conf_has_theme_directives "$conf"; then
+        info "Limine configuration already contains theme directives; leaving existing theme unchanged."
+        return 0
+    fi
+
+    local tmp
+    tmp="$(mktemp)"
+    ACTIVE_TEMP_FILES+=("$tmp")
+
+    cat <<EOF > "$tmp"
+$theme_marker
+term_palette: 1e1e2e;f38ba8;a6e3a1;f9e2af;89b4fa;f5c2e7;94e2d5;cdd6f4
+term_palette_bright: 585b70;f38ba8;a6e3a1;f9e2af;89b4fa;f5c2e7;94e2d5;cdd6f4
+term_background: 00000000
+term_foreground: cdd6f4
+term_background_bright: 00000000
+term_foreground_bright: cdd6f4
+EOF
+
+    if [[ -n "${LIMINE_WALLPAPER_SOURCE:-}" && -f "$LIMINE_WALLPAPER_SOURCE" ]]; then
+        local ext="${LIMINE_WALLPAPER_SOURCE##*.}"
+        ext="${ext,,}"
+        if [[ "$ext" =~ ^(png|jpg|jpeg|bmp)$ ]]; then
+            local esp_target
+            esp_target="$(detect_esp_mountpoint 2>/dev/null || true)"
+            if [[ -n "$esp_target" ]]; then
+                local wp_dest="${esp_target}/limine-wallpaper.${ext}"
+                sudo cp "$LIMINE_WALLPAPER_SOURCE" "$wp_dest"
+                echo "wallpaper: boot():/limine-wallpaper.${ext}" >> "$tmp"
+                echo "wallpaper_style: stretched" >> "$tmp"
+                info "Installed Limine wallpaper to $wp_dest"
+            fi
+        else
+            warn "Wallpaper must be PNG, JPEG, or BMP format. Skipping wallpaper injection."
+        fi
+    fi
+
+    echo "# ----------------" >> "$tmp"
+    echo "" >> "$tmp"
+
+    sudo cat "$conf" >> "$tmp"
+    backup_file "$conf"
+    atomic_write "$conf" "$tmp"
+    info "Applied Catppuccin theme and wallpaper to Limine configuration."
 }
 
 preflight_checks() {
@@ -650,3 +805,4 @@ execute "Install limine-mkinitcpio-hook" install_aur_packages
 require_cmd limine-install
 require_cmd limine-update
 execute "Deploy Limine" deploy_limine
+execute "Apply Limine UI Theme & Wallpaper" apply_limine_theme

@@ -24,6 +24,7 @@ SCRIPT_SEARCH_DIRS=(
     "${HOME}/user_scripts/arch_setup_scripts"
     "${HOME}/user_scripts/rofi"
     "${HOME}/user_scripts/theme_matugen"
+    "${HOME}/user_scripts/btrfs_snapshots"
     # "${HOME}/my_other_scripts"
     # "/opt/shared_team_scripts"
 )
@@ -124,8 +125,8 @@ INSTALL_SEQUENCE=(
     "U | 380_nvidia_open_source.sh --auto"
     "S | 381_nvidia_services.sh"
 #    "S | 385_waydroid_setup.sh"
-    "U | 390_clipboard_persistance.sh --ram"
-    "S | 395_intel_media_sdk_check.sh"
+    "U | 390_clipboard_persistance.sh --ram --quiet"
+    "S | 395_intel_media_sdk_check.sh --auto"
     "U | 400_firefox_matugen_pywalfox.sh"
 #    "U | 405_spicetify_matugen_setup.sh"
     "U | 410_waybar_swap_config.sh"
@@ -146,6 +147,12 @@ INSTALL_SEQUENCE=(
 # ------ CUSTOM PATH SCRIPTS -------
 
     "U | rofi_wallpaper_selctor.sh --cache-only --progress"
+
+# ------ Btrfs Snapshot configuration -------
+
+    "U | 01_limine_setup.sh --auto"
+    "U | 02_snapper_isolation_subvolume.sh --auto"
+    "U | 03_snapper_pacman_hooks.sh --auto"
 )
 
 # ==============================================================================

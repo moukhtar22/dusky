@@ -49,7 +49,7 @@
   },
 
   "clock": {
-    "format": "󰥔 {:%I:%M}",
+    "format": "{:%I:%M %p}",
     "format-alt": "󰃭 {:%A, %B %d}",
     "tooltip-format": "<tt><span size='12pt' font='JetBrainsMono Nerd Font'>{calendar}</span></tt>",
     "on-click-right": "uwsm-app -- gnome-clocks",

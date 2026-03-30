@@ -6,7 +6,7 @@ ollama waydroid
 Stop the wallpaper script hyprland config 
 
 Names spelling check:- 
-K swaync swww-daemon hypridle 
+K swaync awww-daemon hypridle 
 Rofi waybar
 
 k blueman-tray blueman-applet firewall-applet

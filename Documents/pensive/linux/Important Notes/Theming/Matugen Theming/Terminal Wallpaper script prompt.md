@@ -4,7 +4,7 @@ i want for the light or dark option to be decided by the user toggling an option
 
 make it auto adjust how many wallpapers are on in a row/ column depending on the size of the window, make it dynamic. like i said, think it all through.
 
-also usee swww as the thing that changes the wallpaper, eg .swww img ~/Pictures/wallpapers/image.name --transition-type grow --transition-duration 2 --transition-fps 60
+also usee awww as the thing that changes the wallpaper, eg .awww img ~/Pictures/wallpapers/image.name --transition-type grow --transition-duration 2 --transition-fps 60
 also allow for the variables in he --transition-type, transition duration and fps to be definable at the top of the scipt. so the user can change it later if he so desires.
 
 the thing is, i want to see the wallpapers, like a preview of them so i can see them before picking one and selecting one like have them all preview it side by side in a gird, btw i'm using kitty as my terminal if that helps. btw doesn't have to be in the terminal, you could use rofi's dmenu to show the images if that works better

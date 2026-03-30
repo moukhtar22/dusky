@@ -51,6 +51,8 @@ declare -ar pkgs_misc=(
     "satty"
 
     "matugen"
+
+    "awww"
 )
 
 
@@ -393,7 +395,7 @@ main() {
   validate_group_configuration
   acquire_script_lock
   ensure_keyring
- # refresh_keyring_package
+  refresh_keyring_package
  # upgrade_system
 
   for i in "${!GROUP_LABELS[@]}"; do
