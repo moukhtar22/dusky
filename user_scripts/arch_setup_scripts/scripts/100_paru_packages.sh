@@ -101,8 +101,9 @@ declare -ar PACKAGES=(
   "tray-tui"
   "wifitui-bin"
   "xdg-terminal-exec"
-  "papirus-icon-theme-git"
-  "papirus-folders-git"
+
+#  "papirus-icon-theme-git"
+#  "papirus-folders-git"
 # "fluent-icon-theme-git"
 
 # snapshot & limine

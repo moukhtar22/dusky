@@ -53,6 +53,8 @@ declare -ar pkgs_misc=(
     "matugen"
 
     "awww"
+
+    "papirus-icon-theme"
 )
 
 

@@ -990,10 +990,32 @@ acquire_lock() {
         return 1
     }
 
-    flock -n "$LOCK_FD" || {
-        log ERROR "Another instance is already running"
+    if ! flock -n "$LOCK_FD"; then
+        log ERROR "Another instance is already running."
+        local lock_real fd pid cmdline summary=""
+        local -A seen_pids=()
+        lock_real="$(readlink -f -- "$LOCK_FILE" 2>/dev/null || printf '%s' "$LOCK_FILE")"
+        for fd in /proc/[0-9]*/fd/*; do
+            [[ -e "$fd" ]] || continue
+            if [[ "$(readlink -f -- "$fd" 2>/dev/null || true)" == "$lock_real" ]]; then
+                pid="${fd#/proc/}"
+                pid="${pid%%/*}"
+                [[ "$pid" == "$$" ]] && continue # Ignore self
+                [[ -n "${seen_pids[$pid]:-}" ]] && continue
+                seen_pids["$pid"]=1
+                
+                cmdline="$(tr '\0' ' ' < "/proc/${pid}/cmdline" 2>/dev/null || true)"
+                cmdline="${cmdline% }"
+                summary+="    -> PID $pid: ${cmdline:-[unknown]}"$'\n'
+            fi
+        done
+        
+        if [[ -n "$summary" ]]; then
+            log WARN "Processes currently holding the lock:"
+            log RAW "${summary%$'\n'}"
+        fi
         return 1
-    }
+    fi
 
     return 0
 }
@@ -1089,7 +1111,11 @@ run_logged_command() {
     local timestamp="" arg=""
 
     if [[ -z "$LOG_FILE" || ! -w "$LOG_FILE" ]]; then
-        "${cmd[@]}" || rc=$?
+        # Subshell severs the lock before running unlogged commands
+        (
+            [[ -n "${LOCK_FD:-}" ]] && exec {LOCK_FD}>&- 2>/dev/null || true
+            "${cmd[@]}"
+        ) || rc=$?
         return "$rc"
     fi
 
@@ -1102,7 +1128,11 @@ run_logged_command() {
         printf '\n'
     } >> "$LOG_FILE"
 
-    "${cmd[@]}" > >(tee -a "$LOG_FILE") 2> >(tee -a "$LOG_FILE" >&2) || rc=$?
+    # Subshell severs the lock for BOTH the payload and the asynchronous tee processes
+    (
+        [[ -n "${LOCK_FD:-}" ]] && exec {LOCK_FD}>&- 2>/dev/null || true
+        "${cmd[@]}" > >(tee -a "$LOG_FILE") 2> >(tee -a "$LOG_FILE" >&2)
+    ) || rc=$?
 
     sleep 0.2
 
@@ -2790,9 +2820,9 @@ execute_scripts() {
 
         if [[ "$OPT_DRY_RUN" == true ]]; then
             if [[ -n "$quoted_args" ]]; then
-                printf '%s→%s [DRY-RUN] %s %s (%s-mode)\n' "$CLR_BLU" "$CLR_RST" "$script" "$quoted_args" "$mode"
+                printf '%s→%s %s %s [DRY-RUN]\n' "$CLR_BLU" "$CLR_RST" "$script" "$quoted_args"
             else
-                printf '%s→%s [DRY-RUN] %s (%s-mode)\n' "$CLR_BLU" "$CLR_RST" "$script" "$mode"
+                printf '%s→%s %s [DRY-RUN]\n' "$CLR_BLU" "$CLR_RST" "$script"
             fi
             continue
         fi
@@ -2803,25 +2833,67 @@ execute_scripts() {
             printf '%s→%s %s\n' "$CLR_BLU" "$CLR_RST" "$script"
         fi
 
-        local rc=0
-        case "$mode" in
-            S) run_logged_command sudo "$BASH_BIN" "$script_path" "${args[@]}" || rc=$? ;;
-            U) run_logged_command "$BASH_BIN" "$script_path" "${args[@]}" || rc=$? ;;
-        esac
+        local -i auto_retry_limit=3
+        local -i auto_retry_count=0
 
-        if ((rc != 0)); then
+        # The Retry/Skip prompt logic natively integrated into the execution sequence
+        while true; do
+            local rc=0
+            case "$mode" in
+                S) run_logged_command sudo "$BASH_BIN" "$script_path" "${args[@]}" || rc=$? ;;
+                U) run_logged_command "$BASH_BIN" "$script_path" "${args[@]}" || rc=$? ;;
+            esac
+
+            if ((rc == 0)); then
+                break
+            fi
+
             if [[ "$ignore_fail" == "true" ]]; then
                 log WARN "$script failed (exit $rc) - ignored via ignore-fail"
                 SOFT_FAILED_SCRIPTS+=("$script")
+                break
+            fi
+
+            if (( auto_retry_count < auto_retry_limit )); then
+                (( ++auto_retry_count ))
+                log WARN "$script failed (exit $rc). Auto-retrying (attempt ${auto_retry_count}/${auto_retry_limit})..."
+                sleep 1
+                continue
+            fi
+
+            log ERROR "$script failed (exit $rc)"
+
+            if [[ -t 0 && "$OPT_FORCE" != true && "$OPT_DRY_RUN" != true ]]; then
+                local _fail_choice=""
+                printf '\n%s[ACTION REQUIRED]%s Script execution failed: %s\n' "$CLR_YLW" "$CLR_RST" "$script"
+                read -r -p "Do you want to [S]kip, [R]etry, or [Q]uit? (s/r/q): " _fail_choice
+
+                case "${_fail_choice,,}" in
+                    s|skip)
+                        log WARN "Skipping $script (User Selection)."
+                        HARD_FAILED_SCRIPTS+=("$script (skipped by user)")
+                        break
+                        ;;
+                    r|retry)
+                        log INFO "Retrying $script..."
+                        sleep 1
+                        continue
+                        ;;
+                    *)
+                        log ERROR "Stopping execution as requested."
+                        HARD_FAILED_SCRIPTS+=("$script")
+                        return 1
+                        ;;
+                esac
             else
-                log ERROR "$script failed (exit $rc)"
                 HARD_FAILED_SCRIPTS+=("$script")
                 if [[ "$OPT_STOP_ON_FAIL" == true ]]; then
                     log ERROR "Stopping execution sequence due to --stop-on-fail"
-                    break
+                    return 1
                 fi
+                break
             fi
-        fi
+        done
     done
 
     return 0
