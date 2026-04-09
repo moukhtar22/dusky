@@ -298,6 +298,7 @@ declare -ra UPDATE_SEQUENCE=(
 #    "U | 420_kokoro_gpu_setup.sh"
 #    "U | 425_parakeet_gpu_setup.sh"
 #    "S | 430_btrfs_zstd_compression_stats.sh"
+    "U | 434_wayclick_soundpacks_download.sh --auto"
 #    "U | 435_key_sound_wayclick_setup.sh --setup"
 #    "U | 440_config_bat_notify.sh --default"
 #    "U | 450_generate_colorfiles_for_current_wallpaer.sh"

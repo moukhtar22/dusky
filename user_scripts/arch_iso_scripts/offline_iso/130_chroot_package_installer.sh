@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# This script installs ALL PACKAGES. Inspect it manually to remove/add anything you want.
+# This script installs ALL PACKAGES from the Offline Repository. Inspect it manually to remove/add anything you want.
 # It installs packages only. It does not enable systemd services automatically.
 # ------------------------------------------------------------------------------
-# Arch Linux / Hyprland / UWSM - Elite System Installer (v3.4 - Hardened)
+# Arch Linux / Hyprland / UWSM - Elite System Installer (v3.4 - Hardened Offline)
 # ------------------------------------------------------------------------------
 
 # --- 1. CONFIGURATION ---
@@ -35,12 +35,7 @@ declare -ar pkgs_audio=(
 # Group 6: Filesystem & Archives
 declare -ar pkgs_filesystem=(
   "btrfs-progs" "compsize" "zram-generator" "udisks2" "udiskie" "dosfstools" "ntfs-3g" "xdg-user-dirs" "usbutils" "gnome-disk-utility" "unzip" "zip" "unrar" "7zip" "cpio" "file-roller" "rsync" "nfs-utils" "nilfs-utils" "smartmontools" "dmraid" "hdparm" "hwdetect" "lsscsi" "sg3_utils" "cpupower" "dust" "fcitx5" "fcitx5-gtk" "fcitx5-qt" "dkms"
-
-  # thunar
-  # "thunar" "thunar-archive-plugin" "thunar-volman" "tumbler" "ffmpegthumbnailer" "webp-pixbuf-loader" "poppler-glib" "gvfs" "gvfs-mtp" "gvfs-nfs" "gvfs-smb"
-
-  # nemo
-  "nemo" "nemo-fileroller" "file-roller" "gvfs" "gvfs-smb" "gvfs-mtp" "gvfs-gphoto2" "gvfs-google" "gvfs-nfs" "gvfs-afc" "gvfs-dnssd" "ffmpegthumbnailer" "webp-pixbuf-loader" "poppler-glib" "libgsf" "gnome-epub-thumbnailer" "resvg" "nemo-terminal" "nemo-python" "nemo-compare" "meld" "nemo-media-columns" "nemo-audio-tab" "nemo-image-converter" "nemo-emblems" "nemo-repairer" "nemo-share" "python-gobject" "dconf-editor" "xreader" "nemo-pastebin"
+  "nemo" "nemo-fileroller" "file-roller" "gvfs" "gvfs-smb" "gvfs-mtp" "gvfs-gphoto2" "gvfs-nfs" "gvfs-afc" "gvfs-dnssd" "ffmpegthumbnailer" "webp-pixbuf-loader" "poppler-glib" "libgsf" "gnome-epub-thumbnailer" "resvg" "nemo-terminal" "nemo-python" "nemo-compare" "meld" "nemo-media-columns" "nemo-audio-tab" "nemo-image-converter" "nemo-emblems" "nemo-repairer" "nemo-share" "python-gobject" "dconf-editor" "xreader" "nemo-pastebin"
 )
 
 # Group 7: Network & Internet
@@ -330,18 +325,6 @@ ensure_keyring() {
   print_ok "Arch keyring initialized."
 }
 
-refresh_keyring_package() {
-  print_info "Refreshing Arch keyring package"
-  run_pacman --sync --refresh --needed --noconfirm -- archlinux-keyring
-  print_ok "Arch keyring package is current."
-}
-
-upgrade_system() {
-  print_info "Full System Upgrade"
-  run_pacman --sync --sysupgrade --noconfirm
-  print_ok "System upgrade successful."
-}
-
 install_group() {
   local group_name="$1"
   local array_name="$2"
@@ -449,8 +432,6 @@ main() {
   validate_group_configuration
   acquire_script_lock
   ensure_keyring
-  refresh_keyring_package
-  upgrade_system
 
   for i in "${!GROUP_LABELS[@]}"; do
     install_group "${GROUP_LABELS[i]}" "${GROUP_ARRAYS[i]}"

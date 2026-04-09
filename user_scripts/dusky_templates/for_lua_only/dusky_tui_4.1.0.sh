@@ -351,21 +351,332 @@ register_child() {
 }
 
 populate_config_cache() {
-    CONFIG_CACHE=()
+    local config_file="${CONFIG_FILE-}"
+    local lua_bin="" candidate decl attrs
+    local tmp_proto tmp_err err_msg
+    local part state=0 key_part="" scope_part="" value_part="" cache_key=""
+    local -A new_cache=()
 
-    if [[ ! -r "$CONFIG_FILE" ]]; then
-        log_err "Config file not readable: $CONFIG_FILE"
+    if [[ -z "$config_file" || ! -f "$config_file" || ! -r "$config_file" ]]; then
+        log_err "Config file missing or unreadable: ${config_file:-<unset>}"
         return 1
     fi
 
-    local parsed_data
-    if ! parsed_data=$(LC_ALL=C awk -v MODE="READ" '
+    for candidate in lua lua5.4 lua54; do
+        lua_bin=$(type -P "$candidate" 2>/dev/null || true)
+        [[ -n $lua_bin ]] && break
+    done
+
+    if [[ -z $lua_bin ]]; then
+        log_err "Lua interpreter not found"
+        return 1
+    fi
+
+    if ! tmp_proto=$(mktemp); then
+        log_err "Failed to create IPC file"
+        return 1
+    fi
+
+    if ! tmp_err=$(mktemp); then
+        rm -f -- "$tmp_proto"
+        log_err "Failed to create error file"
+        return 1
+    fi
+
+    # Execute Lua. Pass the config path and IPC file path as args.
+    if ! LC_ALL=C "$lua_bin" - "$config_file" "$tmp_proto" >/dev/null 2>"$tmp_err" <<'LUA'
+local path = assert(arg[1], "missing config path")
+local proto_path = assert(arg[2], "missing protocol path")
+
+local out, open_err = io.open(proto_path, "wb")
+if not out then
+    io.stderr:write(tostring(open_err), "\n")
+    os.exit(1)
+end
+
+local function shallow_copy(src)
+    local dst = {}
+    for k, v in pairs(src) do dst[k] = v end
+    return dst
+end
+
+-- Safely stub destructive OS and IO functions to prevent side-effects during parsing
+local safe_os = shallow_copy(os)
+safe_os.execute = function() return true, "exit", 0 end
+safe_os.exit = function() end
+safe_os.remove = function() return nil, "sandbox" end
+safe_os.rename = function() return nil, "sandbox" end
+
+local safe_io = shallow_copy(io)
+safe_io.popen = function() return nil, "sandbox" end
+safe_io.write = function(...) end
+
+local env = {
+    assert = assert, error = error, ipairs = ipairs, next = next, pairs = pairs,
+    pcall = pcall, rawequal = rawequal, rawget = rawget, rawlen = rawlen,
+    rawset = rawset, select = select, tonumber = tonumber, tostring = tostring,
+    type = type, xpcall = xpcall, math = shallow_copy(math),
+    string = shallow_copy(string), table = shallow_copy(table),
+    os = safe_os, io = safe_io,
+    -- CRITICAL: Allow require/package so modular multi-file configs parse successfully
+    require = require, package = package, dofile = dofile, loadfile = loadfile, load = load,
+    print = function(...) end, warn = function(...) end, -- Block stdout pollution
+}
+if utf8 then env.utf8 = shallow_copy(utf8) end
+if bit32 then env.bit32 = shallow_copy(bit32) end
+env._G = env
+
+local reserved = {}
+for k in next, env do reserved[k] = true end
+
+-- Infinite loop protection
+local hook_steps = 0
+local hook_interval = 100000
+local hook_limit = 50000000
+debug.sethook(function()
+    hook_steps = hook_steps + hook_interval
+    if hook_steps > hook_limit then
+        error("config evaluation exceeded the instruction limit", 0)
+    end
+end, "", hook_interval)
+
+local function safe_tostring(v)
+    local ok, s = pcall(tostring, v)
+    return ok and s or "<unprintable>"
+end
+
+local function run()
+    local chunk, err = loadfile(path, "t", env)
+    if not chunk then error(err, 0) end
+
+    local root = chunk()
+    if root == nil then
+        local table_name = nil
+        for k, v in next, env do
+            if not reserved[k] and type(v) == "table" then
+                if table_name ~= nil then error("config creates ambiguous global tables", 0) end
+                table_name = k
+            end
+        end
+        if table_name ~= nil then root = env[table_name] end
+    end
+
+    if type(root) ~= "table" then
+        root = env
+    end
+
+    local scope = {}
+    local active = {}
+
+    local function scope_text(depth)
+        if depth == 0 then return "" end
+        return table.concat(scope, "/", 1, depth)
+    end
+
+    local function scalar_to_string(v)
+        local t = type(v)
+        if t == "string" then
+            if v:find("\0", 1, true) then error("NUL bytes not supported in values", 0) end
+            return v
+        elseif t == "number" then
+            if v ~= v or v == math.huge or v == -math.huge then error("non-finite numbers not supported", 0) end
+            return tostring(v)
+        elseif t == "boolean" then
+            return v and "true" or "false"
+        end
+        error("unsupported value type: " .. t, 0)
+    end
+
+    local function walk(t, depth)
+        if depth > 512 then error("table nesting too deep", 0) end
+        if active[t] then return end -- Gracefully skip cyclic tables instead of crashing
+        active[t] = true
+
+        local keys = {}
+        for k in next, t do
+            if type(k) == "string" and k ~= "_G" and k ~= "package" and k ~= "os" and k ~= "io" and k ~= "math" and k ~= "string" and k ~= "table" and k ~= "coroutine" then
+                if not (k:find("\0", 1, true) or k:find("|", 1, true) or k:find("/", 1, true) or k == "") then
+                    keys[#keys+1] = k
+                end
+            end
+        end
+        table.sort(keys)
+
+        for _, k in ipairs(keys) do
+            local v = rawget(t, k)
+            if type(v) == "table" then
+                scope[depth + 1] = k
+                walk(v, depth + 1)
+                scope[depth + 1] = nil
+            else
+                local ok, str_val = pcall(scalar_to_string, v)
+                if ok then
+                    out:write(k, "\0", scope_text(depth), "\0", str_val, "\0")
+                end
+            end
+        end
+        active[t] = nil
+    end
+
+    walk(root, 0)
+end
+
+local ok, err = xpcall(run, function(msg) return type(msg) == "string" and msg or safe_tostring(msg) end)
+debug.sethook()
+out:close()
+
+if not ok then
+    io.stderr:write(tostring(err), "\n")
+    os.exit(1)
+end
+LUA
+    then
+        err_msg=$(<"$tmp_err")
+        [[ -n $err_msg ]] || err_msg="unknown Lua error"
+        log_err "Parser failed on $config_file: $err_msg"
+        rm -f -- "$tmp_proto" "$tmp_err"
+        return 1
+    fi
+
+    # Ingest NUL-delimited stream safely and instantly at C-level speed inside Bash
+    if ! exec 3<"$tmp_proto"; then
+        rm -f -- "$tmp_proto" "$tmp_err"
+        log_err "Failed to open parser output file"
+        return 1
+    fi
+
+    while IFS= read -r -d '' part <&3; do
+        case $state in
+            0) key_part=$part; state=1 ;;
+            1) scope_part=$part; state=2 ;;
+            2) 
+               value_part=$part
+               cache_key="${key_part}|${scope_part}"
+               new_cache["$cache_key"]="$value_part"
+               state=0 
+               ;;
+        esac
+    done
+
+    exec 3<&-
+    rm -f -- "$tmp_proto" "$tmp_err"
+
+    if (( state != 0 )); then
+        log_err "Internal parser output was truncated."
+        return 1
+    fi
+
+    # Safe Associative Array Initialization
+    if decl=$(declare -p CONFIG_CACHE 2>/dev/null); then
+        attrs=${decl#declare }
+        attrs=${attrs%% *}
+        if [[ $attrs != *A* ]]; then
+            unset -v CONFIG_CACHE 2>/dev/null || true
+        fi
+    fi
+
+    declare -gA CONFIG_CACHE 2>/dev/null || true
+    CONFIG_CACHE=()
+
+    # Apply to global cache array safely
+    for cache_key in "${!new_cache[@]}"; do
+        CONFIG_CACHE["$cache_key"]="${new_cache["$cache_key"]}"
+    done
+}
+
+write_value_to_file() {
+    local key="$1" new_val="$2" block="${3:-}"
+    local cache_key="${key}|${block}"
+    local current_val="${CONFIG_CACHE["$cache_key"]:-}"
+
+    LAST_WRITE_CHANGED=0
+
+    # 1. File availability checks
+    if [[ ! -f "$CONFIG_FILE" || ! -r "$CONFIG_FILE" ]]; then
+        set_status "Config file missing or unreadable."
+        return 1
+    fi
+
+    # 2. Concurrency Lock (Using a dedicated .lock file to survive atomic mv)
+    local lock_file="${CONFIG_FILE}.lock"
+    exec 9>>"$lock_file"
+    if ! flock -n 9; then
+        exec 9>&-
+        set_status "Config file is locked by another process."
+        return 1
+    fi
+
+    # 3. Cache fast-path check
+    if [[ -n "${CONFIG_CACHE["$cache_key"]+_}" && "$current_val" == "$new_val" ]]; then
+        flock -u 9; exec 9>&-
+        return 0
+    fi
+
+    if [[ ! -w "$CONFIG_FILE" ]]; then
+        flock -u 9; exec 9>&-
+        set_status "Config file not writable."
+        return 1
+    fi
+
+    create_tmpfile || {
+        flock -u 9; exec 9>&-
+        set_status "Atomic save unavailable."
+        return 1
+    }
+
+    # 4. Bulletproof Trailing Newline Check (Solves the command-substitution stripping bug)
+    local has_trailing="false"
+    local last_char
+    last_char=$(tail -c 1 "$CONFIG_FILE" 2>/dev/null; echo x)
+    last_char="${last_char%x}"
+    if [[ "$last_char" == $'\n' ]]; then
+        has_trailing="true"
+    fi
+
+    # 5. Transport New Value via Temp File (Solves Environment Size Limits / Quoting issues)
+    local val_file
+    val_file=$(mktemp) || {
+        rm -f -- "$_TMPFILE" 2>/dev/null || :
+        _TMPFILE=""
+        _TMPMODE=""
+        flock -u 9; exec 9>&-
+        set_status "Failed to create value transfer file."
+        return 1
+    }
+    printf "%s" "$new_val" > "$val_file"
+
+    # 6. Execute Ironclad "Fail-Closed" AWK Mutator
+    local awk_status=0
+    HAS_TRAILING="$has_trailing" TARGET_SCOPE="$block" TARGET_KEY="$key" VAL_FILE="$val_file" LC_ALL=C awk '
+        function read_file(path,    ret, line) {
+            ret = ""
+            while ((getline line < path) > 0) ret = ret line "\n"
+            close(path)
+            if (length(ret) > 0) ret = substr(ret, 1, length(ret)-1)
+            return ret
+        }
+
+        # Safely detects Lua long brackets like [=[ ... ]=]
+        function check_long_bracket(f, p, len,    eqs, tmp, ep, ei) {
+            if (substr(f, p, 1) != "[") return 0
+            eqs = ""
+            tmp = p + 1
+            while (tmp <= len && substr(f, tmp, 1) == "=") { eqs = eqs "="; tmp++ }
+            if (substr(f, tmp, 1) == "[") {
+                ep = "]" eqs "]"
+                ei = index(substr(f, tmp + 1), ep)
+                if (ei > 0) return tmp + ei + length(ep) - 1
+                else return len + 1
+            }
+            return 0
+        }
+
         BEGIN {
             file = ""
-            while (getline line > 0) {
-                file = file line "\n"
-            }
+            while ((getline line > 0)) { file = file line "\n" }
             len = length(file)
+
+            new_v = read_file(ENVIRON["VAL_FILE"])
             
             # Lexical Analyzer
             pos = 1; tok_count = 0
@@ -373,36 +684,29 @@ populate_config_cache() {
                 c = substr(file, pos, 1)
                 if (c ~ /[ \t\r\n]/) { pos++; continue }
                 
-                # Comments
-                if (c == "-" && substr(file, pos+1, 1) == "-") {
-                    start_pos = pos; pos += 2; eqs = ""; tmp_pos = pos
-                    while (tmp_pos <= len && substr(file, tmp_pos, 1) == "=") { eqs = eqs "="; tmp_pos++ }
-                    if (substr(file, tmp_pos, 1) == "[") {
-                        tmp_pos++; end_pat = "]" eqs "]"
-                        end_idx = index(substr(file, tmp_pos), end_pat)
-                        if (end_idx > 0) pos = tmp_pos + end_idx - 1 + length(end_pat)
-                        else pos = len + 1
-                    } else {
+                tok_start = pos
+
+                # Minus and Comments (Fixes the infinite loop bug on negative numbers)
+                if (c == "-") {
+                    if (substr(file, pos+1, 1) == "-") {
+                        pos += 2
+                        lb_end = check_long_bracket(file, pos, len)
+                        if (lb_end > 0) { pos = lb_end; continue }
                         end_idx = index(substr(file, pos), "\n")
                         if (end_idx > 0) pos += end_idx - 1
                         else pos = len + 1
+                        continue
+                    } else {
+                        tok_count++; T_TYPE[tok_count] = "OTHER"; T_VAL[tok_count] = "-"; T_START[tok_count] = pos; T_END[tok_count] = pos; pos++; continue
                     }
-                    continue
                 }
-                
-                tok_start = pos
                 
                 # Long Strings and LBRACK
                 if (c == "[") {
-                    eqs = ""; tmp_pos = pos + 1
-                    while (tmp_pos <= len && substr(file, tmp_pos, 1) == "=") { eqs = eqs "="; tmp_pos++ }
-                    if (substr(file, tmp_pos, 1) == "[") {
-                        tmp_pos++; end_pat = "]" eqs "]"
-                        end_idx = index(substr(file, tmp_pos), end_pat)
-                        if (end_idx > 0) pos = tmp_pos + end_idx - 1 + length(end_pat)
-                        else pos = len + 1
-                        tok_count++; T_TYPE[tok_count] = "STRING"; T_VAL[tok_count] = substr(file, tok_start, pos - tok_start)
-                        T_START[tok_count] = tok_start; T_END[tok_count] = pos - 1; continue
+                    lb_end = check_long_bracket(file, pos, len)
+                    if (lb_end > 0) {
+                        tok_count++; T_TYPE[tok_count] = "STRING"; T_VAL[tok_count] = substr(file, pos, lb_end - pos)
+                        T_START[tok_count] = pos; T_END[tok_count] = lb_end - 1; pos = lb_end; continue
                     }
                     tok_count++; T_TYPE[tok_count] = "LBRACK"; T_VAL[tok_count] = "["; T_START[tok_count] = pos; T_END[tok_count] = pos; pos++; continue
                 }
@@ -436,227 +740,10 @@ populate_config_cache() {
                 else if (c == ";") type = "SEMI"
                 else if (c == "(") type = "LPAREN"
                 else if (c == ")") type = "RPAREN"
-                else if (c == "<") type = "LANGLE"
-                else if (c == ">") type = "RANGLE"
                 else {
                     while (pos <= len) {
                         sc = substr(file, pos, 1)
-                        if (sc ~ /[ \t\r\n\-"\x27\[\]{}=,;()<>a-zA-Z_]/) break
-                        pos++
-                    }
-                    tok_count++; T_TYPE[tok_count] = "OTHER"; T_VAL[tok_count] = substr(file, tok_start, pos - tok_start)
-                    T_START[tok_count] = tok_start; T_END[tok_count] = pos - 1; continue
-                }
-                tok_count++; T_TYPE[tok_count] = type; T_VAL[tok_count] = c; T_START[tok_count] = pos; T_END[tok_count] = pos; pos++
-            }
-        }
-        
-        function unquote_string(s,   q, out, k, cx, nx) {
-            q = substr(s, 1, 1)
-            if (q != "\"" && q != "\x27") {
-                sub(/^\[=*\[/, "", s); sub(/\]=*\]$/, "", s)
-                if (substr(s, 1, 1) == "\n") s = substr(s, 2)
-                return s
-            }
-            s = substr(s, 2, length(s)-2); out = ""; k = 1
-            while (k <= length(s)) {
-                cx = substr(s, k, 1)
-                if (cx == "\\") {
-                    nx = substr(s, k+1, 1)
-                    if (nx == "n") out = out "\n"
-                    else if (nx == "r") out = out "\r"
-                    else if (nx == "t") out = out "\t"
-                    else if (nx == "\\") out = out "\\"
-                    else if (nx == "\"" || nx == "\x27") out = out nx
-                    else out = out "\\" nx
-                    k += 2
-                } else { out = out cx; k++ }
-            }
-            return out
-        }
-        
-        function process_value(val) {
-            if (match(val, /^\[=*\[/) || match(val, /^["\x27]/)) return unquote_string(val)
-            return val
-        }
-
-        END {
-            i = 1; depth = 0; pending_key = ""
-            while (i <= tok_count) {
-                t = T_TYPE[i]; v = T_VAL[i]
-                
-                if (t == "LBRACE") {
-                    depth++; scope_stack[depth] = pending_key; pending_key = ""; i++; continue
-                }
-                if (t == "RBRACE") {
-                    if (depth > 0) delete scope_stack[depth--]; i++; continue
-                }
-                if (t == "IDENT" && (v == "local" || v == "return")) { i++; continue }
-                
-                key_name = ""; is_key = 0
-                if (t == "IDENT") {
-                    key_name = v; is_key = 1
-                    if (T_TYPE[i+1] == "LANGLE") {
-                        j = i + 1; while (j <= tok_count && T_TYPE[j] != "RANGLE") j++; i = j
-                    }
-                } else if (t == "LBRACK" && T_TYPE[i+1] == "STRING" && T_TYPE[i+2] == "RBRACK") {
-                    key_name = unquote_string(T_VAL[i+1]); is_key = 1; i += 2
-                }
-                
-                if (is_key && T_TYPE[i+1] == "EQUALS") {
-                    i += 2; curr_key = key_name
-                    if (T_TYPE[i] == "LBRACE") { pending_key = curr_key; continue }
-                    
-                    rhs_start = i; rhs_end = i; nesting = 0
-                    while (i <= tok_count) {
-                        nt = T_TYPE[i]
-                        if (nt == "LBRACE" || nt == "LBRACK" || nt == "LPAREN") nesting++
-                        if (nt == "RBRACE" || nt == "RBRACK" || nt == "RPAREN") nesting--
-                        if (nesting < 0) break
-                        if (nesting == 0) {
-                            if (nt == "COMMA" || nt == "SEMI") break
-                            if (depth == 0 && i > rhs_start) {
-                                if ((nt == "IDENT" && T_TYPE[i+1] == "EQUALS") ||
-                                    (nt == "LBRACK" && T_TYPE[i+1] == "STRING" && T_TYPE[i+2] == "RBRACK" && T_TYPE[i+3] == "EQUALS") ||
-                                    (nt == "IDENT" && T_TYPE[i+1] == "LANGLE")) break
-                            }
-                        }
-                        rhs_end = i; i++
-                    }
-                    
-                    if (rhs_end >= rhs_start) {
-                        v_start = T_START[rhs_start]; v_end = T_END[rhs_end]
-                        raw_val = substr(file, v_start, v_end - v_start + 1)
-                        curr_scope = ""
-                        for (s = 1; s <= depth; s++) {
-                            if (scope_stack[s] != "") curr_scope = curr_scope (curr_scope != "" ? "/" : "") scope_stack[s]
-                        }
-                        printf "%s\0%s\0%s\0", curr_key, curr_scope, process_value(raw_val)
-                    }
-                    continue
-                }
-                i++
-            }
-        }
-    ' < "$CONFIG_FILE"); then
-        log_err "Parser failed on $CONFIG_FILE"
-        return 1
-    fi
-
-    local key_part scope_part value_part cache_key
-    while IFS= read -r -d $'\0' key_part &&
-          IFS= read -r -d $'\0' scope_part &&
-          IFS= read -r -d $'\0' value_part; do
-        [[ -z "$key_part" ]] && continue
-        cache_key="${key_part}|${scope_part}"
-        CONFIG_CACHE["$cache_key"]="$value_part"
-    done <<< "$parsed_data"
-}
-
-write_value_to_file() {
-    local key="$1" new_val="$2" block="${3:-}"
-    local cache_key="${key}|${block}"
-    local current_val="${CONFIG_CACHE["$cache_key"]:-}"
-
-    LAST_WRITE_CHANGED=0
-
-    if [[ -n "${CONFIG_CACHE["$cache_key"]+_}" && "$current_val" == "$new_val" ]]; then
-        return 0
-    fi
-
-    if [[ ! -r "$CONFIG_FILE" ]]; then
-        set_status "Config file not readable."
-        return 1
-    fi
-
-    create_tmpfile || {
-        set_status "Atomic save unavailable."
-        return 1
-    }
-
-    local has_trailing="false"
-    if [[ "$(tail -c 1 "$CONFIG_FILE" 2>/dev/null)" == $'\n' ]]; then
-        has_trailing="true"
-    fi
-
-    if ! HAS_TRAILING="$has_trailing" TARGET_SCOPE="$block" TARGET_KEY="$key" NEW_VAL="$new_val" LC_ALL=C awk '
-        BEGIN {
-            file = ""
-            while (getline line > 0) {
-                file = file line "\n"
-            }
-            len = length(file)
-            
-            # Lexical Analyzer
-            pos = 1; tok_count = 0
-            while (pos <= len) {
-                c = substr(file, pos, 1)
-                if (c ~ /[ \t\r\n]/) { pos++; continue }
-                
-                if (c == "-" && substr(file, pos+1, 1) == "-") {
-                    start_pos = pos; pos += 2; eqs = ""; tmp_pos = pos
-                    while (tmp_pos <= len && substr(file, tmp_pos, 1) == "=") { eqs = eqs "="; tmp_pos++ }
-                    if (substr(file, tmp_pos, 1) == "[") {
-                        tmp_pos++; end_pat = "]" eqs "]"
-                        end_idx = index(substr(file, tmp_pos), end_pat)
-                        if (end_idx > 0) pos = tmp_pos + end_idx - 1 + length(end_pat)
-                        else pos = len + 1
-                    } else {
-                        end_idx = index(substr(file, pos), "\n")
-                        if (end_idx > 0) pos += end_idx - 1
-                        else pos = len + 1
-                    }
-                    continue
-                }
-                
-                tok_start = pos
-                
-                if (c == "[") {
-                    eqs = ""; tmp_pos = pos + 1
-                    while (tmp_pos <= len && substr(file, tmp_pos, 1) == "=") { eqs = eqs "="; tmp_pos++ }
-                    if (substr(file, tmp_pos, 1) == "[") {
-                        tmp_pos++; end_pat = "]" eqs "]"
-                        end_idx = index(substr(file, tmp_pos), end_pat)
-                        if (end_idx > 0) pos = tmp_pos + end_idx - 1 + length(end_pat)
-                        else pos = len + 1
-                        tok_count++; T_TYPE[tok_count] = "STRING"; T_VAL[tok_count] = substr(file, tok_start, pos - tok_start)
-                        T_START[tok_count] = tok_start; T_END[tok_count] = pos - 1; continue
-                    }
-                    tok_count++; T_TYPE[tok_count] = "LBRACK"; T_VAL[tok_count] = "["; T_START[tok_count] = pos; T_END[tok_count] = pos; pos++; continue
-                }
-                
-                if (c == "\"" || c == "\x27") {
-                    quote = c; pos++
-                    while (pos <= len) {
-                        sc = substr(file, pos, 1)
-                        if (sc == "\\") { pos += 2; continue }
-                        if (sc == quote) { pos++; break }
-                        pos++
-                    }
-                    tok_count++; T_TYPE[tok_count] = "STRING"; T_VAL[tok_count] = substr(file, tok_start, pos - tok_start)
-                    T_START[tok_count] = tok_start; T_END[tok_count] = pos - 1; continue
-                }
-                
-                if (c ~ /[a-zA-Z_]/) {
-                    while (pos <= len && substr(file, pos, 1) ~ /[a-zA-Z_0-9]/) pos++
-                    tok_count++; T_TYPE[tok_count] = "IDENT"; T_VAL[tok_count] = substr(file, tok_start, pos - tok_start)
-                    T_START[tok_count] = tok_start; T_END[tok_count] = pos - 1; continue
-                }
-                
-                if (c == "{") type = "LBRACE"
-                else if (c == "}") type = "RBRACE"
-                else if (c == "]") type = "RBRACK"
-                else if (c == "=") type = "EQUALS"
-                else if (c == ",") type = "COMMA"
-                else if (c == ";") type = "SEMI"
-                else if (c == "(") type = "LPAREN"
-                else if (c == ")") type = "RPAREN"
-                else if (c == "<") type = "LANGLE"
-                else if (c == ">") type = "RANGLE"
-                else {
-                    while (pos <= len) {
-                        sc = substr(file, pos, 1)
-                        if (sc ~ /[ \t\r\n\-"\x27\[\]{}=,;()<>a-zA-Z_]/) break
+                        if (sc ~ /[ \t\r\n\-"\x27\[\]{}=,;()a-zA-Z_]/) break
                         pos++
                     }
                     tok_count++; T_TYPE[tok_count] = "OTHER"; T_VAL[tok_count] = substr(file, tok_start, pos - tok_start)
@@ -691,19 +778,18 @@ write_value_to_file() {
         }
 
         END {
-            i = 1; depth = 0; pending_key = ""; found = 0
+            i = 1; depth = 0; pending_key = ""; match_count = 0
             while (i <= tok_count) {
                 t = T_TYPE[i]; v = T_VAL[i]
                 if (t == "LBRACE") { depth++; scope_stack[depth] = pending_key; pending_key = ""; i++; continue }
                 if (t == "RBRACE") { if (depth > 0) delete scope_stack[depth--]; i++; continue }
+                
+                # Ignore assignments preceded by local or return
                 if (t == "IDENT" && (v == "local" || v == "return")) { i++; continue }
                 
                 key_name = ""; is_key = 0
                 if (t == "IDENT") {
                     key_name = v; is_key = 1
-                    if (T_TYPE[i+1] == "LANGLE") {
-                        j = i + 1; while (j <= tok_count && T_TYPE[j] != "RANGLE") j++; i = j
-                    }
                 } else if (t == "LBRACK" && T_TYPE[i+1] == "STRING" && T_TYPE[i+2] == "RBRACK") {
                     key_name = unquote_string(T_VAL[i+1]); is_key = 1; i += 2
                 }
@@ -722,8 +808,7 @@ write_value_to_file() {
                             if (nt == "COMMA" || nt == "SEMI") break
                             if (depth == 0 && i > rhs_start) {
                                 if ((nt == "IDENT" && T_TYPE[i+1] == "EQUALS") ||
-                                    (nt == "LBRACK" && T_TYPE[i+1] == "STRING" && T_TYPE[i+2] == "RBRACK" && T_TYPE[i+3] == "EQUALS") ||
-                                    (nt == "IDENT" && T_TYPE[i+1] == "LANGLE")) break
+                                    (nt == "LBRACK" && T_TYPE[i+1] == "STRING" && T_TYPE[i+2] == "RBRACK" && T_TYPE[i+3] == "EQUALS")) break
                             }
                         }
                         rhs_end = i; i++
@@ -737,9 +822,10 @@ write_value_to_file() {
                         }
                         
                         if (curr_key == ENVIRON["TARGET_KEY"] && curr_scope == ENVIRON["TARGET_SCOPE"]) {
-                            last_match_start = v_start; last_match_end = v_end
+                            match_count++
+                            last_match_start = v_start
+                            last_match_end = v_end
                             last_match_raw = substr(file, v_start, v_end - v_start + 1)
-                            found = 1
                         }
                     }
                     continue
@@ -747,8 +833,8 @@ write_value_to_file() {
                 i++
             }
             
-            if (found) {
-                new_v = ENVIRON["NEW_VAL"]
+            # Commit logic - Fails closed if ambiguous (Solves the corrupt-the-wrong-key bug)
+            if (match_count == 1) {
                 if (match(last_match_raw, /^\[=*\[/)) {
                     match(last_match_raw, /^\[=*\[/); prefix = substr(last_match_raw, RSTART, RLENGTH)
                     suffix = prefix; gsub(/\[/, "]", suffix)
@@ -758,40 +844,82 @@ write_value_to_file() {
                     new_v = prefix "\n" new_v suffix
                 } else if (match(last_match_raw, /^["\x27]/)) {
                     quote = substr(last_match_raw, 1, 1)
-                    gsub(/\\/, "\\\\", new_v); gsub(/\n/, "\\n", new_v); gsub(/\r/, "\\r", new_v); gsub(/\t/, "\\t", new_v)
+                    # Complete Lua String Escaping
+                    gsub(/\\/, "\\\\", new_v); gsub(/\n/, "\\n", new_v); gsub(/\r/, "\\r", new_v); 
+                    gsub(/\t/, "\\t", new_v); gsub(/\f/, "\\f", new_v); gsub(/\b/, "\\b", new_v);
                     gsub(quote, "\\" quote, new_v); new_v = quote new_v quote
                 }
                 
                 file = substr(file, 1, last_match_start - 1) new_v substr(file, last_match_end + 1)
-                if (ENVIRON["HAS_TRAILING"] == "false") sub(/\n$/, "", file)
+                
+                # POSIX compliant pure-AWK trailing newline stripping
+                if (ENVIRON["HAS_TRAILING"] == "false") {
+                    if (substr(file, length(file)-1, 2) == "\r\n") {
+                        file = substr(file, 1, length(file)-2)
+                    } else if (substr(file, length(file), 1) == "\n") {
+                        file = substr(file, 1, length(file)-1)
+                    }
+                }
+                
                 printf "%s", file
                 exit 0
+            } else if (match_count > 1) {
+                exit 2
+            } else {
+                exit 1
             }
-            exit 1
         }
-    ' < "$CONFIG_FILE" > "$_TMPFILE"; then
+    ' < "$CONFIG_FILE" > "$_TMPFILE"
+
+    awk_status=$?
+
+    # Cleanup the transfer file immediately
+    rm -f "$val_file" 2>/dev/null || :
+
+    # 7. Safe Error Handling
+    if (( awk_status == 1 )); then
         rm -f -- "$_TMPFILE" 2>/dev/null || :
         _TMPFILE=""
         _TMPMODE=""
-        set_status "Key not found or parse failed."
+        flock -u 9; exec 9>&-
+        set_status "Key not found in specified scope."
         return 1
-    }
+    elif (( awk_status == 2 )); then
+        rm -f -- "$_TMPFILE" 2>/dev/null || :
+        _TMPFILE=""
+        _TMPMODE=""
+        flock -u 9; exec 9>&-
+        set_status "Ambiguous duplicate keys found. Refusing to write."
+        return 1
+    elif (( awk_status != 0 )); then
+        rm -f -- "$_TMPFILE" 2>/dev/null || :
+        _TMPFILE=""
+        _TMPMODE=""
+        flock -u 9; exec 9>&-
+        set_status "Parse or memory error during write."
+        return 1
+    fi
 
     if [[ ! -s "$_TMPFILE" ]]; then
         rm -f -- "$_TMPFILE" 2>/dev/null || :
         _TMPFILE=""
         _TMPMODE=""
+        flock -u 9; exec 9>&-
         set_status "Refusing empty write."
         return 1
-    }
+    fi
 
     commit_tmpfile || {
         rm -f -- "$_TMPFILE" 2>/dev/null || :
         _TMPFILE=""
         _TMPMODE=""
+        flock -u 9; exec 9>&-
         set_status "Atomic save failed."
         return 1
     }
+
+    # 8. Release lock and gracefully exit
+    flock -u 9; exec 9>&-
 
     CONFIG_CACHE["$cache_key"]="$new_val"
     LAST_WRITE_CHANGED=1

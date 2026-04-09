@@ -101,8 +101,8 @@ INSTALL_SEQUENCE=(
     "U | 300_git_config.sh"
     "U | 305_new_github_repo_to_backup.sh"
     "U | 310_reconnect_and_push_new_changes_to_github.sh"
-    "S | 315_grub_optimization.sh"
-    "S | 320_systemdboot_optimization.sh"
+#    "S | 315_grub_optimization.sh"
+#    "S | 320_systemdboot_optimization.sh"
     "S | 325_hosts_files_block.sh"
     "S | 330_gtk_root_symlink.sh"
     "S | 335_preload_config.sh"
@@ -128,6 +128,7 @@ INSTALL_SEQUENCE=(
     "U | 420_kokoro_gpu_setup.sh" #requires nvidia gpu with at least 4gb vram
     "U | 425_parakeet_gpu_setup.sh" #requires nvidia gpu with at least 4gb vram
     "S | 430_btrfs_zstd_compression_stats.sh"
+    "U | 434_wayclick_soundpacks_download.sh --auto"
     "U | 435_key_sound_wayclick_setup.sh --setup"
     "U | 440_config_bat_notify.sh"
     "U | 455_hyprctl_reload.sh"

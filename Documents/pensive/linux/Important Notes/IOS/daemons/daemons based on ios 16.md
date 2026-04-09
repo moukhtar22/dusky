@@ -158,8 +158,8 @@ Conservative legend:
 | 147 | exchangesyncd                 | Microsoft Exchange sync daemon                                                               | if-unused                      |
 | 148 | facemetricsd                  | Face ID metrics / attention support                                                          | no                             |
 | 149 | factory.NFQRCoded             | Factory/diagnostic QR or NFC code support                                                    | yes                            |
-| 150 | fairplayd.H2                  | FairPlay DRM daemon                                                                          | no                             |
-| 151 | fairplaydeviceidentityd       | FairPlay device identity support                                                             | no                             |
+| 150 | fairplayd.H2                  | FairPlay DRM daemon, apps installed from the app store dont launch if disabled               | NO                             |
+| 151 | fairplaydeviceidentityd       | FairPlay device identity support, apps installed from the app store dont launch if disabled  | NO                             |
 | 152 | familycircled                 | Family Sharing management daemon                                                             | if-unused                      |
 | 153 | FamilyControlsAgent           | Family Controls / Screen Time family enforcement                                             | if-unused                      |
 | 154 | familynotificationd           | Family Sharing notifications daemon                                                          | if-unused                      |

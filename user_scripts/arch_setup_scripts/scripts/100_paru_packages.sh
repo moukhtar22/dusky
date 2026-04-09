@@ -93,7 +93,6 @@ declare -ar PACKAGES=(
   "adwsteamgtk"
   "otf-atkinson-hyperlegible-next"
   "python-pywalfox"
-  "python-pyquery"
   "hyprshade"
   "hyprshutdown"
   "waypaper"
