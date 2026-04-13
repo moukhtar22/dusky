@@ -1,10 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # BTRFS ENOSPC Universal Rescue Automation
-# Original Author: Gemini Systems Architect
-# Forensic Audit & Revision: Claude Sonnet 4.6 — April 2026
-# Dynamic Interactive & Collision-Safe Revision: Gemini Systems Architect
-# Interactive Evacuation Loop Revision: Gemini Systems Architect
 # ==============================================================================
 
 set -euo pipefail
