@@ -282,6 +282,30 @@ log_success "Hostname set to: $FINAL_HOST"
 log_step "Setting Root Password"
 if var_nonempty ROOT_PASS; then
     apply_password_from_var root ROOT_PASS
+elif [[ "$AUTO_MODE" == "1" ]]; then
+    if var_nonempty USER_PASS; then
+        log_info "Auto mode: Using predefined USER_PASS for root."
+        apply_password_from_var root USER_PASS
+    else
+        ensure_tty
+        log_info "Auto mode: Setting unified password for root and ${FINAL_USER}."
+        while true; do
+            read -r -s -p "Enter unified password for root and ${FINAL_USER}: " SHARED_PASS
+            echo
+            read -r -s -p "Retype unified password: " SHARED_PASS_CONFIRM
+            echo
+            if [[ -z "$SHARED_PASS" ]]; then
+                log_error "Password cannot be empty. Please try again."
+            elif [[ "$SHARED_PASS" != "$SHARED_PASS_CONFIRM" ]]; then
+                log_error "Passwords do not match. Please try again."
+            else
+                ROOT_PASS="$SHARED_PASS"
+                USER_PASS="$SHARED_PASS"
+                apply_password_from_var root ROOT_PASS
+                break
+            fi
+        done
+    fi
 else
     set_password_interactive root "root"
 fi

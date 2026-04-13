@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# 011_build_aur_packages.sh  —  v1.4  (AUR Factory Builder w/ Smart Deduplication)
+# 011_build_aur_packages.sh  —  v1.5  (AUR Factory Builder w/ Smart Deduplication)
 #
 # Factory script: Builds AUR packages into an offline pacman repository for
 # use in an offline Arch Linux ISO. Does NOT install the built packages onto
@@ -32,7 +32,7 @@ shopt -s inherit_errexit
 # SECTION 1 — AUR PACKAGE LIST
 # ==============================================================================
 
-declare -ar AUR_PACKAGES=(
+declare -a AUR_PACKAGES=(
     'wlogout'
     'adwaita-qt6'
     'adwaita-qt5'
@@ -46,8 +46,9 @@ declare -ar AUR_PACKAGES=(
     'tray-tui'
     'wifitui-bin'
     'xdg-terminal-exec'
-    'limine-mkinitcpio-hook'
-    'limine-snapper-sync'
+    'paru'
+#    'limine-mkinitcpio-hook'
+#    'limine-snapper-sync'
 )
 
 # ==============================================================================
@@ -437,10 +438,23 @@ _download_official_deps() {
             official_deps+=("$dep")
             log_step "  [official] ${dep}"
         else
-            # Not found in official repos — likely an AUR dep.
-            # Warn so the operator knows to ensure it is handled separately.
-            log_warn "'${dep}' (dep of '${pkg}') not in official repos." \
-                     "Ensure it is listed in AUR_PACKAGES or already in the repo."
+            # Not found in official repos — it is an AUR runtime dependency.
+            # Automatically inject it into the build queue if not already present.
+            local already_queued=0
+            local existing
+            for existing in "${AUR_PACKAGES[@]}"; do
+                if [[ "$existing" == "$dep" ]]; then
+                    already_queued=1
+                    break
+                fi
+            done
+
+            if (( already_queued )); then
+                log_step "  [aur] ${dep} (already queued for build)"
+            else
+                log_step "  [aur] ${dep} (auto-queuing missing dependency)"
+                AUR_PACKAGES+=("$dep")
+            fi
         fi
     done
 
@@ -826,13 +840,15 @@ main() {
     _init_isolated_db
 
     # ── Main build loop ───────────────────────────────────────────────────────
-    log_info "Processing ${#AUR_PACKAGES[@]} AUR packages"
+    log_info "Starting compilation of AUR packages"
 
     local -i built_count=0 skip_count=0 fail_count=0
     local -a failed_pkgs=()
     local pkg
 
-    for pkg in "${AUR_PACKAGES[@]}"; do
+    local -i i=0
+    while (( i < ${#AUR_PACKAGES[@]} )); do
+        pkg="${AUR_PACKAGES[i]}"
         if _build_aur_package "$pkg"; then
             if (( _LAST_PKG_SKIPPED )); then
                 skip_count=$(( skip_count + 1 ))
@@ -844,6 +860,7 @@ main() {
             failed_pkgs+=("$pkg")
             log_warn "Continuing with remaining packages despite failure on '${pkg}'."
         fi
+        i=$(( i + 1 ))
     done
 
     # ── Finalize repository ───────────────────────────────────────────────────

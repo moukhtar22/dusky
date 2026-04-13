@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# MODULE: 003_partitioning.sh
+# MODULE: 030_partitioning.sh
 # CONTEXT: Arch ISO Environment
 # PURPOSE: Block Device Prep, GPT, LUKS2 Encryption, Base Filesystem Creation
 # ==============================================================================
@@ -25,7 +25,7 @@ cleanup() {
     trap - EXIT INT TERM
 
     # If this run opened cryptroot but failed later, close it.
-    # On success, keep it open for the next module (004_disk_mount.sh).
+    # On success, keep it open for the next module.
     if (( status != 0 )) && (( OPENED_CRYPTROOT == 1 )) && [[ -b "/dev/mapper/${TARGET_CRYPT_NAME}" ]]; then
         cryptsetup close "${TARGET_CRYPT_NAME}" 2>/dev/null || true
         udevadm settle 2>/dev/null || true
@@ -250,7 +250,7 @@ validate_target_disk() {
         exit 1
     fi
 
-    # Protect the live Arch ISO boot media when booted from USB storage
+    # Protect the live Arch ISO boot media
     boot_src=$(findmnt -rn -o SOURCE /run/archiso/bootmnt 2>/dev/null || true)
     if [[ -n "$boot_src" && -b "$boot_src" ]] && device_is_on_disk "$boot_src" "$dev"; then
         echo -e "${C_RED}Critical: $dev appears to host the live Arch ISO boot media. Refusing to wipe it.${C_RESET}"
@@ -296,11 +296,11 @@ ensure_mapper_name_available() {
             udevadm settle
 
             if [[ -b "/dev/mapper/${TARGET_CRYPT_NAME}" ]]; then
-                echo -e "${C_RED}Critical: Failed to release existing ${TARGET_CRYPT_NAME} mapper on $target_dev. Aborting.${C_RESET}"
+                echo -e "${C_RED}Critical: Failed to release existing ${TARGET_CRYPT_NAME} mapper. Aborting.${C_RESET}"
                 exit 1
             fi
         else
-            echo -e "${C_RED}Critical: /dev/mapper/${TARGET_CRYPT_NAME} already exists and does not belong to $target_dev. Aborting to avoid collateral damage.${C_RESET}"
+            echo -e "${C_RED}Critical: /dev/mapper/${TARGET_CRYPT_NAME} already exists elsewhere. Aborting.${C_RESET}"
             exit 1
         fi
     fi
@@ -320,10 +320,9 @@ teardown_device() {
     local -A mount_targets=()
     local -a crypts=()
 
-    # 1. Disable active swap backed by this device tree
+    # 1. Disable active swap
     while IFS= read -r swap_name; do
         [[ -n "$swap_name" ]] || continue
-
         swap_src=$(get_swap_backing_device "$swap_name")
 
         if [[ -n "$swap_src" && -b "$swap_src" ]] && device_is_on_disk "$swap_src" "$dev"; then
@@ -333,11 +332,11 @@ teardown_device() {
     done < <(swapon --show=NAME --noheadings 2>/dev/null || true)
 
     if has_active_swap_on_device "$dev"; then
-        echo -e "${C_RED}Critical: Failed to disable all active swap on $dev. Aborting.${C_RESET}"
+        echo -e "${C_RED}Critical: Failed to disable active swap. Aborting.${C_RESET}"
         exit 1
     fi
 
-    # 2. Unmount all mountpoints backed by this device tree
+    # 2. Unmount filesystems
     while read -r src mp; do
         [[ -n "$src" && -n "$mp" ]] || continue
         src=$(normalize_mount_source "$src")
@@ -356,11 +355,11 @@ teardown_device() {
     fi
 
     if has_active_mounts_on_device "$dev"; then
-        echo -e "${C_RED}Critical: Failed to unmount all active filesystems on $dev. Aborting.${C_RESET}"
+        echo -e "${C_RED}Critical: Failed to unmount active filesystems. Aborting.${C_RESET}"
         exit 1
     fi
 
-    # 3. Close active crypt mappers backed by this device tree
+    # 3. Close LUKS containers
     while read -r node type; do
         [[ -n "$node" && -n "$type" ]] || continue
         [[ "$type" == "crypt" ]] || continue
@@ -377,7 +376,7 @@ teardown_device() {
     udevadm settle
 
     if has_active_crypt_on_device "$dev"; then
-        echo -e "${C_RED}Critical: Failed to close all active LUKS containers on $dev. Aborting.${C_RESET}"
+        echo -e "${C_RED}Critical: Failed to close active LUKS containers. Aborting.${C_RESET}"
         exit 1
     fi
 }
@@ -411,14 +410,16 @@ prompt_luks_password() {
     done
 }
 
-# --- Autonomous Execution Flow ---
-run_auto_mode() {
+# --- Unified Provisioning Flow ---
+run_provisioning_wizard() {
+    local cli_arg="${1:-}"
+    
     clear 2>/dev/null || true
-    echo -e "${C_BOLD}=== AUTONOMOUS DISK PROVISIONING (${C_CYAN}${BOOT_MODE}${C_RESET}${C_BOLD}) ===${C_RESET}\n"
+    echo -e "${C_BOLD}=== SYSTEM DISK PROVISIONING (${C_CYAN}${BOOT_MODE}${C_RESET}${C_BOLD}) ===${C_RESET}\n"
 
     print_available_disks
 
-    read -r -p "Enter target drive to WIPE and PROVISION (e.g., nvme0n1): " raw_drive
+    read -r -p "Enter target drive to PROVISION/RESCUE (e.g., nvme0n1): " raw_drive
     local target_input="/dev/${raw_drive#/dev/}"
 
     if [[ ! -b "$target_input" ]]; then
@@ -428,140 +429,193 @@ run_auto_mode() {
 
     local target_dev
     target_dev=$(readlink -f "$target_input")
-
     validate_target_disk "$target_dev"
 
+    # --- Strategy Selection Menu & CLI Override ---
+    local strategy_choice=""
+    
+    if [[ "$cli_arg" == "--auto" || "$cli_arg" == "auto" ]]; then
+        echo -e "\n${C_YELLOW}>> [--auto] flag detected. Bypassing menu and defaulting to 'Wipe Entire Drive' strategy.${C_RESET}"
+        strategy_choice="1"
+    elif [[ "$cli_arg" == "--manual" || "$cli_arg" == "manual" ]]; then
+        echo -e "\n${C_YELLOW}>> [--manual] flag detected. Bypassing menu and defaulting to 'Manual Partitioning' strategy.${C_RESET}"
+        strategy_choice="3"
+    elif [[ "$cli_arg" == "--rescue" || "$cli_arg" == "rescue" ]]; then
+        echo -e "\n${C_YELLOW}>> [--rescue] flag detected. Bypassing menu and defaulting to 'Rescue / Chroot' strategy.${C_RESET}"
+        strategy_choice="4"
+    else
+        echo -e "\n${C_CYAN}Partitioning Strategies:${C_RESET}"
+        echo -e "  [1] Wipe Entire Drive     (Default - Erases all data and creates standard layout)"
+        echo -e "  [2] Select Existing       (Dual Boot - Retains other partitions, overwrites selected)"
+        echo -e "  [3] Manual Partitioning   (Advanced - Opens cfdisk to let you design layout manually)"
+        echo -e "  [4] Rescue / Chroot       (Mount Only - Unlocks existing LUKS root without formatting)"
+        echo ""
+        read -r -p "Enter your choice [1/2/3/4]: " strategy_choice
+    fi
+
+    local wipe_entire_disk=0
+    local manual_partition=0
+    local rescue_mode=0
+    local format_efi=1
+    local part_boot=""
+    local part_root=""
+
+    case "$strategy_choice" in
+        2)
+            wipe_entire_disk=0
+            manual_partition=0
+            rescue_mode=0
+            ;;
+        3)
+            wipe_entire_disk=0
+            manual_partition=1
+            rescue_mode=0
+            ;;
+        4)
+            wipe_entire_disk=0
+            manual_partition=0
+            rescue_mode=1
+            ;;
+        *)
+            wipe_entire_disk=1
+            manual_partition=0
+            rescue_mode=0
+            ;;
+    esac
+
+    # Step 1: Strategy-Specific Pre-Work
+    if (( manual_partition == 1 )); then
+        echo -e "\n${C_YELLOW}>> Releasing disk locks before opening manual partitioner...${C_RESET}"
+        teardown_device "$target_dev"
+        
+        echo -e "${C_YELLOW}>> Launching cfdisk...${C_RESET}"
+        cfdisk "$target_dev" < /dev/tty > /dev/tty 2>&1
+        
+        partprobe "$target_dev"
+        udevadm settle
+
+        echo -e "\n${C_GREEN}>> Manual partitioning finished. Please specify your target layout.${C_RESET}"
+        lsblk -o NAME,SIZE,TYPE,FSTYPE,PARTLABEL "$target_dev"
+        echo ""
+    elif (( wipe_entire_disk == 0 )); then
+        echo -e "\n${C_CYAN}Available partitions on $target_dev:${C_RESET}"
+        lsblk -o NAME,SIZE,TYPE,FSTYPE,PARTLABEL "$target_dev"
+        echo ""
+    fi
+
+    # Step 2: Assign Partitions
+    if (( wipe_entire_disk == 0 )); then
+        read -r -p "Enter the ROOT partition (e.g., nvme0n1p2): " raw_root
+        local root_input="/dev/${raw_root#/dev/}"
+        if [[ ! -b "$root_input" ]]; then
+            echo -e "${C_RED}Critical: Root partition $root_input not found. Aborting.${C_RESET}"
+            exit 1
+        fi
+        part_root=$(readlink -f "$root_input")
+        validate_partition_on_target "$part_root" "$target_dev" "Root"
+
+        # EFI mapping is skipped in Rescue mode; 040_disk_mount.sh handles EFI interactively anyway
+        if [[ "$BOOT_MODE" == "UEFI" && "$rescue_mode" == 0 ]]; then
+            read -r -p "Enter the EFI partition (e.g., nvme0n1p1): " raw_efi
+            local efi_input="/dev/${raw_efi#/dev/}"
+            if [[ ! -b "$efi_input" ]]; then
+                echo -e "${C_RED}Critical: EFI partition $efi_input not found. Aborting.${C_RESET}"
+                exit 1
+            fi
+            part_boot=$(readlink -f "$efi_input")
+            validate_partition_on_target "$part_boot" "$target_dev" "EFI"
+
+            if [[ "$part_boot" == "$part_root" ]]; then
+                echo -e "${C_RED}Critical: EFI and Root cannot be the same partition. Aborting.${C_RESET}"
+                exit 1
+            fi
+
+            # Safe formatting logic for Dual Boot and Manual
+            read -r -p "Format this EFI partition? (Say 'n' if sharing with Windows) [y/N]: " fmt_choice
+            if [[ "${fmt_choice,,}" != "y" && "${fmt_choice,,}" != "yes" ]]; then
+                format_efi=0
+            fi
+        fi
+    fi
+
+    # Step 3: Rescue Mode Early Exit
+    if (( rescue_mode == 1 )); then
+        echo -e "\n${C_YELLOW}>> Rescue Mode selected. No data will be formatted.${C_RESET}"
+        
+        # Validation Check: Ensure the selected partition actually contains a LUKS header
+        if ! cryptsetup isLuks "$part_root" >/dev/null 2>&1; then
+            echo -e "${C_RED}Critical: Partition $part_root does not contain a valid LUKS header. Aborting.${C_RESET}"
+            exit 1
+        fi
+        
+        teardown_device "$target_dev"
+        ensure_mapper_name_available "$target_dev"
+
+        echo -e "${C_YELLOW}>> Unlocking existing LUKS Root Partition ($part_root)...${C_RESET}"
+        # Added --allow-discards so TRIM works properly during system maintenance tasks
+        cryptsetup open --allow-discards "$part_root" "$TARGET_CRYPT_NAME"
+        OPENED_CRYPTROOT=1
+        
+        echo -e "${C_GREEN}>> Rescue unlocked. Proceed to 040_disk_mount.sh to map subvolumes without formatting.${C_RESET}"
+        return 0
+    fi
+
+    # Step 4: Authentication (For new/overwritten systems)
     local luks_pass
     luks_pass=$(prompt_luks_password)
 
-    echo -e "\n${C_RED}${C_BOLD}!!! WARNING: WIPING ALL DATA ON $target_dev IN 5 SECONDS !!!${C_RESET}"
+    # Step 5: Final Warning
+    if (( wipe_entire_disk == 1 )); then
+        echo -e "\n${C_RED}${C_BOLD}!!! WARNING: WIPING ALL DATA ON $target_dev IN 5 SECONDS !!!${C_RESET}"
+    elif (( manual_partition == 1 )); then
+        echo -e "\n${C_RED}${C_BOLD}!!! WARNING: OVERWRITING CHOSEN MANUAL LAYOUT ON $target_dev IN 5 SECONDS !!!${C_RESET}"
+    else
+        echo -e "\n${C_RED}${C_BOLD}!!! WARNING: OVERWRITING SELECTED PARTITIONS ON $target_dev IN 5 SECONDS !!!${C_RESET}"
+    fi
     sleep 5
 
+    # Step 6: Master Teardown & Validation
     teardown_device "$target_dev"
     ensure_mapper_name_available "$target_dev"
 
-    echo -e "${C_YELLOW}>> Zapping partition table...${C_RESET}"
-    wipefs -a "$target_dev"
-    sgdisk --zap-all "$target_dev"
+    # Step 7: Drive Wipe & Re-partition (Strategy 1 Only)
+    if (( wipe_entire_disk == 1 )); then
+        echo -e "${C_YELLOW}>> Zapping partition table...${C_RESET}"
+        wipefs -a "$target_dev"
+        sgdisk --zap-all "$target_dev"
 
-    echo -e "${C_YELLOW}>> Writing new GPT layout...${C_RESET}"
-    if [[ "$BOOT_MODE" == "UEFI" ]]; then
-        sgdisk -n 1:0:+2G -t 1:ef00 -c 1:"EFI System" "$target_dev"
-        sgdisk -n 2:0:0   -t 2:8309 -c 2:"Linux LUKS" "$target_dev"
-    else
-        sgdisk -n 1:0:+1M -t 1:ef02 -c 1:"BIOS Boot"  "$target_dev"
-        sgdisk -n 2:0:0   -t 2:8309 -c 2:"Linux LUKS" "$target_dev"
-    fi
+        echo -e "${C_YELLOW}>> Writing new GPT layout...${C_RESET}"
+        if [[ "$BOOT_MODE" == "UEFI" ]]; then
+            sgdisk -n 1:0:+2G -t 1:ef00 -c 1:"EFI System" "$target_dev"
+            sgdisk -n 2:0:0   -t 2:8309 -c 2:"Linux LUKS" "$target_dev"
+        else
+            sgdisk -n 1:0:+1M -t 1:ef02 -c 1:"BIOS Boot"  "$target_dev"
+            sgdisk -n 2:0:0   -t 2:8309 -c 2:"Linux LUKS" "$target_dev"
+        fi
 
-    partprobe "$target_dev"
-    udevadm settle
+        partprobe "$target_dev"
+        udevadm settle
 
-    local part_boot
-    local part_root
-    part_boot=$(get_partition_path "$target_dev" 1)
-    part_root=$(get_partition_path "$target_dev" 2)
+        part_boot=$(get_partition_path "$target_dev" 1)
+        part_root=$(get_partition_path "$target_dev" 2)
 
-    if ! wait_for_block_device "$part_root" 10; then
-        echo -e "${C_RED}Critical: Root partition $part_root did not appear after partitioning. Aborting.${C_RESET}"
-        exit 1
-    fi
-
-    if [[ "$BOOT_MODE" == "UEFI" ]] && ! wait_for_block_device "$part_boot" 10; then
-        echo -e "${C_RED}Critical: EFI partition $part_boot did not appear after partitioning. Aborting.${C_RESET}"
-        exit 1
-    fi
-
-    echo -e "${C_YELLOW}>> Clearing residual signatures on Root ($part_root)...${C_RESET}"
-    wipefs -af "$part_root"
-
-    echo -e "${C_YELLOW}>> Encrypting Root Partition ($part_root)...${C_RESET}"
-    printf '%s' "$luks_pass" | cryptsetup -q --batch-mode luksFormat --type luks2 --key-file - "$part_root"
-    printf '%s' "$luks_pass" | cryptsetup open --allow-discards --key-file - "$part_root" "$TARGET_CRYPT_NAME"
-    OPENED_CRYPTROOT=1
-    unset -v luks_pass
-
-    echo -e "${C_YELLOW}>> Formatting Filesystems...${C_RESET}"
-    mkfs.btrfs -f -L "ARCH_ROOT" "/dev/mapper/${TARGET_CRYPT_NAME}"
-
-    if [[ "$BOOT_MODE" == "UEFI" ]]; then
-        echo -e "${C_YELLOW}>> Clearing residual signatures on EFI ($part_boot)...${C_RESET}"
-        wipefs -af "$part_boot"
-        mkfs.fat -F 32 -n "EFI" "$part_boot"
-    fi
-
-    echo -e "${C_GREEN}>> Autonomous Provisioning Complete.${C_RESET}"
-}
-
-# --- Interactive Execution Flow ---
-run_interactive_mode() {
-    clear 2>/dev/null || true
-    echo -e "${C_BOLD}=== INTERACTIVE DISK PROVISIONING (${C_CYAN}${BOOT_MODE}${C_RESET}${C_BOLD}) ===${C_RESET}\n"
-
-    print_available_disks
-
-    read -r -p "Enter drive to partition via cfdisk (e.g., nvme0n1): " raw_drive
-    local target_input="/dev/${raw_drive#/dev/}"
-
-    if [[ ! -b "$target_input" ]]; then
-        echo -e "${C_RED}Critical: Block device $target_input not found. Aborting.${C_RESET}"
-        exit 1
-    fi
-
-    local target_dev
-    target_dev=$(readlink -f "$target_input")
-
-    validate_target_disk "$target_dev"
-
-    teardown_device "$target_dev"
-
-    cfdisk "$target_dev" < /dev/tty > /dev/tty 2>&1
-    partprobe "$target_dev"
-    udevadm settle
-
-    echo -e "\n${C_GREEN}>> Partitioning finished. Please specify the new layout.${C_RESET}"
-    lsblk -o NAME,SIZE,TYPE,FSTYPE "$target_dev"
-
-    read -r -p "Enter the new ROOT partition (e.g., nvme0n1p2): " raw_root
-    local root_input="/dev/${raw_root#/dev/}"
-
-    if [[ ! -b "$root_input" ]]; then
-        echo -e "${C_RED}Critical: Root partition $root_input not found. Aborting.${C_RESET}"
-        exit 1
-    fi
-
-    local part_root
-    part_root=$(readlink -f "$root_input")
-    validate_partition_on_target "$part_root" "$target_dev" "Root"
-
-    local part_efi=""
-    if [[ "$BOOT_MODE" == "UEFI" ]]; then
-        read -r -p "Enter the new EFI partition (e.g., nvme0n1p1): " raw_efi
-        local efi_input="/dev/${raw_efi#/dev/}"
-
-        if [[ ! -b "$efi_input" ]]; then
-            echo -e "${C_RED}Critical: EFI partition $efi_input not found. Aborting.${C_RESET}"
+        if ! wait_for_block_device "$part_root" 10; then
+            echo -e "${C_RED}Critical: Root partition $part_root did not appear after partitioning. Aborting.${C_RESET}"
             exit 1
         fi
 
-        part_efi=$(readlink -f "$efi_input")
-        validate_partition_on_target "$part_efi" "$target_dev" "EFI"
-
-        if [[ "$part_efi" == "$part_root" ]]; then
-            echo -e "${C_RED}Critical: EFI and Root cannot be the same partition. Aborting.${C_RESET}"
+        if [[ "$BOOT_MODE" == "UEFI" ]] && ! wait_for_block_device "$part_boot" 10; then
+            echo -e "${C_RED}Critical: EFI partition $part_boot did not appear after partitioning. Aborting.${C_RESET}"
             exit 1
         fi
     fi
 
-    ensure_mapper_name_available "$target_dev"
-
-    local luks_pass
-    luks_pass=$(prompt_luks_password)
-
+    # Step 8: Shared Architecture Formatting (All provisioning strategies converge here safely)
     echo -e "${C_YELLOW}>> Clearing residual signatures on Root ($part_root)...${C_RESET}"
     wipefs -af "$part_root"
 
     echo -e "${C_YELLOW}>> Encrypting Root Partition ($part_root)...${C_RESET}"
-    printf '%s' "$luks_pass" | cryptsetup -q --batch-mode luksFormat --type luks2 --key-file - "$part_root"
+    printf '%s' "$luks_pass" | cryptsetup --batch-mode luksFormat --type luks2 --key-file - "$part_root"
     printf '%s' "$luks_pass" | cryptsetup open --allow-discards --key-file - "$part_root" "$TARGET_CRYPT_NAME"
     OPENED_CRYPTROOT=1
     unset -v luks_pass
@@ -570,26 +624,19 @@ run_interactive_mode() {
     mkfs.btrfs -f -L "ARCH_ROOT" "/dev/mapper/${TARGET_CRYPT_NAME}"
 
     if [[ "$BOOT_MODE" == "UEFI" ]]; then
-        echo -e "${C_YELLOW}>> Clearing residual signatures on EFI ($part_efi)...${C_RESET}"
-        wipefs -af "$part_efi"
-
-        echo -e "${C_YELLOW}>> Formatting EFI (FAT32)...${C_RESET}"
-        mkfs.fat -F 32 -n "EFI" "$part_efi"
+        if (( format_efi == 1 )); then
+            echo -e "${C_YELLOW}>> Clearing residual signatures and Formatting EFI ($part_boot)...${C_RESET}"
+            wipefs -af "$part_boot"
+            mkfs.fat -F 32 -n "EFI" "$part_boot"
+        else
+            echo -e "${C_YELLOW}>> Skipping EFI format to preserve existing bootloaders.${C_RESET}"
+        fi
     fi
 
-    echo -e "${C_GREEN}>> Interactive Provisioning Complete.${C_RESET}"
+    echo -e "${C_GREEN}>> Disk Provisioning Complete. Ready for architecture assembly.${C_RESET}"
 }
 
 # --- Entry Logic ---
-if [[ "${1:-}" == "--auto" || "${1:-}" == "auto" ]]; then
-    run_auto_mode
-else
-    read -r -p "Run AUTONOMOUS wipe and provision? [y/N]: " choice
-    if [[ "${choice,,}" == "y" ]]; then
-        run_auto_mode
-    else
-        run_interactive_mode
-    fi
-fi
+run_provisioning_wizard "${1:-}"
 
 exit 0

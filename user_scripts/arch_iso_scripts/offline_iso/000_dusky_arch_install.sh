@@ -2,7 +2,7 @@
 # ==============================================================================
 #  UNIFIED ARCH ORCHESTRATOR (v3.7 - Session Aware Engine)
 #  Context: Self-aware Phase 1 (ISO) and Phase 2 (Chroot) execution.
-#  Usage: ./000_dusky_arch_install.sh [--auto|-a] [--dry-run|-d] [--reset]
+#  Usage: ./000_dusky_arch_install.sh [--auto|-a] [--manual|-m] [--dry-run|-d] [--reset] [--help|-h]
 # ==============================================================================
 
 # --- 1. SCRIPT SEQUENCES ---
@@ -11,19 +11,25 @@
 
 declare -ra ISO_SEQUENCE=(
   "020_environment_prep.sh --auto"
-  "030_partitioning.sh --auto"
+  "030_partitioning.sh"
   "040_disk_mount.sh --auto"
+  "045_repo_bind_mount.sh"
   "051_pacman_repo_switch.sh --offline"
   "060_console_fix.sh"
   "070_pacstrap.sh --auto"
+  "080_script_directories_population_in_chroot.sh"
   "090_fstab.sh --auto"
 )
 
 declare -ra CHROOT_SEQUENCE=(
+  "051_pacman_repo_switch.sh --offline"
   "100_etc_skel.sh --auto"
+  "101_skel_files_precision_edit.sh --inject"
   "110_post_chroot.sh --auto"
+  "115_tty_autologin.sh --auto"
   "120_mkintcpip_optimizer.sh | IGNORE"
   "130_chroot_package_installer.sh --auto"
+  "131_chroot_aur_packages.sh --auto"
   "140_mkinitcpio_generation.sh"
   "150_limine_bootloader.sh --auto"
   "160_zram_config.sh"
@@ -73,7 +79,7 @@ fi
 # --- 4. STATE, LOCKING & CHROOT AWARENESS ---
 declare -a EXECUTED_SCRIPTS=() SKIPPED_SCRIPTS=() FAILED_SCRIPTS=() SOFT_FAILED_SCRIPTS=() INSTALL_SEQUENCE=()
 declare -gA COMPLETED_SCRIPTS=()
-declare -i DRY_RUN="${DRY_RUN:-0}" AUTO_MODE="${AUTO_MODE:-0}" IN_CHROOT=0 RESET_STATE=0 TOTAL_START_TIME
+declare -i DRY_RUN="${DRY_RUN:-0}" AUTO_MODE="${AUTO_MODE:-1}" IN_CHROOT=0 RESET_STATE=0 TOTAL_START_TIME
 
 # Detect if we are running inside the arch-chroot via inode comparison
 readonly ROOT_STAT="$(stat -c '%d:%i' / 2>/dev/null || true)"
@@ -141,6 +147,17 @@ print_summary() {
 }
 
 # --- 6. HELPER FUNCTIONS ---
+show_help() {
+    printf "\n%s=== UNIFIED ARCH ORCHESTRATOR HELP ===%s\n\n" "$B" "$RS"
+    printf "Usage: %s./%s [OPTIONS]%s\n\n" "$HL" "$SCRIPT_NAME" "$RS"
+    printf "Options:\n"
+    printf "  %s-a, --auto%s      Run autonomously without prompting (Default)\n" "$G" "$RS"
+    printf "  %s-m, --manual%s    Prompt whether to run interactively (step-by-step)\n" "$Y" "$RS"
+    printf "  %s-d, --dry-run%s   Simulate execution without running scripts\n" "$B" "$RS"
+    printf "  %s--reset%s         Reset the state file and start fresh\n" "$R" "$RS"
+    printf "  %s-h, --help%s      Display this help and exit\n\n" "$HL" "$RS"
+}
+
 load_state() {
     unset COMPLETED_SCRIPTS
     declare -gA COMPLETED_SCRIPTS=()
@@ -273,10 +290,16 @@ main() {
     for arg in "$@"; do
         case "$arg" in
             -a|--auto) AUTO_MODE=1 ;;
+            -m|--manual) AUTO_MODE=0 ;;
             -d|--dry-run) DRY_RUN=1 ;;
             --reset) RESET_STATE=1 ;;
+            -h|--help)
+                show_help
+                exit 0
+                ;;
             *)
                 log ERR "Unknown argument: $arg"
+                log INFO "Use --help to see available options."
                 exit 2
                 ;;
         esac
@@ -610,12 +633,29 @@ main() {
         if [[ -f "$finish_flag" ]]; then
             rm -f "$finish_flag"
             log OK "Autonomous finish flag detected from 180_exiting_unmounting.sh."
+            
+            # --- THE FIX: Deactivate swap before unmounting ---
+            log INFO "Deactivating swap to release kernel filesystem locks..."
+            swapoff -a 2>/dev/null || true
+            
             log INFO "Unmounting filesystems securely..."
             umount -R "$CHROOT_MNT"
             log OK "All filesystems flushed and unmounted."
-            printf "\n%s>>> POWERING OFF IN 5 SECONDS. PULL YOUR USB DRIVE WHEN SCREEN GOES BLACK. <<<%s\n" "$Y" "$RS"
-            sleep 5
-            poweroff
+            
+            # --- NEW: Ask before powering off ---
+            printf "\n"
+            local _poweroff_choice="y"
+            if [[ -t 0 ]]; then
+                read -r -p ">>> System is completely unmounted. Power off now? [Y/n]: " _poweroff_choice || _poweroff_choice="y"
+            fi
+            
+            if [[ "${_poweroff_choice,,}" != "n" && "${_poweroff_choice,,}" != "no" ]]; then
+                printf "\n%s>>> POWERING OFF. PULL YOUR USB DRIVE WHEN SCREEN GOES BLACK. <<<%s\n" "$Y" "$RS"
+                sleep 2
+                poweroff
+            else
+                log INFO "Power off aborted. You are now back in the Live ISO environment."
+            fi
         else
             if (( AUTO_MODE )); then
                 log INFO "AUTO_MODE is enabled; skipping interactive shell prompt."

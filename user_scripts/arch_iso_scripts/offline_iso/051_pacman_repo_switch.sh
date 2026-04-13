@@ -25,11 +25,13 @@ set -euo pipefail
 # These are the only values you should need to edit for your environment.
 # ==============================================================================
 
-# Full file:// URL to the directory on your installation media that contains
-# your custom repository database and packages.
+# Dynamically detect if we are inside the chroot (Phase 2) or on the ISO (Phase 1)
 # MUST begin with 'file:///' (three slashes) to ensure an absolute path.
-# Example: "file:///run/archiso/bootmnt/arch/repo"
-OFFLINE_REPO_PATH="file:///run/archiso/bootmnt/arch/repo"
+if [[ -d "/offline_repo" ]]; then
+    OFFLINE_REPO_PATH="file:///offline_repo"
+else
+    OFFLINE_REPO_PATH="file:///run/archiso/bootmnt/arch/repo"
+fi
 
 # The name of the custom repository section used in the offline pacman.conf.
 # MUST exactly match the base name of your repository database file (without
@@ -402,7 +404,7 @@ HoldPkg     = pacman glibc
 Architecture = auto
 CheckSpace
 ParallelDownloads = 5
-DownloadUser = alpm
+# DownloadUser = alpm
 
 SigLevel    = Required DatabaseOptional
 LocalFileSigLevel = Optional
