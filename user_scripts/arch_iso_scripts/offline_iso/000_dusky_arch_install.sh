@@ -10,6 +10,7 @@
 # even if a non-critical component fails.
 
 declare -ra ISO_SEQUENCE=(
+  "010_set_variables.sh"
   "020_environment_prep.sh --auto"
   "030_partitioning.sh"
   "040_disk_mount.sh --auto"
@@ -31,7 +32,10 @@ declare -ra CHROOT_SEQUENCE=(
   "130_chroot_package_installer.sh --auto"
   "131_chroot_aur_packages.sh --auto"
   "140_mkinitcpio_generation.sh"
-  "150_limine_bootloader.sh --auto"
+#  "150_limine_bootloader.sh --auto"
+  "155_limine_setup.sh --auto"
+  "156_snapper_isolation_subvolume.sh --auto"
+  "157_snapper_pacman_hooks.sh --auto"
   "160_zram_config.sh"
   "170_services.sh"
   "051_pacman_repo_switch.sh --online"

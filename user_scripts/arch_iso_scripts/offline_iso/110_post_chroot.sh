@@ -192,6 +192,12 @@ fi
 # --- 7. Data Ingestion ---
 log_step "Configuration Ingestion"
 
+# INJECTED: Read the credentials safely transported across the chroot boundary
+if [[ -f "./.arch_credentials" ]]; then
+    log_info "Sourcing staged credentials from Live ISO RAM..."
+    source "./.arch_credentials"
+fi
+
 TARGET_TZ="${TARGET_TZ:-$(get_dynamic_timezone)}"
 
 if [[ ! -f "/usr/share/zoneinfo/$TARGET_TZ" ]]; then

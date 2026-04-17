@@ -65,11 +65,14 @@ main() {
     # exit codes for missing firmware (e.g., aic94xx, wd719x) which are
     # usually benign warnings on modern hardware.
     #
-    # Since 'set -e' is active, a non-zero exit would normally crash the script.
-    # The user explicitly stated these errors can be safely ignored.
+    # CHROOT DEPLOYMENT FIX:
+    # If limine-mkinitcpio-hook was installed prior to this script, it intercepts
+    # mkinitcpio and prompts: "Would you like to run 'limine-mkinitcpio' now? [Y/n]"
+    # We feed it "n" via process substitution to maintain 100% autonomy and
+    # defer the Limine update to the dedicated 155_limine_setup.sh script.
     # -------------------------------------------------------------------------
     
-    mkinitcpio -P || {
+    mkinitcpio -P < <(echo "n") || {
         printf "%s\n" "----------------------------------------"
         log_warn "mkinitcpio returned a non-zero exit code."
         log_warn "Proceeding as requested (ignoring potential firmware warnings)."

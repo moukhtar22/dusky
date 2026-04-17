@@ -28,3 +28,11 @@ to revert
 ```ini
 /var/jb/basebin/daemonmanager reset
 ```
+
+
+
+neovim delete lines with no in it
+
+```ini
+:g/ no/d
+```

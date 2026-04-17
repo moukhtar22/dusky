@@ -29,7 +29,7 @@ shopt -s extglob
 # ▼ USER CONFIGURATION (EDIT THIS SECTION) ▼
 # =============================================================================
 
-declare -r APP_TITLE="Dusky Service Manager"
+declare -r APP_TITLE="Dusky Services"
 declare -r APP_VERSION="v3.0.0"
 
 # Dimensions & Layout
@@ -56,6 +56,7 @@ declare -ra USER_SERVICE_DEFS=(
     "dusky_sliders.service|Dusky Sliders Service"
     "update_checker.timer|Automatic Update Checker"
     "hypridle.service|Hyprland Idle Daemon"
+    "hyprsunset.service|Night Light/BlueLight Filter"
 )
 
 declare -ra SYSTEM_SERVICE_DEFS=(

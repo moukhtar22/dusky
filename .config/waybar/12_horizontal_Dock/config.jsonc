@@ -87,8 +87,8 @@
                     ""
                 ]
             },
-            "on-scroll-up": "swayosd-client --output-volume raise",
-            "on-scroll-down": "swayosd-client --output-volume lower",
+            "on-scroll-up": "pactl set-sink-volume @DEFAULT_SINK@ +5%",
+            "on-scroll-down": "pactl set-sink-volume @DEFAULT_SINK@ -5%",
             "on-click": "pavucontrol",
             "ignored-sinks": [
                 "Easy Effects Sink"

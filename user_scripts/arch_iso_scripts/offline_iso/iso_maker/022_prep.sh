@@ -58,6 +58,9 @@ shopt -u dotglob nullglob
 echo "[*] Positioning master factory script..."
 cp -a "${SOURCE_DIR}/iso_maker/030_build_iso.sh" "${WORKSPACE}/"
 
+echo "[*] Injecting predefined packages.x86_64 asset..."
+cp -a "${SOURCE_DIR}/iso_maker/assets/packages.x86_64" "${WORKSPACE}/profile/"
+
 # --- Phase 4: Execution Deferral & Clipboard Integration ---
 echo -e "\n[*] Preparing master script for execution..."
 chmod +x "${WORKSPACE}/030_build_iso.sh"

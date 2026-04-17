@@ -47,6 +47,11 @@ else
     readonly BOOT_MODE="BIOS"
 fi
 
+# --- Credential Ingestion (Phase 1) ---
+if [[ -f "./.arch_credentials" ]]; then
+    source "./.arch_credentials"
+fi
+
 # --- Helper: Partition Naming ---
 get_partition_path() {
     local dev_path="$1"
@@ -552,8 +557,14 @@ run_provisioning_wizard() {
         ensure_mapper_name_available "$target_dev"
 
         echo -e "${C_YELLOW}>> Unlocking existing LUKS Root Partition ($part_root)...${C_RESET}"
-        # Added --allow-discards so TRIM works properly during system maintenance tasks
-        cryptsetup open --allow-discards "$part_root" "$TARGET_CRYPT_NAME"
+        
+        # Modified for Auto-Rescue support
+        if [[ -n "${ROOT_PASS:-}" ]]; then
+            printf '%s' "$ROOT_PASS" | cryptsetup open --allow-discards --key-file - "$part_root" "$TARGET_CRYPT_NAME"
+        else
+            cryptsetup open --allow-discards "$part_root" "$TARGET_CRYPT_NAME"
+        fi
+        
         OPENED_CRYPTROOT=1
         
         echo -e "${C_GREEN}>> Rescue unlocked. Proceed to 040_disk_mount.sh to map subvolumes without formatting.${C_RESET}"
@@ -562,7 +573,12 @@ run_provisioning_wizard() {
 
     # Step 4: Authentication (For new/overwritten systems)
     local luks_pass
-    luks_pass=$(prompt_luks_password)
+    if [[ -n "${ROOT_PASS:-}" ]]; then
+        echo -e "${C_YELLOW}>> Inheriting LUKS passphrase from staged credentials...${C_RESET}"
+        luks_pass="$ROOT_PASS"
+    else
+        luks_pass=$(prompt_luks_password)
+    fi
 
     # Step 5: Final Warning
     if (( wipe_entire_disk == 1 )); then
@@ -586,7 +602,7 @@ run_provisioning_wizard() {
 
         echo -e "${C_YELLOW}>> Writing new GPT layout...${C_RESET}"
         if [[ "$BOOT_MODE" == "UEFI" ]]; then
-            sgdisk -n 1:0:+2G -t 1:ef00 -c 1:"EFI System" "$target_dev"
+            sgdisk -n 1:0:+5G -t 1:ef00 -c 1:"EFI System" "$target_dev"
             sgdisk -n 2:0:0   -t 2:8309 -c 2:"Linux LUKS" "$target_dev"
         else
             sgdisk -n 1:0:+1M -t 1:ef02 -c 1:"BIOS Boot"  "$target_dev"

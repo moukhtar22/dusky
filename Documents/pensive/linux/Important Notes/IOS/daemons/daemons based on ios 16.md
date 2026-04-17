@@ -67,8 +67,8 @@ Conservative legend:
 | 56  | bookassetd                    | Apple Books asset management                                                                 | if-unused                      |
 | 57  | bookdatastored                | Apple Books data storage and sync                                                            | if-unused                      |
 | 58  | bootps                        | BOOTP/DHCP service used for tethering or USB networking                                      | no                             |
-| 59  | BTServer.avrcp                | Bluetooth media control profile support                                                      | if-unused                      |
-| 60  | BTServer.le                   | Bluetooth Low Energy support                                                                 | if-unused                      |
+| 59  | BTServer.avrcp                | Bluetooth media control profile support, Prevents pause/play on the headphones if disabled   | NO                             |
+| 60  | BTServer.le                   | Bluetooth Low Energy support, saves power                                                    | NO                             |
 | 61  | BTServer.map                  | Bluetooth Message Access Profile support                                                     | if-unused                      |
 | 62  | BTServer.pbap                 | Bluetooth Phone Book Access Profile support                                                  | if-unused                      |
 | 63  | businessservicesd             | Apple business-related services; public role unclear                                         | no                             |
@@ -299,7 +299,7 @@ Conservative legend:
 | 288 | neagent-ios                   | Network Extension agent for VPNs/filters                                                     | if-unused                      |
 | 289 | nearbyd                       | Nearby interaction and proximity service                                                     | if-unused                      |
 | 290 | nehelper-embedded             | Network Extension helper service                                                             | if-unused                      |
-| 291 | nesessionmanager              | Manages Network Extension sessions such as VPNs                                              | if-unused                      |
+| 291 | nesessionmanager              | DISABLING CAUSES MASSIVE POWER DRAW                                                          | NO                             |
 | 292 | NetworkLinkConditioner        | Developer network-throttling tool                                                            | yes                            |
 | 293 | networkserviceproxy           | Network proxy service used by Private Relay and related features                             | if-unused                      |
 | 294 | newsd                         | Apple News background service                                                                | if-unused                      |

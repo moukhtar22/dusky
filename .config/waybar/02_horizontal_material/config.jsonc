@@ -151,9 +151,9 @@
           },
           "on-click": "uwsm-app -- pavucontrol",
           "on-click-right": "uwsm-app -- kitty --class cava -e cava",
-          "on-click-middle": "swayosd-client --output-volume mute-toggle",
-          "on-scroll-up": "swayosd-client --output-volume raise",
-          "on-scroll-down": "swayosd-client --output-volume lower",
+          "on-click-middle": "pactl set-sink-mute @DEFAULT_SINK@ toggle",
+          "on-scroll-up": "pactl set-sink-volume @DEFAULT_SINK@ +5%",
+          "on-scroll-down": "pactl set-sink-volume @DEFAULT_SINK@ -5%",
           "scroll-step": 5,
           "max-volume": 150
       },
@@ -165,9 +165,9 @@
           "format-source-muted": "󰍭 {volume}%",
           "on-click": "uwsm-app -- pavucontrol",
           "on-click-right": "uwsm-app -- ~/user_scripts/audio/mic_switch.sh",
-          "on-click-middle": "swayosd-client --input-volume mute-toggle",
-          "on-scroll-up": "swayosd-client --input-volume raise",
-          "on-scroll-down": "swayosd-client --input-volume lower",
+          "on-click-middle": "pactl set-source-mute @DEFAULT_SOURCE@ toggle",
+          "on-scroll-up": "pactl set-source-volume @DEFAULT_SOURCE@ +5%",
+          "on-scroll-down": "pactl set-source-volume @DEFAULT_SOURCE@ -5%",
           "tooltip-format": "<b>Input Device</b>: {desc}"
       },
 

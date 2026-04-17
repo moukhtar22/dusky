@@ -25,6 +25,7 @@ Tools       | glances               | CLI curses-based monitoring tool
 Tools       | lazydocker            | TUI for managing Docker containers
 Tools       | kvantum               | SVG-based theme engine for Qt applications
 Tools       | gparted               | GUI partition editor for disk management
+Tools       | xorg-xhost            | to allow unfettered access to xorg root apps, like timeshfit, gparted etc
 Tools       | baobab                | Disk usage analyzer to visualize storage
 Tools       | grsync                | GUI rsync frontend for backups
 Tools       | caligula              | User-friendly, lightweight disk imager
@@ -45,6 +46,7 @@ Internet    | filezilla             | Fast and reliable FTP/SFTP client
 Internet    | zapret2               | Deep Packet Inspection circumvetntion for blocked sites
 Internet    | qbittorrent           | Feature-rich BitTorrent client (Qt-based)
 Internet    | networkmanager-openvpn| NetworkManager VPN plugin for OpenVPN (with GUI)
+Internet    | network-manager-applet| NetworkManager applet, GUI, System Tray
 Internet    | vesktop               | Custom Discord client (Vencord + Electron)
 Internet    | beeper-v4-bin         | Universal chat app (Matrix bridge)
 Productivity| pinta                 | Simple drawing/editing tool (Paint.NET clone)
