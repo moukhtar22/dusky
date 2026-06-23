@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-#  UNIFIED ARCH ORCHESTRATOR (v3.7 - Session Aware Engine)
+#  UNIFIED ARCH ORCHESTRATOR (v3.9 - Session Aware & Multi-Interpreter Engine)
 #  Context: Self-aware Phase 1 (ISO) and Phase 2 (Chroot) execution.
 #  Usage: ./000_dusky_arch_install.sh [--auto|-a] [--manual|-m] [--dry-run|-d] [--reset] [--help|-h]
 # ==============================================================================
@@ -25,9 +25,15 @@ declare -ra CHROOT_SEQUENCE=(
   "110_post_chroot.sh --auto"
   "115_tty_autologin.sh --auto"
   "120_mkintcpip_optimizer.sh | IGNORE"
+  "125_mkinitcpio_hooks_disable.sh"
   "130_chroot_package_installer.sh --auto"
-  "140_mkinitcpio_generation.sh"
-  "150_limine_bootloader.sh --auto"
+  "135_plymouth_setup.sh"
+# "150_limine_bootloader.sh --auto"
+  "154_mkinitcpio_hooks_restore.sh"
+  "155_limine_setup.sh --auto"
+  "156_snapper_isolation_subvolume.sh --auto"
+  "157_snapper_pacman_hooks.sh --auto"
+  "158_mkinitcpio_restore_and_generate.sh"
   "160_zram_config.sh"
   "170_services.sh"
   "180_exiting_unmounting.sh --auto"
@@ -35,6 +41,9 @@ declare -ra CHROOT_SEQUENCE=(
 
 # --- 2. SETUP & SAFETY ---
 set -o errexit -o nounset -o pipefail -o errtrace
+
+# Unbuffer Python outputs ensuring real-time log piping
+export PYTHONUNBUFFERED=1
 
 readonly SCRIPT_PATH="$(readlink -f "$0")"
 readonly SCRIPT_DIR="$(dirname "$SCRIPT_PATH")"
@@ -175,6 +184,34 @@ get_script_description() {
     printf "%s" "${desc:-No description available}"
 }
 
+resolve_interpreter() {
+    local script_path="$1"
+    local ext="${script_path##*.}"
+    local first_line="" extracted_interpreter=""
+
+    if [[ -f "$script_path" ]]; then
+        # Strip potential Carriage Returns from Windows edits
+        read -r first_line < "$script_path" || true
+        first_line="${first_line%$'\r'}"
+        
+        if [[ "$first_line" =~ ^#![[:space:]]*(.+) ]]; then
+            extracted_interpreter="${BASH_REMATCH[1]}"
+            # Return exact shebang command (e.g. "/usr/bin/env python3")
+            if [[ "$extracted_interpreter" =~ python|bash|sh|zsh|dash|ksh ]]; then
+                printf "%s\n" "$extracted_interpreter"
+                return 0
+            fi
+        fi
+    fi
+
+    # Extension fallback
+    if [[ "${ext,,}" == "py" ]]; then
+        printf "python\n"
+    else
+        printf "bash\n"
+    fi
+}
+
 # --- 7. EXECUTION ENGINE ---
 execute_script() {
     local entry="$1" state_key="$2" current="$3" total="$4" start_time exit_code
@@ -198,6 +235,22 @@ execute_script() {
         return 0
     fi
 
+    # Interpreter Resolution & Word Splitting
+    local interpreter_str
+    interpreter_str=$(resolve_interpreter "$script_name")
+    
+    local -a interpreter_cmd=()
+    read -r -a interpreter_cmd <<< "$interpreter_str" # Safe word-splitting for shebang args
+
+    # Check if the requested interpreter is Python-based
+    local is_python=0
+    for part in "${interpreter_cmd[@]}"; do
+        if [[ "$part" == *"python"* ]]; then
+            is_python=1
+            break
+        fi
+    done
+
     # Propagate Orchestrator arguments downward
     local child_args=()
     [[ -n "$script_args" ]] && read -ra appended_args <<< "$script_args" && child_args+=("${appended_args[@]}")
@@ -211,15 +264,36 @@ execute_script() {
         if (( attempt > 1 )); then
             log INFO "[$current/$total] Retrying: ${HL}$raw_command${RS} (Attempt $attempt/$max_attempts)"
         else
-            log INFO "[$current/$total] Executing: ${HL}$raw_command${RS}"
+            # Prettify the visual log based on execution binary
+            local base_bin="${interpreter_cmd[-1]}"
+            base_bin="${base_bin##*/}"
+            log INFO "[$current/$total] Executing ($base_bin): ${HL}$raw_command${RS}"
         fi
         
         start_time=$SECONDS
+        exit_code=0
 
-        set +e
-        bash "$script_name" "${child_args[@]}"
-        exit_code=$?
-        set -e
+        # Install Python dependency Just-In-Time if missing, fully subsumed within the retry paradigm
+        if (( is_python )) && ! command -v python >/dev/null 2>&1; then
+            log WARN "Python dependency detected for '$script_name', but python is not installed."
+            log INFO "Attempting JIT pacman installation (Attempt $attempt/$max_attempts)..."
+            if pacman -Sy --noconfirm --needed python; then
+                log OK "Python successfully installed."
+            else
+                log ERR "Failed to synchronize and install Python dependency."
+                exit_code=1
+            fi
+        fi
+
+        # Proceed with script execution EXCLUSIVELY if dependencies are empirically satisfied
+        if (( exit_code == 0 )); then
+            # CRITICAL: We append `9>&-` to prevent child processes from inheriting the lock file
+            # descriptor, which would cause infinite deadlocks if the child spawns a daemon.
+            set +e
+            "${interpreter_cmd[@]}" "./$script_name" "${child_args[@]}" 9>&-
+            exit_code=$?
+            set -e
+        fi
 
         if (( exit_code == 0 )); then
             echo "$state_key" >> "$STATE_FILE"
@@ -382,7 +456,20 @@ main() {
             
             local display_name="$raw_command"
             (( ignore_fail == 1 )) && display_name+=" (IGN)"
-            printf "  %3d. %-45s %s\n" "$i" "$display_name" "$status"
+            
+            # Predict Interpreter for Dry Run
+            local interpreter_str
+            interpreter_str=$(resolve_interpreter "$script_name")
+            local -a interpreter_cmd=()
+            read -r -a interpreter_cmd <<< "$interpreter_str"
+            
+            # Extract just the base name (e.g. 'python' from '/usr/bin/env python')
+            local base_interpreter="${interpreter_cmd[-1]}"
+            base_interpreter="${base_interpreter##*/}"
+            
+            display_name+=" [${base_interpreter}]"
+
+            printf "  %3d. %-55s %s\n" "$i" "$display_name" "$status"
         done
         
         printf "\n%sSummary:%s\n" "$HL" "$RS"

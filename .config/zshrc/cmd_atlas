@@ -1,0 +1,160 @@
+# =============================================================================
+# Dusky Command Atlas v3.0 (Platinum Edition)
+# Architecture: Zero-fork environment scanning, associative array metadata,
+#               hidden delimiter routing, and interactive Zsh buffer injection.
+# Dependencies: zsh 5.9+, fzf 0.72.0+
+# =============================================================================
+
+# =============================================================================
+# The Global Metadata Dictionary (Extended Environment Edition)
+# =============================================================================
+typeset -g -A ZSH_DOCS
+ZSH_DOCS=(
+    # --- DUSKY CUSTOM TOOLS ---
+    "atlas"               "Interactive fuzzy-finder for environment functions and aliases."
+    "batstat"             "Zero-fork battery monitor with live TUI."
+    "mon_info"            "Mathematical aspect ratio and display info renderer."
+    "pkg"                 "Advanced pacman/expac package querying tool."
+    "res_mon"             "Live system resource monitor."
+    
+    # --- VIRTUALIZATION & KVM ---
+    "win"                 "Windows 10 KVM orchestrator with Looking Glass integration."
+    "nvidia_bind"         "Binds Nvidia GPU to the VFIO driver for VM passthrough."
+    "nvidia_unbind"       "Unbinds Nvidia GPU from the VFIO driver to restore host access."
+
+    # --- DUSKY DOTFILES MANAGEMENT ---
+    "git_dusky"           "Core git wrapper locked to the bare repository."
+    "git_dusky_add_list"  "Stages specific tracked files from the .git_dusky_list payload."
+    "git_dusky_restore"   "Destructive hard reset to revert all local dotfile changes."
+    "gitdelta"            "Stages list files and computes the repository diff against HEAD."
+    "lazygit_dusky"       "Launches Lazygit scoped to the Dusky bare repository."
+
+    # --- DEVELOPMENT & EXECUTION ---
+    "logs_old"            "Advanced execution wrapper for robust script testing and tracing."
+    "llm"                 "Dynamically launches the latest LM Studio AppImage build."
+    "mkcd"                "Creates a new directory and immediately shifts the working path into it."
+
+    # --- ENVIRONMENT UTILITIES ---
+    "waydroid_bind"       "Remounts Waydroid pictures directory to ZRAM."
+    "wthr"                "Fetches current weather via wttr.in (optional -s flag for terse)."
+
+    # --- STANDARD GNU COREUTILS & NAVIGATION ---
+    "ls"                  "List directory contents (often overridden by exa/eza)."
+    "ll"                  "List directory contents in long format."
+    "la"                  "List all files, including hidden dotfiles."
+    "lsa"                 "List all files in long format."
+    "grep"                "Search text using regular expressions (with color)."
+    "egrep"               "Search text using extended regular expressions."
+    "fgrep"               "Search text using fixed strings."
+    "cp"                  "Copy files and directories (interactive mode)."
+    "mv"                  "Move or rename files and directories (interactive mode)."
+    "rm"                  "Remove files or directories (interactive mode)."
+    "cat"                 "Concatenate and print files (often overridden by bat)."
+    
+    # --- ARCH LINUX / PACMAN / SYSTEM ---
+    "pacman"              "Arch Linux package manager."
+    "yay"                 "AUR helper and pacman wrapper."
+    "paru"                "Feature-packed AUR helper."
+    "update"              "System update alias."
+    "sysctl"              "Kernel parameter configuration."
+    "systemctl"           "Control the systemd system and service manager."
+    "journalctl"          "Query the systemd journal."
+)
+
+cmd_atlas() {
+    # 1. Strict Environment Isolation
+    emulate -L zsh
+    setopt localoptions extendedglob
+    local LC_ALL=C
+
+    # Dependency Validation
+    if (( ! $+commands[fzf] )); then
+        print -u2 -P "\n%F{red}✖ Error:%f 'fzf' is not installed."
+        return 1
+    fi
+
+    # 2. State Initialization
+    local -a valid_items
+    local -A item_types
+    local max_len=7 # Hard floor to guarantee safe math for header padding
+    local name desc type_lbl 
+    local -a display_lines=()
+
+    # 3. Memory Ledger Collection (Zero-Fork)
+    # Aliases
+    for name in ${(ok)aliases}; do
+        # STRICT MODE: If the alias is not in the dictionary, do not render it.
+        if [[ -z "${ZSH_DOCS[$name]+isset}" ]]; then continue; fi
+
+        valid_items+=("$name")
+        item_types[$name]="Alias"
+        (( ${#name} > max_len )) && max_len=${#name}
+    done
+
+    # Functions (with noise filtering)
+    for name in ${(ok)functions}; do
+        if [[ "$name" == _* && -z "${ZSH_DOCS[$name]+isset}" ]]; then continue; fi
+        if [[ "$name" == (chpwd|precmd|preexec|periodic|zshaddhistory) && -z "${ZSH_DOCS[$name]+isset}" ]]; then continue; fi
+
+        valid_items+=("$name")
+        item_types[$name]="Func "
+        (( ${#name} > max_len )) && max_len=${#name}
+    done
+
+    # Cap visual column width to prevent UI distortion
+    (( max_len > 35 )) && max_len=35
+
+    # 4. Data Stream Construction with Hidden Routing
+    for name in $valid_items; do
+        local type="${item_types[$name]}"
+        desc="${ZSH_DOCS[$name]:-}"
+        [[ -z "$desc" ]] && desc="<No description provided>"
+
+        local disp_name="${name:0:$max_len}"
+        local padded_name="${(r:$max_len:)disp_name}"
+        local color_type=$([[ "$type" == "Alias" ]] && echo "\033[38;5;114m" || echo "\033[1;38;5;39m")
+        
+        # CRITICAL ARCHITECTURE: Format is "RAW_CMD|VISUAL_STRING"
+        # The '|' acts as an unbreakable delimiter for fzf to separate logic from UI.
+        display_lines+=("${name}|\033[38;5;242m[\033[0m${color_type}${type}\033[0m\033[38;5;242m]\033[0m  \033[1;37m${padded_name}\033[0m  \033[38;5;238m│\033[0m  \033[38;5;250m${desc}\033[0m")
+    done
+
+    # 5. Header Mathematics
+    local header_pad
+    header_pad=$(printf '%*s' $((max_len - 7)) '')
+    local visual_header="   TYPE   COMMAND${header_pad} │  DESCRIPTION"
+
+    # 6. FZF Engine Execution
+    local fzf_choice
+    fzf_choice=$(print -l "${display_lines[@]}" | fzf --ansi \
+        --delimiter='\|' \
+        --with-nth=2 \
+        --prompt="   Search ❯ " \
+        --pointer="" \
+        --marker="✓" \
+        --layout=reverse \
+        --border=rounded \
+        --border-label=" 󰘳 Dusky Command Atlas " \
+        --border-label-pos=3 \
+        --padding=1,2 \
+        --margin=2%,5% \
+        --info=inline-right \
+        --header="$visual_header" \
+        --header-first \
+        --color="bg+:#1e1e2e,bg:#11111b,spinner:#f5e0dc,hl:#f38ba8" \
+        --color="fg:#cdd6f4,header:#89b4fa,info:#cba6f7,pointer:#a6e3a1" \
+        --color="marker:#f5e0dc,fg+:#cdd6f4,prompt:#cba6f7,hl+:#f38ba8" \
+        --color="border:#585b70,label:#a6e3a1")
+
+    # 7. Action Router (Buffer Injection)
+    # If the user selected an item (didn't press ESC)
+    if [[ -n "$fzf_choice" ]]; then
+        # Natively strip everything from the delimiter onward to isolate the raw command name
+        local cmd="${fzf_choice%%|*}"
+        
+        # Inject the selected command directly onto the active Zsh prompt
+        print -z "$cmd"
+    fi
+}
+
+alias atlas='cmd_atlas'

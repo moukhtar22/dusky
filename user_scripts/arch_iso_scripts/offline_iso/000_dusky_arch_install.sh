@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-#  UNIFIED ARCH ORCHESTRATOR (v3.7 - Session Aware Engine)
+#  UNIFIED ARCH ORCHESTRATOR (v3.9 - Session Aware & Multi-Interpreter Engine)
 #  Context: Self-aware Phase 1 (ISO) and Phase 2 (Chroot) execution.
 #  Usage: ./000_dusky_arch_install.sh [--auto|-a] [--manual|-m] [--dry-run|-d] [--reset] [--help|-h]
 # ==============================================================================
@@ -10,40 +10,43 @@
 # even if a non-critical component fails.
 
 declare -ra ISO_SEQUENCE=(
-  "010_set_variables.sh"
-  "020_environment_prep.sh --auto"
+  "001_uefi_check.sh"
+  "010_set_variables.sh --no_encrypt"
+  "020_environment_prep.sh --auto --cachy"
   "030_partitioning.sh"
   "040_disk_mount.sh --auto"
   "045_repo_bind_mount.sh"
-  "051_pacman_repo_switch.sh --offline"
+  "051_pacman_repo_switch.sh --offline --cachyos"
   "060_console_fix.sh"
-  "070_pacstrap.sh --auto"
+  "070_pacstrap_and_disable_mkinitcpio.py --auto --cachyos"
   "080_script_directories_population_in_chroot.sh"
   "090_fstab.sh --auto"
 )
 
 declare -ra CHROOT_SEQUENCE=(
-  "051_pacman_repo_switch.sh --offline"
+  "051_pacman_repo_switch.sh --offline --cachyos"
   "100_etc_skel.sh --auto"
   "101_skel_files_precision_edit.sh --inject"
   "110_post_chroot.sh --auto"
   "115_tty_autologin.sh --auto"
-  "120_mkintcpip_optimizer.sh | IGNORE"
-  "130_chroot_package_installer.sh --auto"
-  "131_chroot_aur_packages.sh --auto"
-  "140_mkinitcpio_generation.sh"
-#  "150_limine_bootloader.sh --auto"
-  "155_limine_setup.sh --auto"
+  "120_mkinitcpio_optimizer.sh | IGNORE"
+  "135_plymouth_setup.sh"
+  "130_chroot_package_installer.sh --auto --cachyos"
+  "131_chroot_aur_packages.sh --auto --cachyos"
+  "133_uwsm_gpu_env.py --auto"
+  "151_systemd_bootloader.sh"
   "156_snapper_isolation_subvolume.sh --auto"
-  "157_snapper_pacman_hooks.sh --auto"
+  "158_mkinitcpio_restore_and_generate.sh"
   "160_zram_config.sh"
   "170_services.sh"
-  "051_pacman_repo_switch.sh --online"
-  "180_exiting_unmounting.sh --auto"
+  "051_pacman_repo_switch.sh --online --cachyos"
 )
 
 # --- 2. SETUP & SAFETY ---
 set -o errexit -o nounset -o pipefail -o errtrace
+
+# Unbuffer Python outputs ensuring real-time log piping
+export PYTHONUNBUFFERED=1
 
 readonly SCRIPT_PATH="$(readlink -f "$0")"
 readonly SCRIPT_DIR="$(dirname "$SCRIPT_PATH")"
@@ -184,6 +187,34 @@ get_script_description() {
     printf "%s" "${desc:-No description available}"
 }
 
+resolve_interpreter() {
+    local script_path="$1"
+    local ext="${script_path##*.}"
+    local first_line="" extracted_interpreter=""
+
+    if [[ -f "$script_path" ]]; then
+        # Strip potential Carriage Returns from Windows edits
+        read -r first_line < "$script_path" || true
+        first_line="${first_line%$'\r'}"
+        
+        if [[ "$first_line" =~ ^#![[:space:]]*(.+) ]]; then
+            extracted_interpreter="${BASH_REMATCH[1]}"
+            # Return exact shebang command (e.g. "/usr/bin/env python3")
+            if [[ "$extracted_interpreter" =~ python|bash|sh|zsh|dash|ksh ]]; then
+                printf "%s\n" "$extracted_interpreter"
+                return 0
+            fi
+        fi
+    fi
+
+    # Extension fallback
+    if [[ "${ext,,}" == "py" ]]; then
+        printf "python\n"
+    else
+        printf "bash\n"
+    fi
+}
+
 # --- 7. EXECUTION ENGINE ---
 execute_script() {
     local entry="$1" state_key="$2" current="$3" total="$4" start_time exit_code
@@ -207,6 +238,22 @@ execute_script() {
         return 0
     fi
 
+    # Interpreter Resolution & Word Splitting
+    local interpreter_str
+    interpreter_str=$(resolve_interpreter "$script_name")
+    
+    local -a interpreter_cmd=()
+    read -r -a interpreter_cmd <<< "$interpreter_str" # Safe word-splitting for shebang args
+
+    # Check if the requested interpreter is Python-based
+    local is_python=0
+    for part in "${interpreter_cmd[@]}"; do
+        if [[ "$part" == *"python"* ]]; then
+            is_python=1
+            break
+        fi
+    done
+
     # Propagate Orchestrator arguments downward
     local child_args=()
     [[ -n "$script_args" ]] && read -ra appended_args <<< "$script_args" && child_args+=("${appended_args[@]}")
@@ -220,15 +267,36 @@ execute_script() {
         if (( attempt > 1 )); then
             log INFO "[$current/$total] Retrying: ${HL}$raw_command${RS} (Attempt $attempt/$max_attempts)"
         else
-            log INFO "[$current/$total] Executing: ${HL}$raw_command${RS}"
+            # Prettify the visual log based on execution binary
+            local base_bin="${interpreter_cmd[-1]}"
+            base_bin="${base_bin##*/}"
+            log INFO "[$current/$total] Executing ($base_bin): ${HL}$raw_command${RS}"
         fi
         
         start_time=$SECONDS
+        exit_code=0
 
-        set +e
-        bash "$script_name" "${child_args[@]}"
-        exit_code=$?
-        set -e
+        # Install Python dependency Just-In-Time if missing, fully subsumed within the retry paradigm
+        if (( is_python )) && ! command -v python >/dev/null 2>&1; then
+            log WARN "Python dependency detected for '$script_name', but python is not installed."
+            log INFO "Attempting JIT pacman installation (Attempt $attempt/$max_attempts)..."
+            if pacman -Sy --noconfirm --needed python; then
+                log OK "Python successfully installed."
+            else
+                log ERR "Failed to synchronize and install Python dependency."
+                exit_code=1
+            fi
+        fi
+
+        # Proceed with script execution EXCLUSIVELY if dependencies are empirically satisfied
+        if (( exit_code == 0 )); then
+            # CRITICAL: We append `9>&-` to prevent child processes from inheriting the lock file
+            # descriptor, which would cause infinite deadlocks if the child spawns a daemon.
+            set +e
+            "${interpreter_cmd[@]}" "./$script_name" "${child_args[@]}" 9>&-
+            exit_code=$?
+            set -e
+        fi
 
         if (( exit_code == 0 )); then
             echo "$state_key" >> "$STATE_FILE"
@@ -391,7 +459,20 @@ main() {
             
             local display_name="$raw_command"
             (( ignore_fail == 1 )) && display_name+=" (IGN)"
-            printf "  %3d. %-45s %s\n" "$i" "$display_name" "$status"
+            
+            # Predict Interpreter for Dry Run
+            local interpreter_str
+            interpreter_str=$(resolve_interpreter "$script_name")
+            local -a interpreter_cmd=()
+            read -r -a interpreter_cmd <<< "$interpreter_str"
+            
+            # Extract just the base name (e.g. 'python' from '/usr/bin/env python')
+            local base_interpreter="${interpreter_cmd[-1]}"
+            base_interpreter="${base_interpreter##*/}"
+            
+            display_name+=" [${base_interpreter}]"
+
+            printf "  %3d. %-55s %s\n" "$i" "$display_name" "$status"
         done
         
         printf "\n%sSummary:%s\n" "$HL" "$RS"
@@ -584,10 +665,6 @@ main() {
         local CHROOT_MNT="/mnt"
         local TMP_DIR="/root/arch_install_tmp"
         local TARGET_TMP="${CHROOT_MNT}${TMP_DIR}"
-        local finish_flag="${CHROOT_MNT}/root/.arch-installer-finish-auto"
-
-        log INFO "Clearing any stale autonomous-finish sentinel..."
-        rm -f "$finish_flag"
 
         log INFO "Cloning orchestrator payload to Phase 2 environment..."
         mkdir -p "$TARGET_TMP"
@@ -634,43 +711,113 @@ main() {
 
         printf "\n%s%s=== COMPLETE SYSTEM DEPLOYMENT SUCCESSFUL ===%s\n" "$G" "$HL" "$RS"
 
-        if [[ -f "$finish_flag" ]]; then
-            rm -f "$finish_flag"
-            log OK "Autonomous finish flag detected from 180_exiting_unmounting.sh."
-            
-            # --- THE FIX: Deactivate swap before unmounting ---
+        # --- THE FIX: Intuitive, Safe, & Diagnostic User Unmount Flow ---
+        local _poweroff_choice="y"
+        if [[ -t 0 ]]; then
+            printf "\n"
+            read -r -p ">>> Installation complete! Unmount filesystems and power off now? [Y/n]: " _poweroff_choice || _poweroff_choice="y"
+        fi
+
+        if [[ "${_poweroff_choice,,}" != "n" && "${_poweroff_choice,,}" != "no" ]]; then
+            log INFO "Flushing filesystem buffers to disk (sync)..."
+            sync
+
             log INFO "Deactivating swap to release kernel filesystem locks..."
             swapoff -a 2>/dev/null || true
             
-            log INFO "Unmounting filesystems securely..."
-            umount -R "$CHROOT_MNT"
-            log OK "All filesystems flushed and unmounted."
-            
-            # --- NEW: Ask before powering off ---
-            printf "\n"
-            local _poweroff_choice="y"
-            if [[ -t 0 ]]; then
-                read -r -p ">>> System is completely unmounted. Power off now? [Y/n]: " _poweroff_choice || _poweroff_choice="y"
-            fi
-            
-            if [[ "${_poweroff_choice,,}" != "n" && "${_poweroff_choice,,}" != "no" ]]; then
+            log INFO "Attempting graceful unmount of filesystems..."
+            if umount -R "$CHROOT_MNT" 2>/dev/null; then
+                log OK "All filesystems flushed and unmounted cleanly."
                 printf "\n%s>>> POWERING OFF. PULL YOUR USB DRIVE WHEN SCREEN GOES BLACK. <<<%s\n" "$Y" "$RS"
                 sleep 2
                 poweroff
+                return 0
             else
-                log INFO "Power off aborted. You are now back in the Live ISO environment."
-            fi
-        else
-            if (( AUTO_MODE )); then
-                log INFO "AUTO_MODE is enabled; skipping interactive shell prompt."
-            else
-                if ! read -r -p "Do you want to open an interactive shell in the new system? [y/N]: " shell_choice; then
-                    shell_choice=""
+                log WARN "Target is busy. Graceful unmount failed."
+                log INFO "Identifying background processes currently holding the mount hostage:"
+                
+                # Print the offenders in a highly visible warning block
+                printf "\n%s" "$Y"
+                
+                # CRITICAL BTRFS CONSIDERATION: fuser has a bug with memory-mapped files on BTRFS.
+                # Since we use BTRFS, lsof is the more reliable diagnostic tool here.
+                local found_blockers=0
+                
+                if command -v lsof >/dev/null 2>&1; then
+                    echo "[lsof diagnostic - checking $CHROOT_MNT]"
+                    lsof +D "$CHROOT_MNT" 2>/dev/null || true
+                    found_blockers=1
                 fi
-                if [[ "${shell_choice,,}" == "y" ]]; then
-                    arch-chroot "$CHROOT_MNT"
+                
+                if command -v fuser >/dev/null 2>&1; then
+                    echo "[fuser diagnostic - checking $CHROOT_MNT]"
+                    fuser -vm "$CHROOT_MNT" 2>/dev/null || true
+                    found_blockers=1
+                fi
+                
+                if (( found_blockers == 0 )); then
+                    echo "  [Cannot list processes: 'fuser' or 'lsof' not found on host]"
+                fi
+                printf "%s\n" "$RS"
+                
+                local _force_choice="n"
+                if [[ -t 0 ]]; then
+                    printf "%s[!] WARNING:%s Forcefully terminating processes actively writing data CAN cause filesystem corruption.\n" "$R" "$RS"
+                    printf "It is often safer to drop to manual mode or let the OS shutdown sequence handle them.\n"
+                    read -r -p ">>> Do you want to FORCEFULLY terminate these processes and retry unmounting? [y/N]: " _force_choice
+                fi
+                
+                if [[ "${_force_choice,,}" == "y" || "${_force_choice,,}" == "yes" ]]; then
+                    log INFO "Sending graceful termination signals (SIGTERM)..."
+                    # Using both lsof and fuser to catch all edge cases, especially on BTRFS
+                    if command -v lsof >/dev/null 2>&1; then
+                        lsof -t +D "$CHROOT_MNT" 2>/dev/null | xargs -r kill -TERM 2>/dev/null || true
+                    fi
+                    fuser -k -TERM -m "$CHROOT_MNT" >/dev/null 2>&1 || true
+                    sleep 2
+                    
+                    log INFO "Sending absolute kill signals (SIGKILL)..."
+                    if command -v lsof >/dev/null 2>&1; then
+                        lsof -t +D "$CHROOT_MNT" 2>/dev/null | xargs -r kill -KILL 2>/dev/null || true
+                    fi
+                    fuser -k -KILL -m "$CHROOT_MNT" >/dev/null 2>&1 || true
+                    sleep 1
+                    
+                    if umount -R "$CHROOT_MNT" 2>/dev/null; then
+                        log OK "Filesystems forcefully unmounted."
+                        printf "\n%s>>> POWERING OFF. PULL YOUR USB DRIVE WHEN SCREEN GOES BLACK. <<<%s\n" "$Y" "$RS"
+                        sleep 2
+                        poweroff
+                        return 0
+                    else
+                        log ERR "Still unable to unmount! A system process is critically locked."
+                        # If it STILL fails, fall through to manual mode so the user isn't trapped
+                        _poweroff_choice="n" 
+                    fi
+                else
+                    log INFO "Force unmount aborted by user."
+                    log INFO "Falling back to safe shutdown or manual mode."
+                    _poweroff_choice="n"
                 fi
             fi
+        fi
+
+        # --- MANUAL MODE / FALLBACK STATE ---
+        # This triggers if the user said 'n' originally, OR if force-unmounting was aborted/failed.
+        if [[ "${_poweroff_choice,,}" == "n" || "${_poweroff_choice,,}" == "no" ]]; then
+            log INFO "Filesystems remain safely mounted at $CHROOT_MNT."
+            printf "\n%s=== MANUAL MODE / POST-INSTALL TWEAKS ===%s\n" "$B" "$RS"
+            printf "To re-enter your new system to make manual adjustments, run:\n"
+            printf "  %sarch-chroot %s%s\n\n" "$Y" "$CHROOT_MNT" "$RS"
+            
+            printf "%s[!] CRITICAL: When you are finished, you MUST run these exact commands%s\n" "$R" "$RS"
+            printf "%sto flush data to the disk before pulling the USB drive:%s\n" "$R" "$RS"
+            printf "  1. %ssync%s\n" "$Y" "$RS"
+            printf "  2. %sswapoff -a%s\n" "$Y" "$RS"
+            printf "  3. %sumount -R %s%s\n" "$Y" "$CHROOT_MNT" "$RS"
+            printf "  4. %spoweroff%s\n\n" "$Y" "$RS"
+            
+            log INFO "Returning control to Live ISO shell. Have fun!"
         fi
     fi
 }

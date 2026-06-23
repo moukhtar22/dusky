@@ -162,8 +162,10 @@ main() {
     # --- Clean Stuck Partial Downloads (across all pacman cache dirs) ---
     local cache_dir
     for cache_dir in "${PACMAN_CACHES[@]}"; do
-        if [[ -d "$cache_dir" ]]; then
+        # Strict safety checks: must be a directory, must be an absolute path, must not be the root directory
+        if [[ -d "$cache_dir" && "$cache_dir" == /* && "$cache_dir" != "/" ]]; then
             sudo find "$cache_dir" -maxdepth 1 -type f -name "*.part" -delete 2>/dev/null || true
+            sudo find "$cache_dir" -maxdepth 1 -type d -name "download-*" -exec rm -rf -- {} + 2>/dev/null || true
         fi
     done
 

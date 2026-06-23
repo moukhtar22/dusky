@@ -1,33 +1,30 @@
 #!/usr/bin/env bash
 # -----------------------------------------------------------------------------
-# Hyprland Animation Switcher for Rofi
+# Hyprland Animation Switcher for Rofi (Bleeding-Edge Edition v3)
 # -----------------------------------------------------------------------------
-# Strict Mode:
-# -u: Error on unset variables (catches typos)
-# -o pipefail: Pipeline fails if any command fails
-set -u
-set -o pipefail
+set -euo pipefail
 
 # -----------------------------------------------------------------------------
 # CONFIGURATION
 # -----------------------------------------------------------------------------
-# Use readonly for constants to prevent accidental overwrites
 readonly CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}"
 readonly ANIM_DIR="$CONFIG_DIR/hypr/source/animations"
 readonly LINK_DIR="$ANIM_DIR/active"
-readonly DEST_FILE="$LINK_DIR/active.conf"
-readonly STATE_FILE="$CONFIG_DIR/dusky/settings/dusky_animiation"
-readonly FALLBACK_ANIM="horizontal_dusky.conf"
+readonly DEST_FILE="$LINK_DIR/active.lua"
+readonly STATE_FILE="$CONFIG_DIR/dusky/settings/dusky_animiation" 
+readonly FALLBACK_ANIM="dusky.lua"
 
-# Visual Assets (Nerd Fonts)
-readonly ICON_ACTIVE=""   # Checkmark
-readonly ICON_FILE=""     # File
-readonly ICON_ERROR=""    # Warning
+# Visual Assets
+readonly ICON_ACTIVE=""   
+readonly ICON_FILE=""     
+readonly ICON_DIR="󰹹"      
+readonly ICON_BACK=""     
+readonly ICON_ERROR=""    
+readonly ICON_DISABLE=""  
 
 # -----------------------------------------------------------------------------
 # HELPER FUNCTIONS
 # -----------------------------------------------------------------------------
-
 notify_user() {
     local title="$1"
     local message="$2"
@@ -38,13 +35,11 @@ notify_user() {
 }
 
 reload_hyprland() {
-    # Silence output to prevent polluting Rofi's stream
     if command -v hyprctl &>/dev/null; then
         hyprctl reload &>/dev/null
     fi
 }
 
-# Sanitize filenames for Rofi's Pango markup
 escape_markup() {
     local s="$1"
     s="${s//&/&amp;}"
@@ -56,144 +51,198 @@ escape_markup() {
 }
 
 # -----------------------------------------------------------------------------
-# EXECUTION LOGIC (Selection Made or Flags)
+# CORE LOGIC: ATOMIC APPLY
 # -----------------------------------------------------------------------------
+apply_animation() {
+    local target_orient="$1"
+    local src_file="$2"
 
-# Handle the --current restoration flag (with fallback logic)
-if [[ "${1:-}" == "--current" ]]; then
-    target_anim=""
-
-    # 1. Attempt to read existing valid state
-    if [[ -f "$STATE_FILE" ]]; then
-        saved_anim=$(<"$STATE_FILE")
-        if [[ -n "$saved_anim" && -f "$saved_anim" ]]; then
-            target_anim="$saved_anim"
-        fi
+    if [[ ! -f "$src_file" ]]; then
+        notify_user "Error" "Target file missing: $src_file" "critical"
+        return 1
     fi
 
-    # 2. Fallback if no valid state was found
-    if [[ -z "$target_anim" ]]; then
-        target_anim="$ANIM_DIR/$FALLBACK_ANIM"
-        if [[ ! -f "$target_anim" ]]; then
-            notify_user "Error" "Fallback animation missing: $target_anim" "critical"
-            exit 1
-        fi
-    fi
-
-    # 3. Apply target_anim and save state
     mkdir -p -- "$LINK_DIR" 2>/dev/null
-    rm -f -- "$DEST_FILE"
-    
-    if cp -- "$target_anim" "$DEST_FILE"; then
-        # Ensure state directory exists and write current state
+
+    # V3 CRITICAL FIX: Create tmp file in the SAME directory to guarantee 
+    # same-filesystem atomic inode swap, bypassing Arch's tmpfs boundary issue.
+    local tmp_file
+    tmp_file="$(mktemp "${LINK_DIR}/.active.XXXXXX.tmp")"
+
+    # Ensure cleanup of the temporary file if script exits unexpectedly
+    trap 'rm -f "$tmp_file"' EXIT
+
+    # V3 CRITICAL FIX: Standardize permissions (mktemp defaults to 0600)
+    chmod 644 "$tmp_file"
+
+    if ! awk -v orient="$target_orient" '
+    BEGIN { state="normal" }
+    /^-- FOR HORIZONTAL/ { state="horiz"; print; next }
+    /^-- FOR VERTICAL/   { state="vert"; print; next }
+    /^$/ { state="normal" } 
+    {
+        if (state == "horiz") {
+            if (orient == "vertical") {
+                if ($0 ~ /^hl\.animation/) sub(/^hl\.animation/, "-- hl.animation")
+            } else if (orient == "horizontal") {
+                if ($0 ~ /^-- *hl\.animation/) sub(/^-- *hl\.animation/, "hl.animation")
+            }
+        } else if (state == "vert") {
+            if (orient == "vertical") {
+                if ($0 ~ /^-- *hl\.animation/) sub(/^-- *hl\.animation/, "hl.animation")
+            } else if (orient == "horizontal") {
+                if ($0 ~ /^hl\.animation/) sub(/^hl\.animation/, "-- hl.animation")
+            }
+        }
+        print $0
+    }
+    ' "$src_file" > "$tmp_file"; then
+        notify_user "Critical Fault" "Failed to process Lua stream." "critical"
+        return 1
+    fi
+
+    # Atomic swap: Replaces symlinks natively and cannot be interrupted
+    if mv -f -- "$tmp_file" "$DEST_FILE"; then
+        trap - EXIT # Disarm the cleanup trap since the move was successful
+        
         mkdir -p -- "${STATE_FILE%/*}" 2>/dev/null
-        printf '%s\n' "$target_anim" > "$STATE_FILE"
+        printf '%s|%s\n' "$target_orient" "$src_file" > "$STATE_FILE"
 
         reload_hyprland
+        notify_user "Success" "Applied: ${src_file##*/} (${target_orient^})"
+        return 0
+    else
+        notify_user "Filesystem Error" "Failed atomic write to $DEST_FILE" "critical"
+        return 1
+    fi
+}
+
+# -----------------------------------------------------------------------------
+# STRICT STATE RETRIEVAL
+# -----------------------------------------------------------------------------
+get_current_state() {
+    current_orient="horizontal" 
+    current_anim=""
+
+    if [[ -f "$STATE_FILE" ]]; then
+        local saved_state
+        saved_state=$(<"$STATE_FILE")
+        
+        if [[ "$saved_state" == *"|"* ]]; then
+            current_orient="${saved_state%|*}"
+            current_anim="${saved_state#*|}"
+        fi
+    fi
+}
+
+# -----------------------------------------------------------------------------
+# ROUTING & CLI FLAGS
+# -----------------------------------------------------------------------------
+if [[ "${1:-}" == "--current" ]]; then
+    get_current_state
+    
+    target_anim="$current_anim"
+    if [[ -z "$target_anim" || ! -f "$target_anim" ]]; then
+        target_anim="$ANIM_DIR/$FALLBACK_ANIM"
+    fi
+
+    if [[ -f "$target_anim" ]]; then
+        apply_animation "$current_orient" "$target_anim"
         exit 0
     else
-        notify_user "Failure" "Could not re-apply configuration." "critical"
+        notify_user "Fatal Error" "System fallback animation missing." "critical"
         exit 1
     fi
 fi
 
 selection="${ROFI_INFO:-}"
 
-# Fallback: Handle manual CLI usage or older Rofi versions
-if [[ -z "$selection" && -n "${1:-}" ]]; then
-    # Use printf to safely handle inputs starting with dashes
-    clean_name=$(printf '%s' "$1" | sed 's/<[^>]*>//g' | xargs -r)
-    selection="$ANIM_DIR/$clean_name"
+if [[ -z "$selection" && $# -eq 2 && ("$1" == "horizontal" || "$1" == "vertical" || "$1" == "disabled") ]]; then
+    selection="FILE:$1:$2"
 fi
 
-if [[ -n "$selection" ]]; then
-    if [[ ! -f "$selection" ]]; then
-        notify_user "Error" "File not found: $selection" "critical"
-        exit 1
-    fi
+# -----------------------------------------------------------------------------
+# ROFI MENUS
+# -----------------------------------------------------------------------------
+get_current_state
 
-    # Ensure target directory exists
-    if ! mkdir -p -- "$LINK_DIR" 2>/dev/null; then
-        notify_user "Error" "Cannot create directory: $LINK_DIR" "critical"
-        exit 1
-    fi
+# STEP 3: Apply Selection
+if [[ "$selection" == FILE:* ]]; then
+    target_orient="$(echo "$selection" | cut -d':' -f2)"
+    target_file="$(echo "$selection" | cut -d':' -f3-)"
+    
+    apply_animation "$target_orient" "$target_file"
+    exit 0
+fi
 
-    # ATOMIC-ISH UPDATE
-    rm -f -- "$DEST_FILE"
+# STEP 2: Show Files
+if [[ "$selection" == DIR:* ]]; then
+    target_orient="${selection#DIR:}"
+    
+    printf '\0prompt\x1fAnimations (%s)\n' "${target_orient^}"
+    printf '\0markup-rows\x1ftrue\n'
+    printf '\0no-custom\x1ftrue\n'
+    printf '\0message\x1fSelect a configuration to apply instantly\n'
+    
+    printf '<span weight="bold">⬅ Back</span>\0icon\x1f%s\x1finfo\x1fBACK\n' "$ICON_BACK"
 
-    if cp -- "$selection" "$DEST_FILE"; then
-        # Save state for the --current flag
-        mkdir -p -- "${STATE_FILE%/*}" 2>/dev/null
-        printf '%s\n' "$selection" > "$STATE_FILE"
+    shopt -s nullglob
+    files=("$ANIM_DIR"/*.lua)
+    shopt -u nullglob
 
-        # Use parameter expansion for basename (faster than subshell)
-        filename="${selection##*/}"
-        reload_hyprland
-        notify_user "Success" "Switched to: $filename"
+    if [[ ${#files[@]} -eq 0 ]]; then
+        printf '%s\0icon\x1f%s\x1finfo\x1fignore\n' "No .lua files found in $ANIM_DIR" "$ICON_ERROR"
         exit 0
-    else
-        notify_user "Failure" "Could not copy configuration." "critical"
-        exit 1
     fi
-fi
 
-# -----------------------------------------------------------------------------
-# MENU GENERATION (No Selection)
-# -----------------------------------------------------------------------------
+    for file in "${files[@]}"; do
+        filename="${file##*/}"
 
-# Rofi Protocol Headers
-printf '\0prompt\x1fAnimations\n'
-printf '\0markup-rows\x1ftrue\n'
-printf '\0no-custom\x1ftrue\n'
-printf '\0message\x1fSelect a configuration to apply instantly\n'
+        # Prevent the disable.lua file from cluttering the orientation sub-menus
+        if [[ "$filename" == "disable.lua" ]]; then
+            continue
+        fi
 
-# Validate Source Directory
-if [[ ! -d "$ANIM_DIR" ]]; then
-    printf '%s\0icon\x1f%s\x1finfo\x1fignore\n' "Directory Missing" "$ICON_ERROR"
-    exit 0
-fi
+        escaped_name=$(escape_markup "$filename")
 
-# Gather .conf files safely
-shopt -s nullglob
-files=("$ANIM_DIR"/*.conf)
-shopt -u nullglob
-
-if [[ ${#files[@]} -eq 0 ]]; then
-    printf '%s\0icon\x1f%s\x1finfo\x1fignore\n' "No .conf files found" "$ICON_ERROR"
-    exit 0
-fi
-
-# Determine Active File via Content Comparison
-active_index=-1
-
-if [[ -f "$DEST_FILE" ]]; then
-    for i in "${!files[@]}"; do
-        if cmp -s "${files[$i]}" "$DEST_FILE"; then
-            active_index=$i
-            break
+        if [[ "$file" == "$current_anim" && "$target_orient" == "$current_orient" ]]; then
+            printf "<span weight='bold'>%s</span> <span size='small' style='italic'>(Active)</span>\0icon\x1f%s\x1finfo\x1fFILE:%s:%s\n" \
+                "$escaped_name" "$ICON_ACTIVE" "$target_orient" "$file"
+        else
+            printf '%s\0icon\x1f%s\x1finfo\x1fFILE:%s:%s\n' \
+                "$escaped_name" "$ICON_FILE" "$target_orient" "$file"
         fi
     done
+    exit 0
 fi
 
-# Tell Rofi which row to highlight
-if (( active_index >= 0 )); then
-    printf '\0active\x1f%d\n' "$active_index"
-fi
+# STEP 1: Main Menu
+if [[ -z "$selection" || "$selection" == "BACK" ]]; then
+    printf '\0prompt\x1fOrientation\n'
+    printf '\0markup-rows\x1ftrue\n'
+    printf '\0no-custom\x1ftrue\n'
+    printf '\0message\x1fSelect animation layout orientation\n'
 
-# Generate Rows
-for i in "${!files[@]}"; do
-    file="${files[$i]}"
-    filename="${file##*/}"
-    
-    escaped_name=$(escape_markup "$filename")
-
-    if (( i == active_index )); then
-        printf "<span weight='bold'>%s</span> <span size='small' style='italic'>(Active)</span>\0icon\x1f%s\x1finfo\x1f%s\n" \
-            "$escaped_name" "$ICON_ACTIVE" "$file"
-    else
-        printf '%s\0icon\x1f%s\x1finfo\x1f%s\n' \
-            "$escaped_name" "$ICON_FILE" "$file"
+    # Check for disable.lua and list it as the first option if it exists
+    if [[ -f "$ANIM_DIR/disable.lua" ]]; then
+        if [[ "$current_anim" == "$ANIM_DIR/disable.lua" ]]; then
+            printf '<span weight="bold">Disable Animations</span> <span size="small" style="italic">(Active)</span>\0icon\x1f%s\x1finfo\x1fFILE:disabled:%s/disable.lua\n' "$ICON_ACTIVE" "$ANIM_DIR"
+        else
+            printf 'Disable Animations\0icon\x1f%s\x1finfo\x1fFILE:disabled:%s/disable.lua\n' "$ICON_DISABLE" "$ANIM_DIR"
+        fi
     fi
-done
 
-exit 0
+    if [[ "$current_orient" == "horizontal" && -n "$current_anim" && "$current_anim" != "$ANIM_DIR/disable.lua" ]]; then
+        printf '<span weight="bold">Horizontal Animations</span> <span size="small" style="italic">(Active)</span>\0icon\x1f%s\x1finfo\x1fDIR:horizontal\n' "$ICON_ACTIVE"
+    else
+        printf 'Horizontal Animations\0icon\x1f%s\x1finfo\x1fDIR:horizontal\n' "$ICON_DIR"
+    fi
+
+    if [[ "$current_orient" == "vertical" && -n "$current_anim" && "$current_anim" != "$ANIM_DIR/disable.lua" ]]; then
+        printf '<span weight="bold">Vertical Animations</span> <span size="small" style="italic">(Active)</span>\0icon\x1f%s\x1finfo\x1fDIR:vertical\n' "$ICON_ACTIVE"
+    else
+        printf 'Vertical Animations\0icon\x1f%s\x1finfo\x1fDIR:vertical\n' "$ICON_DIR"
+    fi
+
+    exit 0
+fi

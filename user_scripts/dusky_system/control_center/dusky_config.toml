@@ -1,0 +1,3310 @@
+[[pages]]
+id = "home"
+title = "Home"
+icon = "user-home-symbolic"
+
+[[pages.layout]]
+type = "grid_section"
+[pages.layout.properties]
+title = "Quick Actions"
+
+[[pages.layout.items]]
+type = "toggle_card"
+[pages.layout.items.properties]
+title = "Bluetooth"
+icon = "bluetooth-active-symbolic"
+state_command = "rfkill list bluetooth | grep -q 'Soft blocked: no' && echo yes"
+interval = 5
+[pages.layout.items.on_toggle.enabled]
+type = "exec"
+command = "rfkill unblock bluetooth && notify-send 'Bluetooth' 'Bluetooth Turned ON'"
+terminal = false
+[pages.layout.items.on_toggle.disabled]
+type = "exec"
+command = "rfkill block bluetooth && notify-send 'Bluetooth' 'Bluetooth Turned OFF'"
+terminal = false
+
+[[pages.layout.items]]
+type = "toggle_card"
+[pages.layout.items.properties]
+title = "Wi-Fi"
+icon = "network-wireless-symbolic"
+state_command = "rfkill list wifi | grep -q 'Soft blocked: no' && echo yes"
+interval = 5
+[pages.layout.items.on_toggle.enabled]
+type = "exec"
+command = "rfkill unblock wifi && notify-send 'Wi-Fi' 'Wireless Radio Turned ON'"
+terminal = false
+[pages.layout.items.on_toggle.disabled]
+type = "exec"
+command = "rfkill block wifi && notify-send 'Wi-Fi' 'Wireless Radio Turned OFF'"
+terminal = false
+
+[[pages.layout.items]]
+type = "toggle_card"
+[pages.layout.items.properties]
+title = "Dark Mode"
+icon = "weather-clear-night-symbolic"
+key = "dusky_theme/state"
+[pages.layout.items.on_toggle.enabled]
+type = "exec"
+command = "$HOME/user_scripts/theme_matugen/theme_ctl.sh set --mode dark"
+terminal = false
+[pages.layout.items.on_toggle.disabled]
+type = "exec"
+command = "$HOME/user_scripts/theme_matugen/theme_ctl.sh set --mode light"
+terminal = false
+
+[[pages.layout.items]]
+type = "grid_card"
+[pages.layout.items.properties]
+title = "Reload CC"
+icon = "system-reboot-symbolic"
+style = "destructive"
+[pages.layout.items.on_press]
+type = "exec"
+command = "$HOME/user_scripts/dusky_system/reload_cc/cc_restart.sh"
+terminal = false
+
+[[pages.layout.items]]
+type = "grid_card"
+[pages.layout.items.properties]
+title = "Dusky"
+icon = "software-update-available-symbolic"
+badge_file = "~/.config/dusky/settings/dusky_update_behind_commit"
+button_text_file = "~/.config/dusky/settings/dusky_update_behind_commit"
+button_text_map = { "0" = "Updated", "default" = "Available" }
+style_map = { "0" = "default", "default" = "suggested" }
+[pages.layout.items.on_press]
+type = "exec"
+command = "kitty --class update_dusky.sh --title \"System Updater\" --hold sh -c \"$HOME/user_scripts/update_dusky/update_dusky.sh\""
+terminal = false
+
+[[pages.layout.items]]
+type = "grid_card"
+[pages.layout.items.properties]
+title = "Power"
+icon = "system-log-out-symbolic"
+style = "destructive"
+[pages.layout.items.on_press]
+type = "exec"
+command = "$HOME/user_scripts/wlogout/wlogout_scale.sh"
+terminal = false
+
+[[pages.layout]]
+type = "section"
+[pages.layout.properties]
+title = "Power Management"
+icon = ""
+description = ""
+
+[[pages.layout.items]]
+type = "selection"
+[pages.layout.items.properties]
+title = "Active Profile"
+description = "Select performance mode"
+key = "tlp_state"
+icon = "power-profile-balanced-symbolic"
+interval = 2
+options = ["Balanced", "Performance", "Power Saver"]
+options_map = { "balanced" = "Balanced", "performance" = "Performance", "power-saver" = "Power Saver" }
+[pages.layout.items.on_change.Balanced]
+type = "exec"
+command = "~/user_scripts/battery/tlp/tlp_mode_toggle.sh balanced"
+[pages.layout.items.on_change.Performance]
+type = "exec"
+command = "~/user_scripts/battery/tlp/tlp_mode_toggle.sh performance"
+[pages.layout.items.on_change."Power Saver"]
+type = "exec"
+command = "~/user_scripts/battery/tlp/tlp_mode_toggle.sh power-saver"
+
+[[pages.layout]]
+type = "section"
+[pages.layout.properties]
+title = "Quick Controls"
+icon = ""
+description = ""
+
+[[pages.layout.items]]
+type = "slider"
+[pages.layout.items.properties]
+title = "Volume"
+icon = "audio-volume-high-symbolic"
+min = 0.0
+max = 100.0
+step = 1.0
+default = 50.0
+debounce = false
+value_command = "wpctl get-volume @DEFAULT_AUDIO_SINK@ | awk '{print $2 * 100}'"
+interval = 2
+[pages.layout.items.on_change]
+type = "exec"
+command = "wpctl set-volume @DEFAULT_AUDIO_SINK@ {value}%"
+
+[[pages.layout.items]]
+type = "slider"
+[pages.layout.items.properties]
+title = "Brightness"
+icon = "display-brightness-high-symbolic"
+min = 1.0
+max = 100.0
+step = 1.0
+default = 50.0
+debounce = false
+value_command = "brightnessctl -m | awk -F, '{print $4}' | tr -d %"
+interval = 2
+[pages.layout.items.on_change]
+type = "exec"
+command = "brightnessctl set {value}%"
+
+[[pages.layout]]
+type = "section"
+[pages.layout.properties]
+title = "Live System Status"
+icon = ""
+description = ""
+
+[[pages.layout.items]]
+type = "label"
+[pages.layout.items.properties]
+title = "Kernel"
+interval = 10
+[pages.layout.items.value]
+type = "system"
+key = "kernel_version"
+
+[[pages.layout.items]]
+type = "label"
+[pages.layout.items.properties]
+title = "Memory Used"
+interval = 5
+[pages.layout.items.value]
+type = "system"
+key = "memory_used"
+
+
+[[pages]]
+id = "system"
+title = "System"
+icon = "computer-symbolic"
+
+[[pages.layout]]
+type = "grid_section"
+
+[[pages.layout.items]]
+type = "grid_card"
+[pages.layout.items.properties]
+title = "Hypr Reload"
+icon = "view-refresh-symbolic"
+[pages.layout.items.on_press]
+type = "exec"
+command = "hyprctl reload"
+terminal = false
+
+[[pages.layout.items]]
+type = "grid_card"
+[pages.layout.items.properties]
+title = "Benchmark"
+icon = "utilities-system-monitor-symbolic"
+[pages.layout.items.on_press]
+type = "exec"
+command = "kitty --class sysbench_benchmark.sh --title \"System Benchmark\" --hold sh -c \"$HOME/user_scripts/performance/sysbench_benchmark.sh\""
+terminal = false
+
+[[pages.layout.items]]
+type = "grid_card"
+[pages.layout.items.properties]
+title = "About Dusky"
+icon = "help-about-symbolic"
+[pages.layout.items.on_press]
+type = "redirect"
+page = "about_dusky"
+
+[[pages.layout]]
+type = "section"
+[pages.layout.properties]
+title = "Reset Dusky (takes 5 minutes)"
+icon = ""
+description = ""
+
+[[pages.layout.items]]
+type = "button"
+[pages.layout.items.properties]
+title = "Step 1: Deploy Dotfiles"
+description = "Force sync with Git (Overwrites local configs)"
+icon = "folder-download-symbolic"
+style = "destructive"
+button_text = "Step 1"
+[pages.layout.items.on_press]
+type = "exec"
+command = "kitty --class deploy_dotfiles.sh --hold sh -c $HOME/user_scripts/arch_setup_scripts/deploy_dotfiles.sh"
+terminal = false
+
+[[pages.layout.items]]
+type = "button"
+[pages.layout.items.properties]
+title = "Step 2: Orchestra"
+description = "Full system re-setup (Takes 5-10 mins)"
+icon = "preferences-system-symbolic"
+style = "destructive"
+button_text = "Step 2"
+[pages.layout.items.on_press]
+type = "exec"
+command = "kitty --class ORCHESTRA.sh --hold sh -c $HOME/user_scripts/arch_setup_scripts/ORCHESTRA.sh"
+terminal = false
+
+[[pages.layout]]
+type = "section"
+[pages.layout.properties]
+title = "BTRFS Snapshots"
+icon = "drive-harddisk-system-symbolic"
+description = "Manage filesystem snapshots"
+
+[[pages.layout.items]]
+type = "button"
+[pages.layout.items.properties]
+title = "Dusky System Snapshots"
+description = "Create, restore, and delete snapshots"
+icon = "document-revert-symbolic"
+button_text = "Open"
+[pages.layout.items.on_press]
+type = "exec"
+command = "kitty --class dusky_snapshot_manager.py --hold sudo python3 \"$HOME/user_scripts/btrfs_snapshots/cc/dusky_snapshot_manager.py\""
+terminal = false
+
+[[pages.layout]]
+type = "section"
+[pages.layout.properties]
+title = "Dusky Updates"
+icon = ""
+description = ""
+
+[[pages.layout.items]]
+type = "navigation"
+[pages.layout.items.properties]
+title = "System Updates & Logs"
+description = "Update system and manage backups"
+icon = "folder-download-symbolic"
+
+[[pages.layout.items.layout]]
+type = "section"
+[pages.layout.items.layout.properties]
+title = "System Updates"
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Dusky Updater"
+description = "Update Dusky specific configuration files"
+icon = "software-update-available-symbolic"
+badge_file = "~/.config/dusky/settings/dusky_update_behind_commit"
+button_text_file = "~/.config/dusky/settings/dusky_update_behind_commit"
+button_text_map = { "0" = "Updated", "default" = "Available" }
+style_map = { "0" = "normal", "default" = "suggested" }
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "kitty --class update_dusky.sh --title \"System Updater\" --hold sh -c \"$HOME/user_scripts/update_dusky/update_dusky.sh\""
+terminal = false
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Arch Updater"
+description = "Pacman and AUR packages update"
+icon = "folder-download-symbolic"
+button_text = "Update"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "kitty --class arch_update --title \"Arch Linux Updater\" --hold sh -c \"paru -Syu\""
+terminal = false
+
+[[pages.layout.items.layout]]
+type = "section"
+[pages.layout.items.layout.properties]
+title = "Backups & Logs"
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "View Backups"
+description = "Browse ~/Documents/dusky_backups/"
+icon = "edit-copy-symbolic"
+
+[[pages.layout.items.layout.items.properties.buttons]]
+icon = "utilities-terminal-symbolic"
+button_text = "Yazi"
+[pages.layout.items.layout.items.properties.buttons.on_press]
+type = "exec"
+command = "kitty --class yazi --title \"Backup Viewer\" --hold sh -c \"yazi $HOME/Documents/dusky_backups/\""
+
+[[pages.layout.items.layout.items.properties.buttons]]
+icon = "system-file-manager-symbolic"
+button_text = "thunar"
+style = "suggested"
+[pages.layout.items.layout.items.properties.buttons.on_press]
+type = "exec"
+command = "thunar \"$HOME/Documents/dusky_backups/\""
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Send Logs"
+description = "Generate system logs and copy link to clipboard"
+icon = "mail-send-symbolic"
+button_text = "Send"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "kitty --class send_logs.sh --hold sh -c \"$HOME/user_scripts/arch_setup_scripts/send_logs.sh\""
+terminal = false
+
+[[pages.layout]]
+type = "section"
+[pages.layout.properties]
+title = "Locale & Region"
+icon = ""
+description = "Configure time, date, timezone, and language settings"
+
+[[pages.layout.items]]
+type = "button"
+[pages.layout.items.properties]
+title = "Configure System Locale"
+description = "Set timezone, time, date, locale, and keymap"
+icon = "preferences-system-time-symbolic"
+button_text = "Configure"
+[pages.layout.items.on_press]
+type = "exec"
+command = "kitty --class locale_tui.sh --title \"System Region Manager\" --hold sh -c \"$HOME/user_scripts/locale/locale_tui.sh\""
+terminal = false
+
+[[pages.layout]]
+type = "section"
+[pages.layout.properties]
+title = "Session Management"
+icon = "system-users-symbolic"
+description = "Manage user session and login behavior"
+
+[[pages.layout.items]]
+type = "toggle"
+[pages.layout.items.properties]
+title = "TTY Auto Login"
+description = "Automatically login to TTY1 on boot"
+icon = "avatar-default-symbolic"
+key = "auto_login_tty"
+[pages.layout.items.on_toggle.enabled]
+type = "exec"
+command = "kitty --class 285_tty_autologin.sh --hold sh -c \"$HOME/user_scripts/arch_setup_scripts/scripts/285_tty_autologin.sh --auto\""
+terminal = false
+[pages.layout.items.on_toggle.disabled]
+type = "exec"
+command = "kitty --class 285_tty_autologin.sh --hold sh -c \"$HOME/user_scripts/arch_setup_scripts/scripts/285_tty_autologin.sh --revert --auto\""
+terminal = false
+
+[[pages.layout]]
+type = "section"
+[pages.layout.properties]
+title = "Git Backup"
+icon = ""
+description = ""
+
+[[pages.layout.items]]
+type = "navigation"
+[pages.layout.items.properties]
+title = "Git Configuration & Backup"
+description = "Manage dotfiles repository"
+icon = "network-server-symbolic"
+
+[[pages.layout.items.layout]]
+type = "section"
+[pages.layout.items.layout.properties]
+title = "Configuration"
+icon = ""
+description = ""
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Step 1: Git Config"
+description = "Configure global git user/email"
+icon = "preferences-system-symbolic"
+button_text = "Config"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "kitty --class 300_git_config.sh --hold sh -c \"$HOME/user_scripts/arch_setup_scripts/scripts/300_git_config.sh\""
+terminal = false
+
+[[pages.layout.items.layout]]
+type = "section"
+[pages.layout.items.layout.properties]
+title = "Repository Setup"
+icon = ""
+description = ""
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Step 2: Setup New Repo"
+description = "Initialize a new GitHub repository"
+icon = "folder-new-symbolic"
+button_text = "Setup"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "kitty --class 305_new_github_repo_to_backup.sh --hold sh -c \"$HOME/user_scripts/arch_setup_scripts/scripts/305_new_github_repo_to_backup.sh\""
+terminal = false
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Step 2: Reconnect Repo"
+description = "Reconnect and push to existing remote"
+icon = "emblem-synchronizing-symbolic"
+button_text = "Reconnect"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "kitty --class 310_reconnect_and_push_new_changes_to_github.sh --hold sh -c \"$HOME/user_scripts/arch_setup_scripts/scripts/310_reconnect_and_push_new_changes_to_github.sh\""
+terminal = false
+
+
+[[pages]]
+id = "disk_and_files"
+title = "Disk & Files"
+icon = "drive-multidisk-symbolic"
+
+[[pages.layout]]
+type = "section"
+[pages.layout.properties]
+title = "Storage Monitoring"
+icon = ""
+description = ""
+
+[[pages.layout.items]]
+type = "button"
+[pages.layout.items.properties]
+title = "Dysk Analysis"
+description = "Graphical disk space usage"
+icon = "drive-harddisk-symbolic"
+button_text = "View"
+[pages.layout.items.on_press]
+type = "exec"
+command = "kitty --class dysk --title \"Dysk Analysis\" --hold sh -c \"dysk\""
+terminal = false
+
+[[pages.layout.items]]
+type = "button"
+[pages.layout.items.properties]
+title = "Disk I/O Monitor"
+description = "Real-time disk activity (TUI)"
+icon = "utilities-system-monitor-symbolic"
+button_text = "Monitor"
+[pages.layout.items.on_press]
+type = "exec"
+command = "kitty --class dusky_disk_monitor_io.py --hold \"$HOME/user_scripts/drives/dusky_disk_monitor_io.py\""
+terminal = false
+
+[[pages.layout.items]]
+type = "button"
+[pages.layout.items.properties]
+title = "BTRFS Compression Stats"
+description = "View space saved by ZSTD compression"
+icon = "package-x-generic-symbolic"
+button_text = "View"
+[pages.layout.items.on_press]
+type = "exec"
+command = "kitty --class btrfs_zstd_compression_stats.sh --hold sh -c \"$HOME/user_scripts/drives/btrfs_zstd_compression_stats.sh\""
+terminal = false
+
+[[pages.layout]]
+type = "section"
+[pages.layout.properties]
+title = "Drive Management"
+icon = ""
+description = ""
+
+[[pages.layout.items]]
+type = "button"
+[pages.layout.items.properties]
+title = "Cache Purge"
+description = "Clear Pacman and AUR helper caches"
+icon = "user-trash-symbolic"
+button_text = "Purge"
+[pages.layout.items.on_press]
+type = "exec"
+command = "kitty --class 365_cache_purge.sh --hold sh -c \"$HOME/user_scripts/arch_setup_scripts/scripts/365_cache_purge.sh\""
+terminal = false
+
+[[pages.layout.items]]
+type = "button"
+[pages.layout.items.properties]
+title = "Fix NTFS Drives"
+description = "Resolve mounting issues for NTFS drives"
+icon = "tools-check-spelling-symbolic"
+button_text = "Fix"
+[pages.layout.items.on_press]
+type = "exec"
+command = "kitty --class ntfs_fix.sh --hold sh -c $HOME/user_scripts/drives/ntfs_fix.sh"
+terminal = false
+
+[[pages.layout.items]]
+type = "selection"
+[pages.layout.items.properties]
+title = "File Manager Switch"
+description = "Choose Default: thunar (GUI) vs Yazi (TUI)"
+icon = "system-file-manager-symbolic"
+key = "filemanager_switch"
+options = ["Yazi", "thunar"]
+options_map = { "false" = "thunar", "true" = "Yazi" }
+[pages.layout.items.on_change.Yazi]
+type = "exec"
+command = "$HOME/user_scripts/arch_setup_scripts/scripts/235_file_manager_switch.sh --yazi"
+[pages.layout.items.on_change.thunar]
+type = "exec"
+command = "$HOME/user_scripts/arch_setup_scripts/scripts/235_file_manager_switch.sh --thunar"
+
+[[pages.layout]]
+type = "section"
+[pages.layout.properties]
+title = "File Transfer (FTP)"
+icon = ""
+description = ""
+
+[[pages.layout.items]]
+type = "button"
+[pages.layout.items.properties]
+title = "Setup FTP Server"
+description = "Configure local file sharing"
+icon = "network-server-symbolic"
+button_text = "Setup"
+[pages.layout.items.on_press]
+type = "exec"
+command = "kitty --class 250_ftp_arch.sh --hold sh -c \"$HOME/user_scripts/arch_setup_scripts/scripts/250_ftp_arch.sh\""
+terminal = false
+
+[[pages.layout.items]]
+type = "button"
+[pages.layout.items.properties]
+title = "Change FTP Directory"
+description = "Update the shared server directory"
+icon = "folder-publicshare-symbolic"
+button_text = "Change"
+[pages.layout.items.on_press]
+type = "exec"
+command = "kitty --class change_ftp_directory_server.sh --hold sh -c $HOME/user_scripts/ftp/change_ftp_directory_server.sh"
+terminal = false
+
+
+[[pages]]
+id = "network"
+title = "Network"
+icon = "network-workgroup-symbolic"
+
+[[pages.layout]]
+type = "grid_section"
+[pages.layout.properties]
+title = "Quick Network"
+
+[[pages.layout.items]]
+type = "toggle_card"
+[pages.layout.items.properties]
+title = "Warp"
+icon = "security-high-symbolic"
+key = "warp_state"
+[pages.layout.items.on_toggle.enabled]
+type = "exec"
+command = "$HOME/user_scripts/networking/warp_toggle.sh --connect"
+terminal = false
+[pages.layout.items.on_toggle.disabled]
+type = "exec"
+command = "$HOME/user_scripts/networking/warp_toggle.sh --disconnect"
+terminal = false
+
+[[pages.layout.items]]
+type = "toggle_card"
+[pages.layout.items.properties]
+title = "Bluetooth"
+icon = "bluetooth-active-symbolic"
+state_command = "rfkill list bluetooth | grep -q 'Soft blocked: no' && echo yes"
+interval = 5
+[pages.layout.items.on_toggle.enabled]
+type = "exec"
+command = "rfkill unblock bluetooth && notify-send 'Bluetooth' 'Bluetooth Turned ON'"
+terminal = false
+[pages.layout.items.on_toggle.disabled]
+type = "exec"
+command = "rfkill block bluetooth && notify-send 'Bluetooth' 'Bluetooth Turned OFF'"
+terminal = false
+
+[[pages.layout.items]]
+type = "toggle_card"
+[pages.layout.items.properties]
+title = "Wi-Fi"
+icon = "network-wireless-symbolic"
+state_command = "rfkill list wifi | grep -q 'Soft blocked: no' && echo yes"
+interval = 5
+[pages.layout.items.on_toggle.enabled]
+type = "exec"
+command = "rfkill unblock wifi && notify-send 'Wi-Fi' 'Wireless Radio Turned ON'"
+terminal = false
+[pages.layout.items.on_toggle.disabled]
+type = "exec"
+command = "rfkill block wifi && notify-send 'Wi-Fi' 'Wireless Radio Turned OFF'"
+terminal = false
+
+[[pages.layout]]
+type = "section"
+[pages.layout.properties]
+title = "Remote"
+icon = ""
+description = ""
+
+[[pages.layout.items]]
+type = "button"
+[pages.layout.items.properties]
+title = "Step 1: Tailscale Setup"
+description = "Configure mesh VPN"
+icon = "network-vpn-symbolic"
+button_text = "Setup"
+[pages.layout.items.on_press]
+type = "exec"
+command = "kitty --class tailscale_setup --hold sh -c \"$HOME/user_scripts/networking/01_tailscale_setup.sh\""
+terminal = false
+
+[[pages.layout.items]]
+type = "button"
+[pages.layout.items.properties]
+title = "Step 2: Setup OpenSSH"
+description = "Configure SSH keys and service"
+icon = "system-lock-screen-symbolic"
+button_text = "Setup"
+[pages.layout.items.on_press]
+type = "exec"
+command = "kitty --class 02_openssh_setup.py --hold sh -c $HOME/user_scripts/networking/02_openssh_setup.py"
+terminal = false
+
+[[pages.layout.items]]
+type = "button"
+[pages.layout.items.properties]
+title = "Tailscale Uninstall"
+description = "Remove Tailscale configuration"
+icon = "user-trash-symbolic"
+button_text = "Uninstall"
+[pages.layout.items.on_press]
+type = "exec"
+command = "kitty --class tailscale_uninstall --hold sh -c \"$HOME/user_scripts/networking/uninstall_tailscale.sh\""
+terminal = false
+
+[[pages.layout]]
+type = "section"
+[pages.layout.properties]
+title = "WireGuard"
+icon = ""
+description = ""
+
+[[pages.layout.items]]
+type = "navigation"
+[pages.layout.items.properties]
+title = "WireGuard"
+description = "VPN tunnel management"
+icon = "network-vpn-symbolic"
+
+[[pages.layout.items.layout]]
+type = "warning_banner"
+[pages.layout.items.layout.properties]
+title = "Privilege Requirements"
+message = "Toggling tunnels uses sudo (wg-quick). Run the setup script once to configure NOPASSWD rules and fix /etc/wireguard permissions."
+
+[[pages.layout.items.layout]]
+type = "section"
+[pages.layout.items.layout.properties]
+title = "VPN Tunnels"
+description = "Scans /etc/wireguard/ and immediate subdirectories for *.conf files"
+
+[[pages.layout.items.layout.items]]
+type = "file_generator"
+[pages.layout.items.layout.items.properties]
+path = "/etc/wireguard"
+glob = "*.conf"
+recursive = true
+
+[pages.layout.items.layout.items.item_template]
+type = "expander"
+[pages.layout.items.layout.items.item_template.properties]
+title = "{name_pretty}"
+description = "{relpath}"
+icon = "network-vpn-symbolic"
+
+[[pages.layout.items.layout.items.item_template.items]]
+type = "toggle"
+[pages.layout.items.layout.items.item_template.items.properties]
+title = "Enable Tunnel"
+description = "Bring tunnel up or down"
+icon = "network-vpn-symbolic"
+state_command = "[ -d /sys/class/net/{name} ] && echo yes || echo no"
+interval = 5
+[pages.layout.items.layout.items.item_template.items.on_toggle.enabled]
+type = "exec"
+command = "sudo wg-quick up {path}"
+terminal = false
+[pages.layout.items.layout.items.item_template.items.on_toggle.disabled]
+type = "exec"
+command = "sudo wg-quick down {path}"
+terminal = false
+
+[[pages.layout.items.layout.items.item_template.items]]
+type = "button"
+[pages.layout.items.layout.items.item_template.items.properties]
+title = "Edit Config"
+description = "{path}"
+icon = "document-edit-symbolic"
+button_text = "Edit"
+[pages.layout.items.layout.items.item_template.items.on_press]
+type = "exec"
+command = "kitty --class dusky_wg_edit --hold sh -c 'sudo $EDITOR {path}'"
+terminal = false
+
+[[pages.layout.items.layout.items.item_template.items]]
+type = "button"
+[pages.layout.items.layout.items.item_template.items.properties]
+title = "Live Status"
+description = "Open wg show {name} in terminal"
+icon = "utilities-terminal-symbolic"
+button_text = "Show"
+[pages.layout.items.layout.items.item_template.items.on_press]
+type = "exec"
+command = "kitty --class dusky_wg_status --hold sh -c 'sudo wg show {name} 2>/dev/null || echo Inactive; echo; printf \"Press Enter to close...\"; read'"
+terminal = false
+
+[[pages.layout.items.layout.items.item_template.items]]
+type = "button"
+[pages.layout.items.layout.items.item_template.items.properties]
+title = "Delete Tunnel"
+description = "Permanently remove {relpath}"
+icon = "list-remove-symbolic"
+button_text = "Delete"
+[pages.layout.items.layout.items.item_template.items.on_press]
+type = "exec"
+command = "kitty --class dusky_wg_delete --hold sh -c 'printf \"\\e[1;31mDelete {relpath}?\\e[0m [y/N] \"; read c; case $c in [Yy]) sudo rm {path} && echo \"Deleted {relpath}.\" || echo \"Failed.\";; *) echo \"Aborted.\";; esac; echo; printf \"Press Enter to close...\"; read'"
+terminal = false
+
+[[pages.layout.items.layout]]
+type = "section"
+[pages.layout.items.layout.properties]
+title = "Management"
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "New Tunnel Config"
+description = "Create a new wg-quick config (auto chown root:root 600)"
+icon = "list-add-symbolic"
+button_text = "New"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "kitty --class dusky_wg_new --hold sh -c '$HOME/user_scripts/networking/dusky_wireguard_new.sh'"
+terminal = false
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "All Tunnels Status"
+description = "wg show all"
+icon = "network-vpn-symbolic"
+button_text = "Show"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "kitty --class dusky_wg_status --hold sh -c 'sudo wg show all; echo; echo \"Press Enter to close...\"; read'"
+terminal = false
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Setup Permissions"
+description = "Run once: sets /etc/wireguard to 750 root:wheel and adds sudoers rules"
+icon = "security-medium-symbolic"
+button_text = "Setup"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "kitty --class dusky_wg_setup --hold sh -c '$HOME/user_scripts/networking/dusky_wireguard_setup.sh'"
+terminal = false
+
+[[pages.layout]]
+type = "section"
+[pages.layout.properties]
+title = "Network Audit"
+icon = ""
+description = ""
+
+[[pages.layout.items]]
+type = "button"
+[pages.layout.items.properties]
+title = "Network Scan (ARP)"
+description = "Scan for local devices"
+icon = "network-wired-symbolic"
+button_text = "Scan"
+[pages.layout.items.on_press]
+type = "exec"
+command = "kitty --class arp_scan.sh --hold sh -c $HOME/user_scripts/networking/arp_scan.sh"
+terminal = false
+
+[[pages.layout.items]]
+type = "button"
+[pages.layout.items.properties]
+title = "Airmon-ng Setup"
+description = "Enable monitor mode on wireless interface"
+icon = "network-wireless-hotspot-symbolic"
+button_text = "Setup"
+[pages.layout.items.on_press]
+type = "exec"
+command = "kitty --class airmon_ng.sh --hold sh -c ~/user_scripts/networking/airmon_ng.sh"
+terminal = false
+
+[[pages.layout]]
+type = "section"
+[pages.layout.properties]
+title = "Hosts File"
+icon = ""
+description = ""
+
+[[pages.layout.items]]
+type = "button"
+[pages.layout.items.properties]
+title = "Brain Rot Block"
+description = "Blocks social media sites"
+icon = "window-close-symbolic"
+button_text = "Block"
+[pages.layout.items.on_press]
+type = "exec"
+command = "kitty --class 325_hosts_files_block.sh --hold sh -c \"$HOME/user_scripts/arch_setup_scripts/scripts/325_hosts_files_block.sh\""
+terminal = false
+
+
+[[pages]]
+id = "hardware"
+title = "Hardware"
+icon = "input-keyboard-symbolic"
+
+[[pages.layout]]
+type = "section"
+[pages.layout.properties]
+title = "Battery & Power"
+icon = ""
+description = ""
+
+[[pages.layout.items]]
+type = "selection"
+[pages.layout.items.properties]
+title = "Active Profile"
+description = "Select performance mode"
+key = "tlp_state"
+icon = "power-profile-balanced-symbolic"
+interval = 2
+options = ["Balanced", "Performance", "Power Saver"]
+options_map = { "balanced" = "Balanced", "performance" = "Performance", "power-saver" = "Power Saver" }
+[pages.layout.items.on_change.Balanced]
+type = "exec"
+command = "~/user_scripts/battery/tlp/tlp_mode_toggle.sh balanced"
+[pages.layout.items.on_change.Performance]
+type = "exec"
+command = "~/user_scripts/battery/tlp/tlp_mode_toggle.sh performance"
+[pages.layout.items.on_change."Power Saver"]
+type = "exec"
+command = "~/user_scripts/battery/tlp/tlp_mode_toggle.sh power-saver"
+
+[[pages.layout.items]]
+type = "toggle"
+[pages.layout.items.properties]
+title = "Dusky Power Saver"
+icon = "battery-level-80-symbolic"
+description = "Optimize for battery life (TUI)"
+key = "power_saver_state"
+[pages.layout.items.on_toggle.enabled]
+type = "exec"
+command = "foot --app-id=power_saver.sh --title \"Enable Power Saver\" sh -c \"$HOME/user_scripts/battery/power_saver.sh -e\""
+terminal = false
+[pages.layout.items.on_toggle.disabled]
+type = "exec"
+command = "kitty --class power_saver_off.sh --title \"Disable Power Saver\" sh -c \"$HOME/user_scripts/battery/power_saver.sh -d\""
+terminal = false
+
+[[pages.layout.items]]
+type = "button"
+[pages.layout.items.properties]
+title = "Dusky Power Manager"
+description = "Configure lid, power key, and logind.conf settings"
+icon = "preferences-system-power-symbolic"
+button_text = "Open"
+[pages.layout.items.on_press]
+type = "exec"
+command = "kitty --class dusky_power.sh --title \"Power Manager\" --hold sh -c \"$HOME/user_scripts/power/dusky_power.sh\""
+terminal = false
+
+[[pages.layout]]
+type = "section"
+[pages.layout.properties]
+title = "Input Devices"
+icon = ""
+description = ""
+
+[[pages.layout.items]]
+type = "toggle"
+[pages.layout.items.properties]
+title = "Left-Handed Mouse"
+icon = "input-mouse-symbolic"
+description = "Enable/Disable Left-Handed Mode"
+key = "left_handed_mouse"
+[pages.layout.items.on_toggle.enabled]
+type = "exec"
+command = "$HOME/user_scripts/arch_setup_scripts/scripts/265_mouse_button_reverse.sh --left"
+terminal = false
+[pages.layout.items.on_toggle.disabled]
+type = "exec"
+command = "$HOME/user_scripts/arch_setup_scripts/scripts/265_mouse_button_reverse.sh --right"
+terminal = false
+
+
+[[pages]]
+id = "display"
+title = "Display"
+icon = "video-display-symbolic"
+
+[[pages.layout]]
+type = "section"
+[pages.layout.properties]
+title = "Screen"
+icon = ""
+description = ""
+
+[[pages.layout.items]]
+type = "slider"
+[pages.layout.items.properties]
+title = "Brightness"
+icon = "display-brightness-high-symbolic"
+min = 1.0
+max = 100.0
+step = 1.0
+default = 50.0
+debounce = false
+value_command = "brightnessctl -m | awk -F, '{print $4}' | tr -d %"
+interval = 2
+[pages.layout.items.on_change]
+type = "exec"
+command = "brightnessctl set {value}%"
+
+[[pages.layout.items]]
+type = "button"
+[pages.layout.items.properties]
+title = "Screen Rotation"
+description = "Rotates the display"
+icon = "object-rotate-right-symbolic"
+
+[[pages.layout.items.properties.buttons]]
+icon = "object-rotate-right-symbolic"
+button_text = "Clockwise"
+[pages.layout.items.properties.buttons.on_press]
+type = "exec"
+command = "$HOME/user_scripts/hypr/monitor/screen_rotate.py -90"
+
+[[pages.layout.items.properties.buttons]]
+icon = "object-rotate-left-symbolic"
+button_text = "Counter Clockwise"
+[pages.layout.items.properties.buttons.on_press]
+type = "exec"
+command = "$HOME/user_scripts/hypr/monitor/screen_rotate.py +90"
+
+[[pages.layout.items]]
+type = "button"
+[pages.layout.items.properties]
+title = "Night Light"
+description = "Blue light filter slider"
+icon = "preferences-color-symbolic"
+button_text = "Open"
+[pages.layout.items.on_press]
+type = "exec"
+command = "$HOME/user_scripts/dusky_system/quickpanal/dusky_quickpanal.py"
+terminal = false
+
+[[pages.layout]]
+type = "section"
+[pages.layout.properties]
+title = "Monitor Configuration"
+icon = ""
+description = ""
+
+[[pages.layout.items]]
+type = "button"
+[pages.layout.items.properties]
+title = "Dusky Display (TUI)"
+description = "Resolution, positioning, and setup"
+icon = "video-display-symbolic"
+button_text = "Open"
+[pages.layout.items.on_press]
+type = "exec"
+command = "foot --app-id=dusky_tui --hold ~/user_scripts/dusky_tui/python/main/main.py ~/user_scripts/hypr/monitor/monitor_wizard.py"
+terminal = false
+
+[[pages.layout.items]]
+type = "button"
+[pages.layout.items.properties]
+title = "Fractional Scaling"
+description = "Adjust display scale"
+icon = "zoom-fit-best-symbolic"
+
+[[pages.layout.items.properties.buttons]]
+icon = "list-remove-symbolic"
+button_text = "-"
+[pages.layout.items.properties.buttons.on_press]
+type = "exec"
+command = "$HOME/user_scripts/hypr/monitor/adjust_scale.py -"
+
+[[pages.layout.items.properties.buttons]]
+icon = "list-add-symbolic"
+button_text = "+"
+[pages.layout.items.properties.buttons.on_press]
+type = "exec"
+command = "$HOME/user_scripts/hypr/monitor/adjust_scale.py +"
+
+
+[[pages]]
+id = "audio"
+title = "Audio"
+icon = "audio-volume-high-symbolic"
+
+[[pages.layout]]
+type = "grid_section"
+[pages.layout.properties]
+title = "Quick Audio"
+
+[[pages.layout.items]]
+type = "toggle_card"
+[pages.layout.items.properties]
+title = "Mono Audio"
+icon = "audio-card-symbolic"
+key = "mono_audio"
+[pages.layout.items.on_toggle.enabled]
+type = "exec"
+command = "$HOME/user_scripts/audio/mono_audio_pipewire.py"
+terminal = false
+[pages.layout.items.on_toggle.disabled]
+type = "exec"
+command = "$HOME/user_scripts/audio/mono_audio_pipewire.py"
+terminal = false
+
+[[pages.layout.items]]
+type = "grid_card"
+[pages.layout.items.properties]
+title = "Shazam"
+icon = "media-record-symbolic"
+[pages.layout.items.on_press]
+type = "exec"
+command = "$HOME/user_scripts/music/music_recognition.sh"
+terminal = false
+
+[[pages.layout.items]]
+type = "toggle_card"
+[pages.layout.items.properties]
+title = "Wayclick"
+icon = "input-keyboard-symbolic"
+key = "wayclick"
+[pages.layout.items.on_toggle.enabled]
+type = "exec"
+command = "$HOME/user_scripts/wayclick/dusky_wayclick.sh"
+terminal = false
+[pages.layout.items.on_toggle.disabled]
+type = "exec"
+command = "$HOME/user_scripts/wayclick/dusky_wayclick.sh"
+terminal = false
+
+[[pages.layout]]
+type = "section"
+[pages.layout.properties]
+title = "Controls"
+icon = ""
+description = ""
+
+[[pages.layout.items]]
+type = "slider"
+[pages.layout.items.properties]
+title = "Volume"
+icon = "audio-volume-high-symbolic"
+min = 0.0
+max = 100.0
+step = 1.0
+default = 50.0
+debounce = false
+value_command = "wpctl get-volume @DEFAULT_AUDIO_SINK@ | awk '{print $2 * 100}'"
+interval = 2
+[pages.layout.items.on_change]
+type = "exec"
+command = "wpctl set-volume @DEFAULT_AUDIO_SINK@ {value}%"
+
+[[pages.layout.items]]
+type = "button"
+[pages.layout.items.properties]
+title = "Audio Mixer"
+description = "Open Pavucontrol"
+icon = "multimedia-volume-control-symbolic"
+button_text = "Open"
+[pages.layout.items.on_press]
+type = "exec"
+command = "pavucontrol"
+terminal = false
+
+[[pages.layout]]
+type = "section"
+[pages.layout.properties]
+title = "Input & Output"
+icon = ""
+description = ""
+
+[[pages.layout.items]]
+type = "button"
+[pages.layout.items.properties]
+title = "Toggle Output"
+description = "Switch between Speakers/Headphones"
+icon = "audio-speakers-symbolic"
+button_text = "Switch"
+[pages.layout.items.on_press]
+type = "exec"
+command = "$HOME/user_scripts/audio/audio_switch.sh"
+terminal = false
+
+[[pages.layout.items]]
+type = "button"
+[pages.layout.items.properties]
+title = "Toggle Input"
+description = "Switch between Microphones"
+icon = "microphone-sensitivity-high-symbolic"
+button_text = "Switch"
+[pages.layout.items.on_press]
+type = "exec"
+command = "$HOME/user_scripts/audio/mic_switch.sh"
+terminal = false
+
+
+[[pages]]
+id = "visuals"
+title = "Visuals"
+icon = "applications-graphics-symbolic"
+
+[[pages.layout]]
+type = "grid_section"
+[pages.layout.properties]
+title = "Quick Visuals"
+
+[[pages.layout.items]]
+type = "toggle_card"
+[pages.layout.items.properties]
+title = "Dark Mode"
+icon = "weather-clear-night-symbolic"
+key = "dusky_theme/state"
+[pages.layout.items.on_toggle.enabled]
+type = "exec"
+command = "$HOME/user_scripts/theme_matugen/theme_ctl.sh set --mode dark"
+terminal = false
+[pages.layout.items.on_toggle.disabled]
+type = "exec"
+command = "$HOME/user_scripts/theme_matugen/theme_ctl.sh set --mode light"
+terminal = false
+
+[[pages.layout.items]]
+type = "grid_card"
+[pages.layout.items.properties]
+title = "Presets"
+icon = "view-grid-symbolic"
+[pages.layout.items.on_press]
+type = "exec"
+command = "kitty --class dusky_matugen_presets.sh -e ~/user_scripts/theme_matugen/dusky_matugen_presets.sh"
+terminal = false
+
+[[pages.layout.items]]
+type = "toggle_card"
+[pages.layout.items.properties]
+title = "Blur"
+icon = "view-reveal-symbolic"
+key = "opacity_blur"
+[pages.layout.items.on_toggle.enabled]
+type = "exec"
+command = "$HOME/user_scripts/hypr/hypr_blur_opacity_shadow_toggle.sh"
+terminal = false
+[pages.layout.items.on_toggle.disabled]
+type = "exec"
+command = "$HOME/user_scripts/hypr/hypr_blur_opacity_shadow_toggle.sh"
+terminal = false
+
+[[pages.layout]]
+type = "section"
+[pages.layout.properties]
+title = "Visual Configuration"
+icon = ""
+description = ""
+
+[[pages.layout.items]]
+type = "navigation"
+[pages.layout.items.properties]
+title = "Theme & Colors"
+description = "Color schemes and generation"
+icon = "preferences-color-symbolic"
+
+[[pages.layout.items.layout]]
+type = "section"
+[pages.layout.items.layout.properties]
+title = "Theme Management"
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Cycle Theme"
+description = "Randomize colors from wallpaper"
+icon = "preferences-color-symbolic"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "$HOME/user_scripts/theme_matugen/theme_ctl.sh next"
+terminal = false
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Regenerate Color Files"
+description = "Refresh Matugen for current wallpaper"
+icon = "view-refresh-symbolic"
+button_text = "Refresh"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "$HOME/user_scripts/theme_matugen/theme_ctl.sh refresh"
+terminal = false
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Fine Tune"
+description = "Open Rofi theme configuration"
+icon = "emblem-photos-symbolic"
+button_text = "Open"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "$HOME/user_scripts/rofi/rofi_theme.sh"
+terminal = false
+
+[[pages.layout.items]]
+type = "navigation"
+[pages.layout.items.properties]
+title = "Wallpaper"
+description = "Background image settings"
+icon = "image-x-generic-symbolic"
+
+[[pages.layout.items.layout]]
+type = "section"
+[pages.layout.items.layout.properties]
+title = "Wallpaper Management"
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Waypaper"
+description = "GUI Wallpaper Picker"
+icon = "image-x-generic-symbolic"
+button_text = "Open"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "waypaper"
+terminal = false
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Rofi Wallpaper"
+description = "Quick Select Menu"
+icon = "image-x-generic-symbolic"
+button_text = "Select"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "$HOME/user_scripts/rofi/rofi_wallpaper_selctor.sh"
+terminal = false
+
+[[pages.layout.items]]
+type = "navigation"
+[pages.layout.items.properties]
+title = "Effects & Decorations"
+description = "Animations, blur, borders, and shaders"
+icon = "preferences-desktop-display-symbolic"
+
+[[pages.layout.items.layout]]
+type = "section"
+[pages.layout.items.layout.properties]
+title = "Hyprland Appearance"
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Dusky Appearance TUI"
+description = "Configure borders, gaps, colors"
+icon = "preferences-desktop-display-symbolic"
+button_text = "Open"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "kitty --class dusky_tui --hold \"$HOME/user_scripts/dusky_tui/python/main/main.py\" \"$HOME/user_scripts/hypr/visual/tui_appearance.py\""
+terminal = false
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Animation Presets"
+description = "Select Hyprland window animation style"
+icon = "media-playlist-shuffle-symbolic"
+button_text = "Select"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "rofi -show animations -modi \"animations:$HOME/user_scripts/rofi/hypr_anim.sh\""
+terminal = false
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Shaders"
+description = "Screen effects menu"
+icon = "applications-graphics-symbolic"
+button_text = "Open"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "$HOME/user_scripts/rofi/shader_menu.sh"
+terminal = false
+
+
+[[pages]]
+id = "components"
+title = "Components"
+icon = "emblem-system-symbolic"
+
+[[pages.layout]]
+type = "section"
+[pages.layout.properties]
+title = "Clipboard"
+icon = ""
+description = ""
+
+[[pages.layout.items]]
+type = "button"
+[pages.layout.items.properties]
+title = "GSettings & GTK"
+description = "Manage GNOME/GTK settings via TUI or GUI"
+icon = "input-mouse-symbolic"
+
+[[pages.layout.items.properties.buttons]]
+icon = "document-edit-symbolic"
+button_text = "Dconf"
+[pages.layout.items.properties.buttons.on_press]
+type = "exec"
+command = "dconf-editor"
+
+[[pages.layout.items.properties.buttons]]
+icon = "utilities-terminal-symbolic"
+button_text = "TUI"
+style = "suggested"
+[pages.layout.items.properties.buttons.on_press]
+type = "exec"
+command = "kitty --class dusky_gsettings.sh --hold sh -c \"$HOME/user_scripts/gtk/dusky_gsettings.sh\""
+terminal = false
+
+[[pages.layout.items]]
+type = "selection"
+[pages.layout.items.properties]
+title = "Clipboard Persistence"
+description = "Configure clipboard history storage"
+icon = "edit-paste-symbolic"
+key = "clipboard_persistance"
+options = ["RAM", "Disk"]
+options_map = { "false" = "RAM", "true" = "Disk" }
+[pages.layout.items.on_change.RAM]
+type = "exec"
+command = "kitty --class 390_clipboard_persistance.sh --hold sh -c \"$HOME/user_scripts/arch_setup_scripts/scripts/390_clipboard_persistance.sh --ram\""
+terminal = false
+[pages.layout.items.on_change.Disk]
+type = "exec"
+command = "kitty --class 390_clipboard_persistance.sh --hold sh -c \"$HOME/user_scripts/arch_setup_scripts/scripts/390_clipboard_persistance.sh --disk\""
+terminal = false
+
+[[pages.layout]]
+type = "section"
+[pages.layout.properties]
+title = "Memory & Optimization"
+icon = ""
+description = ""
+
+[[pages.layout.items]]
+type = "navigation"
+[pages.layout.items.properties]
+title = "ZRam Configuration"
+description = "Manage compressed memory swap"
+icon = "memory-symbolic"
+
+[[pages.layout.items.layout]]
+type = "section"
+[pages.layout.items.layout.properties]
+title = "ZRam Setup"
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "ZRam Configurator"
+icon = "preferences-system-symbolic"
+button_text = "Setup"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "kitty --class 205_zram_configuration.sh --hold sh -c \"$HOME/user_scripts/arch_setup_scripts/scripts/205_zram_configuration.sh\""
+terminal = false
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Optimize Swappiness"
+description = "Uses more RAM"
+icon = "power-profile-performance-symbolic"
+style = "destructive"
+button_text = "Optimize"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "kitty --class 210_zram_optimize_swappiness.sh --hold sh -c \"$HOME/user_scripts/arch_setup_scripts/scripts/210_zram_optimize_swappiness.sh\""
+terminal = false
+
+[[pages.layout]]
+type = "section"
+[pages.layout.properties]
+title = "Clock"
+icon = ""
+description = ""
+
+[[pages.layout.items]]
+type = "toggle"
+[pages.layout.items.properties]
+title = "24-Hour Clock"
+description = "Toggle between 12hr (AM/PM) and 24hr format"
+icon = "preferences-system-time-symbolic"
+key = "time_format"
+[pages.layout.items.on_toggle.enabled]
+type = "exec"
+command = "~/user_scripts/waybar/toggle_time.sh --24"
+terminal = false
+[pages.layout.items.on_toggle.disabled]
+type = "exec"
+command = "~/user_scripts/waybar/toggle_time.sh --12"
+terminal = false
+
+[[pages.layout]]
+type = "section"
+[pages.layout.properties]
+title = "Status Bar & Notifications"
+icon = ""
+description = ""
+
+[[pages.layout.items]]
+type = "button"
+[pages.layout.items.properties]
+title = "Dusky Waybar Select"
+description = "Choose Status Bar Style"
+icon = "view-more-symbolic"
+button_text = "Swap"
+[pages.layout.items.on_press]
+type = "exec"
+command = "foot --app-id=waybar_tui python ~/user_scripts/dusky_tui/python/main/main.py ~/user_scripts/waybar/tui_waybars.py"
+terminal = false
+
+[[pages.layout.items]]
+type = "button"
+[pages.layout.items.properties]
+title = "Mako Notifications Configurator"
+description = "Mako TUI"
+icon = "preferences-system-notifications-symbolic"
+button_text = "Tweak"
+[pages.layout.items.on_press]
+type = "exec"
+command = "foot --app-id=dusky_tui --hold ~/user_scripts/dusky_tui/python/main/main.py ~/user_scripts/mako_osd/mako_tui/tui_mako.py"
+terminal = false
+
+[[pages.layout]]
+type = "section"
+[pages.layout.properties]
+title = "Lock Screen & Idle"
+icon = ""
+description = ""
+
+[[pages.layout.items]]
+type = "expander"
+[pages.layout.items.properties]
+title = "Lock Screen & Idle"
+description = "Manage Hyprlock and Hypridle"
+icon = "system-lock-screen-symbolic"
+
+[[pages.layout.items.items]]
+type = "button"
+[pages.layout.items.items.properties]
+title = "Dusky Hyprlock TUI"
+description = "Swap Lock Screen Layout"
+icon = "system-lock-screen-symbolic"
+button_text = "Open"
+[pages.layout.items.items.on_press]
+type = "exec"
+command = "kitty --class dusky_hyprlock_switcher.sh --hold sh -c $HOME/user_scripts/hyprlock/dusky_hyprlock_switcher.sh"
+terminal = false
+
+[[pages.layout.items.items]]
+type = "button"
+[pages.layout.items.items.properties]
+title = "Dusky Hypridle TUI"
+description = "Customize Hypridle timings (TUI)"
+icon = "preferences-system-time-symbolic"
+button_text = "Open"
+[pages.layout.items.items.on_press]
+type = "exec"
+command = "kitty --class dusky_hypridle.sh --hold sh -c \"$HOME/user_scripts/hypridle/dusky_hypridle.sh\""
+terminal = false
+
+[[pages.layout.items.items]]
+type = "button"
+[pages.layout.items.items.properties]
+title = "Toggle Idle Daemon"
+description = "Enable/Disable Hypridle (Current session)"
+icon = "media-playlist-repeat-symbolic"
+button_text = "Toggle"
+[pages.layout.items.items.on_press]
+type = "exec"
+command = "$HOME/user_scripts/waybar/toggle_hypridle.sh"
+terminal = false
+
+
+[[pages]]
+id = "services"
+title = "Services"
+icon = "system-run-symbolic"
+
+[[pages.layout]]
+type = "section"
+[pages.layout.properties]
+title = "Management"
+icon = ""
+description = ""
+
+[[pages.layout.items]]
+type = "button"
+[pages.layout.items.properties]
+title = "Service Manager"
+description = "Enable/Disable background services (TUI)"
+icon = "system-run-symbolic"
+button_text = "Open"
+[pages.layout.items.on_press]
+type = "exec"
+command = "foot --app-id=dusky_tui ~/user_scripts/dusky_tui/python/main/main.py ~/user_scripts/services/tui_service_toggle.py"
+terminal = false
+
+[[pages.layout.items]]
+type = "button"
+[pages.layout.items.properties]
+title = "Service Terminator"
+description = "Halt all background services for current session"
+icon = "process-stop-symbolic"
+button_text = "Stop All"
+[pages.layout.items.on_press]
+type = "exec"
+command = "kitty --class performance.sh --hold sh -c \"$HOME/user_scripts/performance/services_and_process_terminator.sh\""
+terminal = false
+
+
+[[pages]]
+id = "configs"
+title = "Configs"
+icon = "emblem-documents-symbolic"
+
+[[pages.layout]]
+type = "section"
+[pages.layout.properties]
+title = "System Defaults"
+icon = "preferences-system-devices-symbolic"
+description = "Manage your global application preferences"
+
+[[pages.layout.items]]
+type = "navigation"
+[pages.layout.items.properties]
+title = "Default Applications"
+description = "Browser, File Manager, Editor, and Terminal"
+icon = "applications-system-symbolic"
+
+[[pages.layout.items.layout]]
+type = "section"
+[pages.layout.items.layout.properties]
+title = "Global Defaults"
+description = "Select your preferred default software"
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "File Manager"
+description = "Switch system-wide file manager"
+icon = "system-file-manager-symbolic"
+button_text = "Switch"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "kitty --class 235_file_manager_switch.sh --hold sh -c \"$HOME/user_scripts/arch_setup_scripts/scripts/235_file_manager_switch.sh\""
+terminal = false
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Web Browser"
+description = "Set default internet browser"
+icon = "web-browser-symbolic"
+button_text = "Switch"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "kitty --class 236_browser_switcher.sh --hold sh -c \"$HOME/user_scripts/arch_setup_scripts/scripts/236_browser_switcher.sh\""
+terminal = false
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Text Editor"
+description = "Set default code/text editor"
+icon = "text-editor-symbolic"
+button_text = "Switch"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "kitty --class 237_text_editer_switcher.sh --hold sh -c \"$HOME/user_scripts/arch_setup_scripts/scripts/237_text_editer_switcher.sh\""
+terminal = false
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Terminal Emulator"
+description = "Set default system terminal"
+icon = "utilities-terminal-symbolic"
+button_text = "Switch"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "kitty --class 238_terminal_switcher.sh --hold sh -c \"$HOME/user_scripts/arch_setup_scripts/scripts/238_terminal_switcher.sh\""
+terminal = false
+
+[[pages.layout.items]]
+type = "navigation"
+[pages.layout.items.properties]
+title = "Reset Custom Configs"
+description = "Revert individual or all configuration files to default templates"
+icon = "edit-delete-symbolic"
+
+[[pages.layout.items.layout]]
+type = "section"
+[pages.layout.items.layout.properties]
+title = "Global Reset"
+description = "Reset all configuration files to their default templates"
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Reset All Configs"
+description = "Force reset all custom configuration files (Destructive!)"
+icon = "edit-delete-symbolic"
+style = "destructive"
+button_text = "Reset All"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "$HOME/user_scripts/arch_setup_scripts/scripts/005_hypr_custom_config_setup.py --force"
+terminal = false
+
+[[pages.layout.items.layout]]
+type = "section"
+[pages.layout.items.layout.properties]
+title = "Component Resets"
+description = "Reset specific configurations individually"
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Default Applications"
+description = "Reset default applications settings (default_apps.lua)"
+icon = "applications-system-symbolic"
+style = "destructive"
+button_text = "Reset"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "$HOME/user_scripts/arch_setup_scripts/scripts/005_hypr_custom_config_setup.py --force --default_apps"
+terminal = false
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Monitors"
+description = "Reset monitor and display layout settings (monitors.lua)"
+icon = "video-display-symbolic"
+style = "destructive"
+button_text = "Reset"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "$HOME/user_scripts/arch_setup_scripts/scripts/005_hypr_custom_config_setup.py --force --monitors"
+terminal = false
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Appearance"
+description = "Reset borders, gaps, colors, and rounding (appearance.lua)"
+icon = "applications-graphics-symbolic"
+style = "destructive"
+button_text = "Reset"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "$HOME/user_scripts/arch_setup_scripts/scripts/005_hypr_custom_config_setup.py --force --appearance"
+terminal = false
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Workspace Rules"
+description = "Reset custom workspace behavior settings (workspace_rules.lua)"
+icon = "view-grid-symbolic"
+style = "destructive"
+button_text = "Reset"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "$HOME/user_scripts/arch_setup_scripts/scripts/005_hypr_custom_config_setup.py --force --workspace_rules"
+terminal = false
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Keybinds"
+description = "Reset custom keyboard shortcuts (keybinds.lua)"
+icon = "input-keyboard-symbolic"
+style = "destructive"
+button_text = "Reset"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "$HOME/user_scripts/arch_setup_scripts/scripts/005_hypr_custom_config_setup.py --force --keybinds"
+terminal = false
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Input"
+description = "Reset keyboard, layout, and general input configurations (input.lua)"
+icon = "input-mouse-symbolic"
+style = "destructive"
+button_text = "Reset"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "$HOME/user_scripts/arch_setup_scripts/scripts/005_hypr_custom_config_setup.py --force --input"
+terminal = false
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Trackpad"
+description = "Reset touchpad and gesture configurations (trackpad.lua)"
+icon = "input-touchpad-symbolic"
+style = "destructive"
+button_text = "Reset"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "$HOME/user_scripts/arch_setup_scripts/scripts/005_hypr_custom_config_setup.py --force --trackpad"
+terminal = false
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Window Rules"
+description = "Reset custom rules for specific application windows (window_rules.lua)"
+icon = "application-x-executable-symbolic"
+style = "destructive"
+button_text = "Reset"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "$HOME/user_scripts/arch_setup_scripts/scripts/005_hypr_custom_config_setup.py --force --window_rules"
+terminal = false
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Autostart"
+description = "Reset background applications launched on login (autostart.lua)"
+icon = "system-run-symbolic"
+style = "destructive"
+button_text = "Reset"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "$HOME/user_scripts/arch_setup_scripts/scripts/005_hypr_custom_config_setup.py --force --autostart"
+terminal = false
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Environment Variables"
+description = "Reset environment variables for UWSM and Hyprland (environment_variables.lua)"
+icon = "preferences-desktop-display-symbolic"
+style = "destructive"
+button_text = "Reset"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "$HOME/user_scripts/arch_setup_scripts/scripts/005_hypr_custom_config_setup.py --force --environment_variables"
+terminal = false
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Plugins"
+description = "Reset custom Hyprland plugin manager integrations (plugins.lua)"
+icon = "application-x-addon-symbolic"
+style = "destructive"
+button_text = "Reset"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "$HOME/user_scripts/arch_setup_scripts/scripts/005_hypr_custom_config_setup.py --force --plugins"
+terminal = false
+
+[[pages.layout]]
+type = "section"
+[pages.layout.properties]
+title = "Core Configuration"
+icon = ""
+description = "Main system settings"
+
+[[pages.layout.items]]
+type = "navigation"
+[pages.layout.items.properties]
+title = "User Customizations"
+description = "Main Hyprland config"
+icon = "text-editor-symbolic"
+
+[[pages.layout.items.layout]]
+type = "section"
+[pages.layout.items.layout.properties]
+title = "User Customizations"
+description = "Edit hyprland.lua"
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Main Config"
+description = "Edit hyprland.lua (User Override)"
+icon = "preferences-system-symbolic"
+button_text = "File"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "gnome-text-editor \"$HOME/.config/hypr/edit_here/hyprland.lua\""
+terminal = false
+
+[[pages.layout.items]]
+type = "navigation"
+[pages.layout.items.properties]
+title = "Keybinds & Input"
+description = "Keyboard shortcuts and input devices"
+icon = "input-keyboard-symbolic"
+
+[[pages.layout.items.layout]]
+type = "section"
+[pages.layout.items.layout.properties]
+title = "Keybinds & Input"
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Keybinds"
+description = "Edit custom keybindings"
+icon = "input-keyboard-symbolic"
+
+[[pages.layout.items.layout.items.properties.buttons]]
+icon = "document-edit-symbolic"
+button_text = "File"
+[pages.layout.items.layout.items.properties.buttons.on_press]
+type = "exec"
+command = "gnome-text-editor \"$HOME/.config/hypr/edit_here/source/keybinds.lua\""
+
+[[pages.layout.items.layout.items.properties.buttons]]
+icon = "input-keyboard-symbolic"
+button_text = "TUI"
+style = "suggested"
+[pages.layout.items.layout.items.properties.buttons.on_press]
+type = "exec"
+command = "kitty --class dusky_keybinds.sh --hold sh -c \"$HOME/user_scripts/hypr/input/dusky_keybinds.py\""
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Input"
+description = "Edit input configuration"
+icon = "input-mouse-symbolic"
+
+[[pages.layout.items.layout.items.properties.buttons]]
+icon = "document-edit-symbolic"
+button_text = "File"
+[pages.layout.items.layout.items.properties.buttons.on_press]
+type = "exec"
+command = "gnome-text-editor \"$HOME/.config/hypr/edit_here/source/input.lua\""
+
+[[pages.layout.items.layout.items.properties.buttons]]
+icon = "input-mouse-symbolic"
+button_text = "TUI"
+style = "suggested"
+[pages.layout.items.layout.items.properties.buttons.on_press]
+type = "exec"
+command = "foot --app-id=dusky_tui $HOME/user_scripts/dusky_tui/python/main/main.py $HOME/user_scripts/hypr/input/tui_input.py"
+
+[[pages.layout.items]]
+type = "navigation"
+[pages.layout.items.properties]
+title = "Auto setup GPU Environment Variables"
+description = "UWSM and Hyprland environment settings"
+icon = "video-display-symbolic"
+
+[[pages.layout.items.layout]]
+type = "section"
+[pages.layout.items.layout.properties]
+title = "Environment Variables"
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Auto Configure GPU"
+description = "Detect and set GPU vars (UWSM)"
+icon = "preferences-desktop-display-symbolic"
+style = "suggested"
+button_text = "Run"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "kitty --class 000_configure_uwsm_gpu.sh --hold sh -c \"$HOME/user_scripts/arch_setup_scripts/scripts/035_configure_uwsm_gpu.sh\""
+
+[[pages.layout.items.layout]]
+type = "section"
+[pages.layout.items.layout.properties]
+title = "Environment Variable files"
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "User Environment"
+description = "~/.config/hypr/edit_here/source/environment_variables.lua"
+icon = "document-edit-symbolic"
+button_text = "File"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "gnome-text-editor \"$HOME/.config/hypr/edit_here/source/environment_variables.lua\""
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "UWSM Global"
+description = "~/.config/uwsm/env"
+icon = "document-edit-symbolic"
+button_text = "File"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "gnome-text-editor \"$HOME/.config/uwsm/env\""
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "UWSM Hyprland"
+description = "~/.config/uwsm/env-hyprland"
+icon = "document-edit-symbolic"
+button_text = "File"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "gnome-text-editor \"$HOME/.config/uwsm/env-hyprland\""
+
+[[pages.layout.items]]
+type = "navigation"
+[pages.layout.items.properties]
+title = "Window Management"
+description = "Monitors, Window Rules"
+icon = "view-dual-symbolic"
+
+[[pages.layout.items.layout]]
+type = "section"
+[pages.layout.items.layout.properties]
+title = "Window Management"
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Monitors"
+description = "Edit monitor configuration"
+icon = "video-display-symbolic"
+
+[[pages.layout.items.layout.items.properties.buttons]]
+icon = "document-edit-symbolic"
+button_text = "File"
+[pages.layout.items.layout.items.properties.buttons.on_press]
+type = "exec"
+command = "gnome-text-editor \"$HOME/.config/hypr/edit_here/source/monitors.lua\""
+
+[[pages.layout.items.layout.items.properties.buttons]]
+icon = "video-display-symbolic"
+button_text = "TUI"
+style = "suggested"
+[pages.layout.items.layout.items.properties.buttons.on_press]
+type = "exec"
+command = "foot --app-id=dusky_tui --hold ~/user_scripts/dusky_tui/python/main/main.py ~/user_scripts/hypr/monitor/monitor_wizard.py"
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Window Rules"
+description = "Edit window rules"
+icon = "application-x-addon-symbolic"
+
+[[pages.layout.items.layout.items.properties.buttons]]
+icon = "document-edit-symbolic"
+button_text = "File"
+[pages.layout.items.layout.items.properties.buttons.on_press]
+type = "exec"
+command = "gnome-text-editor \"$HOME/.config/hypr/edit_here/source/window_rules.lua\""
+
+[[pages.layout.items.layout.items.properties.buttons]]
+icon = "application-x-addon-symbolic"
+button_text = "TUI"
+style = "suggested"
+[pages.layout.items.layout.items.properties.buttons.on_press]
+type = "exec"
+command = "foot --app-id=dusky_window_rules.sh --hold \"$HOME/user_scripts/hypr/rules/window_rules_generator.py\""
+
+[[pages.layout.items]]
+type = "navigation"
+[pages.layout.items.properties]
+title = "Visuals & Idle"
+description = "Appearance and Hypridle"
+icon = "applications-graphics-symbolic"
+
+[[pages.layout.items.layout]]
+type = "section"
+[pages.layout.items.layout.properties]
+title = "Visuals & Idle"
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Appearance"
+description = "Edit visual settings"
+icon = "applications-graphics-symbolic"
+
+[[pages.layout.items.layout.items.properties.buttons]]
+icon = "document-edit-symbolic"
+button_text = "File"
+[pages.layout.items.layout.items.properties.buttons.on_press]
+type = "exec"
+command = "gnome-text-editor \"$HOME/.config/hypr/edit_here/source/appearance.lua\""
+
+[[pages.layout.items.layout.items.properties.buttons]]
+icon = "applications-graphics-symbolic"
+button_text = "TUI"
+style = "suggested"
+[pages.layout.items.layout.items.properties.buttons.on_press]
+type = "exec"
+command = "foot --app-id=dusky_tui --hold $HOME/user_scripts/dusky_tui/python/main/main.py $HOME/user_scripts/hypr/visual/tui_appearance.py"
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Workspace Rules"
+description = "Configure Workspace Rules"
+icon = "applications-graphics-symbolic"
+
+[[pages.layout.items.layout.items.properties.buttons]]
+icon = "document-edit-symbolic"
+button_text = "File"
+[pages.layout.items.layout.items.properties.buttons.on_press]
+type = "exec"
+command = "gnome-text-editor \"$HOME/.config/hypr/edit_here/source/workspace_rules.lua\""
+
+[[pages.layout.items.layout.items.properties.buttons]]
+icon = "applications-graphics-symbolic"
+button_text = "TUI"
+style = "suggested"
+[pages.layout.items.layout.items.properties.buttons.on_press]
+type = "exec"
+command = "kitty --class dusky_workspace_manager.sh --hold sh -c \"$HOME/user_scripts/hypr/dusky_workspace_manager.sh\""
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Hypridle"
+description = "Edit idle daemon config"
+icon = "preferences-system-time-symbolic"
+
+[[pages.layout.items.layout.items.properties.buttons]]
+icon = "document-edit-symbolic"
+button_text = "File"
+[pages.layout.items.layout.items.properties.buttons.on_press]
+type = "exec"
+command = "gnome-text-editor \"$HOME/.config/hypr/hypridle.conf\""
+
+[[pages.layout.items.layout.items.properties.buttons]]
+icon = "preferences-system-time-symbolic"
+button_text = "TUI"
+style = "suggested"
+[pages.layout.items.layout.items.properties.buttons.on_press]
+type = "exec"
+command = "foot --app-id=dusky_tui --hold $HOME/user_scripts/dusky_tui/python/main/main.py $HOME/user_scripts/hypridle/tui_dusky_hypridle.py"
+
+[[pages.layout]]
+type = "section"
+[pages.layout.properties]
+title = "Component Configs"
+icon = ""
+description = "Specific component settings"
+
+[[pages.layout.items]]
+type = "navigation"
+[pages.layout.items.properties]
+title = "Status Bar (Waybar)"
+description = "Configure Waybar layout and style"
+icon = "view-more-symbolic"
+
+[[pages.layout.items.layout]]
+type = "section"
+[pages.layout.items.layout.properties]
+title = "Waybar Management"
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Dusky Waybar Select"
+description = "Launch TUI to swap configs (Preview)"
+icon = "view-more-symbolic"
+button_text = "Swap"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "foot --app-id=waybar_tui python ~/user_scripts/dusky_tui/python/main/main.py ~/user_scripts/waybar/tui_waybars.py"
+terminal = false
+
+[[pages.layout.items.layout.items]]
+type = "selection"
+[pages.layout.items.layout.items.properties]
+title = "Active Waybar"
+description = "Current theme"
+icon = "preferences-system-symbolic"
+options_command = "find $HOME/.config/waybar -maxdepth 1 -type d -not -name '.*' -printf '%f\n' | sort"
+value_command = "readlink -f $HOME/.config/waybar/config.jsonc | xargs dirname | xargs basename"
+interval = 5
+[pages.layout.items.layout.items.on_change]
+type = "exec"
+command = "ln -sf $HOME/.config/waybar/{value}/config.jsonc $HOME/.config/waybar/config.jsonc; ln -sf $HOME/.config/waybar/{value}/style.css $HOME/.config/waybar/style.css; killall -SIGUSR2 waybar"
+
+[[pages.layout.items.layout]]
+type = "section"
+[pages.layout.items.layout.properties]
+title = "Available Themes"
+description = "Located in ~/.config/waybar/"
+
+[[pages.layout.items.layout.items]]
+type = "directory_generator"
+[pages.layout.items.layout.items.properties]
+path = "~/.config/waybar"
+sort = "name"
+
+[pages.layout.items.layout.items.item_template]
+type = "expander"
+[pages.layout.items.layout.items.item_template.properties]
+title = "{name_pretty}"
+description = "{name}"
+icon = "folder-symbolic"
+
+[[pages.layout.items.layout.items.item_template.items]]
+type = "button"
+[pages.layout.items.layout.items.item_template.items.properties]
+title = "Config"
+description = "config.jsonc"
+icon = "preferences-system-symbolic"
+button_text = "Edit"
+[pages.layout.items.layout.items.item_template.items.on_press]
+type = "exec"
+command = "gnome-text-editor \"{path}/config.jsonc\""
+terminal = false
+
+[[pages.layout.items.layout.items.item_template.items]]
+type = "button"
+[pages.layout.items.layout.items.item_template.items.properties]
+title = "Style"
+description = "style.css"
+icon = "document-edit-symbolic"
+button_text = "Edit"
+[pages.layout.items.layout.items.item_template.items.on_press]
+type = "exec"
+command = "gnome-text-editor \"{path}/style.css\""
+terminal = false
+
+[[pages.layout.items]]
+type = "navigation"
+[pages.layout.items.properties]
+title = "Notifications (Mako)"
+description = "Configure notifications"
+icon = "preferences-system-notifications-symbolic"
+
+[[pages.layout.items.layout]]
+type = "section"
+[pages.layout.items.layout.properties]
+title = "Mako Config"
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Mako Side Switch"
+description = "Customize notification"
+icon = "preferences-system-notifications-symbolic"
+button_text = "TUI"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "foot --app-id=dusky_tui --hold ~/user_scripts/dusky_tui/python/main/main.py ~/user_scripts/mako_osd/mako_tui/tui_mako.py"
+terminal = false
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "mako config"
+description = "Edit Current Configuration"
+icon = "preferences-system-symbolic"
+
+[[pages.layout.items.layout.items.properties.buttons]]
+icon = "preferences-system-symbolic"
+button_text = "Config"
+[pages.layout.items.layout.items.properties.buttons.on_press]
+type = "exec"
+command = "gnome-text-editor \"$HOME/.config/mako/config\""
+
+[[pages.layout.items.layout]]
+type = "section"
+[pages.layout.items.layout.properties]
+title = "Path"
+description = "Located in ~/.config/mako/config"
+
+[[pages.layout.items.layout.items]]
+type = "directory_generator"
+[pages.layout.items.layout.items.properties]
+path = "~/.config/mako/config"
+sort = "name"
+
+[pages.layout.items.layout.items.item_template]
+type = "expander"
+[pages.layout.items.layout.items.item_template.properties]
+title = "{name_pretty}"
+description = "{name}"
+icon = "folder-symbolic"
+
+[[pages.layout.items.layout.items.item_template.items]]
+type = "button"
+[pages.layout.items.layout.items.item_template.items.properties]
+title = "Config"
+description = "config.json"
+icon = "preferences-system-symbolic"
+button_text = "Edit"
+[pages.layout.items.layout.items.item_template.items.on_press]
+type = "exec"
+command = "gnome-text-editor \"{path}/config.json\""
+terminal = false
+
+[[pages.layout.items.layout.items.item_template.items]]
+type = "button"
+[pages.layout.items.layout.items.item_template.items.properties]
+title = "Style"
+description = "style.css"
+icon = "document-edit-symbolic"
+button_text = "Edit"
+[pages.layout.items.layout.items.item_template.items.on_press]
+type = "exec"
+command = "gnome-text-editor \"{path}/style.css\""
+terminal = false
+
+[[pages.layout.items]]
+type = "navigation"
+[pages.layout.items.properties]
+title = "Theming (Matugen)"
+description = "Material You theme generation config"
+icon = "preferences-color-symbolic"
+
+[[pages.layout.items.layout]]
+type = "section"
+[pages.layout.items.layout.properties]
+title = "Matugen Config"
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Matugen Config.toml"
+button_text = "View"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "gnome-text-editor \"$HOME/.config/matugen/config.toml\""
+
+[[pages.layout.items]]
+type = "navigation"
+[pages.layout.items.properties]
+title = "Hyprlock Themes"
+description = "Manage installed Hyprlock themes"
+icon = "system-lock-screen-symbolic"
+
+[[pages.layout.items.layout]]
+type = "section"
+[pages.layout.items.layout.properties]
+title = "Hyprlock Management"
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Dusky Hyprlock Select"
+description = "Swap Lock Screen Layout (TUI)"
+icon = "system-lock-screen-symbolic"
+button_text = "Swap"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "kitty --class dusky_hyprlock_switcher.sh --hold sh -c $HOME/user_scripts/hyprlock/dusky_hyprlock_switcher.sh"
+terminal = false
+
+[[pages.layout.items.layout]]
+type = "section"
+[pages.layout.items.layout.properties]
+title = "Available Themes"
+description = "Located in ~/.config/hypr/hyprlock_themes/"
+
+[[pages.layout.items.layout.items]]
+type = "directory_generator"
+[pages.layout.items.layout.items.properties]
+path = "~/.config/hypr/hyprlock_themes"
+sort = "name"
+
+[pages.layout.items.layout.items.item_template]
+type = "expander"
+[pages.layout.items.layout.items.item_template.properties]
+title = "{name_pretty}"
+description = "{name}"
+icon = "folder-symbolic"
+
+[[pages.layout.items.layout.items.item_template.items]]
+type = "button"
+[pages.layout.items.layout.items.item_template.items.properties]
+title = "Config"
+description = "hyprlock.conf"
+icon = "preferences-system-symbolic"
+button_text = "Edit"
+[pages.layout.items.layout.items.item_template.items.on_press]
+type = "exec"
+command = "gnome-text-editor \"{path}/hyprlock.conf\""
+terminal = false
+
+[[pages.layout.items.layout.items.item_template.items]]
+type = "button"
+[pages.layout.items.layout.items.item_template.items.properties]
+title = "Theme Data"
+description = "theme.json"
+icon = "document-edit-symbolic"
+button_text = "Edit"
+[pages.layout.items.layout.items.item_template.items.on_press]
+type = "exec"
+command = "gnome-text-editor \"{path}/theme.json\""
+terminal = false
+
+[[pages.layout.items]]
+type = "navigation"
+[pages.layout.items.properties]
+title = "System Defaults (Read Only)"
+description = "View default configuration files"
+icon = "dialog-warning-symbolic"
+
+[[pages.layout.items.layout]]
+type = "section"
+[pages.layout.items.layout.properties]
+title = "Dusky Default Hyprland"
+description = "WARNING: Read Only - System Defaults"
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Hyprland.lua"
+button_text = "View"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "gnome-text-editor \"$HOME/.config/hypr/hyprland.lua\""
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Environment Variables"
+button_text = "View"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "gnome-text-editor \"$HOME/.config/hypr/source/environment_variables.lua\""
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Appearance"
+button_text = "View"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "gnome-text-editor \"$HOME/.config/hypr/source/appearance.lua\""
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Autostart"
+button_text = "View"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "gnome-text-editor \"$HOME/.config/hypr/source/autostart.lua\""
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Keybinds"
+button_text = "View"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "gnome-text-editor \"$HOME/.config/hypr/source/keybinds.lua\""
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Window Rules"
+button_text = "View"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "gnome-text-editor \"$HOME/.config/hypr/source/window_rules.lua\""
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Input"
+button_text = "View"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "gnome-text-editor \"$HOME/.config/hypr/source/input.lua\""
+
+
+[[pages]]
+id = "keybinds"
+title = "Keybinds"
+icon = "input-keyboard-symbolic"
+
+[[pages.layout]]
+type = "section"
+[pages.layout.properties]
+title = "Keybinding Tools"
+icon = ""
+description = ""
+
+[[pages.layout.items]]
+type = "button"
+[pages.layout.items.properties]
+title = "Search Keybinds"
+description = "Search and list all active keybindings"
+icon = "edit-find-symbolic"
+button_text = "Search"
+[pages.layout.items.on_press]
+type = "exec"
+command = "$HOME/user_scripts/rofi/keybindings.sh"
+terminal = false
+
+[[pages.layout.items]]
+type = "button"
+[pages.layout.items.properties]
+title = "Dusky Keybind Manager"
+description = "Custom keybinding wizard (TUI)"
+icon = "input-keyboard-symbolic"
+button_text = "Open"
+[pages.layout.items.on_press]
+type = "exec"
+command = "kitty --class dusky_keybinds.sh --hold sh -c \"$HOME/user_scripts/hypr/input/dusky_keybinds.py\""
+terminal = false
+
+
+[[pages]]
+id = "tools_and_ai"
+title = "Tools & AI"
+icon = "utilities-terminal-symbolic"
+
+[[pages.layout]]
+type = "section"
+[pages.layout.properties]
+title = "Large Language Models (LLM)"
+icon = ""
+description = ""
+
+[[pages.layout.items]]
+type = "button"
+[pages.layout.items.properties]
+title = "Ollama"
+description = "Local LLM Interface"
+icon = "system-search-symbolic"
+button_text = "Open"
+[pages.layout.items.on_press]
+type = "exec"
+command = "kitty --class ollama_terminal.sh --title \"Ollama\" --hold sh -c \"$HOME/user_scripts/llm/ollama_terminal.sh\""
+terminal = false
+
+[[pages.layout]]
+type = "section"
+[pages.layout.properties]
+title = "Image Tools"
+icon = ""
+description = ""
+
+[[pages.layout.items]]
+type = "button"
+[pages.layout.items.properties]
+title = "Google Lens Search"
+description = "Search image from screen area"
+icon = "edit-find-symbolic"
+button_text = "Search"
+[pages.layout.items.on_press]
+type = "exec"
+command = "$HOME/user_scripts/google_image_search/google_image_search.sh"
+terminal = false
+
+[[pages.layout.items]]
+type = "button"
+[pages.layout.items.properties]
+title = "OCR Selection"
+description = "Copy text from screen"
+icon = "edit-copy-symbolic"
+button_text = "Select"
+[pages.layout.items.on_press]
+type = "exec"
+command = "sh -c 'region=$(slurp); grim -g \"$region\" - | tesseract stdin stdout -l eng | wl-copy'"
+terminal = false
+
+[[pages.layout]]
+type = "section"
+[pages.layout.properties]
+title = "Text to Speech (TTS)"
+icon = ""
+description = ""
+
+[[pages.layout.items]]
+type = "button"
+[pages.layout.items.properties]
+title = "Dusky TTS (Kokoro)"
+description = "Supports Nvidia, AMD, CPU"
+icon = "audio-speakers-symbolic"
+button_text = "Install"
+[pages.layout.items.on_press]
+type = "exec"
+command = "kitty --class kokoro_installer.sh --hold sh -c \"$HOME/user_scripts/tts_stt/dusky_kokoro/kokoro_installer.sh\""
+terminal = false
+
+[[pages.layout]]
+type = "section"
+[pages.layout.properties]
+title = "Speech to Text (SST)"
+icon = ""
+description = ""
+
+[[pages.layout.items]]
+type = "button"
+[pages.layout.items.properties]
+title = "Dusky STT (Parakeet)"
+description = "Supports Nvidia, AMD, CPU"
+icon = "microphone-sensitivity-high-symbolic"
+button_text = "Install"
+[pages.layout.items.on_press]
+type = "exec"
+command = "kitty --class parakeet_installer.sh --hold sh -c \"$HOME/user_scripts/tts_stt/dusky_parakeet/parakeet_installer.sh\""
+terminal = false
+
+
+[[pages]]
+id = "setup_features"
+title = "Setup"
+icon = "system-software-install-symbolic"
+
+[[pages.layout]]
+type = "section"
+[pages.layout.properties]
+title = "Core Installers"
+icon = ""
+description = "Essential tools"
+
+[[pages.layout.items]]
+type = "button"
+[pages.layout.items.properties]
+title = "Install AUR Helper"
+description = "Setup Paru (with Yay fallback)"
+icon = "package-x-generic-symbolic"
+button_text = "Install"
+[pages.layout.items.on_press]
+type = "exec"
+command = "kitty --class 080_aur_paru_fallback_yay.sh --hold sh -c \"$HOME/user_scripts/arch_setup_scripts/scripts/080_aur_paru_fallback_yay.sh\""
+terminal = false
+
+[[pages.layout.items]]
+type = "button"
+[pages.layout.items.properties]
+title = "Setup Cloudflare Warp"
+description = "Install and configure Warp VPN"
+icon = "network-vpn-symbolic"
+button_text = "Setup"
+[pages.layout.items.on_press]
+type = "exec"
+command = "kitty --class 085_warp.sh --hold sh -c \"$HOME/user_scripts/arch_setup_scripts/scripts/085_warp.sh\""
+terminal = false
+
+[[pages.layout.items]]
+type = "button"
+[pages.layout.items.properties]
+title = "Preload Config"
+description = "Cache binaries (WARNING: High RAM Usage!)"
+icon = "system-run-symbolic"
+style = "destructive"
+button_text = "Setup"
+[pages.layout.items.on_press]
+type = "exec"
+command = "kitty --class 335_preload_config.sh --hold sh -c \"$HOME/user_scripts/arch_setup_scripts/scripts/335_preload_config.sh\""
+terminal = false
+
+[[pages.layout.items]]
+type = "button"
+[pages.layout.items.properties]
+title = "SDDM Setup"
+description = "Custom login screen & profile picture"
+icon = "system-users-symbolic"
+button_text = "Setup"
+[pages.layout.items.on_press]
+type = "exec"
+command = "kitty --class 465_sddm_setup.sh --hold sh -c \"$HOME/user_scripts/arch_setup_scripts/scripts/465_sddm_setup.sh\""
+terminal = false
+
+[[pages.layout]]
+type = "section"
+[pages.layout.properties]
+title = "Dusky Enhancements"
+icon = ""
+description = "Optional components"
+
+[[pages.layout.items]]
+type = "button"
+[pages.layout.items.properties]
+title = "Optional Dusky Packages"
+description = "Install extra utilities"
+icon = "package-x-generic-symbolic"
+button_text = "Install"
+[pages.layout.items.on_press]
+type = "exec"
+command = "kitty --class 090_paru_packages_optional.sh --hold sh -c \"$HOME/user_scripts/arch_setup_scripts/scripts/090_paru_packages_optional.sh\""
+terminal = false
+
+[[pages.layout.items]]
+type = "button"
+[pages.layout.items.properties]
+title = "Dusky Wallpaper Pack"
+description = "Download ~2 GB of wallpapers"
+icon = "image-x-generic-symbolic"
+button_text = "Download"
+[pages.layout.items.on_press]
+type = "exec"
+command = "kitty --class 150_wallpapers_download.sh --hold sh -c \"$HOME/user_scripts/arch_setup_scripts/scripts/150_wallpapers_download.sh\""
+terminal = false
+
+# [[pages.layout.items]]
+# type = "navigation"
+# [pages.layout.items.properties]
+# title = "Dusky Plugins"
+# description = "Manage Dusky extensions"
+# icon = "application-x-addon-symbolic"
+#
+# [[pages.layout.items.layout]]
+# type = "section"
+# [pages.layout.items.layout.properties]
+# title = "Layouts & Workspaces"
+#
+# [[pages.layout.items.layout.items]]
+# type = "button"
+# [pages.layout.items.layout.items.properties]
+# title = "Hyprexpo"
+# description = "Provides a workspace overview, inspired by macOS Mission Control or GNOME Activities."
+# icon = "view-grid-symbolic"
+# button_text = "Install"
+# [pages.layout.items.layout.items.on_press]
+# type = "exec"
+# command = "kitty --class 356_dusky_plugin_manager.sh --hold sh -c \"$HOME/user_scripts/arch_setup_scripts/scripts/356_dusky_plugin_manager.sh --expo\""
+# terminal = false
+#
+# [[pages.layout.items.layout.items]]
+# type = "button"
+# [pages.layout.items.layout.items.properties]
+# title = "Hyprspace"
+# description = "An alternative spatial overview providing a zoomed-out, interactive view of all workspaces."
+# icon = "view-app-grid-symbolic"
+# button_text = "Install"
+# [pages.layout.items.layout.items.on_press]
+# type = "exec"
+# command = "kitty --class 356_dusky_plugin_manager.sh --hold sh -c \"$HOME/user_scripts/arch_setup_scripts/scripts/356_dusky_plugin_manager.sh --space\""
+# terminal = false
+#
+# [[pages.layout.items.layout.items]]
+# type = "button"
+# [pages.layout.items.layout.items.properties]
+# title = "Hyprscrolling"
+# description = "A layout plugin that allows moving focus and windows like a continuous scrolling column."
+# icon = "media-playlist-shuffle-symbolic"
+# button_text = "Install"
+# [pages.layout.items.layout.items.on_press]
+# type = "exec"
+# command = "kitty --class 356_dusky_plugin_manager.sh --hold sh -c \"$HOME/user_scripts/arch_setup_scripts/scripts/356_dusky_plugin_manager.sh --scrolling\""
+# terminal = false
+#
+# [[pages.layout.items.layout.items]]
+# type = "button"
+# [pages.layout.items.layout.items.properties]
+# title = "hy3 (i3 Tiling)"
+# description = "Replaces the default layout with an i3/Sway-like manual tiling engine using container nodes."
+# icon = "view-split-left-right-symbolic"
+# button_text = "Install"
+# [pages.layout.items.layout.items.on_press]
+# type = "exec"
+# command = "kitty --class 356_dusky_plugin_manager.sh --hold sh -c \"$HOME/user_scripts/arch_setup_scripts/scripts/356_dusky_plugin_manager.sh --hy3\""
+# terminal = false
+#
+# [[pages.layout.items.layout]]
+# type = "section"
+# [pages.layout.items.layout.properties]
+# title = "Visuals & Enhancements"
+#
+# [[pages.layout.items.layout.items]]
+# type = "button"
+# [pages.layout.items.layout.items.properties]
+# title = "Hypr-Dynamic-Cursors"
+# description = "Adds dynamic physics and behaviors to your cursor, including directional tilt and shake to locate."
+# icon = "input-mouse-symbolic"
+# button_text = "Install"
+# [pages.layout.items.layout.items.on_press]
+# type = "exec"
+# command = "kitty --class 356_dusky_plugin_manager.sh --hold sh -c \"$HOME/user_scripts/arch_setup_scripts/scripts/356_dusky_plugin_manager.sh --cursors\""
+# terminal = false
+#
+# [[pages.layout.items.layout.items]]
+# type = "button"
+# [pages.layout.items.layout.items.properties]
+# title = "Hyprbars"
+# description = "Adds customizable title bars to individual windows, complete with window management buttons."
+# icon = "window-new-symbolic"
+# button_text = "Install"
+# [pages.layout.items.layout.items.on_press]
+# type = "exec"
+# command = "kitty --class 356_dusky_plugin_manager.sh --hold sh -c \"$HOME/user_scripts/arch_setup_scripts/scripts/356_dusky_plugin_manager.sh --bars\""
+# terminal = false
+#
+# [[pages.layout.items.layout.items]]
+# type = "button"
+# [pages.layout.items.layout.items.properties]
+# title = "Hyprglass"
+# description = "Enhanced translucent window styling and blur aesthetics for the Wayland compositor."
+# icon = "palette-symbolic"
+# button_text = "Install"
+# [pages.layout.items.layout.items.on_press]
+# type = "exec"
+# command = "kitty --class 356_dusky_plugin_manager.sh --hold sh -c \"$HOME/user_scripts/arch_setup_scripts/scripts/356_dusky_plugin_manager.sh --glass\""
+# terminal = false
+#
+# [[pages.layout.items.layout.items]]
+# type = "button"
+# [pages.layout.items.layout.items.properties]
+# title = "Hypr-DarkWindow"
+# description = "Allows applying specific visual shaders (like invert or tint) to individual active windows."
+# icon = "display-brightness-symbolic"
+# button_text = "Install"
+# [pages.layout.items.layout.items.on_press]
+# type = "exec"
+# command = "kitty --class 356_dusky_plugin_manager.sh --hold sh -c \"$HOME/user_scripts/arch_setup_scripts/scripts/356_dusky_plugin_manager.sh --darkwindow\""
+# terminal = false
+#
+# [[pages.layout.items.layout]]
+# type = "section"
+# [pages.layout.items.layout.properties]
+# title = "Input & Gestures"
+#
+# [[pages.layout.items.layout.items]]
+# type = "button"
+# [pages.layout.items.layout.items.properties]
+# title = "Hypr-Hot-Edge"
+# description = "Enables responsive screen edge triggers to rapidly toggle special workspaces or panels."
+# icon = "object-select-symbolic"
+# button_text = "Install"
+# [pages.layout.items.layout.items.on_press]
+# type = "exec"
+# command = "kitty --class 356_dusky_plugin_manager.sh --hold sh -c \"$HOME/user_scripts/arch_setup_scripts/scripts/356_dusky_plugin_manager.sh --hotedge\""
+# terminal = false
+#
+# [[pages.layout.items.layout.items]]
+# type = "button"
+# [pages.layout.items.layout.items.properties]
+# title = "Hyprgrass"
+# description = "Advanced multi-touch gesture support for Wayland touchscreens, enabling swipe and edge mechanics."
+# icon = "input-touchpad-symbolic"
+# button_text = "Install"
+# [pages.layout.items.layout.items.on_press]
+# type = "exec"
+# command = "kitty --class 356_dusky_plugin_manager.sh --hold sh -c \"$HOME/user_scripts/arch_setup_scripts/scripts/356_dusky_plugin_manager.sh --grass\""
+# terminal = false
+
+[[pages.layout.items]]
+type = "navigation"
+[pages.layout.items.properties]
+title = "Wayclick Setup"
+description = "Mechanical keyboard sounds"
+icon = "input-keyboard-symbolic"
+
+[[pages.layout.items.layout]]
+type = "section"
+[pages.layout.items.layout.properties]
+title = "Wayclick Configuration"
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Step 1: Reset"
+description = "Clean existing configuration"
+icon = "edit-delete-symbolic"
+style = "destructive"
+button_text = "Reset"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "kitty --class dusky_wayclick.sh --hold sh -c \"$HOME/user_scripts/wayclick/dusky_wayclick.sh --reset\""
+terminal = false
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Step 2: Sound Packs"
+description = "Downlaod Sound Packs"
+icon = "audio-speakers-symbolic"
+button_text = "Download"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "kitty --class wayclick_soundpacks_download.sh --hold sh -c \"$HOME/user_scripts/wayclick/sounds/wayclick_soundpacks_download.sh --auto --force\""
+terminal = false
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Step 3: Install"
+description = "Setup Dusky Wayclick"
+icon = "system-software-install-symbolic"
+button_text = "Install"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "kitty --class dusky_wayclick.sh --hold sh -c \"$HOME/user_scripts/wayclick/dusky_wayclick.sh --setup\""
+terminal = false
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Step 4: Configuration"
+description = "Manage Wayclick sounds and logic"
+icon = "preferences-desktop-keyboard-shortcuts-symbolic"
+
+[[pages.layout.items.layout.items.properties.buttons]]
+icon = "document-edit-symbolic"
+button_text = "File"
+[pages.layout.items.layout.items.properties.buttons.on_press]
+type = "exec"
+command = "gnome-text-editor \"$HOME/user_scripts/wayclick/dusky_wayclick.sh\""
+
+[[pages.layout.items.layout.items.properties.buttons]]
+icon = "input-keyboard-symbolic"
+button_text = "TUI"
+style = "suggested"
+[pages.layout.items.layout.items.properties.buttons.on_press]
+type = "exec"
+command = "kitty --class dusky_tui_wayclick.sh --hold sh -c \"$HOME/user_scripts/wayclick/dusky_tui_wayclick.sh\""
+terminal = false
+
+[[pages.layout.items]]
+type = "navigation"
+[pages.layout.items.properties]
+title = "Neovim Setup & Maintenance"
+description = "Manage configuration and repair plugins"
+icon = "text-editor-symbolic"
+
+[[pages.layout.items.layout]]
+type = "section"
+[pages.layout.items.layout.properties]
+title = "Configuration"
+description = "Main management tools"
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Neovim Manager"
+description = "Main configuration and setup wizard"
+icon = "preferences-system-symbolic"
+style = "suggested"
+button_text = "Open"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "kitty --class dusky_neovim_manager.sh --hold sh -c \"$HOME/user_scripts/nvim/dusky_neovim_manager.sh\""
+terminal = false
+
+[[pages.layout.items.layout]]
+type = "section"
+[pages.layout.items.layout.properties]
+title = "Maintenance & Recovery"
+description = "Use these if Neovim is failing to launch or sync"
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Step 1: Clean"
+description = "Remove Neovim cache and data (Reset)"
+icon = "user-trash-symbolic"
+style = "destructive"
+button_text = "Clean"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "kitty --class 01_reset_neovim.sh --hold sh -c \"$HOME/user_scripts/nvim/reset/01_reset_neovim.sh\""
+terminal = false
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Step 2: Sync"
+description = "Re-download and sync Lazy plugins"
+icon = "view-refresh-symbolic"
+button_text = "Sync"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "kitty --class 02_cli_plugins_download.sh --hold sh -c \"$HOME/user_scripts/nvim/reset/02_cli_plugins_download.sh\""
+terminal = false
+
+[[pages.layout]]
+type = "section"
+[pages.layout.properties]
+title = "Applications"
+
+[[pages.layout.items]]
+type = "button"
+[pages.layout.items.properties]
+title = "Vesktop Setup"
+description = "Superior Discord client with theming"
+icon = "applications-internet-symbolic"
+button_text = "Setup"
+[pages.layout.items.on_press]
+type = "exec"
+command = "kitty --class 470_vesktop_matugen.sh --hold sh -c \"$HOME/user_scripts/arch_setup_scripts/scripts/470_vesktop_matugen.sh\""
+terminal = false
+
+[[pages.layout]]
+type = "section"
+[pages.layout.properties]
+title = "Spotify"
+icon = ""
+description = ""
+
+[[pages.layout.items]]
+type = "navigation"
+[pages.layout.items.properties]
+title = "Spotify"
+description = "Install and Theme"
+icon = "media-playback-start-symbolic"
+
+[[pages.layout.items.layout]]
+type = "section"
+[pages.layout.items.layout.properties]
+title = "Spotify (With Matugen)"
+description = "Themed installation using Spicetify"
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Install Spotify"
+icon = "preferences-color-symbolic"
+button_text = "Install"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "kitty --class 405_spicetify_matugen_setup.sh --hold sh -c \"$HOME/user_scripts/arch_setup_scripts/scripts/405_spicetify_matugen_setup.sh\""
+terminal = false
+
+[[pages.layout.items.layout]]
+type = "section"
+[pages.layout.items.layout.properties]
+title = "Spotify (Without Matugen)"
+description = "Standard Spotify installation"
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Install Standard Spotify"
+icon = "system-software-install-symbolic"
+button_text = "Install"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "kitty --class 260_spotify.sh --hold sh -c \"$HOME/user_scripts/arch_setup_scripts/scripts/260_spotify.sh\""
+terminal = false
+
+[[pages.layout]]
+type = "section"
+[pages.layout.properties]
+title = "Hardware Configuration"
+icon = ""
+description = "GPU and Drivers"
+
+[[pages.layout.items]]
+type = "navigation"
+[pages.layout.items.properties]
+title = "GPU Drivers"
+description = "Nvidia, AMD, Intel configuration"
+icon = "video-display-symbolic"
+
+[[pages.layout.items.layout]]
+type = "section"
+[pages.layout.items.layout.properties]
+title = "Nvidia Drivers"
+icon = ""
+description = "Open source drivers"
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Nvidia Open Source"
+description = "Drivers for 11 series to 60 series"
+icon = "video-display-symbolic"
+button_text = "Install"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "kitty --class 380_nvidia_open_source.sh --hold sh -c \"$HOME/user_scripts/arch_setup_scripts/scripts/380_nvidia_open_source.sh\""
+terminal = false
+
+[[pages.layout]]
+type = "section"
+[pages.layout.properties]
+title = "Virtualization"
+icon = ""
+description = "Waydroid"
+
+[[pages.layout.items]]
+type = "button"
+[pages.layout.items.properties]
+title = "Setup Waydroid"
+description = "Install Android KVM container"
+icon = "phone-symbolic"
+button_text = "Install"
+[pages.layout.items.on_press]
+type = "exec"
+command = "kitty --class 385_waydroid_setup.sh --hold sh -c \"$HOME/user_scripts/arch_setup_scripts/scripts/385_waydroid_setup.sh\""
+terminal = false
+
+
+[[pages]]
+id = "troubleshoot"
+title = "Troubleshoot"
+icon = "tools-check-spelling-symbolic"
+
+[[pages.layout]]
+type = "section"
+[pages.layout.properties]
+title = "Fixes"
+icon = ""
+description = "Common issues and repairs"
+
+[[pages.layout.items]]
+type = "button"
+[pages.layout.items.properties]
+title = "Fix Desktop Entries"
+description = "Resolve application launcher issues"
+icon = "application-x-executable-symbolic"
+button_text = "Reset"
+[pages.layout.items.on_press]
+type = "exec"
+command = "kitty --class 020_desktop_apps_username_setter.sh --hold sh -c \"$HOME/user_scripts/arch_setup_scripts/scripts/020_desktop_apps_username_setter.sh\""
+terminal = false
+
+[[pages.layout.items]]
+type = "button"
+[pages.layout.items.properties]
+title = "Fix Mirror Speeds"
+description = "Update Pacman mirrors (Reflector)"
+icon = "network-server-symbolic"
+button_text = "Refresh"
+[pages.layout.items.on_press]
+type = "exec"
+command = "kitty --class 055_pacman_reflector.sh --hold sh -c \"$HOME/user_scripts/arch_setup_scripts/scripts/055_pacman_reflector.sh\""
+terminal = false
+
+[[pages.layout.items]]
+type = "button"
+[pages.layout.items.properties]
+title = "Reset User Configs"
+description = "Force reset Hyprland configs (Destructive!)"
+icon = "edit-delete-symbolic"
+style = "destructive"
+button_text = "Reset"
+[pages.layout.items.on_press]
+type = "exec"
+command = "\"$HOME/user_scripts/arch_setup_scripts/scripts/005_hypr_custom_config_setup.py --force\""
+terminal = false
+
+[[pages.layout.items]]
+type = "button"
+[pages.layout.items.properties]
+title = "Battery Notify Service"
+description = "Enable battery alerts"
+icon = "battery-level-50-symbolic"
+button_text = "Fix"
+[pages.layout.items.on_press]
+type = "exec"
+command = "kitty --class 135_battery_notify_service.sh --hold sh -c \"$HOME/user_scripts/arch_setup_scripts/scripts/135_battery_notify_service.sh\""
+terminal = false
+
+[[pages.layout.items]]
+type = "button"
+[pages.layout.items.properties]
+title = "Fix Waypaper"
+description = "Reset wallpaper configuration"
+icon = "image-x-generic-symbolic"
+button_text = "Reset"
+[pages.layout.items.on_press]
+type = "exec"
+command = "kitty --class 170_waypaper_config_reset.sh --hold sh -c \"$HOME/user_scripts/arch_setup_scripts/scripts/170_waypaper_config_reset.sh\""
+terminal = false
+
+[[pages.layout.items]]
+type = "button"
+[pages.layout.items.properties]
+title = "Reset Animations"
+description = "Restore default animation settings"
+icon = "media-playlist-shuffle-symbolic"
+button_text = "Reset"
+[pages.layout.items.on_press]
+type = "exec"
+command = "kitty --class 175_animation_default.sh --hold sh -c \"$HOME/user_scripts/arch_setup_scripts/scripts/175_animation_default.sh\""
+terminal = false
+
+[[pages.layout.items]]
+type = "button"
+[pages.layout.items.properties]
+title = "Fix Firefox Theme"
+description = "Apply Matugen/Pywalfox theme"
+icon = "web-browser-symbolic"
+button_text = "Fix"
+[pages.layout.items.on_press]
+type = "exec"
+command = "kitty --class 400_firefox_matugen_pywalfox.sh --hold sh -c \"$HOME/user_scripts/arch_setup_scripts/scripts/400_firefox_matugen_pywalfox.sh\""
+terminal = false
+
+[[pages.layout.items]]
+type = "button"
+[pages.layout.items.properties]
+title = "Fix Cursor Theme"
+description = "Reset to Bibata Modern Classic"
+icon = "input-mouse-symbolic"
+button_text = "Fix"
+[pages.layout.items.on_press]
+type = "exec"
+command = "kitty --class 375_cursor_theme_bibata_classic_modern.sh --hold sh -c \"$HOME/user_scripts/arch_setup_scripts/scripts/375_cursor_theme_bibata_classic_modern.sh\""
+terminal = false
+
+[[pages.layout.items]]
+type = "navigation"
+[pages.layout.items.properties]
+title = "Neovim Troubleshooting"
+description = "Clean and sync plugins"
+icon = "text-editor-symbolic"
+
+[[pages.layout.items.layout]]
+type = "section"
+[pages.layout.items.layout.properties]
+title = "Neovim Maintenance"
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Step 1: Clean"
+description = "Remove Neovim cache/data"
+icon = "user-trash-symbolic"
+style = "destructive"
+button_text = "Clean"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "kitty --class 01_reset_neovim.sh --hold sh -c \"$HOME/user_scripts/nvim/reset/01_reset_neovim.sh\""
+terminal = false
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Step 2: Sync"
+description = "Lazy Sync plugins"
+icon = "view-refresh-symbolic"
+button_text = "Sync"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "kitty --class 02_cli_plugins_download.sh --hold sh -c \"$HOME/user_scripts/nvim/reset/02_cli_plugins_download.sh\""
+terminal = false
+
+
+[[pages]]
+id = "about_dusky"
+title = "About System"
+
+[[pages.layout]]
+type = "section"
+[pages.layout.properties]
+title = "About Dusky"
+description = "Version and details about Dusky System"
+icon = ""
+
+[[pages.layout.items]]
+type = "label"
+[pages.layout.items.properties]
+title = "Dusky Version"
+[pages.layout.items.value]
+type = "file"
+path = "~/.config/dusky/version"
+
+[[pages.layout.items]]
+type = "label"
+[pages.layout.items.properties]
+title = "Hyprland Version"
+icon = "video-display-symbolic"
+[pages.layout.items.value]
+type = "exec"
+command = "hyprctl version | grep Hyprland | awk '{print $2}'"
+
+[[pages.layout]]
+type = "section"
+[pages.layout.properties]
+title = "System Information"
+description = "Key details about your system"
+icon = ""
+
+[[pages.layout.items]]
+type = "label"
+[pages.layout.items.properties]
+title = "Kernel Version"
+icon = "computer-symbolic"
+[pages.layout.items.value]
+type = "system"
+key = "kernel_version"
+
+[[pages.layout.items]]
+type = "label"
+[pages.layout.items.properties]
+title = "Processor"
+icon = "cpu-symbolic"
+[pages.layout.items.value]
+type = "system"
+key = "cpu_model"
+
+[[pages.layout.items]]
+type = "label"
+[pages.layout.items.properties]
+title = "Memory"
+icon = "memory-symbolic"
+[pages.layout.items.value]
+type = "system"
+key = "memory_total"
+
+#Example TOML Configuration
+#[[pages.layout.items]]
+#type = "flag_group"
+#[pages.layout.items.properties]
+#title = "Pacman Operation"
+#description = "Select the transaction flags (Mutually Exclusive)"
+#exclusive = true # true = radio buttons (only one), false = checkboxes (multiple)
+#options = [
+#    { id = "-Syu", label = "System Upgrade" },
+#    { id = "-Scc", label = "Clear Cache" },
+#    { id = "-Rns", label = "Remove Package" }
+#]
+#[pages.layout.items.on_action]
+#type = "exec"
+#command = "sudo pacman {flags}"
+#terminal = true

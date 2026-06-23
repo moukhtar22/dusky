@@ -1,0 +1,508 @@
+# sshfile - Ergonomic, frecency-based bidirectional remote file manager
+# Commands: sshfile, pull_sshfile, push_sshfile
+# Requires: zsh, fzf (0.73+), rsync, awk, ssh, Nerd Fonts (for UI icons)
+
+# Load necessary Zsh modules
+zmodload zsh/datetime || print -u2 "Error: Could not load zsh/datetime module."
+
+export SSHFILE_BASE_DIR="${SSHFILE_BASE_DIR:-/mnt/zram1/sshfile}"
+export SSHFILE_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/dusky/settings/sshfiles"
+
+_sshfile_init_db() {
+    mkdir -p "$SSHFILE_CONFIG_DIR"/{data,scripts}
+    [[ -f "$SSHFILE_CONFIG_DIR/data/hosts.tsv" ]] || touch "$SSHFILE_CONFIG_DIR/data/hosts.tsv"
+    [[ -f "$SSHFILE_CONFIG_DIR/data/paths.tsv" ]] || touch "$SSHFILE_CONFIG_DIR/data/paths.tsv"
+
+    local tab_script="$SSHFILE_CONFIG_DIR/scripts/tab_transform.sh"
+    local hist_script="$SSHFILE_CONFIG_DIR/scripts/render_history.sh"
+
+    # --- HELPER 1: Renders Frecency History cleanly ---
+    # Output format: EXACT_PATH \t FORMATTED_DISPLAY_STRING
+    cat << 'EOF' > "$hist_script"
+#!/usr/bin/env zsh
+target_type="$1" # REMOTE, LOCAL_PUSH, LOCAL_PULL
+host="$2"        # actual host or empty
+hist_file="$3"
+now="$4"
+
+# Subshell guarantees the default path and the awk history output go into the sort pipeline together.
+# We use the Unit Separator ($'\037') to bulletproof sort delimiter collisions against weird filenames.
+(
+if [[ "$target_type" == "LOCAL_PULL" ]]; then
+    default_dir="${SSHFILE_BASE_DIR:-/mnt/zram1/sshfile}"
+    # Normalize trailing slash
+    [[ "$default_dir" != */ ]] && default_dir="${default_dir}/"
+    printf "9999999.0\037%s\037  \033[1;34m%s\033[0m \033[38;5;248m• [Default]\033[0m\n" "$default_dir" "$default_dir"
+fi
+
+awk -F'\t' -v type="$target_type" -v h="$host" -v now="$now" '
+    ($1 == h && type == "REMOTE") || ($1 == type && type ~ /^LOCAL_/) {
+        age = now - $3
+        score = $4 * 10
+        
+        # Tiered Recency Boost (Guarantees last used is #1)
+        if (age < 3600) { time_str = age "s ago"; score += 5000 }
+        else if (age < 86400) { time_str = int(age/3600) "h ago"; score += 3000 }
+        else if (age < 604800) { time_str = int(age/86400) "d ago"; score += 1000 }
+        else { time_str = int(age/86400) "d ago" }
+
+        # Dynamically assign Nerd Font icon & Color based on dir/file
+        icon = ($2 ~ /\/$/) ? " " : " "
+        color = ($2 ~ /\/$/) ? "\033[1;34m" : "\033[1;36m"
+
+        printf "%f\037%s\037%s %s%s\033[0m \033[38;5;248m• %s\033[0m\n", score, $2, icon, color, $2, time_str
+    }
+' "$hist_file" 2>/dev/null
+) | sort -t $'\037' -k1,1nr | awk -F $'\037' '!seen[$2]++ {print $2 "\t" $3}'
+EOF
+    chmod +x "$hist_script"
+
+    # --- HELPER 2: FZF Tab Transformer (Bidirectional Auto-Completion) ---
+    cat << 'EOF' > "$tab_script"
+#!/usr/bin/env zsh
+target_type="$1"
+host="$2"
+socket="$3"
+query="$4"
+item="$5"
+hist_file="$6"
+now="$7"
+
+target="$query"
+[[ -n "$item" ]] && target="$item"
+
+render_hist="\"$SSHFILE_CONFIG_DIR/scripts/render_history.sh\" \"$target_type\" \"$host\" \"$hist_file\" \"$now\""
+
+if [[ "$target_type" == "REMOTE" ]]; then
+    if [[ -z "$target" ]]; then
+        cmd="$render_hist"
+    else
+        if [[ "$target" == "~/"* ]]; then
+            q_target=$(printf "%q" "${target#\~/}")
+            remote_cmd="command ls -dp \"\$HOME\"/${q_target}* \"\$HOME\"/${q_target} 2>/dev/null"
+        elif [[ "$target" == "~" ]]; then
+            remote_cmd="command ls -dp \"\$HOME\"/* \"\$HOME\"/ 2>/dev/null"
+        else
+            q_target=$(printf "%q" "$target")
+            remote_cmd="command ls -dp ${q_target}* ${q_target} 2>/dev/null"
+        fi
+        
+        safe_remote_cmd="${remote_cmd//\'/\'\\\'\'}"
+        # Inject Nerd Fonts to live auto-completion lookups
+        cmd="ssh -o BatchMode=yes -S \"$socket\" \"$host\" '${safe_remote_cmd}' 2>/dev/null | awk '!seen[\$0]++ {icon=(\$0~/\/$/)?\" \":\" \"; color=(\$0~/\/$/)?\"\\033[1;34m\":\"\\033[1;36m\"; print \$0 \"\\t\" icon \" \" color \$0 \"\\033[0m\"}' || true"
+    fi
+else
+    # LOCAL (PUSH or PULL)
+    if [[ -z "$target" ]]; then
+         cmd="$render_hist"
+    else
+         local_target="$target"
+         [[ "$local_target" == "~/"* ]] && local_target="$HOME/${local_target#\~/}"
+         [[ "$local_target" == "~" ]] && local_target="$HOME/"
+         
+         q_local=$(printf "%q" "$local_target")
+         cmd="eval \"command ls -dp ${q_local}* ${q_local} 2>/dev/null\" | awk '!seen[\$0]++ {icon=(\$0~/\/$/)?\" \":\" \"; color=(\$0~/\/$/)?\"\\033[1;34m\":\"\\033[1;36m\"; print \$0 \"\\t\" icon \" \" color \$0 \"\\033[0m\"}' || true"
+    fi
+fi
+
+# Dynamically select an FZF action delimiter to prevent parser breakage
+local delim=""
+for d in '@' '#' '$' '%' '^' '&' '*' ';' '/' '|' '~' '!'; do
+    if [[ "$target" != *"$d"* && "$cmd" != *"$d"* ]]; then
+        delim="$d"
+        break
+    fi
+done
+[[ -z "$delim" ]] && delim="!"
+
+echo "change-query${delim}${target}${delim}+reload${delim}${cmd}${delim}"
+EOF
+    chmod +x "$tab_script"
+}
+
+_sshfile_extract_history_hosts() {
+    fc -lnr 1 | awk '
+        /^[[:space:]]*ssh([[:space:]]|$)/ {
+            sub(/^[[:space:]]+/, "", $0)
+            for(i=2; i<=NF; i++) {
+                if ($i ~ /^-/) {
+                    if ($i ~ /^-[plJcbDEmOoWw]$/) i++; 
+                } else if ($i != "--") {
+                    print $i
+                    break
+                }
+            }
+        }
+    ' | sort -u
+}
+
+_sshfile_extract_config_hosts() {
+    local conf="${HOME}/.ssh/config"
+    [[ -f "$conf" ]] && awk 'tolower($1) == "host" { for(i=2; i<=NF; i++) if ($i !~ /[*?]/) print $i }' "$conf"
+}
+
+_sshfile_update_frecency() {
+    local db_file="$1"
+    local key1="$2"
+    local key2="${3:-}" 
+    local tmp_file="${db_file}.tmp"
+
+    awk -F'\t' -v OFS='\t' -v k1="$key1" -v k2="$key2" -v ts="$EPOCHSECONDS" '
+        {
+            if (k2 == "") {
+                if ($1 == k1) { $2 = ts; $3++; found=1 }
+            } else {
+                if ($1 == k1 && $2 == k2) { $3 = ts; $4++; found=1 }
+            }
+            print $0
+        }
+        END {
+            if (!found) {
+                if (k2 == "") print k1, ts, 1
+                else print k1, k2, ts, 1
+            }
+        }
+    ' "$db_file" > "$tmp_file" && command mv -f "$tmp_file" "$db_file"
+}
+
+_sshfile_ensure_socket() {
+    local host="$1"
+    local socket="$2"
+
+    if ! ssh -o ControlMaster=auto -o ControlPath="$socket" -O check "$host" 2>/dev/null; then
+        print -P "\n%F{blue}󰒋 Establishing secure SSH multiplexing for $host (may prompt for password)...%f"
+        ssh -o ControlMaster=auto -o ControlPath="$socket" -o ControlPersist=1h "$host" true || {
+            print -P "%F{red}Error: Failed to connect or authenticate to $host.%f"
+            return 1
+        }
+    fi
+    return 0
+}
+
+# --- Universal Unified Path Picker (Local & Remote) ---
+_sshfile_pick_path() {
+    local target_type="$1"
+    local host="$2"
+    local socket="$3"
+    local prompt_str="$4"
+    local border_label="$5"
+
+    local initial_list=$("$SSHFILE_CONFIG_DIR/scripts/render_history.sh" "$target_type" "$host" "$SSHFILE_CONFIG_DIR/data/paths.tsv" "$EPOCHSECONDS")
+
+    local selected_path_raw
+    selected_path_raw=$(
+        echo "$initial_list" |
+        fzf --ansi --print-query --expect=ctrl-y,alt-c,enter \
+            --prompt="$prompt_str" \
+            --pointer="▶" --marker="✓" \
+            --border=rounded \
+            --border-label="$border_label" \
+            --border-label-pos=center \
+            --header=" 💡 TAB: Auto-Complete │ ENTER: Select │ ALT-C: Force Exact Typed " \
+            --header-border=line \
+            --info=inline-right \
+            --height=60% --layout=reverse \
+            --delimiter='\t' --with-nth=2.. \
+            --color='bg+:#313244,bg:#1e1e2e,spinner:#f5e0dc,hl:#f38ba8,fg:#cdd6f4,header:#89b4fa,info:#cba6f7,pointer:#f5e0dc,marker:#b4befe,fg+:#cdd6f4,prompt:#a6e3a1,hl+:#f38ba8,border:#f38ba8,label:#f9e2af,query:#cdd6f4' \
+            --bind "tab:transform(\"$SSHFILE_CONFIG_DIR/scripts/tab_transform.sh\" \"$target_type\" \"$host\" \"$socket\" {q} {1} \"$SSHFILE_CONFIG_DIR/data/paths.tsv\" \"$EPOCHSECONDS\")" \
+            --bind "ctrl-r:reload(\"$SSHFILE_CONFIG_DIR/scripts/render_history.sh\" \"$target_type\" \"$host\" \"$SSHFILE_CONFIG_DIR/data/paths.tsv\" \"$EPOCHSECONDS\")+change-query[]"
+    )
+    
+    local fzf_exit=$?
+    [[ $fzf_exit -eq 130 || $fzf_exit -eq 2 ]] && return 1
+
+    local query_str=$(echo "$selected_path_raw" | sed -n '1p')
+    local key_pressed=$(echo "$selected_path_raw" | sed -n '2p')
+    local list_selection=$(echo "$selected_path_raw" | sed -n '3p' | awk -F'\t' '{print $1}')
+
+    local trimmed_query
+    trimmed_query=$(printf "%s" "$query_str" | sed 's/[[:space:]]*$//')
+
+    if [[ "$key_pressed" == "ctrl-y" || "$key_pressed" == "alt-c" ]]; then
+        echo "$trimmed_query"
+    elif [[ "$key_pressed" == "enter" ]]; then
+        if [[ "$query_str" != "$trimmed_query" ]]; then
+            echo "$trimmed_query"
+        elif [[ -n "$list_selection" ]]; then
+            echo "$list_selection"
+        else
+            echo "$trimmed_query"
+        fi
+    else
+        echo "$trimmed_query"
+    fi
+}
+
+_sshfile_pick_host() {
+    local selected_host_raw
+    selected_host_raw=$(
+        (
+            _sshfile_extract_history_hosts | awk '{print $1 "\t0\t0"}'
+            _sshfile_extract_config_hosts | awk '{print $1 "\t0\t0"}'
+            cat "$SSHFILE_CONFIG_DIR/data/hosts.tsv" 2>/dev/null
+        ) | awk -F'\t' -v now="$EPOCHSECONDS" '
+            {
+                host = $1; ts = $2; count = $3;
+                if (ts > max_ts[host]) max_ts[host] = ts;
+                if (count > max_count[host]) max_count[host] = count;
+            }
+            END {
+                for (h in max_ts) {
+                    age = now - max_ts[h]
+                    if (max_ts[h] == 0) { time_str = "never"; score = -1000 }
+                    else {
+                        score = max_count[h] * 10
+                        if (age < 3600) { time_str = age "s ago"; score += 5000 }
+                        else if (age < 86400) { time_str = int(age/3600) "h ago"; score += 3000 }
+                        else if (age < 604800) { time_str = int(age/86400) "d ago"; score += 1000 }
+                        else { time_str = int(age/86400) "d ago" }
+                    }
+                    printf "%f\037%s\037󰒋 \033[1;32m%s\033[0m \033[38;5;248m• %s (uses: %d)\033[0m\n", score, h, h, time_str, max_count[h]
+                }
+            }
+        ' | sort -t $'\037' -k1,1nr | awk -F $'\037' '!seen[$2]++ {print $2 "\t" $3}' |
+        fzf --ansi --scheme=history --print-query --expect=ctrl-y,alt-c,enter \
+            --prompt=" 󰒋 Select Host > " \
+            --pointer="▶" --marker="✓" \
+            --border=rounded --border-label=" 󰒋 SSH Hosts " \
+            --border-label-pos=center \
+            --header=" 💡 ENTER: Select │ ALT-C: Force Typed " \
+            --header-border=line \
+            --info=inline-right \
+            --height=50% --layout=reverse \
+            --delimiter='\t' --with-nth=2.. \
+            --color='bg+:#313244,bg:#1e1e2e,spinner:#f5e0dc,hl:#f38ba8,fg:#cdd6f4,header:#89b4fa,info:#cba6f7,pointer:#f5e0dc,marker:#b4befe,fg+:#cdd6f4,prompt:#a6e3a1,hl+:#f38ba8,border:#89b4fa,label:#cba6f7,query:#cdd6f4'
+    )
+    
+    local fzf_exit=$?
+    [[ $fzf_exit -eq 130 || $fzf_exit -eq 2 ]] && return 1
+
+    local query_str=$(echo "$selected_host_raw" | sed -n '1p')
+    local key_pressed=$(echo "$selected_host_raw" | sed -n '2p')
+    local list_selection=$(echo "$selected_host_raw" | sed -n '3p' | awk -F'\t' '{print $1}')
+
+    local trimmed_query
+    trimmed_query=$(printf "%s" "$query_str" | sed 's/[[:space:]]*$//')
+
+    if [[ "$key_pressed" == "ctrl-y" || "$key_pressed" == "alt-c" ]]; then
+        echo "$trimmed_query"
+    elif [[ "$key_pressed" == "enter" ]]; then
+        if [[ "$query_str" != "$trimmed_query" ]]; then
+            echo "$trimmed_query"
+        elif [[ -n "$list_selection" ]]; then
+            echo "$list_selection"
+        else
+            echo "$trimmed_query"
+        fi
+    else
+        echo "$trimmed_query"
+    fi
+}
+
+# --- Core Engine ---
+_sshfile_core() {
+    emulate -L zsh
+    _sshfile_init_db
+
+    local mode="$1"
+    local socket_dir="${XDG_RUNTIME_DIR:-/tmp}/sshfile_sockets"
+    mkdir -p "$socket_dir"
+    chmod 700 "$socket_dir"
+
+    if [[ "$mode" == "--push" ]]; then
+        print -P "%F{cyan}Mode:%f %F{yellow} PUSH (Local -> Remote)%f"
+        
+        # 1. Select Local Source
+        local local_push_src
+        local_push_src=$(_sshfile_pick_path "LOCAL_PUSH" "" "" "  Local Source > " " 󰮞 PUSH: Local Source ")
+        [[ -z "$local_push_src" ]] && return 1
+        
+        [[ "$local_push_src" == "~/"* ]] && local_push_src="$HOME/${local_push_src#\~/}"
+        [[ "$local_push_src" == "~" ]] && local_push_src="$HOME"
+        
+        local_push_src="${local_push_src:A}"
+        # Normalize local dir paths gracefully
+        if [[ -d "$local_push_src" && "$local_push_src" != */ ]]; then
+            local_push_src="${local_push_src}/"
+        fi
+
+        if [[ ! -e "$local_push_src" ]]; then
+            print -P "%F{red}Error: Local file/dir '$local_push_src' does not exist.%f"
+            return 1
+        fi
+        print -P "%F{cyan}Source:%f %F{yellow}$local_push_src%f"
+
+        # 2. Select Host
+        local host=$(_sshfile_pick_host)
+        [[ -z "$host" ]] && return 1
+
+        # 3. Establish Multiplexing Socket
+        local socket="$socket_dir/${host//:/-}"
+        _sshfile_ensure_socket "$host" "$socket" || return 1
+
+        # 4. Select Remote Destination
+        local remote_dest
+        remote_dest=$(_sshfile_pick_path "REMOTE" "$host" "$socket" "  Remote Dest ($host) > " " 󰮞 PUSH: Remote Dest for '$(basename "$local_push_src")' ")
+        [[ -z "$remote_dest" ]] && return 1
+
+        # 5. Remote Validation & Normalization
+        print -P "\n%F{blue}Verifying remote path environment on $host...%f"
+        local b64_path=$(printf "%s" "$remote_dest" | base64 | tr -d '\n')
+        local remote_output abs_remote_path remote_stat
+        
+        remote_output=$(ssh -o BatchMode=yes -S "$socket" -q "$host" "
+            p=\"\$(echo '$b64_path' | base64 -d)\"
+            case \"\$p\" in ~/*) p=\"\$HOME/\${p#~/}\" ;; ~) p=\"\$HOME\" ;; esac
+            echo \"\$p\"
+            if [ ! -e \"\$p\" ]; then echo 'missing'; exit 0; fi
+            if [ ! -r \"\$p\" ]; then echo 'unreadable'; exit 0; fi
+            if [ -d \"\$p\" ]; then echo 'dir'; else echo 'file'; fi
+        " 2>/dev/null)
+
+        abs_remote_path=$(echo "$remote_output" | sed -n '1p')
+        remote_stat=$(echo "$remote_output" | sed -n '2p')
+        
+        if [[ -z "$remote_stat" || -z "$abs_remote_path" ]]; then
+            print -P "%F{red}Error: Failed to validate remote path. Connection lost or invalid.%f"
+            return 1
+        fi
+
+        # Strict Normalization to fix duplicate Frecency slugs
+        if [[ "$remote_stat" == "dir" && "$abs_remote_path" != */ ]]; then
+            abs_remote_path="${abs_remote_path}/"
+            remote_dest="${remote_dest}/" 
+        fi
+
+        # 6. Execute PUSH
+        print -P "\n%F{green}Pushing to $host:$remote_dest ...%f"
+        
+        if rsync -aP -s --mkpath -e "ssh -S \"$socket\"" "$local_push_src" "$host:$remote_dest"; then
+            print -P "\n%F{green}[✔] Push complete!%f"
+            _sshfile_update_frecency "$SSHFILE_CONFIG_DIR/data/hosts.tsv" "$host"
+            _sshfile_update_frecency "$SSHFILE_CONFIG_DIR/data/paths.tsv" "LOCAL_PUSH" "$local_push_src"
+            _sshfile_update_frecency "$SSHFILE_CONFIG_DIR/data/paths.tsv" "$host" "$remote_dest"
+        else
+            print -P "\n%F{red}[✘] Push failed during rsync phase.%f"
+            return 1
+        fi
+
+    else
+        # --- PULL MODE ---
+        print -P "%F{cyan}Mode:%f %F{green} PULL (Remote -> Local)%f"
+
+        # 1. Select Host
+        local host=$(_sshfile_pick_host)
+        [[ -z "$host" ]] && return 1
+
+        # 2. Establish Multiplexing Socket
+        local socket="$socket_dir/${host//:/-}"
+        _sshfile_ensure_socket "$host" "$socket" || return 1
+
+        # 3. Select Remote Source
+        local remote_src
+        remote_src=$(_sshfile_pick_path "REMOTE" "$host" "$socket" "  Remote Source ($host) > " " 󰮞 PULL: Remote Source ")
+        [[ -z "$remote_src" ]] && return 1
+
+        # 4. Remote Validation
+        print -P "\n%F{blue}Verifying remote path '$remote_src' on $host...%f"
+        local b64_path=$(printf "%s" "$remote_src" | base64 | tr -d '\n')
+        local remote_output abs_remote_path remote_stat
+        
+        remote_output=$(ssh -o BatchMode=yes -S "$socket" -q "$host" "
+            p=\"\$(echo '$b64_path' | base64 -d)\"
+            case \"\$p\" in ~/*) p=\"\$HOME/\${p#~/}\" ;; ~) p=\"\$HOME\" ;; esac
+            echo \"\$p\"
+            if [ ! -e \"\$p\" ]; then echo 'missing'; exit 0; fi
+            if [ ! -r \"\$p\" ]; then echo 'unreadable'; exit 0; fi
+            if [ -d \"\$p\" ]; then echo 'dir'; else echo 'file'; fi
+        " 2>/dev/null)
+
+        abs_remote_path=$(echo "$remote_output" | sed -n '1p')
+        remote_stat=$(echo "$remote_output" | sed -n '2p')
+
+        if [[ -z "$abs_remote_path" || "$remote_stat" == "missing" ]]; then
+            print -P "%F{red}Error: Path '$remote_src' does not exist on $host.%f"
+            return 1
+        elif [[ "$remote_stat" == "unreadable" ]]; then
+            print -P "%F{red}Error: Permission denied reading '$remote_src' on $host.%f"
+            return 1
+        elif [[ -z "$remote_stat" ]]; then
+            print -P "%F{red}Error: Failed to validate remote path. Connection lost or invalid.%f"
+            return 1
+        fi
+
+        # Strict Normalization for Frecency
+        if [[ "$remote_stat" == "dir" && "$abs_remote_path" != */ ]]; then
+            abs_remote_path="${abs_remote_path}/"
+            remote_src="${remote_src}/"
+        fi
+
+        # 5. Select Local Destination
+        local local_pull_dest
+        local_pull_dest=$(_sshfile_pick_path "LOCAL_PULL" "" "" "  Local Dest > " " 󰮞 PULL: Local Destination ")
+        [[ -z "$local_pull_dest" ]] && return 1
+        
+        [[ "$local_pull_dest" == "~/"* ]] && local_pull_dest="$HOME/${local_pull_dest#\~/}"
+        [[ "$local_pull_dest" == "~" ]] && local_pull_dest="$HOME"
+        
+        local_pull_dest="${local_pull_dest:A}"
+        if [[ -d "$local_pull_dest" && "$local_pull_dest" != */ ]]; then
+             local_pull_dest="${local_pull_dest}/"
+        fi
+
+        local default_dir="${SSHFILE_BASE_DIR:-/mnt/zram1/sshfile}"
+        if [[ "${local_pull_dest:A}" == "${default_dir:A}" ]]; then
+            local timestamp=$(strftime "%Y-%m-%d_%H-%M-%S" $EPOCHSECONDS)
+            local_pull_dest="${local_pull_dest%/}/$host/$timestamp/"
+        fi
+
+        # 6. Execute PULL
+        print -P "\n%F{green}Path verified ($remote_stat). Pulling to $local_pull_dest ...%f"
+        
+        if rsync -aP -s --mkpath -e "ssh -S \"$socket\"" "$host:$abs_remote_path" "$local_pull_dest"; then
+            print -P "\n%F{green}[✔] Pull complete!%f"
+            _sshfile_update_frecency "$SSHFILE_CONFIG_DIR/data/hosts.tsv" "$host"
+            _sshfile_update_frecency "$SSHFILE_CONFIG_DIR/data/paths.tsv" "$host" "$remote_src"
+            
+            local frecency_dest="$local_pull_dest"
+            if [[ "$frecency_dest" == *"/$host/"* ]]; then
+                 frecency_dest="${frecency_dest%/$host/*}/"
+            fi
+            _sshfile_update_frecency "$SSHFILE_CONFIG_DIR/data/paths.tsv" "LOCAL_PULL" "$frecency_dest"
+        else
+            print -P "\n%F{red}[✘] Pull failed during rsync phase.%f"
+            return 1
+        fi
+    fi
+}
+
+# --- Top Level Commands ---
+
+pull_sshfile() {
+    _sshfile_core --pull
+}
+
+push_sshfile() {
+    _sshfile_core --push
+}
+
+sshfile() {
+    emulate -L zsh
+    local choice
+    
+    choice=$(printf " PULL  (Fetch file/dir from Remote to Local)\n PUSH  (Send local file/dir to Remote)" | \
+        fzf --prompt=" 󰘚 Select Mode > " \
+            --pointer="▶" \
+            --border=rounded \
+            --border-label=" sshfile Menu " \
+            --border-label-pos=center \
+            --height=20% --layout=reverse \
+            --color='bg+:#313244,bg:#1e1e2e,spinner:#f5e0dc,hl:#f38ba8,fg:#cdd6f4,header:#89b4fa,info:#cba6f7,pointer:#f5e0dc,marker:#b4befe,fg+:#cdd6f4,prompt:#a6e3a1,hl+:#f38ba8,border:#89b4fa,label:#cba6f7'
+    )
+    
+    if [[ "$choice" == *"PULL"* ]]; then
+        pull_sshfile
+    elif [[ "$choice" == *"PUSH"* ]]; then
+        push_sshfile
+    fi
+}

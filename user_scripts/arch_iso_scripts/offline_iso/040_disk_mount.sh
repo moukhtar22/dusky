@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# MODULE: 004_disk_mount.sh
+# MODULE: 040_disk_mount.sh
 # CONTEXT: Arch ISO Environment
 # PURPOSE: BTRFS Subvolume Generation, NOCOW Attributes, and FHS Mounting
 # ==============================================================================
@@ -14,13 +14,19 @@ readonly C_YELLOW=$'\033[33m'
 readonly C_CYAN=$'\033[36m'
 readonly C_RESET=$'\033[0m'
 
-readonly MAPPED_ROOT="/dev/mapper/cryptroot"
 readonly TEMP_MNT="/mnt/btrfs_temp"
 readonly SWAPFILE_PATH="/mnt/swap/swapfile"
 readonly SWAPFILE_SIZE_BYTES=4294967296
 readonly EFI_GPT_TYPE="c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
 readonly BTRFS_OPTS="rw,noatime,compress=zstd:3,space_cache=v2,discard=async"
 
+# --- Inter-module State ---
+readonly STATE_FILE="/tmp/arch_install_state.env"
+if [[ -f "$STATE_FILE" ]]; then
+    source "$STATE_FILE"
+fi
+
+MAPPED_ROOT=""
 SUCCESS=0
 EFI_PART=""
 ROOT_PART=""
@@ -128,27 +134,85 @@ teardown_state() {
 }
 
 # --- Root Device Resolution ---
-resolve_root_ancestry() {
-    local mapped_name="${MAPPED_ROOT##*/}"
-    local backing_part=""
-    local root_disk_name=""
+determine_root_partition() {
+    local auto_mode="$1"
+    local use_crypt=0
 
-    backing_part=$(cryptsetup status "$mapped_name" 2>/dev/null | awk -F': *' '
-        $1 ~ /^[[:space:]]*device$/ { print $2; exit }
-    ' || true)
-
-    if [[ -z "$backing_part" ]]; then
-        echo -e "${C_RED}Critical: Failed to determine the encrypted root partition behind $MAPPED_ROOT.${C_RESET}"
-        exit 1
+    # Determine encryption intent gracefully if state file isn't present
+    if [[ "${ENCRYPT_ROOT:-}" == "1" ]]; then
+        use_crypt=1
+    elif [[ "${ENCRYPT_ROOT:-}" == "0" ]]; then
+        use_crypt=0
+    elif [[ -b "/dev/mapper/cryptroot" ]]; then
+        use_crypt=1
+    else
+        use_crypt=0
     fi
 
-    ROOT_PART=$(readlink -f "$backing_part")
+    if (( use_crypt == 1 )); then
+        if [[ ! -b "/dev/mapper/cryptroot" ]]; then
+            echo -e "${C_RED}Critical: LUKS encryption expected but /dev/mapper/cryptroot not found. Aborting.${C_RESET}"
+            exit 1
+        fi
+        
+        MAPPED_ROOT="/dev/mapper/cryptroot"
+        local mapped_name="${MAPPED_ROOT##*/}"
+        local backing_part=""
+
+        backing_part=$(cryptsetup status "$mapped_name" 2>/dev/null | awk -F': *' '
+            $1 ~ /^[[:space:]]*device$/ { print $2; exit }
+        ' || true)
+
+        if [[ -z "$backing_part" ]]; then
+            echo -e "${C_RED}Critical: Failed to determine the encrypted root partition behind $MAPPED_ROOT.${C_RESET}"
+            exit 1
+        fi
+
+        ROOT_PART=$(readlink -f "$backing_part")
+    else
+        echo -e "${C_YELLOW}>> Encryption disabled state detected. Seeking unencrypted root...${C_RESET}"
+        if (( auto_mode == 1 )); then
+            if [[ -n "${PROVISIONED_ROOT_PART:-}" && -b "$PROVISIONED_ROOT_PART" ]]; then
+                ROOT_PART=$(readlink -f "$PROVISIONED_ROOT_PART")
+                MAPPED_ROOT="$ROOT_PART"
+                echo -e "${C_CYAN}Auto-detected unencrypted BTRFS root (from previous module): $ROOT_PART${C_RESET}"
+            else
+                local -a btrfs_parts=()
+                local part fstype
+                # [MODIFIED]: Added -l (--list) to force list format parsing
+                while read -r part fstype; do
+                    [[ "$fstype" == "btrfs" ]] && btrfs_parts+=("$part")
+                done < <(lsblk -pnlro NAME,FSTYPE 2>/dev/null || true)
+
+                if (( ${#btrfs_parts[@]} == 1 )); then
+                    ROOT_PART=$(readlink -f "${btrfs_parts[0]}")
+                    MAPPED_ROOT="$ROOT_PART"
+                    echo -e "${C_CYAN}Auto-detected unencrypted BTRFS root: $ROOT_PART${C_RESET}"
+                else
+                    echo -e "${C_RED}Critical: Could not auto-detect a unique unencrypted BTRFS root partition. Please run interactively.${C_RESET}"
+                    exit 1
+                fi
+            fi
+        else
+            echo -e "${C_CYAN}Available block devices:${C_RESET}"
+            # [MODIFIED]: Added -l (--list)
+            lsblk -l -o NAME,SIZE,TYPE,FSTYPE,PARTLABEL
+            echo ""
+            read -r -p "Enter your BTRFS root partition (e.g., nvme0n1p2): " raw_root
+            ROOT_PART=$(readlink -f "/dev/${raw_root#/dev/}")
+            MAPPED_ROOT="$ROOT_PART"
+        fi
+    fi
+
     if [[ ! -b "$ROOT_PART" ]]; then
-        echo -e "${C_RED}Critical: Backing root partition $ROOT_PART is not a valid block device.${C_RESET}"
+        echo -e "${C_RED}Critical: Root partition $ROOT_PART is not a valid block device.${C_RESET}"
         exit 1
     fi
 
-    root_disk_name=$(lsblk -ndo PKNAME "$ROOT_PART" 2>/dev/null | head -n1 || true)
+    local root_disk_name=""
+    # [MODIFIED]: Added -l (--list)
+    root_disk_name=$(lsblk -ndlo PKNAME "$ROOT_PART" 2>/dev/null | head -n1 || true)
+
     if [[ -z "$root_disk_name" ]]; then
         echo -e "${C_RED}Critical: Failed to determine the parent disk for $ROOT_PART.${C_RESET}"
         exit 1
@@ -165,17 +229,16 @@ validate_root_state() {
     local root_fstype=""
 
     if [[ ! -b "$MAPPED_ROOT" ]]; then
-        echo -e "${C_RED}Critical: $MAPPED_ROOT not found. Did you run the partitioning module?${C_RESET}"
+        echo -e "${C_RED}Critical: $MAPPED_ROOT not found. Aborting.${C_RESET}"
         exit 1
     fi
 
-    root_fstype=$(lsblk -ndo FSTYPE "$MAPPED_ROOT" 2>/dev/null | head -n1 || true)
+    # [MODIFIED]: Added -l (--list)
+    root_fstype=$(lsblk -ndlo FSTYPE "$MAPPED_ROOT" 2>/dev/null | head -n1 || true)
     if [[ "$root_fstype" != "btrfs" ]]; then
         echo -e "${C_RED}Critical: $MAPPED_ROOT is not a Btrfs filesystem. Aborting.${C_RESET}"
         exit 1
     fi
-
-    resolve_root_ancestry
 }
 
 # --- EFI Detection / Validation ---
@@ -193,17 +256,19 @@ validate_efi_partition() {
     fi
 
     if [[ "$part" == "$ROOT_PART" ]]; then
-        echo -e "${C_RED}Critical: EFI partition cannot be the same as the encrypted root partition.${C_RESET}"
+        echo -e "${C_RED}Critical: EFI partition cannot be the same as the root partition.${C_RESET}"
         exit 1
     fi
 
-    part_type=$(lsblk -ndo TYPE "$part" 2>/dev/null | head -n1 || true)
+    # [MODIFIED]: Added -l (--list)
+    part_type=$(lsblk -ndlo TYPE "$part" 2>/dev/null | head -n1 || true)
     if [[ "$part_type" != "part" ]]; then
         echo -e "${C_RED}Critical: EFI target $part is not a partition. Aborting.${C_RESET}"
         exit 1
     fi
 
-    parent_name=$(lsblk -ndo PKNAME "$part" 2>/dev/null | head -n1 || true)
+    # [MODIFIED]: Added -l (--list)
+    parent_name=$(lsblk -ndlo PKNAME "$part" 2>/dev/null | head -n1 || true)
     if [[ -z "$parent_name" ]]; then
         echo -e "${C_RED}Critical: Failed to determine the parent disk for EFI partition $part.${C_RESET}"
         exit 1
@@ -215,8 +280,9 @@ validate_efi_partition() {
         exit 1
     fi
 
-    fstype=$(lsblk -ndo FSTYPE "$part" 2>/dev/null | head -n1 || true)
-    parttype=$(lsblk -ndo PARTTYPE "$part" 2>/dev/null | head -n1 || true)
+    # [MODIFIED]: Added -l (--list)
+    fstype=$(lsblk -ndlo FSTYPE "$part" 2>/dev/null | head -n1 || true)
+    parttype=$(lsblk -ndlo PARTTYPE "$part" 2>/dev/null | head -n1 || true)
 
     if [[ "${parttype,,}" != "$EFI_GPT_TYPE" && "${fstype,,}" != "vfat" && "${fstype,,}" != "fat32" ]]; then
         echo -e "${C_RED}Critical: $part does not look like a valid EFI System Partition.${C_RESET}"
@@ -236,6 +302,7 @@ auto_detect_efi_partition() {
     local parttype=""
     local partlabel=""
 
+    # [MODIFIED]: Added -l (--list) to force list format parsing
     while read -r part type; do
         [[ "$type" == "part" ]] || continue
         part=$(readlink -f "$part")
@@ -243,9 +310,9 @@ auto_detect_efi_partition() {
 
         non_root_parts+=("$part")
 
-        parttype=$(lsblk -ndo PARTTYPE "$part" 2>/dev/null | head -n1 || true)
-        fstype=$(lsblk -ndo FSTYPE "$part" 2>/dev/null | head -n1 || true)
-        partlabel=$(lsblk -ndo PARTLABEL "$part" 2>/dev/null | head -n1 || true)
+        parttype=$(lsblk -ndlo PARTTYPE "$part" 2>/dev/null | head -n1 || true)
+        fstype=$(lsblk -ndlo FSTYPE "$part" 2>/dev/null | head -n1 || true)
+        partlabel=$(lsblk -ndlo PARTLABEL "$part" 2>/dev/null | head -n1 || true)
 
         if [[ "${parttype,,}" == "$EFI_GPT_TYPE" ]]; then
             guid_matches+=("$part")
@@ -258,7 +325,7 @@ auto_detect_efi_partition() {
         if [[ "${fstype,,}" == "vfat" || "${fstype,,}" == "fat32" ]]; then
             vfat_matches+=("$part")
         fi
-    done < <(lsblk -pnro NAME,TYPE "$disk" 2>/dev/null)
+    done < <(lsblk -pnlro NAME,TYPE "$disk" 2>/dev/null)
 
     if (( ${#guid_matches[@]} == 1 )); then
         printf '%s\n' "${guid_matches[0]}"
@@ -296,7 +363,8 @@ prompt_for_efi_partition() {
     local raw_efi=""
 
     echo -e "${C_CYAN}Available partitions on ${ROOT_DISK}:${C_RESET}"
-    lsblk -o NAME,SIZE,TYPE,FSTYPE,PARTTYPE,PARTLABEL "$ROOT_DISK"
+    # [MODIFIED]: Added -l (--list)
+    lsblk -l -o NAME,SIZE,TYPE,FSTYPE,PARTTYPE,PARTLABEL "$ROOT_DISK"
     read -r -p "Enter your EFI partition (e.g., nvme0n1p1): " raw_efi
     EFI_PART=$(readlink -f "/dev/${raw_efi#/dev/}")
 }
@@ -308,13 +376,18 @@ determine_efi_partition() {
     [[ "$BOOT_MODE" == "UEFI" ]] || return 0
 
     if (( auto_mode == 1 )); then
-        detected=$(auto_detect_efi_partition "$ROOT_DISK" || true)
-        if [[ -n "$detected" ]]; then
-            EFI_PART=$(readlink -f "$detected")
-            echo -e "${C_CYAN}Auto-detected EFI partition: $EFI_PART${C_RESET}"
+        if [[ -n "${PROVISIONED_EFI_PART:-}" && -b "$PROVISIONED_EFI_PART" ]]; then
+            EFI_PART=$(readlink -f "$PROVISIONED_EFI_PART")
+            echo -e "${C_CYAN}Auto-detected EFI partition (from previous module): $EFI_PART${C_RESET}"
         else
-            echo -e "${C_YELLOW}>> Unable to auto-detect a unique EFI partition. User input required.${C_RESET}"
-            prompt_for_efi_partition
+            detected=$(auto_detect_efi_partition "$ROOT_DISK" || true)
+            if [[ -n "$detected" ]]; then
+                EFI_PART=$(readlink -f "$detected")
+                echo -e "${C_CYAN}Auto-detected EFI partition: $EFI_PART${C_RESET}"
+            else
+                echo -e "${C_YELLOW}>> Unable to auto-detect a unique EFI partition. User input required.${C_RESET}"
+                prompt_for_efi_partition
+            fi
         fi
     else
         prompt_for_efi_partition
@@ -342,8 +415,11 @@ construct_subvolume_matrix() {
         "@var_lib_portables"
     )
 
+    # [MODIFIED]: Added standard NOCOW exclusions for database environments
     declare -a NOCOW_SUBVOLS=(
         "@var_lib_libvirt"
+        "@var_lib_mysql"
+        "@var_lib_postgres"
         "@swap"
     )
 
@@ -368,7 +444,8 @@ assemble_fhs() {
     mkdir -p /mnt
     mount -o "${BTRFS_OPTS},subvol=@" "$MAPPED_ROOT" /mnt
 
-    mkdir -p /mnt/{home,.snapshots,var/log,var/cache,var/tmp,var/lib/machines,var/lib/portables,var/lib/libvirt,swap,boot}
+    # [MODIFIED]: Added directories for new DB subvolumes
+    mkdir -p /mnt/{home,.snapshots,var/log,var/cache,var/tmp,var/lib/machines,var/lib/portables,var/lib/libvirt,var/lib/mysql,var/lib/postgres,swap,boot}
 
     mount -o "${BTRFS_OPTS},subvol=@home"              "$MAPPED_ROOT" /mnt/home
     mount -o "${BTRFS_OPTS},subvol=@snapshots"         "$MAPPED_ROOT" /mnt/.snapshots
@@ -377,7 +454,11 @@ assemble_fhs() {
     mount -o "${BTRFS_OPTS},subvol=@var_tmp"           "$MAPPED_ROOT" /mnt/var/tmp
     mount -o "${BTRFS_OPTS},subvol=@var_lib_machines"  "$MAPPED_ROOT" /mnt/var/lib/machines
     mount -o "${BTRFS_OPTS},subvol=@var_lib_portables" "$MAPPED_ROOT" /mnt/var/lib/portables
+    
+    # NOCOW Mounts
     mount -o "${BTRFS_OPTS},subvol=@var_lib_libvirt"   "$MAPPED_ROOT" /mnt/var/lib/libvirt
+    mount -o "${BTRFS_OPTS},subvol=@var_lib_mysql"     "$MAPPED_ROOT" /mnt/var/lib/mysql
+    mount -o "${BTRFS_OPTS},subvol=@var_lib_postgres"  "$MAPPED_ROOT" /mnt/var/lib/postgres
     mount -o "${BTRFS_OPTS},subvol=@swap"              "$MAPPED_ROOT" /mnt/swap
 
     mkdir -p /mnt/home/.snapshots
@@ -424,6 +505,7 @@ run_common() {
     local auto_mode="$1"
 
     teardown_state
+    determine_root_partition "$auto_mode"
     validate_root_state
     determine_efi_partition "$auto_mode"
     construct_subvolume_matrix
@@ -432,7 +514,8 @@ run_common() {
 
     SUCCESS=1
     echo -e "\n${C_GREEN}${C_BOLD}>> Setup Complete. System is primed for 'pacstrap'.${C_RESET}"
-    lsblk -f "$ROOT_DISK" || true
+    # [MODIFIED]: Flat lsblk representation of the final disk tree
+    lsblk -l -f "$ROOT_DISK" || true
 }
 
 run_auto_mode() {

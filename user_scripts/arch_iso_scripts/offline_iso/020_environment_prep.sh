@@ -20,11 +20,13 @@ die()      { msg_err "$1"; exit 1; }
 
 usage() {
     cat <<'EOF'
-Usage: 002_environment_prep.sh [--auto|-a] [--cowspace SIZE]
+Usage: 002_environment_prep.sh [OPTIONS]
 
 Options:
   -a, --auto          Run autonomously with no interactive prompts.
   --cowspace SIZE     Resize Arch ISO cowspace to SIZE (example: 500M, 1G).
+  --arch              Target standard Arch Linux (populates archlinux keys).
+  --cachyos           Target CachyOS (populates archlinux + cachyos keys).
   -h, --help          Show this help.
 
 Environment variables:
@@ -51,6 +53,7 @@ case "$AUTO_MODE" in
 esac
 
 COWSPACE_SIZE="${COWSPACE_SIZE:-}"
+TARGET_OS=""
 
 while (($#)); do
     case "$1" in
@@ -65,6 +68,12 @@ while (($#)); do
         --cowspace=*)
             COWSPACE_SIZE="${1#*=}"
             COWSPACE_SIZE="${COWSPACE_SIZE// /}"
+            ;;
+        --arch)
+            TARGET_OS="arch"
+            ;;
+        --cachyos|--cachy)
+            TARGET_OS="cachyos"
             ;;
         -h|--help)
             usage
@@ -99,9 +108,36 @@ else
     msg_info "Autonomous mode enabled."
 fi
 
+# --- TARGET OS PROMPT ---
+if [[ -z "$TARGET_OS" ]]; then
+    if (( AUTO_MODE == 1 )); then
+        msg_info "Autonomous mode active: Defaulting Target OS to Arch Linux."
+        TARGET_OS="arch"
+    else
+        printf '\n%b:: Select Target OS for Keyring Setup:%b\n' "$C_BOLD" "$C_RESET"
+        printf '   [1] Arch Linux (Default)\n'
+        printf '   [2] CachyOS\n'
+        
+        OS_REPLY=""
+        read -r -p ":: Enter choice [1 or 2]: " OS_REPLY
+        
+        case "${OS_REPLY// /}" in
+            2)
+                TARGET_OS="cachyos"
+                msg_info "Target OS set to CachyOS."
+                ;;
+            *)
+                TARGET_OS="arch"
+                msg_info "Target OS set to Arch Linux."
+                ;;
+        esac
+        printf '\n'
+    fi
+fi
+
 # 1. Console Font
 msg_info "Setting console font..."
-setfont latarcyrheb-sun32 || msg_warn "Could not set font. Continuing..."
+setfont ter-v28b || setfont latarcyrheb-sun24 || msg_warn "Could not set font. Continuing..."
 
 # 2. Battery Threshold
 BAT_DIR=""
@@ -121,8 +157,12 @@ if [[ -n "$BAT_DIR" ]]; then
             if [[ "$CURRENT_THRESHOLD" == "60" ]]; then
                 msg_info "Battery limit already set to 60%."
             else
-                echo "60" > "$BAT_CTRL"
-                msg_ok "Battery limit set to 60%."
+                # Safely attempt to write; do not fail script if hardware rejects the threshold
+                if echo "60" > "$BAT_CTRL" 2>/dev/null; then
+                    msg_ok "Battery limit set to 60%."
+                else
+                    msg_warn "Battery threshold write rejected by hardware. Skipping."
+                fi
             fi
         else
             msg_warn "Battery threshold control exists but is not writable. Skipping."
@@ -189,8 +229,14 @@ msg_info "1/2: pacman-key --init"
 pacman-key --init
 sleep 1
 
-msg_info "2/2: pacman-key --populate archlinux"
-pacman-key --populate archlinux
+POPULATE_TARGETS="archlinux"
+if [[ "$TARGET_OS" == "cachyos" ]]; then
+    POPULATE_TARGETS+=" cachyos"
+fi
+
+msg_info "2/2: pacman-key --populate $POPULATE_TARGETS"
+# shellcheck disable=SC2086
+pacman-key --populate $POPULATE_TARGETS
 sleep 1
 
 msg_ok "Environment Ready."

@@ -212,9 +212,8 @@ done
 if [[ ! -f "$BASE_DIR/.build_marker_v10" ]]; then
     command -v gcc >/dev/null 2>&1 || NEEDED_DEPS+=("gcc")
 
-    # SDL headers/libs for pygame-ce, portmidi for MIDI, freetype2 for fonts,
-    # pkgconf so Meson finds libraries via .pc files, libuv for uvloop.
-    build_deps=("sdl2" "sdl2_mixer" "sdl2_image" "sdl2_ttf" "portmidi" "freetype2" "pkgconf" "libuv")
+    # libuv for uvloop. PyGame dependencies removed as we now use binary wheels.
+    build_deps=("libuv")
     for dep in "${build_deps[@]}"; do
         pacman -Qq "$dep" >/dev/null 2>&1 || NEEDED_DEPS+=("$dep")
     done
@@ -247,9 +246,6 @@ if (( ${#NEEDED_DEPS[@]} > 0 )); then
 fi
 
 # --- 5. PIPEWIRE SERVICE ACTIVATION ---
-# On fresh installs, PipeWire services may be installed but not started.
-# If we just installed audio packages, PipeWire needs a restart to discover
-# the new ALSA SPA plugins and create audio device nodes.
 if $AUDIO_PKGS_INSTALLED || ! systemctl --user is-active pipewire.service >/dev/null 2>&1; then
     printf "%b[AUDIO]%b Activating PipeWire audio services...\n" "${C_BLUE}" "${C_RESET}"
     systemctl --user enable pipewire.service pipewire-pulse.service wireplumber.service 2>/dev/null || true
@@ -257,54 +253,20 @@ if $AUDIO_PKGS_INSTALLED || ! systemctl --user is-active pipewire.service >/dev/
     sleep 1
 fi
 
-# --- 6a. CONFIG FILE CHECK ---
-if [[ ! -f "${CONFIG_DIR}/config.json" ]]; then
-    if $INTERACTIVE; then
-        while [[ ! -f "${CONFIG_DIR}/config.json" ]]; do
-            printf "\n%b[ACTION REQUIRED]%b Missing config.json in: %s\n" \
-                "${C_YELLOW}" "${C_RESET}" "${CONFIG_DIR}"
-            mkdir -p "$CONFIG_DIR" 2>/dev/null || true
-            printf "       Please ensure 'config.json' exists in this folder.\n"
-            printf "       %bPress Enter to re-scan...%b" "${C_DIM}" "${C_RESET}"
-            read -r
-        done
-        printf "%b[CHECK]%b Configuration found.\n" "${C_GREEN}" "${C_RESET}"
-    else
-        notify_user "Missing config.json in ~/.config/wayclick. Run in terminal."
-        exit 1
-    fi
-fi
-
-# --- 6b. AUDIO PACK CHECK ---
-if [[ ! -d "${CONFIG_DIR}/${AUDIO_PACK}" ]]; then
-    if $INTERACTIVE; then
-        printf "\n%b[ERROR]%b Audio pack '%b%s%b' not found in: %s\n" \
-            "${C_RED}" "${C_RESET}" "${C_CYAN}" "$AUDIO_PACK" "${C_RESET}" "${CONFIG_DIR}"
-
-        mapfile -t available < <(find "$CONFIG_DIR" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null | sort)
-
-        if (( ${#available[@]} > 0 )); then
-            printf "       Available packs:\n"
-            for pack in "${available[@]}"; do
-                printf "         %b→%b %s\n" "${C_CYAN}" "${C_RESET}" "$pack"
-            done
-            printf "\n       Update %bAUDIO_PACK%b at the top of this script to one of the above.\n" \
-                "${C_GREEN}" "${C_RESET}"
-        else
-            printf "       No audio packs found. Create a subdirectory with .wav files:\n"
-            printf "         %bmkdir -p %s/my_sounds && cp *.wav %s/my_sounds/%b\n" \
-                "${C_DIM}" "${CONFIG_DIR}" "${CONFIG_DIR}" "${C_RESET}"
-        fi
-        exit 1
-    else
-        notify_user "Audio pack '$AUDIO_PACK' not found. Run in terminal."
-        exit 1
-    fi
-fi
-
-# --- ENVIRONMENT SETUP ---
+# --- 6. ENVIRONMENT SETUP ---
 
 mkdir -p "$BASE_DIR" 2>/dev/null || true
+
+# Silence cross-filesystem hardlink warnings (common on Arch with BTRFS subvolumes or tmpfs)
+export UV_LINK_MODE=copy
+
+# [AUTO-HEAL]: Arch Linux Python updates notoriously break symlinked venvs.
+# This strictly checks if the venv exists BUT the python binary is dead.
+# If dead, it silently nukes the environment to force a pristine rebuild.
+if [[ -x "$PYTHON_BIN" ]] && ! "$PYTHON_BIN" -c "pass" >/dev/null 2>&1; then
+    printf "%b[REPAIR]%b System Python upgrade detected (broken venv). Auto-healing...\n" "${C_YELLOW}" "${C_RESET}"
+    rm -rf "$VENV_DIR" "$BASE_DIR"/.build_marker_*
+fi
 
 if [[ ! -d "$VENV_DIR" ]]; then
     if ! $INTERACTIVE; then
@@ -312,7 +274,9 @@ if [[ ! -d "$VENV_DIR" ]]; then
         exit 1
     fi
     printf "%b[BUILD]%b Initializing UV environment...\n" "${C_BLUE}" "${C_RESET}"
-    uv venv "$VENV_DIR" --python 3.14 --quiet
+    # Explicitly asking for >=3.14 ensures uv seeks the absolute cutting edge 
+    # rolling release present on your system while never falling back to older versions.
+    uv venv "$VENV_DIR" --python ">=3.14" --quiet
 fi
 
 MARKER_FILE="$BASE_DIR/.build_marker_v10"
@@ -330,20 +294,14 @@ if [[ ! -f "$MARKER_FILE" ]]; then
     export CXXFLAGS="$CFLAGS"
     export LDFLAGS="-Wl,-O2,--sort-common,--as-needed,-z,now,--relax -flto=auto"
 
-    # --no-binary targets ONLY our runtime libraries (evdev, pygame-ce).
-    # Build tools (cmake, ninja, scikit-build-core) use pre-built wheels.
-    # This avoids needing 'make' on fresh installs while still compiling
-    # the hot-path C extensions with native CPU flags.
     uv pip install --python "$PYTHON_BIN" \
-        --no-binary evdev --no-binary pygame-ce \
-        --no-cache \
+        --no-binary evdev \
         --compile-bytecode \
         evdev pygame-ce
 
     printf "%b[BUILD]%b Attempting uvloop (optional, faster event loop)...\n" "${C_BLUE}" "${C_RESET}"
     uv pip install --python "$PYTHON_BIN" \
         --no-binary uvloop \
-        --no-cache \
         --compile-bytecode \
         uvloop 2>/dev/null \
         && printf "%b[SUCCESS]%b uvloop installed.\n" "${C_GREEN}" "${C_RESET}" \
@@ -353,7 +311,7 @@ if [[ ! -f "$MARKER_FILE" ]]; then
     printf "%b[SUCCESS]%b Native build complete.\n" "${C_GREEN}" "${C_RESET}"
 fi
 
-# --- PYTHON RUNNER GENERATION ---
+# --- 7. PYTHON RUNNER GENERATION ---
 cat > "$RUNNER_SCRIPT" << 'PYTHON_EOF'
 import asyncio
 import gc
@@ -373,6 +331,8 @@ except ImportError:
 # === ENVIRONMENT ===
 os.environ['PYGAME_HIDE_SUPPORT_PROMPT'] = '1'
 os.environ['SDL_AUDIODRIVER'] = 'pipewire,pulseaudio,alsa'
+os.environ['SDL_APP_NAME'] = 'WayClick'
+os.environ['PULSE_PROP'] = 'application.name="WayClick"'
 
 import pygame
 import evdev
@@ -388,7 +348,7 @@ C_RESET  = "\033[0m"
 CONFIG_DIR  = sys.argv[1]
 PACK_NAME   = sys.argv[2]
 ASSET_DIR   = os.path.join(CONFIG_DIR, PACK_NAME)
-CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
+CONFIG_FILE = os.path.join(ASSET_DIR, "config.json")
 
 ENABLE_TRACKPADS = os.environ.get('ENABLE_TRACKPADS', 'false').lower() == 'true'
 AUTO_DETECT      = os.environ.get('WC_AUTO_DETECT', 'true').lower() == 'true'
@@ -419,6 +379,7 @@ print(f"{C_BLUE}[AUDIO]{C_RESET} Buffer={BUFFER_SIZE} samples (~{latency_ms:.1f}
       f"Rate={SAMPLE_RATE}Hz | Channels={MIX_CHANNELS}")
 
 # === DISABLE GARBAGE COLLECTOR ===
+# (100% safe here as our runloop generates zero cyclic references. Prevents latency spikes).
 gc.disable()
 
 # === CONFIG LOADING ===
@@ -466,7 +427,6 @@ for code, filename in RAW_KEY_MAP.items():
 # === HOT PATH PRE-BINDING ===
 _random_choice = random.choice
 _sound_cache   = SOUND_CACHE
-_max_keycode   = MAX_KEYCODE
 _defaults      = DEFAULT_SOUND_OBJS
 _has_defaults  = bool(DEFAULT_SOUND_OBJS)
 
@@ -477,31 +437,39 @@ if DEBUG:
 
     def play_sound(code):
         t0 = _perf()
-        sound = _sound_cache[code] if code < _max_keycode else None
-        if sound is not None:
-            sound.play()
-        elif _has_defaults:
-            _random_choice(_defaults).play()
+        try:
+            sound = _sound_cache[code]
+            if sound is not None:
+                sound.play()
+            elif _has_defaults:
+                _random_choice(_defaults).play()
+        except IndexError:
+            pass # Silently drop absurd out-of-bounds keycodes
+            
         elapsed_us = (_perf() - t0) / 1000
         print(f"  \u23f1 {elapsed_us:.1f}\u00b5s [code={code}]")
 else:
     def play_sound(code):
-        sound = _sound_cache[code] if code < _max_keycode else None
-        if sound is not None:
-            sound.play()
-        elif _has_defaults:
-            _random_choice(_defaults).play()
+        try:
+            # EAFP (Easier to Ask for Forgiveness) - Try block executes faster 
+            # than evaluating an `if code < MAX` branch check in Python.
+            sound = _sound_cache[code]
+            if sound is not None:
+                sound.play()
+            elif _has_defaults:
+                _random_choice(_defaults).play()
+        except IndexError:
+            pass
 
 # === DEVICE READER ===
-async def read_device(dev, stop_event):
+async def read_device(dev):
     _play = play_sound
-    _is_stopped = stop_event.is_set
 
     print(f"{C_GREEN}[+] Connected:{C_RESET} {dev.name} {C_DIM}({dev.path}){C_RESET}")
     try:
         async for event in dev.async_read_loop():
-            if _is_stopped():
-                break
+            # Stripped the manual stop check here for micro-optimization. 
+            # Task cancellation handles the shutdown sequence natively.
             if event.type == 1 and event.value == 1:
                 _play(event.code)
     except (OSError, IOError):
@@ -516,6 +484,7 @@ async def read_device(dev, stop_event):
 
 # === MAIN LOOP ===
 async def main():
+    loop = asyncio.get_running_loop()
     loop_type = "uvloop (native)" if _UVLOOP else "asyncio (standard)"
     print(f"{C_BLUE}[CORE]{C_RESET}  Engine started | Event loop: {loop_type}")
 
@@ -527,11 +496,9 @@ async def main():
 
     stop = asyncio.Event()
 
-    def _request_shutdown(signum, frame):
-        stop.set()
-
-    signal.signal(signal.SIGINT, _request_shutdown)
-    signal.signal(signal.SIGTERM, _request_shutdown)
+    # Thread-safe asyncio signal handling
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, stop.set)
 
     monitored_tasks = {}
     skipped_paths = set()
@@ -575,7 +542,7 @@ async def main():
                                 continue
 
                     if 1 in caps:
-                        task = asyncio.create_task(read_device(dev, stop))
+                        task = asyncio.create_task(read_device(dev))
                         monitored_tasks[path] = task
                     else:
                         dev.close()
@@ -605,14 +572,13 @@ async def main():
 if __name__ == "__main__":
     try:
         if _UVLOOP:
-            uvloop.run(main())
-        else:
-            asyncio.run(main())
+            uvloop.install()
+        asyncio.run(main())
     except KeyboardInterrupt:
         pass
 PYTHON_EOF
 
-# --- SETUP MODE EXIT ---
+# --- 8. SETUP MODE EXIT ---
 if [[ "$RUN_MODE" == "setup" ]]; then
     printf "\n%b[SETUP]%b Setup complete! Run '%b%s%b' to start WayClick.\n" \
         "${C_GREEN}" "${C_RESET}" "${C_CYAN}" "$(basename "$0")" "${C_RESET}"
@@ -627,7 +593,52 @@ if [[ "$RUN_MODE" == "setup" ]]; then
     exit 0
 fi
 
-# --- 7. GROUP PERMISSION CHECK (run mode only — after build so first run completes setup) ---
+# --- 9a. CONFIG FILE CHECK (run mode only) ---
+if [[ ! -f "${CONFIG_DIR}/${AUDIO_PACK}/config.json" ]]; then
+    if $INTERACTIVE; then
+        while [[ ! -f "${CONFIG_DIR}/${AUDIO_PACK}/config.json" ]]; do
+            printf "\n%b[ACTION REQUIRED]%b Missing config.json in: %s\n" \
+                "${C_YELLOW}" "${C_RESET}" "${CONFIG_DIR}/${AUDIO_PACK}"
+            mkdir -p "${CONFIG_DIR}/${AUDIO_PACK}" 2>/dev/null || true
+            printf "       Please ensure 'config.json' exists in this folder.\n"
+            printf "       %bPress Enter to re-scan...%b" "${C_DIM}" "${C_RESET}"
+            read -r
+        done
+        printf "%b[CHECK]%b Configuration found.\n" "${C_GREEN}" "${C_RESET}"
+    else
+        notify_user "Missing config.json in ~/.config/wayclick/${AUDIO_PACK}. Run in terminal."
+        exit 1
+    fi
+fi
+
+# --- 9b. AUDIO PACK CHECK (run mode only) ---
+if [[ ! -d "${CONFIG_DIR}/${AUDIO_PACK}" ]]; then
+    if $INTERACTIVE; then
+        printf "\n%b[ERROR]%b Audio pack '%b%s%b' not found in: %s\n" \
+            "${C_RED}" "${C_RESET}" "${C_CYAN}" "$AUDIO_PACK" "${C_RESET}" "${CONFIG_DIR}"
+
+        mapfile -t available < <(find "$CONFIG_DIR" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null | sort)
+
+        if (( ${#available[@]} > 0 )); then
+            printf "       Available packs:\n"
+            for pack in "${available[@]}"; do
+                printf "         %b→%b %s\n" "${C_CYAN}" "${C_RESET}" "$pack"
+            done
+            printf "\n       Update %bAUDIO_PACK%b at the top of this script to one of the above.\n" \
+                "${C_GREEN}" "${C_RESET}"
+        else
+            printf "       No audio packs found. Create a subdirectory with .wav files:\n"
+            printf "         %bmkdir -p %s/my_sounds && cp *.wav %s/my_sounds/%b\n" \
+                "${C_DIM}" "${CONFIG_DIR}" "${CONFIG_DIR}" "${C_RESET}"
+        fi
+        exit 1
+    else
+        notify_user "Audio pack '$AUDIO_PACK' not found. Run in terminal."
+        exit 1
+    fi
+fi
+
+# --- 10. GROUP PERMISSION CHECK (run mode only — after build so first run completes setup) ---
 if ! id -nG "$USER" | grep -qw input; then
     if $INTERACTIVE; then
         printf "%b[PERM]%b User '%s' is not in the 'input' group.\n" \

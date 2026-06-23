@@ -227,12 +227,20 @@ run_pacman() {
 
 # --- OS DETECTION ---
 detect_cachyos() {
-    [[ -r /etc/os-release ]] || return 1
-
-    (
-        . /etc/os-release
-        [[ ${ID:-} == cachyos ]]
-    )
+    # 1. Check OS release identity directly
+    if [[ -r /etc/os-release ]] && grep -iq 'cachyos' /etc/os-release; then
+        return 0
+    fi
+    # 2. Heuristic: Check if pacman is configured with CachyOS repositories
+    if grep -q '\[cachyos-v3\]' /etc/pacman.conf 2>/dev/null; then
+        return 0
+    fi
+    # 3. Heuristic: Check if the mirrorlist software payload is installed locally
+    if pacman -Qq cachyos-mirrorlist &>/dev/null; then
+        return 0
+    fi
+    
+    return 1
 }
 
 # --- SYSTEMD TIMER CONFIGURATION ---

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 #
 # Hyprshade Selector - Interactive shader picker with live preview
-# Requires: rofi, hyprshade, flock
+# Powered natively by hyprctl & Lua eval (Hyprland 0.55+ Compatible)
+# Requires: rofi, hyprctl, flock
 #
 
 set -o errexit
@@ -63,7 +64,7 @@ check_dependencies() {
     local -a missing=()
     local cmd
 
-    for cmd in rofi hyprshade flock; do
+    for cmd in rofi hyprctl flock; do
         command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
     done
 
@@ -85,9 +86,28 @@ apply_shader_sync() {
     local shader="${1:-off}"
 
     if [[ "$shader" == "off" ]]; then
-        hyprshade off
+        # Turn off in Hyprland 0.55+ via Lua Eval
+        hyprctl eval 'hl.config({ decoration = { screen_shader = "" } })' >/dev/null 2>&1 || true
     else
-        hyprshade on "$shader"
+        # Resolve full path natively for both .glsl and .frag
+        local shader_path=""
+        local dir
+        local ext
+        for dir in "$HOME/.config/hypr/shaders" "/usr/share/hyprshade/shaders"; do
+            for ext in glsl frag; do
+                if [[ -f "$dir/$shader.$ext" ]]; then
+                    shader_path="$dir/$shader.$ext"
+                    break 2
+                fi
+            done
+        done
+
+        if [[ -n "$shader_path" ]]; then
+            # Apply in Hyprland 0.55+ via Lua Eval
+            hyprctl eval "hl.config({ decoration = { screen_shader = \"$shader_path\" } })" >/dev/null 2>&1 || true
+        else
+            err "Could not resolve path for shader: $shader"
+        fi
     fi
 }
 
@@ -153,10 +173,12 @@ cleanup() {
 }
 
 init() {
-    local current_output
-    local ls_output
-    local line
+    local current_path
+    local shader_file
+    local name
     local i
+    local dir
+    local ext
     local -A seen=([off]=1)
 
     check_dependencies
@@ -174,24 +196,34 @@ init() {
     trap 'exit 143' TERM
     trap 'exit 129' HUP
 
-    current_output=$(hyprshade current 2>/dev/null || true)
-    ORIGINAL_SHADER=$(trim "$current_output")
-    [[ -z "$ORIGINAL_SHADER" ]] && ORIGINAL_SHADER="off"
-
-    if ! ls_output=$(hyprshade ls 2>/dev/null); then
-        err "Failed to list shaders"
-        exit 1
+    # Get current shader purely through hyprctl JSON (Bypassing hyprshade bugs)
+    current_path=$(hyprctl getoption decoration:screen_shader -j 2>/dev/null | grep '"str"' | cut -d'"' -f4 || true)
+    
+    if [[ -z "$current_path" || "$current_path" == "[[EMPTY]]" ]]; then
+        ORIGINAL_SHADER="off"
+    else
+        ORIGINAL_SHADER=$(basename "$current_path")
+        ORIGINAL_SHADER="${ORIGINAL_SHADER%.*}"
     fi
+    [[ -z "$ORIGINAL_SHADER" ]] && ORIGINAL_SHADER="off"
 
     SHADERS=("off")
 
-    while IFS= read -r line; do
-        line=$(trim "$line")
-        [[ -z "$line" || "$line" == "off" ]] && continue
-        [[ -n "${seen[$line]+_}" ]] && continue
-        seen["$line"]=1
-        SHADERS+=("$line")
-    done <<<"$ls_output"
+    # Native directory scan for shaders (Supporting both .glsl and .frag)
+    for dir in "$HOME/.config/hypr/shaders" "/usr/share/hyprshade/shaders"; do
+        [[ -d "$dir" ]] || continue
+        for ext in glsl frag; do
+            for shader_file in "$dir/"*."$ext"; do
+                [[ -f "$shader_file" ]] || continue
+                name=$(basename "$shader_file")
+                name="${name%.*}"
+                [[ -z "$name" || "$name" == "off" ]] && continue
+                [[ -n "${seen[$name]+_}" ]] && continue
+                seen["$name"]=1
+                SHADERS+=("$name")
+            done
+        done
+    done
 
     CURRENT_IDX=0
     for i in "${!SHADERS[@]}"; do

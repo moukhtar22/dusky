@@ -2,34 +2,35 @@
 # This script installs ALL PACKAGES from the Offline Repository. Inspect it manually to remove/add anything you want.
 # It installs packages only. It does not enable systemd services automatically.
 # ------------------------------------------------------------------------------
-# Arch Linux / Hyprland / UWSM - Elite System Installer (v3.4 - Hardened Offline)
+# Arch Linux / Hyprland / UWSM - Elite System Installer (v5.0 - Golden Offline)
 # ------------------------------------------------------------------------------
 
 # --- 1. CONFIGURATION ---
 
 # Group 0: Dusky ISO packages
 declare -ar pkgs_offline=(
-  "intel-ucode" "amd-ucode" "mkinitcpio" "gradle" "glaze" "python-cssselect" "gradle" "base" "base-devel" "python-lxml" "python-certifi" "python-charset-normalizer" "python-idna" "python-requests" "python-urllib3" "deno" "yt-dlp" "yt-dlp-ejs" "hunspell" "xf86-input-libinput" "xorg-xauth" "boost-libs"
+  "mkinitcpio" "glaze" "python-cssselect" "base" "base-devel" "python-lxml" "python-certifi" "python-charset-normalizer" "python-idna" "python-requests" "python-urllib3" "deno" "yt-dlp" "yt-dlp-ejs" "hunspell" "xf86-input-libinput" "xorg-xauth" "boost-libs" "plymouth"
  )
 
 # Group 1: Graphics & Drivers
 declare -ar pkgs_graphics=(
-  "intel-media-driver" "vpl-gpu-rt" "mesa" "vulkan-intel" "mesa-utils" "intel-gpu-tools" "libva" "libva-utils" "vulkan-icd-loader" "vulkan-tools" "sof-firmware" "linux-firmware" "linux-headers" "acpi_call"
+  "intel-media-driver" "vpl-gpu-rt" "mesa" "vulkan-intel" "mesa-utils" "intel-gpu-tools" "libva" "libva-utils" "vulkan-icd-loader" "vulkan-tools" "sof-firmware" "linux-firmware" "linux-headers" "acpi_call" "kernel-modules-hook"
 )
 
 # Group 2: Hyprland Core
 declare -ar pkgs_hyprland=(
-  "hyprland" "uwsm" "xorg-xwayland" "xdg-desktop-portal-hyprland" "xdg-desktop-portal-gtk" "polkit" "hyprpolkitagent" "xdg-utils" "socat" "inotify-tools" "libnotify" "file"
+  "hyprland" "uwsm" "xorg-xwayland" "xdg-desktop-portal-hyprland" "xdg-desktop-portal-gtk" "polkit" "hyprpolkitagent" "xdg-utils" "socat" "inotify-tools" "libnotify" "mako" "file"
 )
 
 # Group 3: GUI, Toolkits & Fonts
 declare -ar pkgs_appearance=(
-  "qt5-wayland" "qt6-wayland" "gtk3" "gtk4" "nwg-look" "qt5ct" "qt6ct" "qt6-svg" "qt6-multimedia-ffmpeg" "adw-gtk-theme" "upower" "plocate" "matugen" "ttf-font-awesome" "ttf-jetbrains-mono-nerd" "noto-fonts-emoji" "sassc" "python-packaging" "python" "fontconfig" "papirus-icon-theme"
+
+  "qt5-wayland" "qt6-wayland" "gtk3" "gtk4" "nwg-look" "qt5ct" "qt6ct" "qt6-svg" "qt6-multimedia-ffmpeg" "adw-gtk-theme" "upower" "plocate" "matugen" "ttf-font-awesome" "ttf-jetbrains-mono-nerd" "noto-fonts-emoji" "sassc" "python-packaging" "python" "python-evdev" "python-pyudev" "fontconfig" "papirus-icon-theme" "python-pyquery" "python-textual" "python-rich"
 )
 
 # Group 4: Desktop Experience
 declare -ar pkgs_desktop=(
-  "waybar" "awww" "hyprlock" "hypridle" "hyprsunset" "hyprpicker" "swaync" "swayosd" "rofi" "libdbusmenu-qt5" "libdbusmenu-glib" "brightnessctl"
+  "waybar" "awww" "hyprlock" "hypridle" "hyprsunset" "hyprpicker" "rofi" "libdbusmenu-qt5" "libdbusmenu-glib" "brightnessctl" "hyprshutdown"
 )
 
 # Group 5: Audio & Bluetooth
@@ -39,18 +40,23 @@ declare -ar pkgs_audio=(
 
 # Group 6: Filesystem & Archives
 declare -ar pkgs_filesystem=(
-  "btrfs-progs" "compsize" "zram-generator" "udisks2" "udiskie" "dosfstools" "ntfs-3g" "xdg-user-dirs" "usbutils" "gnome-disk-utility" "unzip" "zip" "unrar" "7zip" "cpio" "file-roller" "rsync" "nfs-utils" "nilfs-utils" "smartmontools" "dmraid" "hdparm" "hwdetect" "lsscsi" "sg3_utils" "cpupower" "dust" "fcitx5" "fcitx5-gtk" "fcitx5-qt" "dkms"
-  "nemo" "nemo-fileroller" "file-roller" "gvfs" "gvfs-smb" "gvfs-mtp" "gvfs-gphoto2" "gvfs-nfs" "gvfs-afc" "gvfs-dnssd" "ffmpegthumbnailer" "webp-pixbuf-loader" "poppler-glib" "libgsf" "gnome-epub-thumbnailer" "resvg" "nemo-terminal" "nemo-python" "nemo-compare" "meld" "nemo-media-columns" "nemo-audio-tab" "nemo-image-converter" "nemo-emblems" "nemo-repairer" "nemo-share" "python-gobject" "dconf-editor" "xreader" "nemo-pastebin"
+
+  "btrfs-progs" "compsize" "zram-generator" "udisks2" "udiskie" "dosfstools" "ntfs-3g" "xdg-user-dirs" "usbutils" "gnome-disk-utility" "unzip" "zip" "unrar" "7zip" "cpio" "file-roller" "rsync" "nfs-utils" "nilfs-utils" "smartmontools" "dmraid" "hdparm" "hwdetect" "lsscsi" "sg3_utils" "cpupower" "dust" "dkms"
+  # thunar
+  "thunar" "thunar-archive-plugin" "file-roller" "thunar-volman" "thunar-media-tags-plugin" "thunar-shares-plugin" "thunar-vcs-plugin" "tumbler" "ffmpegthumbnailer" "webp-pixbuf-loader" "poppler-glib" "libgsf" "libgepub" "libopenraw" "resvg" "gvfs" "gvfs-mtp" "gvfs-nfs" "gvfs-smb" "gvfs-gphoto2" "gvfs-afc" "gvfs-dnssd" "catfish" "gnome-keyring" "meld" "xreader" "imagemagick"
+
+# nemo
+#  "nemo" "nemo-fileroller" "file-roller" "gvfs" "gvfs-smb" "gvfs-mtp" "gvfs-gphoto2" "gvfs-nfs" "gvfs-afc" "gvfs-dnssd" "ffmpegthumbnailer" "webp-pixbuf-loader" "poppler-glib" "libgsf" "gnome-epub-thumbnailer" "resvg" "nemo-terminal" "nemo-python" "nemo-compare" "meld" "nemo-media-columns" "nemo-audio-tab" "nemo-image-converter" "nemo-emblems" "nemo-repairer" "nemo-share" "python-gobject" "dconf-editor" "xreader" "nemo-pastebin"
 )
 
 # Group 7: Network & Internet
 declare -ar pkgs_network=(
-  "networkmanager" "wireless-regdb" "iwd" "nm-connection-editor" "inetutils" "wget" "curl" "openssh" "firewalld" "vsftpd" "reflector" "bmon" "ethtool" "httrack" "wavemon" "firefox" "nss-mdns" "dnsmasq" "modemmanager" "usb_modeswitch"
+  "networkmanager" "wireless-regdb" "iwd" "nm-connection-editor" "inetutils" "wget" "curl" "openssh" "ufw" "vsftpd" "reflector" "bmon" "ethtool" "httrack" "wavemon" "firefox" "nss-mdns" "dnsmasq" "modemmanager" "usb_modeswitch"
 )
 
 # Group 8: Terminal & Shell
 declare -ar pkgs_terminal=(
-  "kitty" "foot" "zsh" "zsh-syntax-highlighting" "starship" "fastfetch" "bat" "eza" "fd" "yazi" "gum" "tree" "fzf" "less" "ripgrep" "expac" "zsh-autosuggestions" "iperf3" "pkgstats" "libqalculate" "moreutils" "zoxide" "opencode"
+  "kitty" "foot" "zsh" "zsh-syntax-highlighting" "starship" "fastfetch" "bat" "eza" "fd" "yazi" "gum" "tree" "fzf" "less" "ripgrep" "expac" "zsh-autosuggestions" "iperf3" "pkgstats" "libqalculate" "moreutils" "zoxide" "man-db" "lsof"
 )
 
 # Group 9: Development
@@ -65,12 +71,15 @@ declare -ar pkgs_multimedia=(
 
 # Group 11: Sys Admin
 declare -ar pkgs_sysadmin=(
-  "btop" "htop" "dgop" "nvtop" "inxi" "sysstat" "sysbench" "logrotate" "acpid" "tlp" "tlp-pd" "tlp-rdw" "thermald" "powertop" "gdu" "iotop" "iftop" "lshw" "hwinfo" "dmidecode" "wev" "pacman-contrib" "gnome-keyring" "libsecret" "seahorse" "yad" "dysk" "fwupd" "perl" "accountsservice" "smartmontools" "pkgfile" "rebuild-detector" "accountsservice"
+  "btop" "htop" "dgop" "nvtop" "inxi" "sysstat" "sysbench" "logrotate" "acpid" "tlp" "tlp-rdw" "thermald" "powertop" "gdu" "iotop" "iftop" "lshw" "hwinfo" "dmidecode" "wev" "pacman-contrib" "gnome-keyring" "libsecret" "seahorse" "greetd-agreety" "greetd" "greetd-tuigreet" "yad" "dysk" "fwupd" "perl" "accountsservice" "smartmontools" "pkgfile" "rebuild-detector" "accountsservice"
 )
 
 # Group 12: Gnome Utilities
 declare -ar pkgs_gnome=(
-  "snapshot" "cameractrls" "loupe" "gnome-text-editor" "gnome-calculator" "gnome-clocks"
+
+  #"gnome-text-editor"
+
+  "snapshot" "cameractrls" "loupe" "mousepad" "gnome-calculator" "gnome-clocks"
 )
 
 # Group 13: Productivity
@@ -78,9 +87,9 @@ declare -ar pkgs_productivity=(
   "zathura" "zathura-pdf-mupdf" "cava"
 )
 
-# Group 14: Limine and snapshot
+# Group 14: snapshot
 declare -ar pkgs_btrfs_snapshot=(
-  "limine" "efibootmgr" "efitools" "kernel-modules-hook" "btrfs-progs" "snapper" "snap-pac" "jdk-openjdk" "mtools"
+"snapper"
 )
 
 declare -ar GROUP_LABELS=(
@@ -147,10 +156,22 @@ if (( EUID != 0 )); then
   exec "$sudo_bin" --preserve-env=TERM,NO_COLOR -- bash -- "$script_path" "$@"
 fi
 
-# --- 3. SAFETY ---
+# --- 3. SAFETY & ARGUMENT PARSING ---
 
 set -Eeuo pipefail
 shopt -s inherit_errexit
+
+TARGET_OS=""
+
+parse_args() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --cachyos|--cachy) TARGET_OS="cachyos"; shift ;;
+      --arch)            TARGET_OS="arch"; shift ;;
+      *)                 shift ;; # Safely ignore --auto or other unknown flags
+    esac
+  done
+}
 
 # --- 4. UI ---
 
@@ -252,6 +273,48 @@ acquire_script_lock() {
   flock -n "$SCRIPT_LOCK_FD" || die "Another instance of this script is already running."
 }
 
+run_pacman_silent() {
+  local start_time=$SECONDS
+  local rc=0
+  local temp_dir=''
+  local stderr_file=''
+
+  while :; do
+    temp_dir=$(mktemp -d) || return 1
+    stderr_file="${temp_dir}/stderr.log"
+
+    if command env LC_ALL=C pacman --noprogressbar "$@" >/dev/null 2>"$stderr_file"; then
+      rc=0
+    else
+      rc=$?
+    fi
+
+    case "$rc" in
+      0)
+        rm -rf -- "$temp_dir"
+        return 0
+        ;;
+      130|143)
+        rm -rf -- "$temp_dir"
+        print_error "Pacman operation interrupted."
+        exit "$rc"
+        ;;
+    esac
+
+    if grep -Fqs 'unable to lock database' -- "$stderr_file"; then
+      rm -rf -- "$temp_dir"
+      if (( SECONDS - start_time >= PACMAN_LOCK_TIMEOUT )); then
+        return "$rc"
+      fi
+      sleep 2
+      continue
+    fi
+
+    rm -rf -- "$temp_dir"
+    return "$rc"
+  done
+}
+
 run_pacman() {
   local start_time=$SECONDS
   local warned=0
@@ -274,10 +337,22 @@ run_pacman() {
     tee -- "$stderr_file" <"$stderr_pipe" >&2 &
     tee_pid=$!
 
-    if command env LC_ALL=C pacman "$@" 2>"$stderr_pipe"; then
-      rc=0
+    # Utilizes highly strict dynamic array quoting for impenetrable argument passing.
+    # CRITICAL: Added -e flag to script to ensure exact exit codes are passed correctly in headless pipelines.
+    if ! [[ -t 1 ]] && command -v script >/dev/null 2>&1; then
+      local cmd_str
+      printf -v cmd_str '%q ' env LC_ALL=C pacman "$@"
+      if script -q -e -c "$cmd_str" /dev/null 2>"$stderr_pipe"; then
+        rc=0
+      else
+        rc=$?
+      fi
     else
-      rc=$?
+      if command env LC_ALL=C pacman "$@" 2>"$stderr_pipe"; then
+        rc=0
+      else
+        rc=$?
+      fi
     fi
 
     rm -f -- "$stderr_pipe"
@@ -290,7 +365,7 @@ run_pacman() {
         ;;
       130|143)
         rm -rf -- "$temp_dir"
-        print_error "Pacman operation interrupted."
+        print_error "Pacman operation interrupted by user."
         exit "$rc"
         ;;
     esac
@@ -316,20 +391,45 @@ run_pacman() {
   done
 }
 
+determine_os_state() {
+  if [[ -z "${TARGET_OS}" ]]; then
+    print_info "Analyzing system state for keyring requirements..."
+    
+    if grep -qi "ID=cachyos" /etc/os-release 2>/dev/null; then
+       print_info "Pure CachyOS detected."
+       TARGET_OS="cachyos_pure"
+    elif pacman -Qq cachyos-mirrorlist &>/dev/null; then
+       print_ok "Franken-Arch detected (CachyOS packages found on Standard Arch)."
+       TARGET_OS="cachyos"
+    else
+       print_info "Standard Arch Linux detected."
+       TARGET_OS="arch"
+    fi
+  fi
+}
+
 ensure_keyring() {
   local keyring_dir='/etc/pacman.d/gnupg'
 
-  print_info "Checking Arch keyring"
+  print_info "Checking pacman keyring"
 
   if [[ -s ${keyring_dir}/trustdb.gpg ]] && { [[ -s ${keyring_dir}/pubring.kbx ]] || [[ -s ${keyring_dir}/pubring.gpg ]]; }; then
-    print_ok "Arch keyring already initialized."
+    print_ok "Pacman keyring already initialized."
     return 0
   fi
 
   print_warn "Pacman keyring is not initialized. Initializing now..."
   pacman-key --init
-  pacman-key --populate archlinux
-  print_ok "Arch keyring initialized."
+
+  if [[ "${TARGET_OS}" == "cachyos" ]]; then
+      print_info "Populating Arch Linux and CachyOS keyrings..."
+      pacman-key --populate archlinux cachyos
+  else
+      print_info "Populating standard Arch Linux keyring..."
+      pacman-key --populate archlinux
+  fi
+
+  print_ok "Keyring populated."
 }
 
 install_group() {
@@ -371,14 +471,14 @@ install_group() {
     fi
 
     if (( HAS_TTY )); then
-      if run_pacman --sync --needed --noconfirm -- "$pkg" >/dev/null 2>&1; then
+      if run_pacman_silent --sync --needed --noconfirm -- "$pkg"; then
         printf '  %s[+] Installed:%s %s\n' "$GREEN" "$RESET" "$pkg"
         continue
       fi
 
       printf '  %s[?] Intervention needed:%s %s\n' "$YELLOW" "$RESET" "$pkg"
       if run_pacman --sync --needed -- "$pkg"; then
-        printf '  %s[+] Installed (manual):%s %s\n' "$GREEN" "$RESET" "$pkg"
+        printf '  %s[+] Installed (manual resolution):%s %s\n' "$GREEN" "$RESET" "$pkg"
         continue
       fi
     else
@@ -386,18 +486,17 @@ install_group() {
         printf '  %s[+] Installed:%s %s\n' "$GREEN" "$RESET" "$pkg"
         continue
       fi
-
       printf '  %s[?] No TTY available for interactive retry:%s %s\n' "$YELLOW" "$RESET" "$pkg"
     fi
 
-    printf '  %s[X] Failed:%s %s\n' "$RED" "$RESET" "$pkg" >&2
+    printf '  %s[-] Skipped/Failed:%s %s (Moving on to next package...)\n' "$RED" "$RESET" "$pkg" >&2
     FAILED_PACKAGES+=("${group_name} :: ${pkg}")
     (( ++fail_count ))
   done
 
   if (( fail_count > 0 )); then
     FAILED_GROUPS+=("$group_name")
-    print_warn "Group completed with ${fail_count} failure(s)."
+    print_warn "Group completed with ${fail_count} skipped/failed package(s)."
   else
     print_ok "Recovery successful. All packages installed."
   fi
@@ -413,42 +512,47 @@ print_summary() {
     return 0
   fi
 
-  printf '\n%s%s:: INSTALLATION FINISHED WITH FAILURES ::%s\n' "$BOLD" "$YELLOW" "$RESET"
-  printf 'Failed groups: %d\n' "${#FAILED_GROUPS[@]}"
-  printf 'Failed packages: %d\n' "${#FAILED_PACKAGES[@]}"
+  printf '\n%s%s:: INSTALLATION COMPLETED (SOME PACKAGES SKIPPED/FAILED) ::%s\n' "$BOLD" "$YELLOW" "$RESET"
+  printf 'Failed/Skipped groups: %d\n' "${#FAILED_GROUPS[@]}"
+  printf 'Failed/Skipped packages: %d\n' "${#FAILED_PACKAGES[@]}"
 
   if (( ${#FAILED_GROUPS[@]} > 0 )); then
-    printf '\n%sGroups with failures:%s\n' "$BOLD" "$RESET"
+    printf '\n%sGroups with failures/skips:%s\n' "$BOLD" "$RESET"
     for group in "${FAILED_GROUPS[@]}"; do
       printf '  %s\n' "$group"
     done
   fi
 
-  printf '\n%sFailed packages:%s\n' "$BOLD" "$RESET"
+  printf '\n%sFailed/Skipped packages:%s\n' "$BOLD" "$RESET"
   for item in "${FAILED_PACKAGES[@]}"; do
     printf '  %s\n' "$item"
   done
 
-  return 1
+  return 0
 }
 
 main() {
+  parse_args "$@"
   local i
 
   ensure_arch_environment
   validate_group_configuration
   acquire_script_lock
-  ensure_keyring
+  
+  determine_os_state
+  
+  if [[ "${TARGET_OS}" != "cachyos_pure" ]]; then
+    ensure_keyring
+  else
+    print_info "Skipping manual keyring configuration (Managed by CachyOS)."
+  fi
 
   for i in "${!GROUP_LABELS[@]}"; do
     install_group "${GROUP_LABELS[i]}" "${GROUP_ARRAYS[i]}"
   done
 
-  if print_summary; then
-    exit 0
-  else
-    exit 1
-  fi
+  print_summary
+  exit 0
 }
 
 main "$@"

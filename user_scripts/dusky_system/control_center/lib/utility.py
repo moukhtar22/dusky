@@ -2,11 +2,11 @@
 Utility functions for the Dusky Control Center.
 
 Thread-safe utility library for GTK4 control center on Arch Linux (Hyprland).
-Persisted settings use atomic replace semantics. Public helpers are thread-safe,
-except `preflight_check()`, which is intended for startup use on the main thread.
+Persisted settings use an atomic batched buffer. Public helpers are thread-safe.
 """
 from __future__ import annotations
 
+import atexit
 import logging
 import os
 import re
@@ -16,11 +16,13 @@ import subprocess
 import sys
 import tempfile
 import threading
+import tomllib
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING, Final, TypeVar, overload
+from typing import TYPE_CHECKING, Any, Final, TypeVar, overload
 
-import yaml
+from gi.repository import GLib
 
 if TYPE_CHECKING:
     from gi.repository import Adw
@@ -35,6 +37,7 @@ __all__ = [
     "load_config",
     "load_setting",
     "preflight_check",
+    "register_toast_overlay",
     "save_setting",
     "toast",
 ]
@@ -53,7 +56,6 @@ _LEADING_ENV_ASSIGNMENT_PATTERN: Final[re.Pattern[str]] = re.compile(
 
 
 def _get_xdg_path(env_var: str, default_suffix: str) -> Path:
-    """Resolve an XDG base directory path with fallback to home directory."""
     value = os.environ.get(env_var, "").strip()
     if value:
         candidate = Path(value)
@@ -73,11 +75,6 @@ SETTINGS_DIR: Final[Path] = _XDG_CONFIG_HOME / "dusky" / "settings"
 # THREAD-SAFE STATE CONTAINERS
 # =============================================================================
 class _ResolvedDirectoryCache:
-    """
-    Thread-safe lazy directory resolver with caching.
-    Uses double-checked locking pattern safe for CPython (GIL).
-    """
-
     __slots__ = ("_base_dir", "_lock", "_resolved")
 
     def __init__(self, base_dir: Path) -> None:
@@ -86,7 +83,6 @@ class _ResolvedDirectoryCache:
         self._resolved: Path | None = None
 
     def get(self) -> Path:
-        """Get the resolved directory path, creating it if necessary."""
         resolved = self._resolved
         if resolved is not None:
             return resolved
@@ -104,11 +100,6 @@ class _ResolvedDirectoryCache:
 
 
 class _ComputeOnceCache:
-    """
-    Thread-safe compute-once cache with coalesced concurrent requests.
-    Prevents "thundering herd" by ensuring only one thread computes a key.
-    """
-
     __slots__ = ("_cache", "_in_flight", "_lock")
 
     def __init__(self) -> None:
@@ -117,16 +108,15 @@ class _ComputeOnceCache:
         self._in_flight: dict[str, threading.Condition] = {}
 
     def get_or_compute(self, key: str, compute_fn: Callable[[], _T]) -> _T:
-        """Get value from cache, or compute it if missing, handling concurrency."""
         with self._lock:
             while key in self._in_flight:
                 cond = self._in_flight[key]
                 cond.wait()
                 if key in self._cache:
-                    return self._cache[key]  # type: ignore[return-value]
+                    return self._cache[key]
 
             if key in self._cache:
-                return self._cache[key]  # type: ignore[return-value]
+                return self._cache[key]
 
             cond = threading.Condition(self._lock)
             self._in_flight[key] = cond
@@ -153,7 +143,6 @@ _system_info_cache: Final = _ComputeOnceCache()
 
 
 def get_cache_dir() -> Path:
-    """Get the application cache directory."""
     return _cache_dir_cache.get()
 
 
@@ -161,7 +150,6 @@ def get_cache_dir() -> Path:
 # CONFIGURATION LOADER
 # =============================================================================
 def load_config(config_path: Path) -> dict[str, object]:
-    """Load and parse YAML configuration safely."""
     try:
         content = config_path.read_text(encoding="utf-8")
     except (FileNotFoundError, OSError) as e:
@@ -169,28 +157,29 @@ def load_config(config_path: Path) -> dict[str, object]:
         return {}
 
     try:
-        data = yaml.safe_load(content)
-    except yaml.YAMLError as e:
-        log.error("YAML syntax error in %s: %s", config_path, e)
+        data = tomllib.loads(content)
+    except tomllib.TOMLDecodeError as e:
+        log.error("TOML syntax error in %s: %s", config_path, e)
         return {}
 
     return data if isinstance(data, dict) else {}
 
 
 # =============================================================================
-# UWSM-COMPLIANT COMMAND RUNNER
+# COMMAND RUNNER (NO UWSM)
 # =============================================================================
-def execute_command(cmd_string: str, title: str, run_in_terminal: bool) -> bool:
-    """
-    Execute a command via UWSM (Universal Wayland Session Manager).
-    Returns True only if the launch request was handed off successfully.
-    """
+def execute_command(
+    cmd_string: str,
+    title: str,
+    run_in_terminal: bool,
+    requires_root: bool = False
+) -> bool:
     normalized_cmd = _normalize_command(cmd_string)
     if not normalized_cmd:
         return False
 
     safe_title = _sanitize_title(title)
-    full_cmd = _build_command_list(normalized_cmd, safe_title, run_in_terminal)
+    full_cmd = _build_command_list(normalized_cmd, safe_title, run_in_terminal, requires_root)
 
     if full_cmd is None:
         log.error("Failed to parse command: %r", cmd_string)
@@ -200,13 +189,11 @@ def execute_command(cmd_string: str, title: str, run_in_terminal: bool) -> bool:
         if shutil.which("kitty") is None:
             log.error("Terminal launcher 'kitty' was not found in PATH")
             return False
-    elif full_cmd[2:4] != ["sh", "-c"]:
-        executable = full_cmd[2]
+    elif not requires_root and full_cmd[0:2] != ["sh", "-c"]:
+        executable = full_cmd[0]
         if shutil.which(executable) is None:
             log.error("Executable not found: %r", executable)
             return False
-
-    from gi.repository import GLib
 
     try:
         GLib.spawn_async(
@@ -215,11 +202,7 @@ def execute_command(cmd_string: str, title: str, run_in_terminal: bool) -> bool:
         )
         return True
     except GLib.Error as e:
-        log.error(
-            "Executable failed or not found: %r. Ensure 'uwsm-app' is installed. (GLib Error: %s)",
-            full_cmd[0] if full_cmd else "unknown",
-            e.message,
-        )
+        log.error("Executable failed or not found: %s. (GLib Error: %s)", full_cmd, e.message)
         return False
     except Exception as e:
         log.error("Unexpected error executing %r: %s", cmd_string, e)
@@ -227,31 +210,22 @@ def execute_command(cmd_string: str, title: str, run_in_terminal: bool) -> bool:
 
 
 def _normalize_command(cmd_string: str) -> str:
-    """Trim surrounding whitespace and safely expand $HOME/~ to absolute paths."""
     cmd = cmd_string.strip()
     home_dir = str(Path.home())
-
     cmd = cmd.replace("$HOME", home_dir)
-
     if cmd.startswith("~/"):
         cmd = home_dir + cmd[1:]
-
     cmd = cmd.replace(" ~/", f" {home_dir}/")
-
     return cmd
 
 
 def _sanitize_title(title: str | None) -> str:
-    """Sanitize window title string."""
     base = (title or "").strip() or "Dusky Terminal"
-    sanitized = "".join(
-        c if c.isprintable() and c not in "\n\r\t\x00" else " " for c in base
-    )
+    sanitized = "".join(c if c.isprintable() and c not in "\n\r\t\x00" else " " for c in base)
     return " ".join(sanitized.split()) or "Dusky Terminal"
 
 
 def _requires_shell(command: str, parsed_args: list[str]) -> bool:
-    """Return True only when shell semantics are actually required."""
     if _LEADING_ENV_ASSIGNMENT_PATTERN.fullmatch(parsed_args[0]) is not None:
         return True
 
@@ -265,12 +239,10 @@ def _requires_shell(command: str, parsed_args: list[str]) -> bool:
             escaped = False
             token_start = False
             continue
-
         if in_single:
             if ch == "'":
                 in_single = False
             continue
-
         if in_double:
             if ch == "\\":
                 escaped = True
@@ -279,7 +251,6 @@ def _requires_shell(command: str, parsed_args: list[str]) -> bool:
             elif ch in "$`":
                 return True
             continue
-
         if ch.isspace():
             token_start = True
             continue
@@ -295,81 +266,64 @@ def _requires_shell(command: str, parsed_args: list[str]) -> bool:
             in_double = True
             token_start = False
             continue
-        if ch in "|&;()<>`":
-            return True
-        if ch == "$":
+        if ch in "|&;()<>`$":
             return True
         if ch == "~" and token_start:
             next_ch = command[index + 1] if index + 1 < len(command) else ""
             if not next_ch or next_ch.isspace() or next_ch == "/":
                 return True
-
         token_start = False
 
     return False
 
 
 def _build_command_list(
-    normalized_cmd: str, safe_title: str, run_in_terminal: bool
+    normalized_cmd: str, safe_title: str, run_in_terminal: bool, requires_root: bool
 ) -> list[str] | None:
-    """Construct the argv list for process spawning."""
+    if requires_root:
+        if run_in_terminal:
+            return [
+                "kitty", "--class", "dusky-term", "--title", safe_title,
+                "--hold", "pkexec", "sh", "-c", normalized_cmd
+            ]
+        else:
+            return ["pkexec", "sh", "-c", normalized_cmd]
+
     if run_in_terminal:
         return [
-            "uwsm-app",
-            "--",
-            "kitty",
-            "--class",
-            "dusky-term",
-            "--title",
-            safe_title,
-            "--hold",
-            "sh",
-            "-c",
-            normalized_cmd,
+            "kitty", "--class", "dusky-term", "--title", safe_title,
+            "--hold", "sh", "-c", normalized_cmd
         ]
 
     try:
         parsed_args = shlex.split(normalized_cmd, posix=True)
     except ValueError:
-        return ["uwsm-app", "--", "sh", "-c", normalized_cmd]
+        return ["sh", "-c", normalized_cmd]
 
     if not parsed_args:
         return None
 
     if _requires_shell(normalized_cmd, parsed_args):
-        return ["uwsm-app", "--", "sh", "-c", normalized_cmd]
+        return ["sh", "-c", normalized_cmd]
 
-    return ["uwsm-app", "--", *parsed_args]
+    return parsed_args
 
 
 # =============================================================================
 # PRE-FLIGHT DEPENDENCY CHECK
 # =============================================================================
 def preflight_check() -> None:
-    """
-    Check for critical dependencies (GTK, UWSM).
-
-    Intended for startup use on the main thread. On failure, this function exits
-    the current thread of execution via SystemExit.
-    """
     missing_deps: list[str] = []
 
     try:
         import gi
-
         gi.require_version("Gtk", "4.0")
         gi.require_version("Adw", "1")
     except (ImportError, ValueError):
         missing_deps.append("python-gobject (GTK4/Libadwaita)")
 
-    if shutil.which("uwsm-app") is None:
-        missing_deps.append("uwsm (Universal Wayland Session Manager)")
-
     if missing_deps:
-        msg = (
-            "FATAL: Dusky Control Center missing dependencies:\n"
-            + "\n".join(f"  - {dep}" for dep in missing_deps)
-        )
+        msg = "FATAL: Dusky Control Center missing dependencies:\n" + "\n".join(f"  - {dep}" for dep in missing_deps)
         log.critical(msg)
         print(msg, file=sys.stderr)
         sys.exit(1)
@@ -387,14 +341,12 @@ def preflight_check() -> None:
 # SYSTEM VALUE RETRIEVAL
 # =============================================================================
 def get_system_value(key: str) -> str:
-    """Get a system info value (bypasses cache for dynamic stats like memory)."""
     if key in {"memory_used"}:
         return _compute_system_value(key)
     return _system_info_cache.get_or_compute(key, lambda: _compute_system_value(key))
 
 
 def _compute_system_value(key: str) -> str:
-    """Actual logic to fetch system info."""
     match key:
         case "memory_total":
             return _get_memory_total()
@@ -457,34 +409,17 @@ def _get_cpu_model() -> str:
 
 
 def _get_gpu_model() -> str:
-    """Detect GPU using lspci (human-readable or machine format)."""
     try:
-        res = subprocess.run(
-            ["lspci", "-mm"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=False,
-        )
+        res = subprocess.run(["lspci", "-mm"], capture_output=True, text=True, timeout=5, check=False)
         if res.returncode == 0:
             for line in res.stdout.splitlines():
                 try:
                     fields = shlex.split(line, posix=True)
                 except ValueError:
                     continue
-                if len(fields) >= 4 and fields[1] in {
-                    "VGA compatible controller",
-                    "3D controller",
-                }:
+                if len(fields) >= 4 and fields[1] in {"VGA compatible controller", "3D controller"}:
                     return f"{fields[2]} {fields[3]}".strip()
-
-        res = subprocess.run(
-            ["lspci"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=False,
-        )
+        res = subprocess.run(["lspci"], capture_output=True, text=True, timeout=5, check=False)
         if res.returncode == 0:
             for line in res.stdout.splitlines():
                 if "VGA compatible controller" in line or "3D controller" in line:
@@ -497,64 +432,45 @@ def _get_gpu_model() -> str:
 
 
 # =============================================================================
-# SETTINGS PERSISTENCE (Atomic File I/O)
+# SETTINGS PERSISTENCE (Batched Atomic File I/O)
 # =============================================================================
 def _validate_settings_path(key: str) -> Path | None:
-    """
-    Validate the path to prevent directory traversal while natively resolving symlinks.
-    This ensures atomic writes target the dotfile repo instead of clobbering the symlink.
-    """
     if not key or not isinstance(key, str) or "\0" in key:
         return None
 
     pure = PurePosixPath(key)
     if pure.is_absolute() or any(part in {"", ".."} for part in pure.parts):
-        log.warning("Invalid settings path key (traversal attempt detected): %r", key)
+        log.warning("Invalid settings path key: %r", key)
         return None
 
     base = _settings_dir_cache.get()
     target = base / key
 
     try:
-        # Resolve strictly to follow symlinks to their ultimate destination
         if target.exists():
             return target.resolve(strict=True)
-        # If it doesn't exist yet, resolve the parent
         return target.parent.resolve(strict=True) / target.name
     except OSError:
         return target
 
 
-def save_setting(key: str, value: bool | int | float | str) -> bool:
-    """Atomic write to disk (Temp File -> Fsync -> Rename)."""
-    target = _validate_settings_path(key)
-    if target is None:
-        return False
-
-    content = str(value)
+def _write_to_disk_atomic(target: Path, value: str) -> bool:
     temp_fd: int | None = None
     temp_path: Path | None = None
-
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
-        # We create the temp file in the resolved parent directory so that
-        # when we rename it over the target, we don't break the symlink 
-        # sitting in ~/.config. It safely overwrites the file in the git repo.
-        temp_fd, temp_path_str = tempfile.mkstemp(
-            dir=target.parent, prefix=f".{target.name}.", suffix=".tmp"
-        )
+        temp_fd, temp_path_str = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.", suffix=".tmp")
         temp_path = Path(temp_path_str)
 
         with os.fdopen(temp_fd, "w", encoding="utf-8") as f:
-            temp_fd = None  # Transferred to file object
-            f.write(content)
+            temp_fd = None
+            f.write(value)
             f.flush()
             os.fsync(f.fileno())
 
         temp_path.rename(target)
-        temp_path = None  # Prevent deletion of success file
+        temp_path = None
 
-        # Sync parent directory
         dir_fd = os.open(target.parent, os.O_RDONLY | os.O_DIRECTORY)
         try:
             os.fsync(dir_fd)
@@ -562,15 +478,78 @@ def save_setting(key: str, value: bool | int | float | str) -> bool:
             os.close(dir_fd)
         
         return True
-
     except OSError as e:
-        log.error("Save failed for %s: %s", key, e)
+        log.error("Save failed for %s: %s", target.name, e)
         return False
     finally:
         if temp_fd is not None:
             os.close(temp_fd)
         if temp_path is not None:
             temp_path.unlink(missing_ok=True)
+
+
+class _SettingsWriteBuffer:
+    """Thread-safe write buffer that flushes sequentially to preserve SSD life."""
+    __slots__ = ("_buffer", "_lock", "_source_id", "_executor")
+    _instance: _SettingsWriteBuffer | None = None
+
+    def __new__(cls) -> _SettingsWriteBuffer:
+        if cls._instance is None:
+            inst = super().__new__(cls)
+            inst._buffer = {}
+            inst._lock = threading.Lock()
+            inst._source_id = 0
+            inst._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="dusky-io-batch")
+            atexit.register(inst._flush_synchronously)
+            cls._instance = inst
+        return cls._instance
+
+    def queue_write(self, key: str, value: str) -> bool:
+        target = _validate_settings_path(key)
+        if target is None:
+            return False
+
+        with self._lock:
+            self._buffer[target] = value
+            if self._source_id == 0:
+                self._source_id = GLib.timeout_add(250, self._flush_buffer_cb)
+        return True
+
+    def _flush_buffer_cb(self) -> bool:
+        with self._lock:
+            batch = self._buffer.copy()
+            self._buffer.clear()
+            self._source_id = 0
+
+        if batch:
+            self._executor.submit(self._execute_batch, batch)
+        return GLib.SOURCE_REMOVE
+
+    def _execute_batch(self, batch: dict[Path, str]) -> None:
+        for target, value in batch.items():
+            if not _write_to_disk_atomic(target, value):
+                # Safely notify UI on the main thread if background save fails
+                GLib.idle_add(
+                    toast,
+                    _global_toast_overlay,
+                    "Failed to save settings: Disk Error"
+                )
+
+    def _flush_synchronously(self) -> None:
+        """Called automatically on exit to prevent data loss for pending writes."""
+        with self._lock:
+            batch = self._buffer.copy()
+            self._buffer.clear()
+
+        if batch:
+            for target, value in batch.items():
+                _write_to_disk_atomic(target, value)
+        
+        self._executor.shutdown(wait=True)
+
+
+def save_setting(key: str, value: bool | int | float | str) -> bool:
+    return _SettingsWriteBuffer().queue_write(key, str(value))
 
 
 @overload
@@ -592,16 +571,26 @@ def load_setting(
     key: str,
     default: bool | int | float | str | None = None,
 ) -> bool | int | float | str | None:
-    """Load setting with automatic type coercion based on default value."""
     target = _validate_settings_path(key)
     if target is None:
         return default
+
+    # Always check the dirty buffer first to prevent stale reads mid-flush
+    buffer_inst = _SettingsWriteBuffer()
+    with buffer_inst._lock:
+        if target in buffer_inst._buffer:
+            raw = buffer_inst._buffer[target]
+            return _coerce_type(raw, default)
 
     try:
         raw = target.read_text(encoding="utf-8").strip()
     except (FileNotFoundError, OSError):
         return default
 
+    return _coerce_type(raw, default)
+
+
+def _coerce_type(raw: str, default: Any) -> Any:
     try:
         match default:
             case bool():
@@ -617,7 +606,6 @@ def load_setting(
 
 
 def _parse_bool(value: str) -> bool:
-    """Robust boolean parsing."""
     lowered = value.strip().lower()
     if lowered in {"true", "yes", "on", "1"}:
         return True
@@ -627,24 +615,27 @@ def _parse_bool(value: str) -> bool:
 
 
 # =============================================================================
-# UI HELPERS
+# UI HELPERS & REGISTRY
 # =============================================================================
-def toast(
-    toast_overlay: Adw.ToastOverlay | None, message: str, timeout: int = 2
-) -> None:
-    """Schedule a toast notification on the main thread."""
+_global_toast_overlay: Adw.ToastOverlay | None = None
+
+def register_toast_overlay(overlay: Adw.ToastOverlay) -> None:
+    """Register the global toast overlay for background notifications."""
+    global _global_toast_overlay
+    _global_toast_overlay = overlay
+
+def toast(toast_overlay: Adw.ToastOverlay | None, message: str, timeout: int = 2) -> None:
     if toast_overlay is None:
         return
-
-    from gi.repository import Adw as AdwLib, GLib
-
+    
     def _show() -> bool:
         try:
+            from gi.repository import Adw as AdwLib
             t = AdwLib.Toast.new(message)
             t.set_timeout(timeout)
             toast_overlay.add_toast(t)
         except Exception:
             pass
-        return False
-
+        return GLib.SOURCE_REMOVE
+    
     GLib.idle_add(_show)

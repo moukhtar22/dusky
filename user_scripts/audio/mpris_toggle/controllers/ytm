@@ -1,0 +1,42 @@
+#!/bin/sh
+action="$1"
+case "$action" in
+    now)
+        if command -v ytm >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+            json=$(ytm now 2>/dev/null)
+            if [ -n "$json" ]; then
+                title=$(echo "$json" | jq -r '.track.title // ""')
+                artist=$(echo "$json" | jq -r '.track.artist // ""')
+                pos=$(echo "$json" | jq -r '.position // 0')
+                dur=$(echo "$json" | jq -r '.duration // 0')
+                playing=$(echo "$json" | jq -r '.is_playing // false')
+                
+                format_sec() {
+                    t=$(echo "$1" | cut -d. -f1)
+                    if [ -z "$t" ] || [ "$t" -le 0 ] 2>/dev/null; then echo "0:00"; return; fi
+                    m=$((t / 60))
+                    s=$((t % 60))
+                    printf "%d:%02d" $m $s
+                }
+                pos_fmt=$(format_sec "$pos")
+                dur_fmt=$(format_sec "$dur")
+                
+                if [ "$playing" = "true" ]; then stat="Playing"; else stat="Paused"; fi
+                printf "%s|%s|%s|%s|%s\n" "$title" "$artist" "$pos_fmt" "$dur_fmt" "$stat"
+                exit 0
+            fi
+        fi
+        printf "||||\n"
+        ;;
+    toggle)
+        stat=$(ytm status 2>/dev/null)
+        if echo "$stat" | grep -q '"is_playing": true'; then
+            ytm pause 2>/dev/null || true
+        else
+            ytm play 2>/dev/null || true
+        fi
+        ;;
+    next) ytm next 2>/dev/null || true ;;
+    prev) ytm prev 2>/dev/null || true ;;
+    stop) ytm pause 2>/dev/null || true ;;
+esac

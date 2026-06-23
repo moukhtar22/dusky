@@ -1,28 +1,29 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # Script: mouse_button_reverse.sh
-# Purpose: Toggles mouse handedness in Hyprland
-# Engine: Dusky TUI Engine v3.9.1 (Adapted)
-# Usage:  ./mouse_button_reverse.sh [ --left | --right ]
+# Purpose: Toggles mouse handedness in Hyprland (Lua & Conf Hybrid Support)
+# Engine: Dusky TUI Engine (Advanced Hybrid Core)
+# Usage:  ./mouse_button_reverse.sh [ --left | --right | --toggle ]
 #         No args = interactive TUI toggle
 # ==============================================================================
 
-set -euo pipefail
+set -Eeuo pipefail
 shopt -s extglob
 
 # =============================================================================
 # ▼ USER CONFIGURATION ▼
 # =============================================================================
 
-declare -r CONFIG_FILE="${HOME}/.config/hypr/edit_here/source/input.conf"
+# Define the target configuration file (defaults to your specific Lua path)
+declare CONFIG_FILE="${HOME}/.config/hypr/edit_here/source/input.lua"
+
 declare -r APP_TITLE="Mouse Handedness"
-declare -r APP_VERSION="v2.2 (Dusky TUI)"
+declare -r APP_VERSION="v7.0 (Hybrid Edition)"
 
 # Dimensions & Layout
 declare -ri MAX_DISPLAY_ROWS=4
 declare -ri BOX_INNER_WIDTH=56
 declare -ri ITEM_PADDING=28
-
 declare -ri HEADER_ROWS=4
 declare -ri ITEM_START_ROW=$(( HEADER_ROWS + 1 ))
 
@@ -32,7 +33,7 @@ declare -ri ITEM_START_ROW=$(( HEADER_ROWS + 1 ))
 
 # --- Pre-computed Constants ---
 declare _h_line_buf
-printf -v _h_line_buf '%*s' "$BOX_INNER_WIDTH" ''
+printf -v _h_line_buf '%*s' "$BOX_INNER_WIDTH" '' || true
 declare -r H_LINE="${_h_line_buf// /─}"
 unset _h_line_buf
 
@@ -61,178 +62,171 @@ declare -r ESC_READ_TIMEOUT=0.10
 declare -i SELECTED_ROW=0
 declare ORIGINAL_STTY=""
 declare _TMPFILE=""
-declare CURRENT_VALUE="false"
+declare CURRENT_VALUE="unknown"
+declare -a _TEMP_PATHS=()
 
-# --- System Helpers ---
+# --- System Helpers & Safeties ---
 
 log_success() { printf '%s[OK]%s %s\n' "$C_GREEN" "$C_RESET" "$1"; }
-log_err() { printf '%s[ERROR]%s %s\n' "$C_RED" "$C_RESET" "$1" >&2; }
+log_err() { printf '%s[ERROR]%s %s\n' "$C_RED" "$C_RESET" "$1" >&2 || true; }
+
+register_temp() {
+    local path=$1
+    [[ -n $path ]] && _TEMP_PATHS+=("$path")
+}
 
 cleanup() {
-    printf '%s%s%s' "$MOUSE_OFF" "$CURSOR_SHOW" "$C_RESET" 2>/dev/null || :
+    local path
+    if [[ -t 1 ]]; then
+        printf '%s%s%s' "$MOUSE_OFF" "$CURSOR_SHOW" "$C_RESET" 2>/dev/null || :
+    fi
     if [[ -n "${ORIGINAL_STTY:-}" ]]; then
-        stty "$ORIGINAL_STTY" 2>/dev/null || :
+        stty "$ORIGINAL_STTY" < /dev/tty 2>/dev/null || :
     fi
-    if [[ -n "${_TMPFILE:-}" && -f "$_TMPFILE" ]]; then
-        rm -f "$_TMPFILE" 2>/dev/null || :
-    fi
+    for path in "${_TEMP_PATHS[@]:-}"; do
+        [[ -n $path && -e $path ]] && rm -f -- "$path" 2>/dev/null || :
+    done
+    _TEMP_PATHS=()
+    _TMPFILE=""
     printf '\n' 2>/dev/null || :
 }
 
 trap cleanup EXIT
+trap 'exit 129' HUP
 trap 'exit 130' INT
+trap 'exit 131' QUIT
 trap 'exit 143' TERM
 
 # --- String Helpers ---
 
 strip_ansi() {
     local v="$1"
-    v="${v//$'\033'\[*([0-9;:?<=>])@([@A-Z\[\\\]^_\`a-z\{|\}~])/}"
+    v="${v//$'\033'\[*([0-9;:?<=>])@([@A-Z[\\\]^_\`a-z\{\|\}~])/}"
     REPLY="$v"
 }
 
-# --- Config Parser (Template-grade AWK) ---
+# --- Hybrid Depth-Aware Config Parser (Lua & Conf) ---
 
 read_current_value() {
     local val
     val=$(LC_ALL=C awk '
-        BEGIN { depth = 0; in_input = 0; found_val = "" }
-        /^[[:space:]]*#/ { next }
+        BEGIN { depth = 0; in_input = 0; input_depth = 0; found_val = "" }
         {
-            line = $0
-            clean = line
-            sub(/[[:space:]]+#.*$/, "", clean)
+            clean = $0
+            sub(/--.*$/, "", clean)  # Strip Lua comments
+            sub(/#.*$/, "", clean)   # Strip Conf comments
 
-            tmpline = clean
-            while (match(tmpline, /[a-zA-Z0-9_.:-]+[[:space:]]*\{/)) {
-                block_str = substr(tmpline, RSTART, RLENGTH)
-                sub(/[[:space:]]*\{/, "", block_str)
-                depth++
-                block_stack[depth] = block_str
-                if (block_str == "input" && !in_input) {
+            # Detect entry into the `input` block
+            if (match(clean, /input[[:space:]]*=?[[:space:]]*\{/)) {
+                if (!in_input) {
                     in_input = 1
-                    input_depth = depth
-                }
-                tmpline = substr(tmpline, RSTART + RLENGTH)
-            }
-
-            if (in_input && clean ~ /=/) {
-                eq_pos = index(clean, "=")
-                if (eq_pos > 0) {
-                    key = substr(clean, 1, eq_pos - 1)
-                    val = substr(clean, eq_pos + 1)
-                    gsub(/^[[:space:]]+|[[:space:]]+$/, "", key)
-                    gsub(/^[[:space:]]+|[[:space:]]+$/, "", val)
-                    sub(/[[:space:]]+#.*$/, "", val)
-                    gsub(/^[[:space:]]+|[[:space:]]+$/, "", val)
-                    if (key == "left_handed") {
-                        found_val = val
-                    }
+                    input_depth = depth + 1
                 }
             }
+            
+            # Increment depth for all opening braces on this line
+            depth += gsub(/\{/, "{", clean)
 
-            n = gsub(/\}/, "}", clean)
-            while (n > 0 && depth > 0) {
+            # Check for the assignment ONLY when inside the root input depth
+            if (in_input && depth == input_depth && match(clean, /^[[:space:]]*left_handed[[:space:]]*=[[:space:]]*/)) {
+                val_str = clean
+                sub(/^[[:space:]]*left_handed[[:space:]]*=[[:space:]]*/, "", val_str)
+                sub(/,.*$/, "", val_str) # Remove trailing commas (Lua)
+                gsub(/^[[:space:]]+|[[:space:]]+$/, "", val_str)
+                found_val = val_str
+            }
+
+            # Decrement depth for all closing braces on this line
+            close_braces = gsub(/\}/, "}", clean)
+            while (close_braces > 0 && depth > 0) {
                 if (in_input && depth == input_depth) {
                     in_input = 0
                     input_depth = 0
                 }
                 depth--
-                n--
+                close_braces--
             }
         }
         END { print found_val }
     ' "$CONFIG_FILE")
 
     if [[ -z "$val" ]]; then
-        CURRENT_VALUE="false"
+        CURRENT_VALUE="unknown"
     else
         CURRENT_VALUE="$val"
     fi
 }
 
-# --- Atomic File Writer (Template Pattern) ---
+# --- Atomic File Writer ---
 
 write_value_to_file() {
     local new_val="$1"
+    local target_dir target_base
 
     if [[ "$CURRENT_VALUE" == "$new_val" ]]; then return 0; fi
 
-    if [[ -z "$_TMPFILE" ]]; then
-        _TMPFILE=$(mktemp "${CONFIG_FILE}.tmp.XXXXXXXXXX")
+    target_dir=$(dirname "$CONFIG_FILE")
+    target_base=$(basename "$CONFIG_FILE")
+
+    if ! _TMPFILE=$(mktemp --tmpdir="$target_dir" ".${target_base}.tmp.XXXXXXXXXX" 2>/dev/null); then
+        log_err "Failed to create atomic temporary file in $target_dir"
+        return 1
     fi
+    register_temp "$_TMPFILE"
 
     if ! LC_ALL=C awk -v new_value="$new_val" '
-    BEGIN {
-        depth = 0
-        in_input = 0
-        input_depth = 0
-        replaced = 0
-    }
-    {
-        line = $0
-        clean = line
-        sub(/^[[:space:]]*#.*/, "", clean)
-        sub(/[[:space:]]+#.*$/, "", clean)
+        BEGIN { depth = 0; in_input = 0; input_depth = 0; replaced = 0 }
+        {
+            line = $0
+            clean = line
+            sub(/--.*$/, "", clean)
+            sub(/#.*$/, "", clean)
 
-        tmpline = clean
-        while (match(tmpline, /[a-zA-Z0-9_.:-]+[[:space:]]*\{/)) {
-            block_str = substr(tmpline, RSTART, RLENGTH)
-            sub(/[[:space:]]*\{/, "", block_str)
-            depth++
-            block_stack[depth] = block_str
-            if (block_str == "input" && !in_input) {
-                in_input = 1
-                input_depth = depth
-            }
-            tmpline = substr(tmpline, RSTART + RLENGTH)
-        }
-
-        do_replace = 0
-        if (in_input && clean ~ /=/) {
-            eq_pos = index(clean, "=")
-            if (eq_pos > 0) {
-                k = substr(clean, 1, eq_pos - 1)
-                gsub(/^[[:space:]]+|[[:space:]]+$/, "", k)
-                if (k == "left_handed") {
-                    do_replace = 1
+            if (match(clean, /input[[:space:]]*=?[[:space:]]*\{/)) {
+                if (!in_input) {
+                    in_input = 1
+                    input_depth = depth + 1
                 }
             }
-        }
+            
+            depth += gsub(/\{/, "{", clean)
 
-        if (do_replace) {
-            eq = index(line, "=")
-            before_eq = substr(line, 1, eq)
-            rest = substr(line, eq + 1)
-            match(rest, /^[[:space:]]*/)
-            space_after = substr(rest, RSTART, RLENGTH)
-            print before_eq space_after new_value
-            replaced = 1
-        } else {
-            print line
-        }
-
-        n = gsub(/\}/, "}", clean)
-        while (n > 0 && depth > 0) {
-            if (in_input && depth == input_depth) {
-                in_input = 0
-                input_depth = 0
+            do_replace = 0
+            if (in_input && depth == input_depth && clean ~ /^[[:space:]]*left_handed[[:space:]]*=[[:space:]]*/) {
+                do_replace = 1
             }
-            depth--
-            n--
+
+            if (do_replace) {
+                match(line, /left_handed[[:space:]]*=[[:space:]]*/)
+                prefix = substr(line, 1, RSTART + RLENGTH - 1)
+                match(line, /,?[[:space:]]*(--.*|#.*)?$/)
+                suffix = substr(line, RSTART, RLENGTH)
+                print prefix new_value suffix
+                replaced = 1
+            } else {
+                print line
+            }
+
+            close_braces = gsub(/\}/, "}", clean)
+            while (close_braces > 0 && depth > 0) {
+                if (in_input && depth == input_depth) {
+                    in_input = 0
+                    input_depth = 0
+                }
+                depth--
+                close_braces--
+            }
         }
-    }
-    END { exit (replaced ? 0 : 1) }
+        END { exit (replaced ? 0 : 1) }
     ' "$CONFIG_FILE" > "$_TMPFILE"; then
         rm -f "$_TMPFILE" 2>/dev/null || :
-        _TMPFILE=""
         return 1
     fi
 
-    # CRITICAL: Preserve symlinks (template pattern)
-    cat "$_TMPFILE" > "$CONFIG_FILE"
-    rm -f "$_TMPFILE"
-    _TMPFILE=""
+    # Atomic swap: preserves ownership/permissions and prevents partial writes
+    chown --reference="$CONFIG_FILE" -- "$_TMPFILE" 2>/dev/null || :
+    chmod --reference="$CONFIG_FILE" -- "$_TMPFILE" 2>/dev/null || :
+    mv -fT -- "$_TMPFILE" "$CONFIG_FILE" || return 1
 
     CURRENT_VALUE="$new_val"
     return 0
@@ -241,7 +235,7 @@ write_value_to_file() {
 # --- Post-Write Hook ---
 
 post_write_action() {
-    if pgrep -x "Hyprland" > /dev/null 2>&1; then
+    if pgrep -x "Hyprland" > /dev/null 2>&1 || pgrep -x "Hyprland" -P 1 > /dev/null 2>&1; then
         hyprctl reload > /dev/null 2>&1 || :
     fi
 }
@@ -255,11 +249,8 @@ draw_ui() {
     local -i left_pad right_pad vis_len i
 
     buf+="${CURSOR_HOME}"
-
-    # Top border
     buf+="${C_MAGENTA}┌${H_LINE}┐${C_RESET}${CLR_EOL}"$'\n'
 
-    # Title row
     strip_ansi "$APP_TITLE"; local -i t_len=${#REPLY}
     strip_ansi "$APP_VERSION"; local -i v_len=${#REPLY}
     vis_len=$(( t_len + v_len + 1 ))
@@ -271,13 +262,15 @@ draw_ui() {
     printf -v pad_buf '%*s' "$right_pad" ''
     buf+="${pad_buf}│${C_RESET}${CLR_EOL}"$'\n'
 
-    # Subtitle row
     local subtitle
     if [[ "$CURRENT_VALUE" == "true" ]]; then
         subtitle="Currently: ${C_GREEN}Left-Handed${C_MAGENTA}"
-    else
+    elif [[ "$CURRENT_VALUE" == "false" ]]; then
         subtitle="Currently: ${C_CYAN}Right-Handed${C_MAGENTA}"
+    else
+        subtitle="Currently: ${C_RED}Unknown State${C_MAGENTA}"
     fi
+    
     strip_ansi "$subtitle"; local -i s_len=${#REPLY}
     left_pad=$(( (BOX_INNER_WIDTH - s_len) / 2 ))
     right_pad=$(( BOX_INNER_WIDTH - s_len - left_pad ))
@@ -287,13 +280,9 @@ draw_ui() {
     printf -v pad_buf '%*s' "$right_pad" ''
     buf+="${pad_buf}│${C_RESET}${CLR_EOL}"$'\n'
 
-    # Bottom border
     buf+="${C_MAGENTA}└${H_LINE}┘${C_RESET}${CLR_EOL}"$'\n'
-
-    # Scroll indicator (above) - blank for this simple list
     buf+="${CLR_EOL}"$'\n'
 
-    # Item list
     local -i count=${#MENU_ITEMS[@]}
     local item display padded_item
 
@@ -304,8 +293,10 @@ draw_ui() {
             "Left-Handed Mode")
                 if [[ "$CURRENT_VALUE" == "true" ]]; then
                     display="${C_GREEN}ON${C_RESET}"
-                else
+                elif [[ "$CURRENT_VALUE" == "false" ]]; then
                     display="${C_RED}OFF${C_RESET}"
+                else
+                    display="${C_YELLOW}ERR${C_RESET}"
                 fi
                 ;;
             "Apply & Quit")
@@ -321,18 +312,17 @@ draw_ui() {
         fi
     done
 
-    # Fill empty rows
     local -i rows_rendered=$count
     for (( i = rows_rendered; i < MAX_DISPLAY_ROWS; i++ )); do
         buf+="${CLR_EOL}"$'\n'
     done
 
-    # Scroll indicator (below) - blank
     buf+="${CLR_EOL}"$'\n'
-
-    # Footer
     buf+=$'\n'"${C_CYAN} [↑/↓ j/k] Navigate  [←/→ h/l Enter] Toggle  [q] Quit${C_RESET}${CLR_EOL}"$'\n'
-    buf+="${C_CYAN} File: ${C_WHITE}${CONFIG_FILE}${C_RESET}${CLR_EOL}${CLR_EOS}"
+    
+    local filename
+    filename=$(basename "$CONFIG_FILE")
+    buf+="${C_CYAN} Target: ${C_WHITE}${filename}${C_RESET}${CLR_EOL}${CLR_EOS}"
     printf '%s' "$buf"
 }
 
@@ -369,12 +359,12 @@ read_escape_seq() {
     local -n _esc_out=$1
     _esc_out=""
     local char
-    if ! IFS= read -rsn1 -t "$ESC_READ_TIMEOUT" char; then
+    if ! IFS= read -rsn1 -t "$ESC_READ_TIMEOUT" char < /dev/tty; then
         return 1
     fi
     _esc_out+="$char"
     if [[ "$char" == '[' || "$char" == 'O' ]]; then
-        while IFS= read -rsn1 -t "$ESC_READ_TIMEOUT" char; do
+        while IFS= read -rsn1 -t "$ESC_READ_TIMEOUT" char < /dev/tty; do
             _esc_out+="$char"
             if [[ "$char" =~ [a-zA-Z~] ]]; then break; fi
         done
@@ -391,21 +381,16 @@ handle_mouse() {
     local terminator="${body: -1}"
     if [[ "$terminator" != "M" && "$terminator" != "m" ]]; then return 0; fi
     body="${body%[Mm]}"
+    
     local field1 field2 field3
     IFS=';' read -r field1 field2 field3 <<< "$body"
-    if [[ ! "$field1" =~ ^[0-9]+$ ]]; then return 0; fi
-    if [[ ! "$field2" =~ ^[0-9]+$ ]]; then return 0; fi
-    if [[ ! "$field3" =~ ^[0-9]+$ ]]; then return 0; fi
+    if [[ ! "$field1" =~ ^[0-9]+$ || ! "$field2" =~ ^[0-9]+$ || ! "$field3" =~ ^[0-9]+$ ]]; then return 0; fi
     button=$field1; x=$field2; y=$field3
 
-    # Scroll wheel
     if (( button == 64 )); then navigate -1; return 0; fi
     if (( button == 65 )); then navigate 1; return 0; fi
-
-    # Only handle press events
     if [[ "$terminator" != "M" ]]; then return 0; fi
 
-    # Item click detection
     local -i effective_start=$(( ITEM_START_ROW + 1 ))
     if (( y >= effective_start && y < effective_start + MAX_DISPLAY_ROWS )); then
         local -i clicked_idx=$(( y - effective_start ))
@@ -428,7 +413,6 @@ handle_input() {
         if read_escape_seq escape_seq; then
             key="$escape_seq"
         else
-            # Bare ESC = quit
             exit 0
         fi
     fi
@@ -438,13 +422,11 @@ handle_input() {
         '[B'|'OB'|j|J)       navigate 1 ;;
         '[C'|'OC'|l|L)       action_toggle ;;
         '[D'|'OD'|h|H)       action_toggle ;;
-        '[H'|'[1~'|g)
-            SELECTED_ROW=0 ;;
-        '[F'|'[4~'|G)
-            SELECTED_ROW=$(( ${#MENU_ITEMS[@]} - 1 )) ;;
+        '[H'|'[1~'|g)        SELECTED_ROW=0 ;;
+        '[F'|'[4~'|G)        SELECTED_ROW=$(( ${#MENU_ITEMS[@]} - 1 )) ;;
         '['*'<'*[Mm])        handle_mouse "$key" ;;
-        ''|$'\n')             action_toggle ;;
-        q|Q|$'\x03')          exit 0 ;;
+        ''|$'\n')            action_toggle ;;
+        q|Q|$'\x03')         exit 0 ;;
     esac
 }
 
@@ -470,22 +452,18 @@ run_flag_mode() {
 # --- Main ---
 
 main() {
-    # Pre-flight validation (template pattern)
-    local _dep
-    for _dep in awk; do
-        if ! command -v "$_dep" &>/dev/null; then
-            log_err "Missing dependency: ${_dep}"; exit 1
-        fi
-    done
+    if (( BASH_VERSINFO[0] < 5 )); then log_err "Bash 5+ required"; exit 1; fi
 
     if [[ ! -f "$CONFIG_FILE" ]]; then
-        log_err "Config file not found: $CONFIG_FILE"; exit 1
+        log_err "Config file not found: $CONFIG_FILE"
+        exit 1
     fi
     if [[ ! -w "$CONFIG_FILE" ]]; then
-        log_err "Config not writable: $CONFIG_FILE"; exit 1
+        log_err "Config not writable: $CONFIG_FILE"
+        exit 1
     fi
 
-    # --- Argument Parsing (Flags bypass TUI entirely) ---
+    # --- CLI Arguments ---
     if [[ $# -gt 0 ]]; then
         case "$1" in
             --left)
@@ -496,9 +474,18 @@ main() {
                 run_flag_mode "false" "Setting Right-Handed Mode (Force)"
                 exit 0
                 ;;
+            --toggle)
+                read_current_value
+                if [[ "$CURRENT_VALUE" == "true" ]]; then
+                    run_flag_mode "false" "Toggling to Right-Handed Mode"
+                else
+                    run_flag_mode "true" "Toggling to Left-Handed Mode"
+                fi
+                exit 0
+                ;;
             *)
-                log_err "Unknown flag: $1"
-                printf 'Usage: %s [ --left | --right ]\n' "$0"
+                log_err "Unknown argument: $1"
+                printf 'Usage: %s [ --left | --right | --toggle ]\n' "$0"
                 exit 1
                 ;;
         esac
@@ -509,15 +496,15 @@ main() {
 
     read_current_value
 
-    ORIGINAL_STTY=$(stty -g 2>/dev/null) || ORIGINAL_STTY=""
-    stty -icanon -echo min 1 time 0 2>/dev/null
+    ORIGINAL_STTY=$(stty -g < /dev/tty 2>/dev/null) || ORIGINAL_STTY=""
+    stty -icanon -echo -ixon min 1 time 0 < /dev/tty 2>/dev/null
 
     printf '%s%s%s%s' "$MOUSE_ON" "$CURSOR_HIDE" "$CLR_SCREEN" "$CURSOR_HOME"
 
     local key
     while true; do
         draw_ui
-        IFS= read -rsn1 key || break
+        IFS= read -rsn1 key < /dev/tty || break
         handle_input "$key"
     done
 }

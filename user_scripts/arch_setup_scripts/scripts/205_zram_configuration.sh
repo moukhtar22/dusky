@@ -1,83 +1,97 @@
 #!/usr/bin/env bash
-# Zram Configuration
-# -----------------------------------------------------------------------------
+# =============================================================================
 # Elite Arch Linux ZRAM Configurator
-# Context: Hyprland / UWSM Environment
-# -----------------------------------------------------------------------------
+# Target: Arch Linux Cutting-Edge (Kernel 7.0+, Bash 5.3+, systemd 260+)
+# Scope: Platinum Grade. Maximum Memory Efficiency via pure ZRAM Swap.
+# Updates: Decoupled. Strictly handles ZSWAP annihilation and zram0 swap block.
+#          Integrated 75% Resident Limit and Multi-Algorithm Zstd Recompression.
+# =============================================================================
 
 set -euo pipefail
 
-GREEN=$'\033[32m'
-BLUE=$'\033[34m'
-YELLOW=$'\033[33m'
-RED=$'\033[31m'
-NC=$'\033[0m'
+readonly SCRIPT_NAME="${0##*/}"
+readonly SELF_PATH="$(realpath -e -- "${BASH_SOURCE[0]}")"
 
-log_info()    { printf '%b %s\n' "${BLUE}[INFO]${NC}" "$1"; }
-log_success() { printf '%b %s\n' "${GREEN}[SUCCESS]${NC}" "$1"; }
-log_warn()    { printf '%b %s\n' "${YELLOW}[WARN]${NC}" "$1"; }
-log_error()   { printf '%b %s\n' "${RED}[ERROR]${NC}" "$1" >&2; }
-die()         { log_error "$1"; exit 1; }
-
-readonly SCRIPT_PATH="$(readlink -f -- "${BASH_SOURCE[0]}")"
-
-if [[ $EUID -ne 0 ]]; then
-    printf '%b %s\n' "${YELLOW}[INFO]${NC}" "Script not run as root. Escalating privileges..."
-    command -v sudo >/dev/null 2>&1 || die "sudo is required to run this script as root."
-    if [[ $- == *x* ]]; then
-        exec sudo -- bash -x -- "$SCRIPT_PATH" "$@"
-    else
-        exec sudo -- bash -- "$SCRIPT_PATH" "$@"
-    fi
+# --- Formatting ---
+if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
+    C_RESET=$'\033[0m'
+    C_GREEN=$'\033[1;32m'
+    C_BLUE=$'\033[1;34m'
+    C_RED=$'\033[1;31m'
+    C_YELLOW=$'\033[1;33m'
+    C_BOLD=$'\033[1m'
+else
+    C_RESET='' C_GREEN='' C_BLUE='' C_RED='' C_YELLOW='' C_BOLD=''
 fi
 
-command -v systemctl >/dev/null 2>&1 || die "systemctl is required."
-command -v systemd-escape >/dev/null 2>&1 || die "systemd-escape is required."
-command -v findmnt >/dev/null 2>&1 || die "findmnt is required."
+log_info()    { printf '%s[INFO]%s %s\n'  "$C_BLUE"   "$C_RESET" "$1"; }
+log_success() { printf '%s[OK]%s %s\n'    "$C_GREEN"  "$C_RESET" "$1"; }
+log_warn()    { printf '%s[WARN]%s %s\n'  "$C_YELLOW" "$C_RESET" "$1"; }
+log_error()   { printf '%s[ERROR]%s %s\n' "$C_RED"    "$C_RESET" "$1" >&2; }
+die()         { log_error "$1"; exit "${2:-1}"; }
 
+log_critical_action() {
+    printf '\n'
+    printf '%s======================================================================%s\n' "${C_RED}${C_BOLD}" "${C_RESET}"
+    printf '%s [!] ACTION REQUIRED: BOOTLOADER MODIFIED [!]%s\n' "${C_RED}${C_BOLD}" "${C_RESET}"
+    printf '%s======================================================================%s\n' "${C_RED}${C_BOLD}" "${C_RESET}"
+    printf '%s You MUST regenerate your initramfs/UKI before your next reboot.%s\n' "${C_YELLOW}" "${C_RESET}"
+    printf '%s Failure to do so will result in ZSWAP remaining active on boot.%s\n' "${C_YELLOW}" "${C_RESET}"
+    printf '\n'
+    printf '%s Run this command at the very end of your setup:%s\n' "${C_GREEN}" "${C_RESET}"
+    printf '   %smkinitcpio -P%s\n' "${C_BOLD}" "${C_RESET}"
+    printf '%s======================================================================%s\n' "${C_RED}${C_BOLD}" "${C_RESET}"
+    printf '\n'
+}
+
+print_help() {
+    cat <<EOF
+${C_BOLD}Usage:${C_RESET} ${SCRIPT_NAME} [OPTIONS]
+
+  --help, -h            Show this help menu
+EOF
+}
+
+usage_error() { log_error "$1"; print_help >&2; exit 2; }
+
+# --- CLI Parsing ---
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --help|-h) print_help; exit 0 ;;
+        *) usage_error "Unknown argument: $1" ;;
+    esac
+done
+
+# --- Privilege Escalation ---
+if [[ $EUID -ne 0 ]]; then
+    log_info "Root privileges required. Escalating..."
+    command -v sudo >/dev/null 2>&1 || die "sudo is required to run this script as root."
+    exec sudo -- bash -- "$SELF_PATH" "$@"
+fi
+
+# --- Dependency Checks ---
+for cmd in systemctl grep sed; do
+    command -v "$cmd" >/dev/null 2>&1 || die "'$cmd' is required but missing."
+done
+
+readonly CMDLINE_FILE="/etc/kernel/cmdline"
 readonly CONFIG_DIR="/etc/systemd/zram-generator.conf.d"
 readonly CONFIG_FILE="${CONFIG_DIR}/99-elite-zram.conf"
-readonly MOUNT_POINT="/mnt/zram1"
 
 readonly ZRAM_SWAP_DEV="/dev/zram0"
-readonly ZRAM_FS_DEV="/dev/zram1"
-
-readonly ZRAM_SIZE_EXPR='min(ram, 8192) + max(ram - 10192, 0)'
-readonly COMPRESSION_ALGORITHM='zstd'
-readonly FS_OPTIONS='rw,nosuid,nodev,discard,X-mount.mode=1777'
+readonly ZRAM_SIZE_EXPR="ram"
+readonly ZRAM_RESIDENT_LIMIT_EXPR="ram * 3 / 4"
+readonly COMPRESSION_ALGORITHM="zstd(level=1) zstd(level=8) (type=idle)" 
 
 readonly GENERATOR_BIN="/usr/lib/systemd/system-generators/zram-generator"
 readonly SWAP_SETUP_UNIT="systemd-zram-setup@zram0.service"
-readonly FS_SETUP_UNIT="systemd-zram-setup@zram1.service"
 readonly SWAP_UNIT="dev-zram0.swap"
-readonly MOUNT_UNIT="$(systemd-escape --path --suffix=mount "$MOUNT_POINT")"
 
-tmp_config=""
-
-cleanup() {
-    local rc=$?
-    set +e
-    if [[ -n ${tmp_config:-} ]]; then
-        rm -f -- "$tmp_config"
-    fi
-    return "$rc"
-}
-trap cleanup EXIT
-
-# IMPORTANT:
-# Use --mountpoint, not --target.
-# --target answers "what filesystem contains this path?"
-# --mountpoint answers "what is mounted exactly here?"
-mount_source_exact() {
-    findmnt -rn -o SOURCE --mountpoint "$MOUNT_POINT" 2>/dev/null || true
-}
-
-unit_load_state() {
-    systemctl show -p LoadState --value "$1" 2>/dev/null || true
-}
+tmp_config="$(umask 077 && mktemp)"
+trap 'rm -f "$tmp_config"' EXIT
 
 unit_is_loaded() {
-    [[ "$(unit_load_state "$1")" == "loaded" ]]
+    [[ "$(systemctl show -p LoadState --value "$1" 2>/dev/null || true)" == "loaded" ]]
 }
 
 assert_unit_loaded() {
@@ -85,102 +99,95 @@ assert_unit_loaded() {
     unit_is_loaded "$unit" || die "Expected generated unit is not loaded after daemon-reload: $unit"
 }
 
-# This script requires a running systemd system manager.
-[[ -d /run/systemd/system ]] || die "A running systemd system manager is required."
-
-# zram-generator does nothing in containers.
 if systemd-detect-virt --quiet --container; then
     log_warn "Container detected. zram-generator does nothing inside containers; skipping."
     exit 0
 fi
 
-# zram-generator must be installed.
-[[ -x "$GENERATOR_BIN" ]] || die "zram-generator is not installed at: $GENERATOR_BIN"
+# =============================================================================
+# --- 1. ZSWAP ANNIHILATION ---
+# =============================================================================
 
-# Kernel cmdline can disable zram generation entirely.
+log_info "Verifying ZSWAP status..."
+
+readonly ZSWAP_PARAM="/sys/module/zswap/parameters/enabled"
+if [[ -w "$ZSWAP_PARAM" ]]; then
+    current_zswap=$(<"$ZSWAP_PARAM")
+    if [[ "$current_zswap" == "Y" || "$current_zswap" == "1" ]]; then
+        log_info "Live patching: Disabling zswap in the running kernel..."
+        echo 0 > "$ZSWAP_PARAM" || log_warn "Failed to live-disable zswap."
+    else
+        log_success "Live memory: ZSWAP is cleanly disabled."
+    fi
+else
+    log_warn "Zswap parameter not found. Kernel might not have zswap compiled in."
+fi
+
+if [[ -f "$CMDLINE_FILE" ]]; then
+    declare -i needs_cmdline_update=0
+    
+    if grep -q -E '(^|[[:space:]])zswap\.enabled=0([[:space:]]|$)' "$CMDLINE_FILE"; then
+        log_success "Bootloader: zswap.enabled=0 is perfectly configured."
+    else
+        log_info "Bootloader: Patching $CMDLINE_FILE to enforce zswap.enabled=0..."
+        sed -i -E 's/[[:space:]]*zswap\.enabled=[^[:space:]]*//g' "$CMDLINE_FILE"
+        sed -i -E 's/[[:space:]]+$//' "$CMDLINE_FILE"
+        sed -i -E 's/$/ zswap.enabled=0/' "$CMDLINE_FILE"
+        needs_cmdline_update=1
+    fi
+
+    if (( needs_cmdline_update == 1 )); then
+        log_success "Bootloader cmdline successfully patched."
+        log_critical_action
+    fi
+else
+    log_warn "$CMDLINE_FILE not found. If using GRUB, manually add 'zswap.enabled=0'."
+fi
+
+# =============================================================================
+# --- 2. ZRAM SWAP CONFIGURATION ---
+# =============================================================================
+
+if [[ ! -x "$GENERATOR_BIN" ]]; then
+    log_warn "zram-generator is missing. Auto-healing..."
+    while [[ -f /var/lib/pacman/db.lck ]]; do
+        log_warn "Pacman is currently locked. Waiting 3 seconds..."
+        sleep 3
+    done
+    pacman -Sy --needed --noconfirm zram-generator || die "Auto-healing failed."
+    log_success "zram-generator successfully bootstrapped."
+fi
+
 if grep -Eq '(^|[[:space:]])systemd\.zram=0([[:space:]]|$)' /proc/cmdline; then
-    die "Kernel command line contains systemd.zram=0, which disables zram device creation."
+    die "FATAL: Kernel cmdline explicitly disables zram device creation."
 fi
 
-# Refuse to reuse the mount point if something else is mounted exactly there.
-current_source="$(mount_source_exact)"
-if [[ -n $current_source ]]; then
-    case "$current_source" in
-        "$ZRAM_FS_DEV"|zram1)
-            ;;
-        *)
-            die "$MOUNT_POINT is already mounted from $current_source; refusing to reuse it."
-            ;;
-    esac
-fi
-
-# Prepare directories without changing permissions on an already-mounted filesystem.
 install -d -m 0755 -- "$CONFIG_DIR"
 
-if [[ -e "$MOUNT_POINT" ]]; then
-    [[ -d "$MOUNT_POINT" ]] || die "$MOUNT_POINT exists but is not a directory."
-else
-    install -d -m 0755 -- "$MOUNT_POINT"
-fi
-
-log_info "Directories prepared."
-
-tmp_config="$(mktemp "${CONFIG_DIR}/.99-elite-zram.conf.tmp.XXXXXX")"
-
-cat >"$tmp_config" <<EOF
+cat > "$tmp_config" <<EOF
 # Managed by Elite Arch Linux ZRAM Configurator.
-# Manual edits to this file may be overwritten.
-
 [zram0]
-# Intentionally the same size policy as zram1.
-# Shape:
-#   - 1:1 up to 8192 MiB
-#   - flat at 8192 MiB until 10192 MiB
-#   - then (ram - 2000 MiB) above that point
 zram-size = ${ZRAM_SIZE_EXPR}
+zram-resident-limit = ${ZRAM_RESIDENT_LIMIT_EXPR}
 compression-algorithm = ${COMPRESSION_ALGORITHM}
 swap-priority = 100
 options = discard
-
-[zram1]
-# Intentionally the same size policy as zram0.
-zram-size = ${ZRAM_SIZE_EXPR}
-fs-type = ext2
-mount-point = ${MOUNT_POINT}
-compression-algorithm = ${COMPRESSION_ALGORITHM}
-options = ${FS_OPTIONS}
 EOF
 
-chmod 0644 -- "$tmp_config"
-mv -f -- "$tmp_config" "$CONFIG_FILE"
-tmp_config=""
+install -Dm0644 "$tmp_config" "$CONFIG_FILE"
+log_success "ZRAM pool configuration written to ${CONFIG_FILE}"
 
-log_success "Configuration written to ${CONFIG_FILE}"
-
-# Reload so the generated units are visible immediately and the config is validated.
-log_info "Reloading systemd generators..."
+log_info "Reloading systemd daemon to ingest new architecture..."
 systemctl daemon-reload
 
-# Validate that the expected generated units now exist.
 assert_unit_loaded "$SWAP_SETUP_UNIT"
-assert_unit_loaded "$FS_SETUP_UNIT"
 assert_unit_loaded "$SWAP_UNIT"
-assert_unit_loaded "$MOUNT_UNIT"
-
-# Do NOT attempt live teardown/recreation here.
-# Upstream zram-generator documentation explicitly says reboot is the easiest
-# way to apply config changes, and your failures are happening in the runtime
-# reconfiguration path. For reliability, this script installs config only.
-current_source="$(mount_source_exact)"
-if [[ $current_source == "$ZRAM_FS_DEV" || $current_source == zram1 ]]; then
-    log_info "$MOUNT_POINT is currently mounted from $current_source."
-fi
 
 if systemctl is-active --quiet "$SWAP_UNIT"; then
     log_info "$SWAP_UNIT is currently active."
 fi
 
-log_warn "Not attempting live zram reconfiguration in the current boot."
-log_info "Reboot the system to apply the new zram configuration safely."
+log_success "Platinum ZRAM (Pure Multi-Algorithm ZSTD) swap architecture installed safely."
+log_info "Reboot the system to apply the new memory topology natively."
 
-log_success "ZRAM configuration installed successfully."
+exit 0

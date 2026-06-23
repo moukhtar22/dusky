@@ -5,6 +5,15 @@
 set -Eeuo pipefail
 export LC_ALL=C
 
+# --- USER CONFIGURATION ---
+# Set the exact time of day to take the daily snapshot using 24-hour format.
+# Example: "20:00" is 8:00 PM.
+SNAPSHOT_TIME="20:00"
+
+# Set the strict limit on how many automated snapshots to keep per configuration
+SNAPSHOT_RETENTION_LIMIT=6
+# --------------------------
+
 AUTO_MODE=false
 [[ "${1:-}" == "--auto" ]] && AUTO_MODE=true
 
@@ -19,25 +28,31 @@ declare -a ROLLBACK_CMDS=()
 ROLLBACK_ON_EXIT=false
 
 cleanup() {
-    local cmd mnt f
+    local cmd mnt f i
+    
+    # Execute rollbacks in LIFO (Last-In-First-Out) order to safely unwind dependencies
     if [[ "$ROLLBACK_ON_EXIT" == true ]] && (( ${#ROLLBACK_CMDS[@]} > 0 )); then
         warn "Executing transactional rollbacks..."
-        for cmd in "${ROLLBACK_CMDS[@]}"; do
-            eval "$cmd" 2>/dev/null || true
+        for (( i=${#ROLLBACK_CMDS[@]}-1; i>=0; i-- )); do
+            eval "${ROLLBACK_CMDS[i]}" 2>/dev/null || true
         done
     fi
 
-    for mnt in "${ACTIVE_TEMP_MOUNTS[@]}"; do
-        [[ -n "$mnt" ]] || continue
-        if mountpoint -q "$mnt"; then
-            umount "$mnt" 2>/dev/null || true
-        fi
-        rmdir "$mnt" 2>/dev/null || true
-    done
+    if (( ${#ACTIVE_TEMP_MOUNTS[@]} > 0 )); then
+        for mnt in "${ACTIVE_TEMP_MOUNTS[@]}"; do
+            [[ -n "$mnt" ]] || continue
+            if mountpoint -q "$mnt"; then
+                umount "$mnt" 2>/dev/null || true
+            fi
+            rmdir "$mnt" 2>/dev/null || true
+        done
+    fi
 
-    for f in "${ACTIVE_TEMP_FILES[@]}"; do
-        [[ -n "$f" && -f "$f" ]] && rm -f "$f" 2>/dev/null || true
-    done
+    if (( ${#ACTIVE_TEMP_FILES[@]} > 0 )); then
+        for f in "${ACTIVE_TEMP_FILES[@]}"; do
+            [[ -n "$f" && -f "$f" ]] && rm -f "$f" 2>/dev/null || true
+        done
+    fi
 }
 
 trap_exit() { cleanup; }
@@ -86,11 +101,17 @@ remove_array_value() {
     local -n arr_ref="$array_name"
     local -a new_arr=()
 
-    for item in "${arr_ref[@]}"; do
-        [[ -n "$item" && "$item" != "$value" ]] && new_arr+=("$item")
-    done
+    if (( ${#arr_ref[@]} > 0 )); then
+        for item in "${arr_ref[@]}"; do
+            [[ -n "$item" && "$item" != "$value" ]] && new_arr+=("$item")
+        done
+    fi
 
-    arr_ref=("${new_arr[@]}")
+    if (( ${#new_arr[@]} > 0 )); then
+        arr_ref=("${new_arr[@]}")
+    else
+        arr_ref=()
+    fi
 }
 
 path_exists() { test -e "$1"; }
@@ -192,8 +213,12 @@ path_is_btrfs_subvolume() {
 
 btrfs_subvolume_is_ro() {
     local out
-    out="$(btrfs property get -ts "$1" ro 2>/dev/null | awk -F= '{gsub(/[[:space:]]/, "", $2); print $2; exit}' || true)"
-    [[ "$out" == "true" ]]
+    # Modern btrfs-progs v7.0: Use explicit '-t subvol' instead of deprecated '-ts' alias
+    out="$(btrfs property get -t subvol "$1" ro 2>/dev/null || true)"
+    if [[ "$out" == *"ro=true"* ]]; then
+        return 0
+    fi
+    return 1
 }
 
 mount_top_level_for_base() {
@@ -259,14 +284,15 @@ verify_snapshots_mount() {
 }
 
 install_packages() {
-    info "Reinstalling Snapper runtime packages for maximum reliability..."
-    pacman -S --noconfirm snapper boost-libs btrfs-progs
+    info "Verifying Snapper runtime packages for maximum reliability..."
+    # --needed prevents redundant reinstalls, silencing pacman output if already up to date
+    pacman -S --needed --noconfirm snapper boost-libs btrfs-progs
     command -v ldconfig >/dev/null 2>&1 && ldconfig
 }
 
 verify_snapper_runtime() {
     # CHROOT FIX: Inject --no-dbus
-    snapper --no-dbus --help >/dev/null 2>&1 || fatal "snapper is installed but not runnable. This usually indicates a package/runtime mismatch."
+    snapper --no-dbus --help >/dev/null 2>&1 || fatal "snapper is installed but not runnable. This usually indicates a package/runtime mismatch (commonly snapper vs boost-libs)."
 }
 
 post_install_checks() {
@@ -274,6 +300,8 @@ post_install_checks() {
     require_cmd snapper
     require_cmd systemctl
     verify_snapper_runtime
+    # PORTED FROM LIVE: Ensure /home is a subvolume before we touch it
+    path_is_btrfs_subvolume "/home" || fatal "/home is not a Btrfs subvolume."
 }
 
 ensure_snapper_config() {
@@ -285,6 +313,31 @@ ensure_snapper_config() {
     if snapper --no-dbus -c "$config_name" get-config >/dev/null 2>&1; then
         info "Snapper ${config_name} exists."
         return 0
+    fi
+
+    # If get-config failed but the config file exists, it's corrupted (e.g. from a previous aborted run).
+    if [[ -f "/etc/snapper/configs/${config_name}" ]]; then
+        warn "Snapper config '${config_name}' is corrupted or invalid. Purging..."
+        rm -f "/etc/snapper/configs/${config_name}"
+        if [[ -f "/etc/conf.d/snapper" ]]; then
+            sed -i -E "s/[[:space:]]*\b${config_name}\b//g" /etc/conf.d/snapper || true
+        fi
+    fi
+
+    # Check if ANY other config covers the path to prevent "subvolume already covered" error
+    if test -d /etc/snapper/configs; then
+        local conf conflicting_name
+        while read -r -d '' conf; do
+            [[ -n "$conf" ]] || continue
+            if grep -q "^SUBVOLUME=\"${config_path}\"$" "$conf" 2>/dev/null; then
+                conflicting_name="$(basename "$conf")"
+                warn "Subvolume ${config_path} is already covered by '${conflicting_name}'. Purging conflict..."
+                rm -f "$conf"
+                if test -f "/etc/conf.d/snapper"; then
+                    sed -i -E "s/[[:space:]]*\b${conflicting_name}\b//g" /etc/conf.d/snapper || true
+                fi
+            fi
+        done < <(find /etc/snapper/configs/ -mindepth 1 -maxdepth 1 -type f -print0 2>/dev/null || true)
     fi
 
     if mountpoint -q "$snap_dir"; then
@@ -355,14 +408,15 @@ migrate_single_legacy_snapshot_entry() {
                 fatal "Unexpected nested subvolume ${item} inside legacy Snapper entry ${src_entry}."
             fi
 
+            # PORTED FROM LIVE: Better error logs
             if path_exists "${dst_entry}/snapshot"; then
-                fatal "Destination snapshot subvolume ${dst_entry}/snapshot already exists."
+                fatal "Destination snapshot subvolume ${dst_entry}/snapshot already exists. Manual conflict resolution required."
             fi
 
             if btrfs_subvolume_is_ro "$item"; then
-                btrfs subvolume snapshot -r "$item" "${dst_entry}/snapshot" >/dev/null || fatal "Failed to clone read-only snapshot ${item}."
+                btrfs subvolume snapshot -r "$item" "${dst_entry}/snapshot" >/dev/null || fatal "Failed to clone read-only snapshot ${item} to ${dst_entry}/snapshot."
             else
-                btrfs subvolume snapshot "$item" "${dst_entry}/snapshot" >/dev/null || fatal "Failed to clone writable snapshot ${item}."
+                btrfs subvolume snapshot "$item" "${dst_entry}/snapshot" >/dev/null || fatal "Failed to clone writable snapshot ${item} to ${dst_entry}/snapshot."
             fi
 
             btrfs subvolume delete "$item" >/dev/null || fatal "Failed to delete old snapshot subvolume ${item} after cloning."
@@ -519,63 +573,37 @@ verify_snapper_works() {
     snapper --no-dbus -c "$1" list >/dev/null 2>&1 || fatal "Snapper $1 config is broken."
 }
 
-snapper_cleanup_counts() {
-    # CHROOT FIX: Inject --no-dbus
-    snapper --no-dbus --csv -c "$1" list 2>/dev/null | awk -F',' '
-        NR == 1 {
-            for (i = 1; i <= NF; i++) {
-                if ($i == "number") num_col = i
-                else if ($i == "cleanup") cleanup_col = i
-            }
-            next
-        }
-        num_col && cleanup_col &&
-        $num_col ~ /^[0-9]+$/ &&
-        $num_col != "0" {
-            if ($cleanup_col == "number") number_count++
-            else if ($cleanup_col == "important") important_count++
-        }
-        END {
-            printf "%d %d\n", number_count + 0, important_count + 0
-        }
-    '
-}
-
 tune_snapper() {
     local cfg="$1"
-    local default_limit=5 reserve=3
-    local number_count=0 important_count=0
-    local number_limit="$default_limit" important_limit="$default_limit"
+    local strict_limit="${SNAPSHOT_RETENTION_LIMIT}"
 
-    read -r number_count important_count < <(snapper_cleanup_counts "$cfg")
-
-    if (( number_count > default_limit )); then
-        number_limit=$(( number_count + reserve ))
-    fi
-    if (( important_count > default_limit )); then
-        important_limit=$(( important_count + reserve ))
-    fi
+    info "Enforcing strict cleanup limits and zero background bloat for ${cfg}..."
 
     # CHROOT FIX: Inject --no-dbus
+    # CUTTING-EDGE: Explicitly disable BACKGROUND_COMPARISON to guarantee zero background daemon overhead.
+    # Explicitly clear QGROUP to override any rogue system templates, enforcing zero Btrfs quota overhead.
     snapper --no-dbus -c "$cfg" set-config \
         TIMELINE_CREATE="no" \
         NUMBER_CLEANUP="yes" \
-        NUMBER_LIMIT="${number_limit}" \
-        NUMBER_LIMIT_IMPORTANT="${important_limit}" \
+        NUMBER_LIMIT="${strict_limit}" \
+        NUMBER_LIMIT_IMPORTANT="${strict_limit}" \
         SPACE_LIMIT="0.0" \
-        FREE_LIMIT="0.0"
+        FREE_LIMIT="0.0" \
+        BACKGROUND_COMPARISON="no" \
+        QGROUP=""
 }
 
 quiesce_snapper() {
     # Handled carefully since chroot environment doesn't run systemd init
-    if systemctl is-active --quiet snapper-timeline.timer 2>/dev/null; then
+    # PORTED FROM LIVE: Check both timers
+    if systemctl is-active --quiet snapper-timeline.timer 2>/dev/null || systemctl is-active --quiet snapper-cleanup.timer 2>/dev/null; then
         systemctl stop snapper-timeline.timer snapper-cleanup.timer 2>/dev/null || true
     fi
 }
 
 apply_global_btrfs_tuning() {
     btrfs quota disable / 2>/dev/null || true
-    info "Applied global Btrfs tuning parameters."
+    info "Applied global Btrfs tuning parameters (Quotas disabled)."
 }
 
 write_tmpfiles_override() {
@@ -602,6 +630,8 @@ enforce_flat_topology() {
 
     for sv in /var/lib/machines /var/lib/portables; do
         if findmnt -M "$sv" >/dev/null 2>&1; then
+            # PORTED FROM LIVE: Adding descriptive logging
+            info "$sv is an actively mounted filesystem. Preserving explicit layout."
             continue
         fi
 
@@ -612,23 +642,99 @@ enforce_flat_topology() {
 
         if [[ ! -e "$sv" ]]; then
             mkdir -p "$sv"
-            chmod 0755 "$sv"
+            chmod 0700 "$sv"
         fi
     done
 
     mkdir -p /etc/tmpfiles.d
 
-    if write_tmpfiles_override /etc/tmpfiles.d/systemd-nspawn.conf "d /var/lib/machines 0755 - - -"; then
+    if write_tmpfiles_override /etc/tmpfiles.d/systemd-nspawn.conf "d /var/lib/machines 0700 - - -"; then
         changed=true
     fi
 
-    if write_tmpfiles_override /etc/tmpfiles.d/portables.conf "d /var/lib/portables 0755 - - -"; then
+    if write_tmpfiles_override /etc/tmpfiles.d/portables.conf "d /var/lib/portables 0700 - - -"; then
         changed=true
     fi
 
     if [[ "$changed" == true ]]; then
-        info "Applied systemd tmpfiles overrides."
+        info "Applied systemd tmpfiles overrides to permanently enforce flat Btrfs topology."
+    else
+        info "Flat-topology tmpfiles overrides are already correct."
     fi
+}
+
+enable_snapper_timers() {
+    # Ensures that the system is ready to automatically purge snapshots based on NUMBER_LIMIT
+    info "Enabling systemd snapper-cleanup.timer to enforce pruning..."
+    systemctl enable snapper-cleanup.timer 2>/dev/null || true
+    
+    # Actively prevent systemd from firing timeline interrupts since we enforce TIMELINE_CREATE="no"
+    # (Note: '--now' is omitted because systemd is not actively running as PID 1 inside the chroot)
+    info "Disabling systemd snapper-timeline.timer to eliminate background wakeups..."
+    systemctl disable snapper-timeline.timer 2>/dev/null || true
+}
+
+deploy_custom_timer() {
+    info "Deploying custom scheduled snapshot creation timer with gatekeeper..."
+    local service_file="/etc/systemd/system/dusky_snapshot.service"
+    local timer_file="/etc/systemd/system/dusky_snapshot.timer"
+
+    local tmp_service tmp_timer
+    tmp_service="$(mktemp)"
+    tmp_timer="$(mktemp)"
+    ACTIVE_TEMP_FILES+=("$tmp_service" "$tmp_timer")
+
+    # Construct the Service Unit
+    # CRITICAL FIX 1: Snapper manual supports --csvout and --no-headers. We use this instead of `tail|tr` 
+    # so the parser never breaks, even if the user changes their terminal language or UI spacing later.
+    # CRITICAL FIX 2: Removed --no-dbus from the ExecStart. This service runs on the LIVE booted system,
+    # where DBus is active. Snapper warns against bypassing DBus while the live daemon is running.
+    # CRITICAL FIX 3: Ported official kernel capability sandboxing from the snapper-timeline.service.
+    # CRITICAL ADDITION: The 20-hour (72000 seconds) Gatekeeper ExecCondition.
+    cat << EOF > "$tmp_service"
+[Unit]
+Description=Create Automated Snapper Snapshots
+Documentation=man:snapper(8)
+After=local-fs.target nss-user-lookup.target
+Wants=snapper-cleanup.service
+
+[Service]
+Type=oneshot
+CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_FOWNER CAP_CHOWN CAP_FSETID CAP_SETFCAP CAP_SYS_ADMIN CAP_SYS_MODULE CAP_IPC_LOCK CAP_SYS_NICE
+LockPersonality=true
+NoNewPrivileges=false
+PrivateNetwork=true
+ProtectHostname=true
+RestrictAddressFamilies=AF_UNIX
+RestrictRealtime=true
+Nice=19
+IOSchedulingClass=idle
+CPUSchedulingPolicy=idle
+ExecCondition=/usr/bin/bash -c 'if [ -f /var/lib/dusky_snapshot_time ]; then elapsed=\$\$((\$\$(date +%%s) - \$\$(stat -c %%Y /var/lib/dusky_snapshot_time))); if [ \$\$elapsed -lt 72000 ]; then exit 1; fi; fi; exit 0'
+ExecStart=/usr/bin/bash -c 'for cfg in \$(/usr/bin/snapper --csvout --no-headers list-configs | /usr/bin/cut -d, -f1); do /usr/bin/snapper -c "\$cfg" create --description "auto 8pm" --cleanup-algorithm number; done'
+ExecStartPost=/usr/bin/touch /var/lib/dusky_snapshot_time
+EOF
+
+    cat << EOF > "$tmp_timer"
+[Unit]
+Description=Trigger Automated Snapper Snapshots
+Documentation=man:snapper(8)
+
+[Timer]
+OnCalendar=*-*-* ${SNAPSHOT_TIME}:00
+Persistent=true
+RandomizedDelaySec=5m
+
+[Install]
+WantedBy=timers.target
+EOF
+
+    # CHROOT FALLBACK: Manually wire the timer symlink if systemctl complains in the installation environment
+    if ! systemctl enable dusky_snapshot.timer 2>/dev/null; then
+        mkdir -p /etc/systemd/system/timers.target.wants
+        ln -sf ../dusky_snapshot.timer /etc/systemd/system/timers.target.wants/dusky_snapshot.timer
+    fi
+    info "Custom scheduled snapshot timer deployed for ${SNAPSHOT_TIME}."
 }
 
 preflight_checks() {
@@ -644,6 +750,10 @@ preflight_checks() {
     require_cmd mktemp
     require_cmd mountpoint
     require_cmd btrfs
+    
+    # PORTED FROM LIVE: Prevent executing on incorrect filesystems right away
+    [[ "$(stat -f -c %T /)" == "btrfs" ]] || fatal "Root is not Btrfs."
+    [[ "$(stat -f -c %T /home)" == "btrfs" ]] || fatal "/home is not Btrfs."
 }
 
 preflight_checks
@@ -669,5 +779,8 @@ execute "Mount /home/.snapshots" mount_snapshots "/home/.snapshots" "@home_snaps
 execute "Verify Snapper home" verify_snapper_works "home"
 execute "Tune Snapper home" tune_snapper "home"
 
+# --- SYSTEM WIDE OPTIMIZATIONS ---
 execute "Apply Global Btrfs Settings" apply_global_btrfs_tuning
 execute "Enforce Flat Topology" enforce_flat_topology
+execute "Enable Snapper Pruning Timers" enable_snapper_timers
+execute "Deploy Custom Autonomous Timer" deploy_custom_timer

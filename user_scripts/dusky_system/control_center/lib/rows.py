@@ -7,18 +7,23 @@ Optimized for:
 - Type Safety: Strict TypedDict definitions and runtime-checkable Protocols.
 - Architecture: Unified AsyncPollingMixin eliminates boilerplate and ensures consistent lifecycle management.
 - Performance: Native Linux inotify (Gio.FileMonitor) eliminates idle polling for state files.
+- Structural Integration: Native Hyprland IPC listening with resilient reconnects.
+- Domain Specific: Keybinds, Colors, Paths, Spin Buttons, Secrets, and Multiline inputs.
+- Polkit awareness: Executes natively wrapped commands.
 
 GTK4/Libadwaita compatible with proper lifecycle management via `do_unroot`.
 """
 from __future__ import annotations
 
 import atexit
+import json
 import logging
 import math
+import os
 import shlex
+import signal
 import subprocess
 import threading
-import json
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
@@ -41,7 +46,7 @@ import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 gi.require_version("Gio", "2.0")
-from gi.repository import Adw, Gio, GLib, GObject, Gtk, Pango
+from gi.repository import Adw, Gdk, Gio, GLib, GObject, Gtk, Pango
 
 import lib.utility as utility
 
@@ -91,7 +96,6 @@ class _ExecutorManager:
     Manages a singleton ThreadPoolExecutor with lazy initialization.
     Used for blocking file I/O tasks that cannot use Gio.Subprocess.
     """
-
     __slots__ = ("_executor", "_lock", "_is_shutdown")
     _instance: _ExecutorManager | None = None
 
@@ -138,7 +142,6 @@ class _SettingsExecutorManager:
     This preserves submission order and prevents stale values from
     winning when the same key is updated rapidly.
     """
-
     __slots__ = ("_executor", "_lock", "_is_shutdown")
     _instance: _SettingsExecutorManager | None = None
 
@@ -202,6 +205,7 @@ class ActionExec(TypedDict, total=False):
     type: str  # Literal["exec"]
     command: str
     terminal: bool
+    requires_root: bool
 
 
 class ActionRedirect(TypedDict, total=False):
@@ -261,12 +265,15 @@ class RowProperties(TypedDict, total=False):
     step: float
     default: float
     debounce: bool
-    options: list[str]
+    options: list[Any]
+    exclusive: bool
     options_map: dict[str, str]
     options_command: str
     placeholder: str
     badge_file: str
     buttons: list[dict[str, Any]]
+    hyprland_event: str
+    mode: str
 
 
 class RowContext(TypedDict, total=False):
@@ -280,18 +287,21 @@ class RowContext(TypedDict, total=False):
 
 
 # =============================================================================
-# STATE MANAGEMENT (Optimized Architecture)
+# STATE MANAGEMENT
 # =============================================================================
 @dataclass(slots=True)
 class PollSlot:
     """
     Atomic state for one polling channel.
-    Encapsulates the lifecycle of a single repeating task (source ID, cancellable, running state).
+    Encapsulates the lifecycle of a single repeating task.
     """
-
     source_id: int = 0
     cancellable: Any = None
     is_running: bool = False
+    generation: int = 0
+    current_command: str = ""
+    on_output: Any = None
+    timeout: int = 2
 
 
 @dataclass(slots=True)
@@ -300,7 +310,6 @@ class WidgetState:
     Thread-safe state container for widget lifecycle and async operation guards.
     Uses dedicated slots for different polling concerns to prevent state collisions.
     """
-
     lock: threading.Lock = field(default_factory=threading.Lock)
     is_destroyed: bool = False
 
@@ -309,39 +318,46 @@ class WidgetState:
     monitor: PollSlot = field(default_factory=PollSlot)  # For StateMonitorMixin (toggles)
     value: PollSlot = field(default_factory=PollSlot)    # For SliderMonitorMixin/LabelRow
     misc: PollSlot = field(default_factory=PollSlot)     # For generic extras (Badge, Button Text)
+    hyprland: PollSlot = field(default_factory=PollSlot) # For Hyprland IPC listening
 
     # Specific ID for slider debounce (separate from generic polling)
     debounce_source_id: int = 0
 
     @property
     def _slots(self) -> tuple[PollSlot, ...]:
-        return (self.icon, self.monitor, self.value, self.misc)
+        return (self.icon, self.monitor, self.value, self.misc, self.hyprland)
 
     def mark_destroyed_and_get_sources(self) -> tuple[int, ...]:
-        """Atomically marks destroyed, cancels async ops, and returns source IDs for cleanup."""
+        """Mark destroyed, detach cleanup handles under lock, then cancel outside the lock."""
+        sources: list[int] = []
+        cancellables: list[Any] = []
+
         with self.lock:
+            if self.is_destroyed:
+                return ()
+
             self.is_destroyed = True
 
-            # Cancel all in-flight monitor/subprocess operations across all slots.
             for slot in self._slots:
-                if isinstance(slot.cancellable, Gio.FileMonitor):
-                    with suppress(Exception):
-                        slot.cancellable.cancel()
-                elif slot.cancellable is not None:
-                    with suppress(Exception):
-                        slot.cancellable.cancel()
+                if slot.cancellable is not None:
+                    cancellables.append(slot.cancellable)
+
                 slot.cancellable = None
+                slot.is_running = False
 
-            # Harvest source IDs
-            sources: list[int] = []
-            for slot in self._slots:
-                sources.append(slot.source_id)
-                slot.source_id = 0
+                if slot.source_id > 0:
+                    sources.append(slot.source_id)
+                    slot.source_id = 0
 
-            sources.append(self.debounce_source_id)
-            self.debounce_source_id = 0
+            if self.debounce_source_id > 0:
+                sources.append(self.debounce_source_id)
+                self.debounce_source_id = 0
 
-            return tuple(sources)
+        for cancellable in cancellables:
+            with suppress(Exception):
+                cancellable.cancel()
+
+        return tuple(sources)
 
 
 # =============================================================================
@@ -398,11 +414,6 @@ def _perform_redirect(
     action: dict[str, Any],
     context: RowContext,
 ) -> None:
-    """
-    Process an advanced page redirect. 
-    Handles basic sidebar jumps as well as nested subpage layout traversal, generating
-    and pushing subsequent navigation pages if requested.
-    """
     page_id = action.get("page")
     subpage_title = action.get("subpage")
 
@@ -433,18 +444,15 @@ def _perform_redirect(
     if target_page_idx == -1 or not target_page_config:
         return
 
-    # Select the main page in the sidebar (triggers pop_to_tag -> Root sync)
     if row := sidebar.get_row_at_index(target_page_idx):
         sidebar.select_row(row)
 
-    # Force switch stack visible child natively
     page_name = f"page-{target_page_idx}"
     stack.set_visible_child_name(page_name)
 
     if not subpage_title:
         return
 
-    # Extract target page view container
     child = stack.get_child_by_name(page_name)
     if not isinstance(child, Adw.NavigationView):
         return
@@ -507,7 +515,6 @@ def _perform_redirect(
                         return res
         return None
 
-    # Iteratively build and push each section of the found layout path
     for step_title in path_suffix:
         current_path.append(step_title)
         step_layout = get_step_layout(current_layout, step_title)
@@ -552,6 +559,10 @@ def _batch_source_remove(*source_ids: int) -> None:
 
 
 def _submit_task_safe(func: Callable[[], None], state: WidgetState) -> bool:
+    with state.lock:
+        if state.is_destroyed:
+            return False
+
     try:
         _get_executor().submit(func)
         return True
@@ -577,22 +588,12 @@ def _submit_setting_save_safe(key: str, value: object) -> bool:
 # ASYNC SUBPROCESS INFRASTRUCTURE
 # =============================================================================
 def _parse_simple_argv(command: str) -> list[str] | None:
-    """
-    Attempt to decompose *command* into a direct-exec argv list.
-    Returns the argv list when the command is a straightforward executable
-    invocation (e.g. ``brightnessctl get``).
-    Returns ``None`` when shell features are detected (pipes, redirections,
-    variable expansion, globs, etc.), signalling that /bin/sh -c is required.
-    """
-    # Fast O(n) set-intersection check — cheaper than a regex for short
-    # polling commands and avoids compiling a pattern at import time.
     if _SHELL_METACHAR.intersection(command):
         return None
     try:
         argv = shlex.split(command)
         return argv if argv else None
     except ValueError:
-        # Malformed quoting — let the shell figure it out.
         return None
 
 
@@ -632,14 +633,7 @@ def _run_shell_async(
     timeout_seconds: int,
     on_complete: Callable[[str | None], None],
 ) -> _AsyncCommandHandle | None:
-    """
-    Asynchronously run *command*, invoking *on_complete* on the main thread.
-    Simple commands are exec'd directly; shell wrapping is only used when
-    shell features are required.
-    """
     cancellable = Gio.Cancellable()
-
-    # Direct exec when possible; shell wrapper only when necessary.
     argv = _parse_simple_argv(command)
     if argv is None:
         argv = ["/bin/sh", "-c", command]
@@ -665,7 +659,6 @@ def _run_shell_async(
         proc: Gio.Subprocess, result: Gio.AsyncResult,
     ) -> None:
         handle.clear_timeout_source()
-
         try:
             success, stdout_data, _ = proc.communicate_utf8_finish(result)
             if success and proc.get_successful() and stdout_data is not None:
@@ -682,33 +675,87 @@ def _run_shell_async(
     return handle
 
 
-def _spawn_command_async(command: str) -> bool:
-    """
-    Spawn *command* without capturing output and asynchronously reap it.
-    """
-    argv = _parse_simple_argv(command)
-    if argv is None:
-        argv = ["/bin/sh", "-c", command]
+# =============================================================================
+# HYPRLAND NATIVE IPC
+# =============================================================================
+class HyprlandIPCMixin:
+    """Listens asynchronously to Hyprland UNIX socket to trigger UI updates sans polling."""
+    _state: WidgetState
+    properties: RowProperties
 
-    try:
-        launcher = Gio.SubprocessLauncher.new(
-            Gio.SubprocessFlags.STDOUT_SILENCE | Gio.SubprocessFlags.STDERR_SILENCE
-        )
-        proc = launcher.spawnv(argv)
-    except GLib.Error as e:
-        log.debug("Failed to spawn command '%.30s...': %s", command, e.message)
-        return False
+    def _start_hyprland_ipc(self) -> None:
+        if not hasattr(self, "properties"):
+            return
+            
+        event_name = self.properties.get("hyprland_event")
+        if not isinstance(event_name, str) or not event_name.strip():
+            return
+        
+        sig = os.environ.get("HYPRLAND_INSTANCE_SIGNATURE")
+        if not sig:
+            return
 
-    def on_wait_finish(proc: Gio.Subprocess, result: Gio.AsyncResult) -> None:
-        with suppress(GLib.Error):
-            proc.wait_check_finish(result)
+        xdg_runtime = os.environ.get("XDG_RUNTIME_DIR", "/tmp")
+        path1 = Path(xdg_runtime) / "hypr" / sig / ".socket2.sock"
+        path2 = Path("/tmp/hypr") / sig / ".socket2.sock"
+        sock_path = str(path1) if path1.exists() else str(path2)
 
-    proc.wait_check_async(None, on_wait_finish)
-    return True
+        client = Gio.SocketClient()
+        addr = Gio.UnixSocketAddress.new(sock_path)
+        cancellable = Gio.Cancellable()
+
+        with self._state.lock:
+            if self._state.is_destroyed:
+                return
+            if self._state.hyprland.cancellable:
+                with suppress(Exception):
+                    self._state.hyprland.cancellable.cancel()
+            self._state.hyprland.cancellable = cancellable
+
+        def on_connected(source: Gio.SocketClient, result: Gio.AsyncResult) -> None:
+            try:
+                conn = source.connect_finish(result)
+                stream = Gio.DataInputStream.new(conn.get_input_stream())
+                self._read_hyprland_ipc_loop(stream, event_name.strip(), cancellable)
+            except GLib.Error as e:
+                if not e.matches(Gio.io_error_quark(), Gio.IOErrorEnum.CANCELLED):
+                    log.debug("Hyprland IPC connect failed: %s", e.message)
+                    GLib.timeout_add_seconds(2, self._reconnect_hyprland_ipc)
+
+        client.connect_async(addr, cancellable, on_connected)
+
+    def _reconnect_hyprland_ipc(self) -> bool:
+        with self._state.lock:
+            if self._state.is_destroyed:
+                return GLib.SOURCE_REMOVE
+        self._start_hyprland_ipc()
+        return GLib.SOURCE_REMOVE
+
+    def _read_hyprland_ipc_loop(self, stream: Gio.DataInputStream, prefix: str, cancellable: Gio.Cancellable) -> None:
+        def on_read(source: Gio.DataInputStream, result: Gio.AsyncResult) -> None:
+            try:
+                line_bytes, length = source.read_line_finish(result)
+                if line_bytes is not None:
+                    line = line_bytes.decode('utf-8', errors='ignore').strip()
+                    if line.startswith(prefix):
+                        GLib.idle_add(self._on_hyprland_ipc_event)
+                    source.read_line_async(GLib.PRIORITY_DEFAULT, cancellable, on_read)
+                else:
+                    GLib.timeout_add_seconds(2, self._reconnect_hyprland_ipc)
+            except GLib.Error as e:
+                if not e.matches(Gio.io_error_quark(), Gio.IOErrorEnum.CANCELLED):
+                    GLib.timeout_add_seconds(2, self._reconnect_hyprland_ipc)
+                    
+        stream.read_line_async(GLib.PRIORITY_DEFAULT, cancellable, on_read)
+
+    def _on_hyprland_ipc_event(self) -> bool:
+        if hasattr(self, "force_refresh"):
+            self.force_refresh()
+        return GLib.SOURCE_REMOVE
 
 
 # =============================================================================
-# UNIFIED POLLING ENGINE (The "Core")
+# UNIFIED POLLING ENGINE
 # =============================================================================
 class AsyncPollingMixin:
     """
@@ -716,7 +763,6 @@ class AsyncPollingMixin:
     Consolidates locking, cancellable lifecycle, guard flags, and
     the map-check / destroy-check logic across all widgets.
     """
-
     _state: WidgetState
 
     def _start_poll_loop(
@@ -729,21 +775,51 @@ class AsyncPollingMixin:
         *,
         immediate: bool = True,
     ) -> None:
-        """
-        Begin a periodic polling loop bound to a specific state *slot*.
-        Safely replaces any existing timer on the same slot.
-        """
+        interval = max(1, interval)
+        
+        with self._state.lock:
+            slot.current_command = command
+            slot.on_output = on_output
+            slot.timeout = timeout
+
         if immediate:
             self._poll_command(slot, command, on_output, timeout)
+
+        old_source_id = 0
+        with self._state.lock:
+            if self._state.is_destroyed:
+                return
+            old_source_id = slot.source_id
+            slot.source_id = 0
+
+        _safe_source_remove(old_source_id)
 
         with self._state.lock:
             if self._state.is_destroyed:
                 return
-            if slot.source_id > 0:
-                GLib.source_remove(slot.source_id)
             slot.source_id = GLib.timeout_add_seconds(
-                interval, self._poll_tick, slot, command, on_output, timeout,
+                interval,
+                self._poll_tick,
+                slot,
+                command,
+                on_output,
+                timeout,
             )
+
+    def force_refresh(self) -> None:
+        """Forces an immediate repoll of all active slots (used heavily by IPC Mixin)."""
+        if isinstance(self, Gtk.Widget) and not self.get_mapped():
+            return
+        slots_to_poll = []
+        with self._state.lock:
+            if self._state.is_destroyed:
+                return
+            for slot in self._state._slots:
+                if slot.current_command and slot.on_output:
+                    slots_to_poll.append((slot, slot.current_command, slot.on_output, slot.timeout))
+        
+        for sl, cmd, out, tm in slots_to_poll:
+            self._poll_command(sl, cmd, out, tm)
 
     def _poll_tick(
         self,
@@ -752,7 +828,6 @@ class AsyncPollingMixin:
         on_output: Callable[[str], None],
         timeout: int,
     ) -> bool:
-        """GLib timeout callback — skips unmapped widgets, guards concurrency."""
         if isinstance(self, Gtk.Widget) and not self.get_mapped():
             return GLib.SOURCE_CONTINUE
 
@@ -772,24 +847,36 @@ class AsyncPollingMixin:
         on_output: Callable[[str], None],
         timeout: int,
     ) -> None:
-        """Cancel any in-flight operation on *slot*, then launch a new one."""
+        old_handle: Any = None
+
         with self._state.lock:
             if self._state.is_destroyed:
                 slot.is_running = False
                 return
+
+            slot.generation += 1
+            generation = slot.generation
             slot.is_running = True
-            if slot.cancellable is not None:
-                with suppress(Exception):
-                    slot.cancellable.cancel()
-                slot.cancellable = None
+
+            old_handle = slot.cancellable
+            slot.cancellable = None
+
+        if old_handle is not None:
+            with suppress(Exception):
+                old_handle.cancel()
+
+        handle: _AsyncCommandHandle | None = None
 
         def on_result(output: str | None) -> None:
             with self._state.lock:
-                if slot.cancellable is handle:
-                    slot.cancellable = None
-                    slot.is_running = False
-                if self._state.is_destroyed:
+                if self._state.is_destroyed or slot.generation != generation:
                     return
+                if slot.cancellable is not handle:
+                    return
+
+                slot.cancellable = None
+                slot.is_running = False
+
             if output is not None:
                 on_output(output)
 
@@ -798,24 +885,31 @@ class AsyncPollingMixin:
         except Exception as e:
             log.error("Failed to execute async shell command: %s", e)
             with self._state.lock:
-                slot.is_running = False
+                if slot.generation == generation:
+                    slot.is_running = False
             return
 
+        cancel_new_handle = False
+
         with self._state.lock:
-            if not self._state.is_destroyed and handle:
-                slot.cancellable = handle
-            else:
-                if handle:
-                    handle.cancel()
+            if self._state.is_destroyed or slot.generation != generation:
+                cancel_new_handle = handle is not None
+                if slot.generation == generation:
+                    slot.is_running = False
+            elif handle is None:
                 slot.is_running = False
+            else:
+                slot.cancellable = handle
+
+        if cancel_new_handle and handle is not None:
+            with suppress(Exception):
+                handle.cancel()
 
 
 # =============================================================================
 # REFACTORED MIXINS (Using Unified Engine)
 # =============================================================================
 class DynamicIconMixin(AsyncPollingMixin):
-    """Mixin providing dynamic icon updates via periodic command execution."""
-
     icon_widget: Gtk.Image
 
     def _start_icon_update_loop(self, icon_config: dict[str, object]) -> None:
@@ -838,8 +932,6 @@ class DynamicIconMixin(AsyncPollingMixin):
 
 
 class StateMonitorMixin(AsyncPollingMixin):
-    """Mixin providing external state monitoring via native inotify or polling."""
-
     properties: RowProperties
 
     def _start_state_monitor(self) -> None:
@@ -860,25 +952,32 @@ class StateMonitorMixin(AsyncPollingMixin):
                 timeout=SUBPROCESS_TIMEOUT_SHORT,
                 immediate=True,
             )
-        else:
-            # Native Linux inotify event listener (Zero CPU idle)
-            key = str(self.properties.get("key", "")).strip()
-            file_path = utility.SETTINGS_DIR / key
-            try:
-                file_path.parent.mkdir(parents=True, exist_ok=True)
-                if not file_path.exists():
-                    file_path.touch()
+            return
 
-                gfile = Gio.File.new_for_path(str(file_path))
-                monitor = gfile.monitor_file(Gio.FileMonitorFlags.NONE, None)
-                monitor.connect("changed", self._on_file_changed)
+        key = str(self.properties.get("key", "")).strip()
+        settings_dir = utility.SETTINGS_DIR.resolve()
+        file_path = (settings_dir / key).resolve()
 
-                # Note: Gio.FileMonitor is stored in the cancellable field for cleanup parity.
-                # Both FileMonitor and async command handles expose .cancel(), enabling shared teardown logic.
-                with self._state.lock:
-                    self._state.monitor.cancellable = monitor
-            except Exception as e:
-                log.error(f"File monitor setup failed for {key}: {e}")
+        if not file_path.is_relative_to(settings_dir):
+            log.error("Refusing to monitor setting key outside SETTINGS_DIR: %r", key)
+            return
+
+        try:
+            file_path.parent.mkdir(parents=True, exist_ok=True)
+            if not file_path.exists():
+                file_path.touch()
+
+            gfile = Gio.File.new_for_path(str(file_path.parent))
+            monitor = gfile.monitor_directory(Gio.FileMonitorFlags.NONE, None)
+            monitor.connect("changed", self._on_file_changed, key, file_path.name)
+
+            with self._state.lock:
+                if self._state.is_destroyed:
+                    monitor.cancel()
+                    return
+                self._state.monitor.cancellable = monitor
+        except Exception as e:
+            log.error("File monitor setup failed for %s: %s", key, e)
 
     def _handle_state_output(self, output: str) -> None:
         new_state = output.strip().lower() in TRUE_VALUES
@@ -890,24 +989,40 @@ class StateMonitorMixin(AsyncPollingMixin):
         file: Gio.File,
         other_file: Gio.File | None,
         event_type: Gio.FileMonitorEvent,
+        key: str,
+        target_name: str,
     ) -> None:
         with self._state.lock:
             if self._state.is_destroyed:
                 return
 
-        if event_type in (Gio.FileMonitorEvent.CHANGES_DONE_HINT, Gio.FileMonitorEvent.CREATED):
-            key = str(self.properties.get("key", "")).strip()
-            val = utility.load_setting(key, default=False)
-            if isinstance(val, bool):
-                self._apply_state_update(val)
+        changed_name = file.get_basename() if file is not None else None
+        other_name = other_file.get_basename() if other_file is not None else None
+        if target_name not in (changed_name, other_name):
+            return
+
+        handled_events = {
+            Gio.FileMonitorEvent.CHANGED,
+            Gio.FileMonitorEvent.CHANGES_DONE_HINT,
+            Gio.FileMonitorEvent.CREATED,
+        }
+
+        for optional_event in ("MOVED_IN", "RENAMED"):
+            if event := getattr(Gio.FileMonitorEvent, optional_event, None):
+                handled_events.add(event)
+
+        if event_type not in handled_events:
+            return
+
+        val = utility.load_setting(key, default=False)
+        if isinstance(val, bool):
+            self._apply_state_update(val)
 
     def _apply_state_update(self, new_state: bool) -> bool:
         raise NotImplementedError
 
 
 class SliderMonitorMixin(AsyncPollingMixin):
-    """Mixin providing numeric value monitoring via periodic polling."""
-
     properties: RowProperties
 
     def _start_value_monitor(self) -> None:
@@ -944,7 +1059,7 @@ class SliderMonitorMixin(AsyncPollingMixin):
 # =============================================================================
 # BASE ROW CLASS
 # =============================================================================
-class BaseActionRow(DynamicIconMixin, Adw.ActionRow):
+class BaseActionRow(DynamicIconMixin, HyprlandIPCMixin, Adw.ActionRow):
     __gtype_name__ = "DuskyBaseActionRow"
 
     def __init__(
@@ -977,6 +1092,8 @@ class BaseActionRow(DynamicIconMixin, Adw.ActionRow):
 
         if _is_dynamic_icon(icon_config) and isinstance(icon_config, dict):
             self._start_icon_update_loop(icon_config)
+            
+        self._start_hyprland_ipc()
 
     def _create_icon_widget(self, icon: object) -> Gtk.Image:
         if isinstance(icon, dict) and icon.get("type") == "file":
@@ -995,12 +1112,9 @@ class BaseActionRow(DynamicIconMixin, Adw.ActionRow):
         return img
 
     def do_unroot(self) -> None:
-        self._perform_cleanup()
-        Adw.ActionRow.do_unroot(self)
-
-    def _perform_cleanup(self) -> None:
         sources = self._state.mark_destroyed_and_get_sources()
         _batch_source_remove(*sources)
+        Adw.ActionRow.do_unroot(self)
 
 
 # =============================================================================
@@ -1070,26 +1184,70 @@ class ButtonRow(BaseActionRow):
                 self.btn.add_css_class("default-action")
 
     def _start_dynamic_poll(self) -> None:
-        # Use 'misc' slot for button text polling
-        self._update_dynamic_state()
+        self._queue_dynamic_state_read()
+
         with self._state.lock:
             if not self._state.is_destroyed:
-                self._state.misc.source_id = GLib.timeout_add_seconds(2, self._update_dynamic_state)
+                self._state.misc.source_id = GLib.timeout_add_seconds(
+                    2,
+                    self._update_dynamic_state,
+                )
 
     def _update_dynamic_state(self) -> bool:
+        if not self.get_mapped():
+            return GLib.SOURCE_CONTINUE
+
+        self._queue_dynamic_state_read()
+        return GLib.SOURCE_CONTINUE
+
+    def _queue_dynamic_state_read(self) -> None:
+        with self._state.lock:
+            if self._state.is_destroyed or self._state.misc.is_running:
+                return
+
+            self._state.misc.is_running = True
+            self._state.misc.generation += 1
+            generation = self._state.misc.generation
+
+        if not _submit_task_safe(lambda: self._read_dynamic_state_async(generation), self._state):
+            with self._state.lock:
+                if self._state.misc.generation == generation:
+                    self._state.misc.is_running = False
+
+    def _read_dynamic_state_async(self, generation: int) -> None:
+        value: str | None = None
+
         try:
-            path = Path(self.text_file).expanduser()
-            if not path.exists():
-                return True
-            val = path.read_text().strip()
-            new_label = self.text_map.get(val, self.text_map.get("default", self.btn.get_label()))
-            if self.btn.get_label() != new_label:
-                self.btn.set_label(new_label)
-            new_style = self.style_map.get(val, self.style_map.get("default", self.base_style))
-            self._apply_base_style(new_style)
-        except Exception:
-            pass
-        return True
+            path = Path(str(self.text_file)).expanduser()
+            if path.exists():
+                value = path.read_text(encoding="utf-8").strip()
+        except Exception as e:
+            log.debug("Failed to read button dynamic state file %r: %s", self.text_file, e)
+
+        GLib.idle_add(self._apply_dynamic_state, generation, value)
+
+    def _apply_dynamic_state(self, generation: int, value: str | None) -> bool:
+        with self._state.lock:
+            if self._state.misc.generation == generation:
+                self._state.misc.is_running = False
+
+            if self._state.is_destroyed or self._state.misc.generation != generation:
+                return GLib.SOURCE_REMOVE
+
+        if value is None:
+            return GLib.SOURCE_REMOVE
+
+        text_map = self.text_map if isinstance(self.text_map, dict) else {}
+        style_map = self.style_map if isinstance(self.style_map, dict) else {}
+
+        new_label = text_map.get(value, text_map.get("default", self.btn.get_label()))
+        if self.btn.get_label() != new_label:
+            self.btn.set_label(new_label)
+
+        new_style = style_map.get(value, style_map.get("default", self.base_style))
+        self._apply_base_style(str(new_style).lower())
+
+        return GLib.SOURCE_REMOVE
 
     def _on_button_clicked(self, _button: Gtk.Button) -> None:
         self._trigger_action(self.on_action)
@@ -1107,11 +1265,390 @@ class ButtonRow(BaseActionRow):
             if isinstance(cmd, str) and cmd.strip():
                 title = str(self.properties.get("title", "Command"))
                 term = bool(act.get("terminal", False))
-                success = utility.execute_command(cmd.strip(), title, term)
+                root = bool(act.get("requires_root", False))
+                final_cmd = cmd.strip()
+                success = utility.execute_command(final_cmd, title, term, requires_root=root)
                 msg = f"{'▶ Launched' if success else '✖ Failed'}: {title}"
                 utility.toast(self.toast_overlay, msg, 2 if success else 4)
         elif t == "redirect":
             _perform_redirect(act, self.context)
+
+
+class KeybindRow(BaseActionRow):
+    __gtype_name__ = "DuskyKeybindRow"
+    
+    def __init__(self, properties: RowProperties, on_action: ActionConfig | None = None, context: RowContext | None = None) -> None:
+        super().__init__(properties, on_action, context)
+        self.btn = Gtk.Button(label="Click to bind")
+        self.btn.set_valign(Gtk.Align.CENTER)
+        self.btn.add_css_class("suggested-action")
+        
+        self.key_ctrl = Gtk.EventControllerKey.new()
+        self.key_ctrl.connect("key-pressed", self._on_key_pressed)
+        self.btn.add_controller(self.key_ctrl)
+        
+        self.btn.connect("clicked", self._on_btn_clicked)
+        self.add_suffix(self.btn)
+        self.set_activatable_widget(self.btn)
+        self._listening = False
+        
+        if key := properties.get("key"):
+            val = utility.load_setting(str(key).strip(), default="")
+            if val:
+                self.btn.set_label(str(val))
+
+    def _on_btn_clicked(self, btn: Gtk.Button) -> None:
+        self._listening = True
+        self.btn.set_label("Listening...")
+
+    def _on_key_pressed(self, ctrl: Gtk.EventControllerKey, keyval: int, keycode: int, state: Gdk.ModifierType) -> bool:
+        if not self._listening:
+            return False
+        
+        mods = []
+        if state & Gdk.ModifierType.SUPER_MASK:
+            mods.append("SUPER")
+        if state & Gdk.ModifierType.CONTROL_MASK:
+            mods.append("CTRL")
+        if state & Gdk.ModifierType.ALT_MASK:
+            mods.append("ALT")
+        if state & Gdk.ModifierType.SHIFT_MASK:
+            mods.append("SHIFT")
+        
+        key_name = Gdk.keyval_name(keyval)
+        if not key_name or key_name in ("Super_L", "Super_R", "Control_L", "Control_R", "Alt_L", "Alt_R", "Shift_L", "Shift_R"):
+            return True 
+            
+        bind_str = " + ".join(mods + [key_name.upper()])
+        self.btn.set_label(bind_str)
+        self._listening = False
+        
+        if key := self.properties.get("key"):
+            _submit_setting_save_safe(str(key).strip(), bind_str)
+            
+        if isinstance(self.on_action, dict) and (cmd := self.on_action.get("command")):
+            final_cmd = str(cmd).replace("{value}", shlex.quote(bind_str))
+            term = bool(self.on_action.get("terminal", False))
+            root = bool(self.on_action.get("requires_root", False))
+            utility.execute_command(
+                final_cmd, 
+                "Keybind", 
+                term,
+                requires_root=root
+            )
+            
+        return True
+
+
+class ColorRow(BaseActionRow):
+    __gtype_name__ = "DuskyColorRow"
+    
+    def __init__(self, properties: RowProperties, on_action: ActionConfig | None = None, context: RowContext | None = None) -> None:
+        super().__init__(properties, on_action, context)
+        self.dialog = Gtk.ColorDialog.new()
+        self.btn = Gtk.ColorDialogButton.new(self.dialog)
+        self.btn.set_valign(Gtk.Align.CENTER)
+        self.btn.connect("notify::rgba", self._on_color_changed)
+        self.add_suffix(self.btn)
+        
+        if key := properties.get("key"):
+            val = utility.load_setting(str(key).strip(), default="")
+            if val and isinstance(val, str) and val.startswith("#"):
+                rgba = Gdk.RGBA()
+                if rgba.parse(val):
+                    self.btn.set_rgba(rgba)
+
+    def _on_color_changed(self, btn: Gtk.ColorDialogButton, param: GObject.ParamSpec) -> None:
+        rgba = btn.get_rgba()
+        if not rgba:
+            return
+            
+        r, g, b, a = int(rgba.red * 255), int(rgba.green * 255), int(rgba.blue * 255), int(rgba.alpha * 255)
+        hex_color = f"#{r:02x}{g:02x}{b:02x}" + (f"{a:02x}" if a < 255 else "")
+        
+        if key := self.properties.get("key"):
+            _submit_setting_save_safe(str(key).strip(), hex_color)
+            
+        if isinstance(self.on_action, dict) and (cmd := self.on_action.get("command")):
+            final_cmd = str(cmd).replace("{value}", shlex.quote(hex_color))
+            term = bool(self.on_action.get("terminal", False))
+            root = bool(self.on_action.get("requires_root", False))
+            utility.execute_command(
+                final_cmd, 
+                "Color", 
+                term,
+                requires_root=root
+            )
+
+
+class PathRow(BaseActionRow):
+    __gtype_name__ = "DuskyPathRow"
+    
+    def __init__(self, properties: RowProperties, on_action: ActionConfig | None = None, context: RowContext | None = None) -> None:
+        super().__init__(properties, on_action, context)
+        self.btn = Gtk.Button(icon_name="document-open-symbolic")
+        self.btn.set_valign(Gtk.Align.CENTER)
+        self.btn.connect("clicked", self._on_clicked)
+        self.add_suffix(self.btn)
+        self.set_activatable_widget(self.btn)
+        self.mode = str(properties.get("mode", "file")).lower()
+
+    def _on_clicked(self, btn: Gtk.Button) -> None:
+        dialog = Gtk.FileDialog.new()
+        root = self.get_root()
+        parent = root if isinstance(root, Gtk.Window) else None
+        
+        if self.mode == "folder":
+            dialog.select_folder(parent, None, self._on_select_finish)
+        else:
+            dialog.open(parent, None, self._on_select_finish)
+
+    def _on_select_finish(self, dialog: Gtk.FileDialog, result: Gio.AsyncResult) -> None:
+        with self._state.lock:
+            if self._state.is_destroyed:
+                return
+
+        try:
+            file = dialog.select_folder_finish(result) if self.mode == "folder" else dialog.open_finish(result)
+            if file and (path := file.get_path()):
+                if key := self.properties.get("key"):
+                    _submit_setting_save_safe(str(key).strip(), path)
+                if isinstance(self.on_action, dict) and (cmd := self.on_action.get("command")):
+                    final_cmd = str(cmd).replace("{value}", shlex.quote(path))
+                    term = bool(self.on_action.get("terminal", False))
+                    root = bool(self.on_action.get("requires_root", False))
+                    utility.execute_command(
+                        final_cmd, 
+                        "Path", 
+                        term,
+                        requires_root=root
+                    )
+        except GLib.Error:
+            pass
+
+
+class SpinRow(SliderMonitorMixin, BaseActionRow):
+    __gtype_name__ = "DuskySpinRow"
+    
+    def __init__(self, properties: RowProperties, on_change: ActionConfig | None = None, context: RowContext | None = None) -> None:
+        super().__init__(properties, on_change, context)
+        self.min_val = _safe_float(properties.get("min"), 0.0)
+        self.max_val = _safe_float(properties.get("max"), 100.0)
+        self.step_val = max(MIN_STEP_VALUE, _safe_float(properties.get("step"), 1.0))
+        default_val = _safe_float(properties.get("default"), self.min_val)
+        self.debounce_enabled = bool(properties.get("debounce", True))
+        
+        adj = Gtk.Adjustment(
+            value=default_val, 
+            lower=self.min_val, 
+            upper=self.max_val, 
+            step_increment=self.step_val, 
+            page_increment=self.step_val * 10
+        )
+        digits = 0 if self.step_val.is_integer() else len(str(self.step_val).split('.')[-1])
+        
+        self.spin = Gtk.SpinButton(adjustment=adj, numeric=True, digits=digits)
+        self.spin.set_valign(Gtk.Align.CENTER)
+        self.spin.connect("value-changed", self._on_value_changed)
+        self.add_suffix(self.spin)
+        
+        self._spin_changing = False
+        self._pending_value: float | None = None
+        self._start_value_monitor()
+
+    def _apply_value_update(self, new_value: float) -> bool:
+        with self._state.lock:
+            if self._state.is_destroyed:
+                return GLib.SOURCE_REMOVE
+                
+        clamped = max(self.min_val, min(new_value, self.max_val))
+        if math.isclose(self.spin.get_value(), clamped, abs_tol=MIN_STEP_VALUE):
+            return GLib.SOURCE_REMOVE
+        
+        self._spin_changing = True
+        try:
+            self.spin.set_value(clamped)
+        finally:
+            self._spin_changing = False
+            
+        return GLib.SOURCE_REMOVE
+
+    def _on_value_changed(self, spin: Gtk.SpinButton) -> None:
+        if self._spin_changing:
+            return
+            
+        val = spin.get_value()
+        self._pending_value = val
+
+        if not self.debounce_enabled:
+            self._execute_debounced_action()
+            return
+
+        with self._state.lock:
+            if self._state.is_destroyed:
+                return
+            old_id = self._state.debounce_source_id
+            self._state.debounce_source_id = GLib.timeout_add(
+                SLIDER_DEBOUNCE_MS, self._execute_debounced_action,
+            )
+
+        _safe_source_remove(old_id)
+
+    def _execute_debounced_action(self) -> bool:
+        with self._state.lock:
+            if self._state.is_destroyed:
+                return GLib.SOURCE_REMOVE
+            self._state.debounce_source_id = 0
+
+        value = self._pending_value
+        self._pending_value = None
+
+        if value is None:
+            return GLib.SOURCE_REMOVE
+
+        if isinstance(self.on_action, dict) and (cmd := self.on_action.get("command")):
+            v_str = str(int(value)) if value.is_integer() else f"{value:.15g}"
+            final_cmd = str(cmd).replace("{value}", v_str)
+            term = bool(self.on_action.get("terminal", False))
+            root = bool(self.on_action.get("requires_root", False))
+            utility.execute_command(
+                final_cmd, 
+                "Spin", 
+                term,
+                requires_root=root
+            )
+            
+        return GLib.SOURCE_REMOVE
+
+
+class SecretRow(BaseActionRow):
+    __gtype_name__ = "DuskySecretRow"
+    
+    def __init__(self, properties: RowProperties, on_action: ActionConfig | None = None, context: RowContext | None = None) -> None:
+        super().__init__(properties, on_action, context)
+        self.entry = Gtk.PasswordEntry()
+        self.entry.set_valign(Gtk.Align.CENTER)
+        self.entry.set_show_peek_icon(True)
+        self.add_suffix(self.entry)
+        
+        btn = Gtk.Button(label="Apply")
+        btn.add_css_class("suggested-action")
+        btn.set_valign(Gtk.Align.CENTER)
+        btn.connect("clicked", self._on_apply)
+        self.add_suffix(btn)
+
+    def _on_apply(self, btn: Gtk.Button) -> None:
+        text = self.entry.get_text()
+        if not text:
+            return
+            
+        if key := self.properties.get("key"):
+            _submit_setting_save_safe(str(key).strip(), text)
+            
+        if isinstance(self.on_action, dict) and (cmd := self.on_action.get("command")):
+            final_cmd = str(cmd).replace("{value}", shlex.quote(text))
+            term = bool(self.on_action.get("terminal", False))
+            root = bool(self.on_action.get("requires_root", False))
+            utility.execute_command(
+                final_cmd, 
+                "Secret", 
+                term,
+                requires_root=root
+            )
+
+
+class MultiTextRow(DynamicIconMixin, HyprlandIPCMixin, Adw.ExpanderRow):
+    __gtype_name__ = "DuskyMultiTextRow"
+    
+    def __init__(self, properties: RowProperties, on_action: ActionConfig | None = None, context: RowContext | None = None) -> None:
+        super().__init__()
+        self._state = WidgetState()
+        self.properties = properties
+        self.on_action: ActionConfig = on_action or {}
+        self.context: RowContext = context or {}
+        
+        self.set_title(GLib.markup_escape_text(str(properties.get("title", "Text Editor"))))
+        
+        if sub := properties.get("description", ""):
+            self.set_subtitle(GLib.markup_escape_text(str(sub)))
+        
+        icon = properties.get("icon", DEFAULT_ICON)
+        self.icon_widget = self._create_icon_widget(icon)
+        self.add_prefix(self.icon_widget)
+
+        self.textview = Gtk.TextView(wrap_mode=Gtk.WrapMode.WORD_CHAR, monospace=True)
+        self.textview.set_size_request(-1, 200)
+        self.textview.set_margin_top(8)
+        self.textview.set_margin_bottom(8)
+        self.textview.set_margin_start(8)
+        self.textview.set_margin_end(8)
+        
+        if key := properties.get("key"):
+            val = utility.load_setting(str(key).strip(), default="")
+            self.textview.get_buffer().set_text(str(val))
+            
+        self._changed_handler_id = self.textview.get_buffer().connect("changed", self._on_buffer_changed)
+        
+        scroll = Gtk.ScrolledWindow(vexpand=True)
+        scroll.set_child(self.textview)
+        scroll.set_min_content_height(200)
+        scroll.add_css_class("view")
+        
+        row = Adw.PreferencesRow()
+        row.set_child(scroll)
+        self.add_row(row)
+        
+        if _is_dynamic_icon(icon) and isinstance(icon, dict):
+            self._start_icon_update_loop(icon)
+            
+        self._start_hyprland_ipc()
+
+    def _create_icon_widget(self, icon: object) -> Gtk.Image:
+        if isinstance(icon, dict) and icon.get("type") == "file":
+            if path := icon.get("path"):
+                p = _expand_path(str(path))
+                if p.exists():
+                    img = Gtk.Image.new_from_file(str(p))
+                    img.add_css_class("action-row-prefix-icon")
+                    return img
+
+        icon_name = _resolve_static_icon_name(icon)
+        img = Gtk.Image.new_from_icon_name(icon_name)
+        img.add_css_class("action-row-prefix-icon")
+        return img
+
+    def _on_buffer_changed(self, buf: Gtk.TextBuffer) -> None:
+        with self._state.lock:
+            if self._state.is_destroyed:
+                return
+            old_id = self._state.debounce_source_id
+            self._state.debounce_source_id = GLib.timeout_add(500, self._save_text)
+            
+        _safe_source_remove(old_id)
+
+    def _save_text(self) -> bool:
+        with self._state.lock:
+            self._state.debounce_source_id = 0
+            if self._state.is_destroyed:
+                return GLib.SOURCE_REMOVE
+        
+        buf = self.textview.get_buffer()
+        text = buf.get_text(buf.get_start_iter(), buf.get_end_iter(), False)
+        
+        if key := self.properties.get("key"):
+            _submit_setting_save_safe(str(key).strip(), text)
+            
+        return GLib.SOURCE_REMOVE
+
+    def do_unroot(self) -> None:
+        if hasattr(self, "_changed_handler_id") and self._changed_handler_id > 0:
+            with suppress(Exception):
+                self.textview.get_buffer().disconnect(self._changed_handler_id)
+            self._changed_handler_id = 0
+            
+        sources = self._state.mark_destroyed_and_get_sources()
+        _batch_source_remove(*sources)
+        Adw.ExpanderRow.do_unroot(self)
 
 
 class ToggleRow(StateMonitorMixin, BaseActionRow):
@@ -1125,7 +1662,7 @@ class ToggleRow(StateMonitorMixin, BaseActionRow):
     ) -> None:
         super().__init__(properties, on_toggle, context)
 
-        self._programmatic_update_event = threading.Event()
+        self._programmatic_update = False
 
         self.toggle_switch = Gtk.Switch()
         self.toggle_switch.set_valign(Gtk.Align.CENTER)
@@ -1146,26 +1683,30 @@ class ToggleRow(StateMonitorMixin, BaseActionRow):
                 return GLib.SOURCE_REMOVE
 
         if new_state != self.toggle_switch.get_active():
-            self._programmatic_update_event.set()
+            self._programmatic_update = True
             try:
                 self.toggle_switch.set_active(new_state)
             finally:
-                self._programmatic_update_event.clear()
+                self._programmatic_update = False
 
         return GLib.SOURCE_REMOVE
 
     def _on_toggle_changed(self, _switch: Gtk.Switch, state: bool) -> bool:
-        if self._programmatic_update_event.is_set():
+        if self._programmatic_update:
             return False
 
         if isinstance(self.on_action, dict):
             action_key = "enabled" if state else "disabled"
             if action := self.on_action.get(action_key):
                 if isinstance(action, dict) and (cmd := action.get("command")):
+                    final_cmd = str(cmd).strip()
+                    term = bool(action.get("terminal", False))
+                    root = bool(action.get("requires_root", False))
                     utility.execute_command(
-                        str(cmd).strip(),
+                        final_cmd,
                         "Toggle",
-                        bool(action.get("terminal", False)),
+                        term,
+                        requires_root=root
                     )
 
         if key := self.properties.get("key"):
@@ -1195,9 +1736,6 @@ class LabelRow(BaseActionRow):
         self.add_suffix(self.value_label)
 
         interval = _safe_int(properties.get("interval"), 0)
-
-        # Optimization: Route repetitive shell execs to the native Gio async engine
-        # to strictly avoid thread pool starvation.
         is_exec = isinstance(self.value_config, dict) and self.value_config.get("type") == "exec"
 
         if is_exec and interval > 0:
@@ -1221,13 +1759,11 @@ class LabelRow(BaseActionRow):
             if interval > 0:
                 with self._state.lock:
                     if not self._state.is_destroyed:
-                        # LabelRow uses the 'value' slot for updates
                         self._state.value.source_id = GLib.timeout_add_seconds(
                             interval, self._on_timeout,
                         )
 
     def _handle_async_output(self, output: str) -> None:
-        """Callback for Gio async loop execution."""
         self._update_label(output.strip() if output else LABEL_NA)
 
     def _on_timeout(self) -> bool:
@@ -1341,7 +1877,6 @@ class SliderRow(SliderMonitorMixin, BaseActionRow):
         self.step_val = step if step > MIN_STEP_VALUE else 1.0
         self.debounce_enabled = bool(properties.get("debounce", True))
 
-        # ---- feedback-loop guard (no lock needed — main thread only) ----
         self._slider_changing: bool = False
         self._last_snapped: float | None = None
         self._pending_value: float | None = None
@@ -1377,7 +1912,6 @@ class SliderRow(SliderMonitorMixin, BaseActionRow):
         return max(self.min_val, min(snapped, self.max_val))
 
     def _apply_value_update(self, new_value: float) -> bool:
-        """Push a polled value into the slider, suppressing feedback."""
         with self._state.lock:
             if self._state.is_destroyed:
                 return GLib.SOURCE_REMOVE
@@ -1458,14 +1992,12 @@ class SliderRow(SliderMonitorMixin, BaseActionRow):
                 value_text = self._format_action_value(value)
                 final_cmd = str(cmd).replace("{value}", value_text)
                 is_term = bool(self.on_action.get("terminal", False))
-                if is_term:
-                    utility.execute_command(final_cmd, "Slider", True)
-                else:
-                    _spawn_command_async(final_cmd)
+                is_root = bool(self.on_action.get("requires_root", False))
+                utility.execute_command(final_cmd, "Slider", is_term, requires_root=is_root)
         return GLib.SOURCE_REMOVE
 
 
-class SelectionRow(DynamicIconMixin, Adw.ComboRow):
+class SelectionRow(DynamicIconMixin, HyprlandIPCMixin, Adw.ComboRow):
     __gtype_name__ = "DuskySelectionRow"
 
     def __init__(
@@ -1529,6 +2061,15 @@ class SelectionRow(DynamicIconMixin, Adw.ComboRow):
 
         if properties.get("value_command") or properties.get("key"):
             self._start_selection_monitor()
+            
+        self._start_hyprland_ipc()
+
+    def force_refresh(self) -> None:
+        super().force_refresh()
+        if self.get_mapped():
+            self._queue_selection_fetch()
+            if self.properties.get("options_command"):
+                self._queue_options_fetch()
 
     def _create_icon_widget(self, icon: object) -> Gtk.Image:
         if isinstance(icon, dict) and icon.get("type") == "file":
@@ -1667,12 +2208,18 @@ class SelectionRow(DynamicIconMixin, Adw.ComboRow):
         return GLib.SOURCE_REMOVE
 
     def _start_selection_monitor(self) -> None:
-        # SelectionRow uses 'value' slot for selection monitoring
-        interval = _safe_int(self.properties.get("interval"), DEFAULT_INTERVAL_SECONDS)
+        interval = max(
+            1,
+            _safe_int(self.properties.get("interval"), DEFAULT_INTERVAL_SECONDS),
+        )
+
         with self._state.lock:
             if self._state.is_destroyed:
                 return
-            self._state.value.source_id = GLib.timeout_add_seconds(interval, self._check_selection_tick)
+            self._state.value.source_id = GLib.timeout_add_seconds(
+                interval,
+                self._check_selection_tick,
+            )
 
     def _on_map(self, _widget: Gtk.Widget) -> None:
         self._queue_selection_fetch()
@@ -1767,10 +2314,13 @@ class SelectionRow(DynamicIconMixin, Adw.ComboRow):
             if isinstance(action, dict) and (cmd := action.get("command")):
                 safe_value = shlex.quote(item)
                 final_cmd = str(cmd).replace("{value}", safe_value)
+                term = bool(action.get("terminal", False))
+                root = bool(action.get("requires_root", False))
                 utility.execute_command(
                     final_cmd,
                     "Selection",
-                    bool(action.get("terminal", False)),
+                    term,
+                    requires_root=root
                 )
 
     def do_unroot(self) -> None:
@@ -1779,7 +2329,7 @@ class SelectionRow(DynamicIconMixin, Adw.ComboRow):
         Adw.ComboRow.do_unroot(self)
 
 
-class EntryRow(DynamicIconMixin, Adw.EntryRow):
+class EntryRow(DynamicIconMixin, HyprlandIPCMixin, Adw.EntryRow):
     __gtype_name__ = "DuskyEntryRow"
 
     def __init__(
@@ -1815,6 +2365,8 @@ class EntryRow(DynamicIconMixin, Adw.EntryRow):
         if _is_dynamic_icon(icon_config) and isinstance(icon_config, dict):
             self._start_icon_update_loop(icon_config)
 
+        self._start_hyprland_ipc()
+
     def _create_icon_widget(self, icon: object) -> Gtk.Image:
         if isinstance(icon, dict) and icon.get("type") == "file":
             if path := icon.get("path"):
@@ -1833,13 +2385,20 @@ class EntryRow(DynamicIconMixin, Adw.EntryRow):
         text = self.get_text()
         if not text:
             return
+            
+        if key := self.properties.get("key"):
+            _submit_setting_save_safe(str(key).strip(), text)
+            
         if isinstance(self.on_action, dict) and (cmd := self.on_action.get("command")):
             safe_value = shlex.quote(text)
             final_cmd = str(cmd).replace("{value}", safe_value)
+            term = bool(self.on_action.get("terminal", False))
+            root = bool(self.on_action.get("requires_root", False))
             utility.execute_command(
                 final_cmd,
                 "Entry",
-                bool(self.on_action.get("terminal", False)),
+                term,
+                requires_root=root
             )
 
     def do_unroot(self) -> None:
@@ -1873,7 +2432,7 @@ class NavigationRow(BaseActionRow):
             self.nav_view.push(self.builder_func(title, self.layout_data, new_ctx))
 
 
-class ExpanderRow(DynamicIconMixin, Adw.ExpanderRow):
+class ExpanderRow(DynamicIconMixin, HyprlandIPCMixin, Adw.ExpanderRow):
     __gtype_name__ = "DuskyExpanderRow"
 
     def __init__(
@@ -1905,6 +2464,8 @@ class ExpanderRow(DynamicIconMixin, Adw.ExpanderRow):
 
         if _is_dynamic_icon(icon_config) and isinstance(icon_config, dict):
             self._start_icon_update_loop(icon_config)
+            
+        self._start_hyprland_ipc()
 
     def _create_icon_widget(self, icon: object) -> Gtk.Image:
         if isinstance(icon, dict) and icon.get("type") == "file":
@@ -1943,14 +2504,28 @@ class ExpanderRow(DynamicIconMixin, Adw.ExpanderRow):
                     return LabelRow(props, item.get("value"), self.context)
                 case "slider":
                     return SliderRow(props, item.get("on_change"), self.context)
+                case "spin":
+                    return SpinRow(props, item.get("on_change"), self.context)
                 case "selection":
                     return SelectionRow(props, item.get("on_change"), self.context)
                 case "entry":
                     return EntryRow(props, item.get("on_action"), self.context)
+                case "secret":
+                    return SecretRow(props, item.get("on_action"), self.context)
                 case "navigation":
                     return NavigationRow(props, item.get("layout"), self.context)
                 case "expander":
                     return ExpanderRow(props, item.get("items"), self.context)
+                case "multi_text":
+                    return MultiTextRow(props, item.get("on_action"), self.context)
+                case "keybind":
+                    return KeybindRow(props, item.get("on_action"), self.context)
+                case "color":
+                    return ColorRow(props, item.get("on_action"), self.context)
+                case "path":
+                    return PathRow(props, item.get("on_action"), self.context)
+                case "flag_group":
+                    return FlagGroupRow(props, item.get("on_action"), self.context)
                 case _:
                     log.warning("Unknown item type '%s' in expander, skipping", item_type)
                     return None
@@ -1959,21 +2534,156 @@ class ExpanderRow(DynamicIconMixin, Adw.ExpanderRow):
             return None
 
     def do_unroot(self) -> None:
-        self._perform_cleanup()
-        Adw.ExpanderRow.do_unroot(self)
-
-    def _perform_cleanup(self) -> None:
         sources = self._state.mark_destroyed_and_get_sources()
         _batch_source_remove(*sources)
+        Adw.ExpanderRow.do_unroot(self)
 
 
+class FlagGroupRow(DynamicIconMixin, HyprlandIPCMixin, Adw.PreferencesRow):
+    __gtype_name__ = "DuskyFlagGroupRow"
 
-class AsyncSelectorRow(DynamicIconMixin, Adw.PreferencesRow):
-    """
-    A generalized widget matching a Vertical UI paradigm:
-    Top: Title & Description
-    Bottom: Controls (Refresh + Dropdown + Optional Action Button)
-    """
+    def __init__(
+        self,
+        properties: RowProperties,
+        on_action: ActionConfig | None = None,
+        context: RowContext | None = None,
+    ) -> None:
+        super().__init__()
+        self.add_css_class("action-row")
+
+        self._state = WidgetState()
+        self.properties = properties
+        self.on_action: ActionConfig = on_action or {}
+        self.context: RowContext = context or {}
+        self.toast_overlay: Adw.ToastOverlay | None = self.context.get("toast_overlay")
+
+        self.exclusive = bool(properties.get("exclusive", False))
+        self.options = properties.get("options", [])
+
+        main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        main_box.set_margin_top(12)
+        main_box.set_margin_bottom(12)
+        main_box.set_margin_start(12)
+        main_box.set_margin_end(12)
+
+        top_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        icon_config = properties.get("icon", DEFAULT_ICON)
+        self.icon_widget = self._create_icon_widget(icon_config)
+        self.icon_widget.set_valign(Gtk.Align.CENTER)
+        top_box.append(self.icon_widget)
+
+        text_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        text_box.set_valign(Gtk.Align.CENTER)
+        text_box.set_hexpand(True)
+
+        title_str = str(properties.get("title", "Unnamed"))
+        title_label = Gtk.Label(xalign=0)
+        title_label.set_markup(f"<b>{GLib.markup_escape_text(title_str)}</b>")
+        title_label.set_wrap(True)
+        text_box.append(title_label)
+
+        if sub_str := properties.get("description", ""):
+            sub_label = Gtk.Label(label=sub_str, xalign=0)
+            sub_label.add_css_class("dim-label")
+            sub_label.set_wrap(True)
+            text_box.append(sub_label)
+
+        top_box.append(text_box)
+
+        btn_text = str(properties.get("button_text", "Execute"))
+        self.action_btn = Gtk.Button(label=btn_text)
+        self.action_btn.set_valign(Gtk.Align.CENTER)
+        self.action_btn.connect("clicked", self._on_action_clicked)
+
+        btn_style = str(properties.get("style", "default")).lower()
+        if btn_style == "destructive":
+            self.action_btn.add_css_class("destructive-action")
+        elif btn_style == "suggested":
+            self.action_btn.add_css_class("suggested-action")
+        else:
+            self.action_btn.add_css_class("default-action")
+
+        top_box.append(self.action_btn)
+        main_box.append(top_box)
+
+        flow = Gtk.FlowBox()
+        flow.set_selection_mode(Gtk.SelectionMode.NONE)
+        flow.set_max_children_per_line(4)
+        flow.set_row_spacing(8)
+        flow.set_column_spacing(16)
+
+        self._flag_map = {}
+        self.check_buttons: list[Gtk.CheckButton] = []
+        first_btn: Gtk.CheckButton | None = None
+
+        for opt in self.options:
+            if isinstance(opt, dict):
+                opt_id = str(opt.get("id", ""))
+                opt_label = str(opt.get("label", opt_id))
+            else:
+                opt_id = str(opt)
+                opt_label = str(opt)
+
+            chk = Gtk.CheckButton(label=opt_label)
+            self._flag_map[chk] = opt_id
+
+            if self.exclusive:
+                if first_btn is None:
+                    first_btn = chk
+                else:
+                    chk.set_group(first_btn)
+
+            self.check_buttons.append(chk)
+            flow.append(chk)
+
+        main_box.append(flow)
+        self.set_child(main_box)
+
+        if _is_dynamic_icon(icon_config) and isinstance(icon_config, dict):
+            self._start_icon_update_loop(icon_config)
+            
+        self._start_hyprland_ipc()
+
+    def _create_icon_widget(self, icon: object) -> Gtk.Image:
+        if isinstance(icon, dict) and icon.get("type") == "file":
+            if path := icon.get("path"):
+                p = _expand_path(str(path))
+                if p.exists():
+                    img = Gtk.Image.new_from_file(str(p))
+                    img.add_css_class("action-row-prefix-icon")
+                    return img
+
+        icon_name = _resolve_static_icon_name(icon)
+        img = Gtk.Image.new_from_icon_name(icon_name)
+        img.add_css_class("action-row-prefix-icon")
+        return img
+
+    def _on_action_clicked(self, _btn: Gtk.Button) -> None:
+        active_flags = [self._flag_map[chk] for chk in self.check_buttons if chk.get_active()]
+        flags_str = " ".join(active_flags)
+
+        if not isinstance(self.on_action, dict):
+            return
+
+        if self.on_action.get("type") == "exec" and (cmd := self.on_action.get("command")):
+            final_cmd = str(cmd).replace("{flags}", flags_str)
+            is_term = bool(self.on_action.get("terminal", False))
+            is_root = bool(self.on_action.get("requires_root", False))
+            title = str(self.properties.get("title", "Flag Action"))
+
+            success = utility.execute_command(final_cmd, title, is_term, requires_root=is_root)
+            msg = f"{'▶ Executed' if success else '✖ Failed'}: {title}"
+            utility.toast(self.toast_overlay, msg, 2 if success else 4)
+        elif self.on_action.get("type") == "redirect":
+            _perform_redirect(self.on_action, self.context)
+
+    def do_unroot(self) -> None:
+        sources = self._state.mark_destroyed_and_get_sources()
+        _batch_source_remove(*sources)
+        Adw.PreferencesRow.do_unroot(self)
+
+
+class AsyncSelectorRow(DynamicIconMixin, HyprlandIPCMixin, Adw.PreferencesRow):
     __gtype_name__ = "DuskyAsyncSelectorRow"
 
     def __init__(
@@ -2098,15 +2808,13 @@ class AsyncSelectorRow(DynamicIconMixin, Adw.PreferencesRow):
 
         if _is_dynamic_icon(icon_config) and isinstance(icon_config, dict):
             self._start_icon_update_loop(icon_config)
+            
+        self._start_hyprland_ipc()
 
-    @contextmanager
-    def _suppress_change_signal(self):
-        """Context manager to prevent dropdown signals from firing during UI updates."""
-        self._programmatic_update = True
-        try:
-            yield
-        finally:
-            self._programmatic_update = False
+    def force_refresh(self) -> None:
+        super().force_refresh()
+        if self.get_mapped() and not self._fetch_in_progress:
+            self._on_refresh_clicked(self.refresh_btn)
 
     def _create_icon_widget(self, icon: object) -> Gtk.Image:
         if isinstance(icon, dict) and icon.get("type") == "file":
@@ -2121,6 +2829,14 @@ class AsyncSelectorRow(DynamicIconMixin, Adw.PreferencesRow):
         img = Gtk.Image.new_from_icon_name(icon_name)
         img.add_css_class("action-row-prefix-icon")
         return img
+
+    @contextmanager
+    def _suppress_change_signal(self):
+        self._programmatic_update = True
+        try:
+            yield
+        finally:
+            self._programmatic_update = False
 
     def _on_dropdown_setup(self, factory: Gtk.SignalListItemFactory, list_item: Gtk.ListItem) -> None:
         label = Gtk.Label(xalign=0)
@@ -2140,22 +2856,50 @@ class AsyncSelectorRow(DynamicIconMixin, Adw.PreferencesRow):
     def _on_refresh_clicked(self, _btn: Gtk.Button) -> None:
         if not self.list_command or self._fetch_in_progress:
             return
+
         self._fetch_in_progress = True
         self.refresh_btn.set_sensitive(False)
+
         if self.action_btn:
             self.action_btn.set_sensitive(False)
-        _submit_task_safe(self._fetch_data_async, self._state)
+
+        if _submit_task_safe(self._fetch_data_async, self._state):
+            return
+
+        self._fetch_in_progress = False
+        self.refresh_btn.set_sensitive(True)
+
+        if self.action_btn:
+            self.action_btn.set_sensitive(bool(self.json_data) and self.has_action)
+
+        utility.toast(self.toast_overlay, "✖ Failed to queue data fetch", 4)
+
+    def _signal_process_group(self, proc: subprocess.Popen, sig: signal.Signals) -> None:
+        if proc.poll() is not None:
+            return
+
+        try:
+            os.killpg(proc.pid, sig)
+        except ProcessLookupError:
+            return
+        except Exception:
+            with suppress(Exception):
+                proc.send_signal(sig)
 
     def _kill_and_reap_process(self, proc: subprocess.Popen) -> None:
         if proc.poll() is None:
-            try:
-                proc.kill()
-            except Exception:
-                pass
+            self._signal_process_group(proc, signal.SIGTERM)
+
         try:
-            proc.communicate(timeout=2)
+            proc.communicate(timeout=1)
+            return
+        except subprocess.TimeoutExpired:
+            self._signal_process_group(proc, signal.SIGKILL)
         except Exception:
-            pass
+            return
+
+        with suppress(Exception):
+            proc.communicate(timeout=1)
 
     def _cancel_active_fetch(self) -> None:
         with self._state.lock:
@@ -2164,10 +2908,7 @@ class AsyncSelectorRow(DynamicIconMixin, Adw.PreferencesRow):
         if proc is None or proc.poll() is not None:
             return
 
-        try:
-            proc.kill()
-        except Exception:
-            pass
+        self._signal_process_group(proc, signal.SIGKILL)
 
     def _fetch_data_async(self) -> None:
         with self._state.lock:
@@ -2183,44 +2924,46 @@ class AsyncSelectorRow(DynamicIconMixin, Adw.PreferencesRow):
                 else ["/bin/sh", "-c", self.list_command]
             )
 
-            proc = subprocess.Popen(
+            with subprocess.Popen(
                 argv,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
-            )
+                start_new_session=True,
+            ) as proc:
 
-            with self._state.lock:
-                self._fetch_process = proc
-                destroyed = self._state.is_destroyed
+                with self._state.lock:
+                    self._fetch_process = proc
+                    destroyed = self._state.is_destroyed
 
-            if destroyed:
-                self._kill_and_reap_process(proc)
-                return
+                if destroyed:
+                    self._kill_and_reap_process(proc)
+                    return
 
-            try:
-                stdout, stderr = proc.communicate(timeout=self.command_timeout)
-            except subprocess.TimeoutExpired:
-                self._kill_and_reap_process(proc)
-                raise TimeoutError(f"Command timed out after {self.command_timeout:g} seconds")
+                try:
+                    stdout, stderr = proc.communicate(timeout=self.command_timeout)
+                except subprocess.TimeoutExpired:
+                    self._kill_and_reap_process(proc)
+                    raise TimeoutError(f"Command timed out after {self.command_timeout:g} seconds")
 
-            if proc.returncode != 0:
-                raise subprocess.CalledProcessError(
-                    proc.returncode,
-                    argv,
-                    output=stdout,
-                    stderr=stderr,
-                )
+                if proc.returncode != 0:
+                    raise subprocess.CalledProcessError(
+                        proc.returncode,
+                        argv,
+                        output=stdout,
+                        stderr=stderr,
+                    )
 
-            output = stdout.strip()
-            parsed_data = json.loads(output) if output else []
+                output = stdout.strip()
+                parsed_data = json.loads(output) if output else []
 
-            if not isinstance(parsed_data, list):
-                raise ValueError("Expected a JSON array.")
-            if parsed_data and not all(isinstance(item, dict) for item in parsed_data):
-                raise ValueError("Expected every JSON array item to be a dictionary object.")
+                # Restored Validation Loop
+                if not isinstance(parsed_data, list):
+                    raise ValueError("Expected a JSON array.")
+                if parsed_data and not all(isinstance(item, dict) for item in parsed_data):
+                    raise ValueError("Expected every JSON array item to be a dictionary object.")
 
-            GLib.idle_add(self._update_ui, parsed_data)
+                GLib.idle_add(self._update_ui, parsed_data)
         except Exception as e:
             log.error("AsyncSelector fetch failed: %s", e)
             GLib.idle_add(self._on_fetch_failed)
@@ -2291,7 +3034,6 @@ class AsyncSelectorRow(DynamicIconMixin, Adw.PreferencesRow):
         return GLib.SOURCE_REMOVE
 
     def _on_dropdown_selected(self, _dropdown: Gtk.DropDown, _param: GObject.ParamSpec) -> None:
-        """Triggered whenever the dropdown selection changes."""
         if self._programmatic_update or not self.has_action or not self.auto_execute:
             return
 
@@ -2319,15 +3061,17 @@ class AsyncSelectorRow(DynamicIconMixin, Adw.PreferencesRow):
             title = str(self.properties.get("title", "Action"))
 
             try:
-                final_cmd = cmd_template.format_map(SafeDict(selected_dict))
+                safe_dict = {k: shlex.quote(str(v)) for k, v in selected_dict.items()}
+                final_cmd = cmd_template.format_map(SafeDict(safe_dict))
             except Exception as e:
                 log.error("AsyncSelector action formatting failed: %s", e)
                 utility.toast(self.toast_overlay, f"✖ Failed: {title}", 4)
                 return
 
             is_term = bool(self.on_action.get("terminal", False))
+            is_root = bool(self.on_action.get("requires_root", False))
 
-            success = utility.execute_command(final_cmd, title, is_term)
+            success = utility.execute_command(final_cmd, title, is_term, requires_root=is_root)
             msg = f"{'▶ Executed' if success else '✖ Failed'}: {title}"
             utility.toast(self.toast_overlay, msg, 2 if success else 4)
 
@@ -2339,6 +3083,7 @@ class AsyncSelectorRow(DynamicIconMixin, Adw.PreferencesRow):
         self._cancel_active_fetch()
         _batch_source_remove(*sources)
         Adw.PreferencesRow.do_unroot(self)
+
 
 # =============================================================================
 # GRID CARDS
@@ -2369,7 +3114,6 @@ class GridCardBase(Gtk.Button):
         self._apply_base_style(self.base_style)
 
     def _apply_base_style(self, style: str) -> None:
-        """Dynamically add/remove CSS classes based on the current style state."""
         if style == self._current_card_style:
             return
 
@@ -2386,12 +3130,9 @@ class GridCardBase(Gtk.Button):
         self._current_card_style = style
 
     def do_unroot(self) -> None:
-        self._perform_cleanup()
-        Gtk.Button.do_unroot(self)
-
-    def _perform_cleanup(self) -> None:
         sources = self._state.mark_destroyed_and_get_sources()
         _batch_source_remove(*sources)
+        Gtk.Button.do_unroot(self)
 
     def _build_content(self, icon: str, title: str) -> Gtk.Box:
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
@@ -2413,7 +3154,7 @@ class GridCardBase(Gtk.Button):
         return box
 
 
-class GridCard(DynamicIconMixin, GridCardBase):
+class GridCard(DynamicIconMixin, HyprlandIPCMixin, GridCardBase):
     __gtype_name__ = "DuskyGridCard"
 
     def __init__(
@@ -2430,7 +3171,6 @@ class GridCard(DynamicIconMixin, GridCardBase):
             str(properties.get("title", "Unnamed")),
         )
 
-        # Build overlay hierarchy before attaching to prevent visual flashes
         self.badge_label: Gtk.Label | None = None
         badge_path = properties.get("badge_file")
 
@@ -2456,7 +3196,6 @@ class GridCard(DynamicIconMixin, GridCardBase):
         if _is_dynamic_icon(icon_conf) and isinstance(icon_conf, dict):
             self._start_icon_update_loop(icon_conf)
 
-        # Dynamic Text and Style Polling
         self.text_file: str | None = properties.get("button_text_file")
         self.text_map: dict[str, str] = properties.get("button_text_map") or {}
         self.style_map: dict[str, str] = properties.get("style_map") or {}
@@ -2464,15 +3203,25 @@ class GridCard(DynamicIconMixin, GridCardBase):
 
         if self.text_file:
             self._start_dynamic_style_poll()
+            
+        self._start_hyprland_ipc()
+
+    def force_refresh(self) -> None:
+        super().force_refresh()
+        if self.get_mapped():
+            if self.properties.get("badge_file"):
+                self._queue_badge_fetch(str(self.properties.get("badge_file")))
+            if self.text_file:
+                self._queue_dynamic_state_fetch()
 
     def _start_dynamic_style_poll(self) -> None:
-        # Fetch immediately to bypass the initial get_mapped() delay
-        _submit_task_safe(self._fetch_dynamic_state_async, self._state)
+        self._queue_dynamic_state_fetch()
 
         with self._state.lock:
             if not self._state.is_destroyed:
                 self._state.value.source_id = GLib.timeout_add_seconds(
-                    MONITOR_INTERVAL_SECONDS, self._dynamic_state_tick,
+                    MONITOR_INTERVAL_SECONDS,
+                    self._dynamic_state_tick,
                 )
 
     def _dynamic_state_tick(self) -> bool:
@@ -2483,26 +3232,42 @@ class GridCard(DynamicIconMixin, GridCardBase):
         if not self.get_mapped():
             return GLib.SOURCE_CONTINUE
 
-        _submit_task_safe(self._fetch_dynamic_state_async, self._state)
+        self._queue_dynamic_state_fetch()
         return GLib.SOURCE_CONTINUE
 
-    def _fetch_dynamic_state_async(self) -> None:
-        """Runs in the background thread pool."""
+    def _queue_dynamic_state_fetch(self) -> None:
+        with self._state.lock:
+            if self._state.is_destroyed or self._state.value.is_running:
+                return
+
+            self._state.value.is_running = True
+            self._state.value.generation += 1
+            generation = self._state.value.generation
+
+        if not _submit_task_safe(lambda: self._fetch_dynamic_state_async(generation), self._state):
+            with self._state.lock:
+                if self._state.value.generation == generation:
+                    self._state.value.is_running = False
+
+    def _fetch_dynamic_state_async(self, generation: int) -> None:
         val: str | None = None
+
         try:
             if self.text_file:
                 path = _expand_path(self.text_file)
                 if path.exists():
                     val = path.read_text(encoding="utf-8").strip()
         except Exception as e:
-            log.debug(f"Failed to read dynamic state file {self.text_file}: {e}")
+            log.debug("Failed to read dynamic state file %r: %s", self.text_file, e)
 
-        GLib.idle_add(self._apply_dynamic_state_ui, val)
+        GLib.idle_add(self._apply_dynamic_state_ui, generation, val)
 
-    def _apply_dynamic_state_ui(self, val: str | None) -> bool:
-        """Runs on the GTK main thread."""
+    def _apply_dynamic_state_ui(self, generation: int, val: str | None) -> bool:
         with self._state.lock:
-            if self._state.is_destroyed:
+            if self._state.value.generation == generation:
+                self._state.value.is_running = False
+
+            if self._state.is_destroyed or self._state.value.generation != generation:
                 return GLib.SOURCE_REMOVE
 
         if val is not None:
@@ -2517,24 +3282,44 @@ class GridCard(DynamicIconMixin, GridCardBase):
 
     def _start_badge_monitor(self, path_str: str) -> None:
         self._check_badge_tick(path_str)
+
         with self._state.lock:
             if self._state.is_destroyed:
                 return
             self._state.misc.source_id = GLib.timeout_add_seconds(
-                DEFAULT_INTERVAL_SECONDS, self._check_badge_tick, path_str,
+                DEFAULT_INTERVAL_SECONDS,
+                self._check_badge_tick,
+                path_str,
             )
 
     def _check_badge_tick(self, path_str: str) -> bool:
         if not self.get_mapped():
             return GLib.SOURCE_CONTINUE
+
         with self._state.lock:
             if self._state.is_destroyed:
                 return GLib.SOURCE_REMOVE
-        _submit_task_safe(lambda: self._fetch_badge_async(path_str), self._state)
+
+        self._queue_badge_fetch(path_str)
         return GLib.SOURCE_CONTINUE
 
-    def _fetch_badge_async(self, path_str: str) -> None:
+    def _queue_badge_fetch(self, path_str: str) -> None:
+        with self._state.lock:
+            if self._state.is_destroyed or self._state.misc.is_running:
+                return
+
+            self._state.misc.is_running = True
+            self._state.misc.generation += 1
+            generation = self._state.misc.generation
+
+        if not _submit_task_safe(lambda: self._fetch_badge_async(path_str, generation), self._state):
+            with self._state.lock:
+                if self._state.misc.generation == generation:
+                    self._state.misc.is_running = False
+
+    def _fetch_badge_async(self, path_str: str, generation: int) -> None:
         count_text: str | None = None
+
         try:
             path = _expand_path(path_str)
             if path.exists():
@@ -2543,18 +3328,24 @@ class GridCard(DynamicIconMixin, GridCardBase):
                     count_text = content
         except Exception:
             pass
-        GLib.idle_add(self._update_badge_ui, count_text)
 
-    def _update_badge_ui(self, text: str | None) -> bool:
+        GLib.idle_add(self._update_badge_ui, generation, count_text)
+
+    def _update_badge_ui(self, generation: int, text: str | None) -> bool:
         with self._state.lock:
-            if self._state.is_destroyed:
+            if self._state.misc.generation == generation:
+                self._state.misc.is_running = False
+
+            if self._state.is_destroyed or self._state.misc.generation != generation:
                 return GLib.SOURCE_REMOVE
+
         if self.badge_label:
             if text:
                 self.badge_label.set_label(text)
                 self.badge_label.set_visible(True)
             else:
                 self.badge_label.set_visible(False)
+
         return GLib.SOURCE_REMOVE
 
     def _on_clicked(self, _button: Gtk.Button) -> None:
@@ -2563,17 +3354,16 @@ class GridCard(DynamicIconMixin, GridCardBase):
         match self.on_action.get("type"):
             case "exec":
                 if cmd := self.on_action.get("command"):
-                    success = utility.execute_command(
-                        str(cmd).strip(),
-                        "Command",
-                        bool(self.on_action.get("terminal", False)),
-                    )
+                    term = bool(self.on_action.get("terminal", False))
+                    root = bool(self.on_action.get("requires_root", False))
+                    final_cmd = str(cmd).strip()
+                    success = utility.execute_command(final_cmd, "Command", term, requires_root=root)
                     utility.toast(self.toast_overlay, "▶ Launched" if success else "✖ Failed")
             case "redirect":
                 _perform_redirect(self.on_action, self.context)
 
 
-class GridToggleCard(DynamicIconMixin, StateMonitorMixin, GridCardBase):
+class GridToggleCard(DynamicIconMixin, StateMonitorMixin, HyprlandIPCMixin, GridCardBase):
     __gtype_name__ = "DuskyGridToggleCard"
 
     def __init__(
@@ -2606,6 +3396,8 @@ class GridToggleCard(DynamicIconMixin, StateMonitorMixin, GridCardBase):
 
         if _is_dynamic_icon(icon_conf) and isinstance(icon_conf, dict):
             self._start_icon_update_loop(icon_conf)
+            
+        self._start_hyprland_ipc()
 
     def _apply_state_update(self, new_state: bool) -> bool:
         with self._state.lock:
@@ -2626,15 +3418,15 @@ class GridToggleCard(DynamicIconMixin, StateMonitorMixin, GridCardBase):
     def _on_clicked(self, _button: Gtk.Button) -> None:
         new_state = not self.is_active
         self._set_visual(new_state)
+        
         if isinstance(self.on_action, dict):
             action_key = "enabled" if new_state else "disabled"
             if act := self.on_action.get(action_key):
                 if isinstance(act, dict) and (cmd := act.get("command")):
-                    utility.execute_command(
-                        str(cmd).strip(),
-                        "Toggle",
-                        bool(act.get("terminal", False)),
-                    )
+                    term = bool(act.get("terminal", False))
+                    root = bool(act.get("requires_root", False))
+                    final_cmd = str(cmd).strip()
+                    utility.execute_command(final_cmd, "Toggle", term, requires_root=root)
 
         if key := self.properties.get("key"):
             key_str = str(key).strip()

@@ -67,9 +67,9 @@ pacman -Sy git
 git clone --depth 1 https://github.com/dusklinux/dusky.git
 ```
 
-##### Copy the pre-chroot scripts to the current directory
+##### Run the orchestra
 ```bash
-cp dusky/user_scripts/arch_iso_scripts/000_pre_chroot/* .
+./user_scripts/arch_iso_scripts/online/000_dusky_arch_install.sh
 ```
 
 ### Step 3: Run the ISO Orchestra

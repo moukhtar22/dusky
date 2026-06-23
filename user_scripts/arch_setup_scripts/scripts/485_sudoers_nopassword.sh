@@ -16,9 +16,12 @@ shopt -s nullglob inherit_errexit
 declare -ar DEFAULT_BINARIES=(
 
 #    "/usr/bin/powertop"
-    "/usr/bin/papirus-folders"
-    "~/user_scripts/btrfs_snapshots/cc/04_dusky_snapshot_manager.py"
-    "~/user_scripts/btrfs_snapshots/cc/bash_wrapper_for_cc.sh"
+#    "/usr/bin/papirus-folders"
+    "/usr/bin/rfkill"
+    "/usr/bin/smartctl"
+    "/usr/bin/tlp"
+#    "~/user_scripts/btrfs_snapshots/cc/04_dusky_snapshot_manager.py"
+#    "~/user_scripts/btrfs_snapshots/cc/bash_wrapper_for_cc.sh"
 )
 
 declare -r SCRIPT_PATH="${BASH_SOURCE[0]}"

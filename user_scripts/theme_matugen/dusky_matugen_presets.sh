@@ -1,22 +1,21 @@
 #!/usr/bin/env bash
 # -----------------------------------------------------------------------------
-# Dusky Matugen Presets v4.0.5 (Matugen V2 Aligned)
+# Dusky Matugen Presets v4.1.1 (Production Release)
 # -----------------------------------------------------------------------------
 # Target: Arch Linux / Hyprland / Matugen / Wayland
 #
-# v4.0.5 CHANGELOG (Matugen V2 Integration):
-#   - FEAT: Added support for Base16 Backend generation (disable/wal).
-#   - FEAT: Added support for Source Color Index extraction (0-3).
-#   - SYNC: Perfectly mirrors state.conf schema with theme_ctl.sh.
-#   - OPTIM: UI Status Bar reformatted to fit 80-char width constraint.
-#   - FIX: apply_matugen uses Bash arrays to conditionally build commands.
-#   - ARCH: Now executes through theme_ctl.sh for flawless state syncing.
+# v4.1.1 CHANGELOG:
+#   - FIX: Resolved right bounding-box structural collapse in the Tab row.
+#   - FIX: Decoupled UI width calculations from mouse-zone tracking logic.
+#   - FIX: Corrected a 1-character horizontal shift/jitter on the active selection.
+#   - SYNC: Re-introduced '30' deg and '-1.0' contrast to match daemon defaults.
+#   - FEAT: Bulletproof state parsing handles unexpected quotes gracefully.
 # -----------------------------------------------------------------------------
 
 set -euo pipefail
 shopt -s extglob
 
-# Force standard C locale to prevent decimal format errors (e.g., 0,5 vs 0.5)
+# Force standard C locale to prevent decimal format errors
 export LC_NUMERIC=C
 
 # =============================================================================
@@ -24,7 +23,7 @@ export LC_NUMERIC=C
 # =============================================================================
 
 declare -r APP_TITLE="Dusky Matugen Presets"
-declare -r APP_VERSION="v4.0.5"
+declare -r APP_VERSION="v4.1.1"
 
 # --- State & Favorites Paths ---
 declare -r USE_STATE_FILE=true
@@ -44,28 +43,34 @@ declare -ri MIN_COLS=82
 declare -ri MIN_ROWS=24
 
 # UI Row Calculations
-# Structure: 1:Top border, 2:Title, 3:Status, 4:Tabs, 5:Bottom border
-declare -ri HEADER_LINES=5
-declare -ri TAB_ROW=4
+# Structure: 1:Top border, 2:Title, 3:Status 1, 4:Status 2, 5:Tabs, 6:Bottom border
+declare -ri HEADER_LINES=6
+declare -ri TAB_ROW=5
 declare -ri ITEM_START_Y=$(( HEADER_LINES + 1 ))
 
 # Tabs — Favorites is tab 0
-declare -ra TABS=("★ Favs" "Vibrant" "Neon" "Deep" "Pastel" "Mono" "Custom" "Settings")
+declare -ra TABS=("♥ Fav" "Vib" "Neon" "Deep" "Pastel" "Mono" "Cust" "Theme" "Anim")
 
-# Favorite indicator — U+2665 BLACK HEART SUIT
+# Favorite indicator
 declare -r FAV_ICON="♥"
 
-# Global Settings (Defaults - V2 Updated)
+# Global Settings (Defaults - theme_ctl.sh Aligned)
 declare -A SETTINGS=(
-    ["type"]="scheme-fidelity"
+    ["type"]="scheme-tonal-spot"
     ["mode"]="dark"
-    ["contrast"]="0.0"
+    ["contrast"]="0"
     ["index"]="0"
     ["base16"]="disable"
+    ["t_type"]="random"
+    ["t_dur"]="2"
+    ["t_fps"]="60"
+    ["t_bez"]=".54,0,.34,.99"
+    ["t_ang"]="30"
+    ["t_pos"]="center"
 )
 
 # =============================================================================
-# ▼ ANSI CONSTANTS (Template-aligned) ▼
+# ▼ ANSI CONSTANTS ▼
 # =============================================================================
 
 declare -r C_RESET=$'\033[0m'
@@ -91,7 +96,7 @@ declare -r MOUSE_OFF=$'\033[?1000l\033[?1002l\033[?1006l'
 
 declare -r ESC_READ_TIMEOUT=0.10
 
-# --- Pre-computed Constants (Template pattern) ---
+# --- Pre-computed Constants ---
 declare _h_line_buf
 printf -v _h_line_buf '%*s' "$BOX_INNER_WIDTH" ''
 declare -r H_LINE="${_h_line_buf// /─}"
@@ -115,7 +120,8 @@ declare LAST_STATUS_MSG=""
 # Tab index constants
 declare -ri FAVORITES_TAB=0
 declare -ri CUSTOM_TAB=6
-declare -ri SETTINGS_TAB=7
+declare -ri THEME_TAB=7
+declare -ri ANIM_TAB=8
 
 # Favorite hex lookup
 declare -A FAV_HEX_LOOKUP=()
@@ -132,7 +138,7 @@ done
 unset _ti
 
 # =============================================================================
-# ▼ SYSTEM HELPERS (Template-aligned) ▼
+# ▼ SYSTEM HELPERS ▼
 # =============================================================================
 
 log_err() {
@@ -283,12 +289,22 @@ register_items() {
     register 6 "Input RGB Values"  "ACTION_INPUT_RGB"
     register 6 "Regenerate Last"   "ACTION_REGEN"
 
-    # --- TAB 7: SETTINGS (V2 Updated) ---
-    register 7 "Scheme Type"       "type|cycle|scheme-fidelity,scheme-content,scheme-fruit-salad,scheme-vibrant,scheme-rainbow,scheme-neutral,scheme-tonal-spot,scheme-expressive,scheme-monochrome"
-    register 7 "Mode"              "mode|cycle|dark,light"
-    register 7 "Contrast"          "contrast|float|-1.0|1.0|0.1"
-    register 7 "Color Index"       "index|cycle|0,1,2,3"
-    register 7 "Base16 Backend"    "base16|cycle|disable,wal"
+    # --- TAB 7: THEME ---
+    register 7 "» Apply Settings «" "ACTION_APPLY_SETTINGS"
+    register 7 "Scheme Type"       "type|cycle|scheme-fidelity;scheme-content;scheme-fruit-salad;scheme-vibrant;scheme-rainbow;scheme-neutral;scheme-tonal-spot;scheme-expressive;scheme-monochrome;disable"
+    register 7 "Mode"              "mode|cycle|dark;light"
+    register 7 "Contrast"          "contrast|cycle|0;-1.0;-0.8;-0.6;-0.4;-0.2;0.2;0.4;0.6;0.8;1.0;disable"
+    register 7 "Color Index"       "index|cycle|0;1;2;3;4"
+    register 7 "Base16 Backend"    "base16|cycle|disable;wal"
+
+    # --- TAB 8: ANIMATION ---
+    register 8 "» Apply Settings «" "ACTION_APPLY_SETTINGS"
+    register 8 "Transition Type"   "t_type|cycle|random;simple;fade;left;right;top;bottom;wipe;wave;grow;center;any;outer;none;disable"
+    register 8 "Duration (sec)"    "t_dur|cycle|disable;0.5;1;2;3;5;10"
+    register 8 "FPS"               "t_fps|cycle|disable;30;60;90;120;144"
+    register 8 "Bezier Curve"      "t_bez|cycle|disable;.54,0,.34,.99;0,0,1,1;.85,0,.15,1;.17,.67,.83,.67"
+    register 8 "Angle (Deg)"       "t_ang|cycle|disable;0;30;45;90;135;180;225;270;315"
+    register 8 "Position"          "t_pos|cycle|disable;center;top;left;right;bottom;top-left;top-right;bottom-left;bottom-right"
 }
 
 # =============================================================================
@@ -409,7 +425,7 @@ unfavorite_by_hex() {
 }
 
 toggle_favorite() {
-    if (( CURRENT_TAB == FAVORITES_TAB || CURRENT_TAB == CUSTOM_TAB || CURRENT_TAB == SETTINGS_TAB )); then
+    if (( CURRENT_TAB == FAVORITES_TAB || CURRENT_TAB == CUSTOM_TAB || CURRENT_TAB == THEME_TAB || CURRENT_TAB == ANIM_TAB )); then
         LAST_STATUS_MSG="${C_YELLOW}Navigate to a color tab to manage favorites${C_RESET}"
         return 0
     fi
@@ -497,17 +513,25 @@ load_state() {
 
         value="${value//$'\n'/}"
         value="${value//\"/}"
+        value="${value//\'/}"
 
         case "${key}" in
             THEME_MODE)         [[ -n "${value}" ]] && SETTINGS["mode"]="${value}" ;;
             MATUGEN_TYPE)       [[ -n "${value}" ]] && SETTINGS["type"]="${value}" ;;
             SOURCE_COLOR_INDEX) [[ -n "${value}" ]] && SETTINGS["index"]="${value}" ;;
             BASE16_BACKEND)     [[ -n "${value}" ]] && SETTINGS["base16"]="${value}" ;;
+            AWWW_TRANS_TYPE)    [[ -n "${value}" ]] && SETTINGS["t_type"]="${value}" ;;
+            AWWW_TRANS_DURATION)[[ -n "${value}" ]] && SETTINGS["t_dur"]="${value}" ;;
+            AWWW_TRANS_FPS)     [[ -n "${value}" ]] && SETTINGS["t_fps"]="${value}" ;;
+            AWWW_TRANS_BEZIER)  [[ -n "${value}" ]] && SETTINGS["t_bez"]="${value}" ;;
+            AWWW_TRANS_ANGLE)   [[ -n "${value}" ]] && SETTINGS["t_ang"]="${value}" ;;
+            AWWW_TRANS_POS)     [[ -n "${value}" ]] && SETTINGS["t_pos"]="${value}" ;;
             LAST_APPLIED_HEX)   [[ -n "${value}" ]] && LAST_APPLIED_HEX="${value}" ;;
             MATUGEN_CONTRAST)
                 if [[ -n "${value}" ]]; then
-                    if [[ "${value}" == "disable" ]]; then
-                        SETTINGS["contrast"]="0.0"
+                    # Map legacy 0.0 standard natively to 0
+                    if [[ "${value}" == "0.0" ]]; then
+                        SETTINGS["contrast"]="0"
                     else
                         SETTINGS["contrast"]="${value}"
                     fi
@@ -523,28 +547,18 @@ save_state() {
 
     mkdir -p "${STATE_DIR}"
 
-    local contrast_val="${SETTINGS["contrast"]}"
-    if [[ "${contrast_val}" == "0.0" || "${contrast_val}" == "0" ]]; then
-        contrast_val="disable"
-    fi
-
     local tmpfile
     tmpfile=$(mktemp "${STATE_DIR}/state.tmp.XXXXXXXXXX") || {
         log_err "Failed to create temp file for state save"
         return 1
     }
 
-    # Only save the UI's last applied hex here. The rest of the state is managed by theme_ctl.sh
-    # We read state from theme_ctl.sh, but only write the LAST_APPLIED_HEX to avoid race conditions.
-    
-    # Read the current true state to preserve it
+    # Extract preserving state managed purely by theme_ctl
     local current_state=""
     if [[ -f "${STATE_FILE}" ]]; then
-        # Use grep to remove the old LAST_APPLIED_HEX line if it exists
         current_state=$(grep -v "^LAST_APPLIED_HEX=" "${STATE_FILE}" || true)
     fi
     
-    # Write the preserved state plus the updated hex
     if [[ -n "${current_state}" ]]; then
         printf '%s\n' "${current_state}" > "${tmpfile}"
     else
@@ -564,16 +578,28 @@ save_state() {
 apply_matugen() {
     local hex="${1^^}"
     
-    # Update the local UI tracking variable
+    # Update local tracking UI
     LAST_APPLIED_HEX="${hex}"
     save_state
 
-    # Execute synchronously. No setsid!
-    local -a cmd=("${THEME_CTL}" "set" "--no-wall" "--no-regen" "--mode" "${SETTINGS["mode"]}" "--type" "${SETTINGS["type"]}" "--contrast" "${SETTINGS["contrast"]}" "--index" "${SETTINGS["index"]}" "--base16" "${SETTINGS["base16"]}")
+    # Execute synchronously mapping strictly to theme_ctl schema
+    local -a cmd=("${THEME_CTL}" "set" "--no-wall" "--no-regen" \
+        "--mode" "${SETTINGS["mode"]}" \
+        "--type" "${SETTINGS["type"]}" \
+        "--contrast" "${SETTINGS["contrast"]}" \
+        "--index" "${SETTINGS["index"]}" \
+        "--base16" "${SETTINGS["base16"]}" \
+        "--trans-type" "${SETTINGS["t_type"]}" \
+        "--trans-duration" "${SETTINGS["t_dur"]}" \
+        "--trans-fps" "${SETTINGS["t_fps"]}" \
+        "--trans-bezier" "${SETTINGS["t_bez"]}" \
+        "--trans-angle" "${SETTINGS["t_ang"]}" \
+        "--trans-pos" "${SETTINGS["t_pos"]}"
+    )
 
-    # Fire the controller set command to update the environment
+    # Fire controller to globally cache settings
     if "${cmd[@]}" >/dev/null 2>&1; then
-        # Now safely run the solid hex color generation
+        # Proceed with enforcing solid background color extraction
         local -a color_cmd=("${THEME_CTL}" "color" "${hex}")
         if "${color_cmd[@]}" >/dev/null 2>&1; then
             LAST_STATUS_MSG="${C_GREEN}✓ Applied via theme_ctl: ${hex}${C_RESET}"
@@ -615,7 +641,7 @@ validate_rgb_component() {
 modify_setting() {
     local label="$1"
     local -i direction=$2
-    local config="${ITEM_MAP["${SETTINGS_TAB}::${label}"]}"
+    local config="${ITEM_MAP["${CURRENT_TAB}::${label}"]}"
     local key type rest
 
     key="${config%%|*}"
@@ -629,7 +655,7 @@ modify_setting() {
     case "${type}" in
         cycle)
             local -a opts=()
-            IFS=',' read -r -a opts <<< "${rest}"
+            IFS=';' read -r -a opts <<< "${rest}"
             local -i count=${#opts[@]} idx=0 i
             if (( count == 0 )); then return 0; fi
 
@@ -643,46 +669,49 @@ modify_setting() {
             idx=$(( (idx + direction + count) % count ))
             new_val="${opts[idx]}"
             ;;
-        float)
-            local s_min s_max s_step
-            IFS='|' read -r s_min s_max s_step <<< "${rest}"
-
-            new_val=$(LC_ALL=C awk \
-                -v c="${current}" \
-                -v dir="${direction}" \
-                -v step="${s_step}" \
-                -v lo="${s_min}" \
-                -v hi="${s_max}" \
-                'BEGIN {
-                    val = c + (dir * step)
-                    if (val < lo) val = lo
-                    if (val > hi) val = hi
-                    if (val == 0) val = 0
-                    printf "%.1f", val
-                }')
-            ;;
         *)
             return 0
             ;;
     esac
 
     SETTINGS["${key}"]="${new_val}"
-    
-    # We intentionally do NOT call save_state() here.
-    # The settings changes are visual-only until the user presses [Enter] to apply a color,
-    # at which point apply_matugen() invokes theme_ctl.sh to solidify the settings globally.
 }
 
 trigger_action() {
     local label="$1"
     local val="${ITEM_MAP["${CURRENT_TAB}::${label}"]}"
 
-    if (( CURRENT_TAB == SETTINGS_TAB )); then
-        modify_setting "${label}" 1
-        return 0
+    if (( CURRENT_TAB == THEME_TAB || CURRENT_TAB == ANIM_TAB )); then
+        if [[ "${val}" == ACTION_* ]]; then
+            : # Fall through to execution
+        else
+            modify_setting "${label}" 1
+            return 0
+        fi
     fi
 
     case "${val}" in
+        ACTION_APPLY_SETTINGS)
+            local -a cmd=("${THEME_CTL}" "set" "--no-wall" \
+                "--mode" "${SETTINGS["mode"]}" \
+                "--type" "${SETTINGS["type"]}" \
+                "--contrast" "${SETTINGS["contrast"]}" \
+                "--index" "${SETTINGS["index"]}" \
+                "--base16" "${SETTINGS["base16"]}" \
+                "--trans-type" "${SETTINGS["t_type"]}" \
+                "--trans-duration" "${SETTINGS["t_dur"]}" \
+                "--trans-fps" "${SETTINGS["t_fps"]}" \
+                "--trans-bezier" "${SETTINGS["t_bez"]}" \
+                "--trans-angle" "${SETTINGS["t_ang"]}" \
+                "--trans-pos" "${SETTINGS["t_pos"]}"
+            )
+            if "${cmd[@]}" >/dev/null 2>&1; then
+                LAST_STATUS_MSG="${C_GREEN}✓ Settings Applied successfully${C_RESET}"
+            else
+                LAST_STATUS_MSG="${C_RED}✗ Failed to apply settings${C_RESET}"
+            fi
+            return 0
+            ;;
         ACTION_INPUT_HEX)
             local input_hex=""
             prompt_input "Enter HEX (e.g. #FF0000):" input_hex
@@ -722,7 +751,7 @@ trigger_action() {
 }
 
 # =============================================================================
-# ▼ SCROLL & RENDER HELPERS (Template-aligned) ▼
+# ▼ SCROLL & RENDER HELPERS ▼
 # =============================================================================
 
 compute_scroll_window() {
@@ -782,9 +811,9 @@ render_scroll_indicator() {
 
 draw_ui() {
     local buf="" pad_buf="" padded_item="" item val display
-    local -i i current_col=3 zone_start len count pad_needed
+    local -i i current_col len count pad_needed
     local -i visible_len left_pad right_pad
-    local -i _vis_start _vis_end
+    local -i _vis_start _vis_end zone_start
 
     local dot="" key="" setting_val="" prefix=""
     local -i cr=0 cg=0 cb=0
@@ -806,21 +835,41 @@ draw_ui() {
     printf -v pad_buf '%*s' "$right_pad" ''
     buf+="${pad_buf}│${C_RESET}${CLR_EOL}"$'\n'
 
-    # --- Status Line ---
-    local status_content="Mode: ${SETTINGS[mode]} | Type: ${SETTINGS[type]} | Cont: ${SETTINGS[contrast]} | Idx: ${SETTINGS[index]} | B16: ${SETTINGS[base16]}"
-    local -i raw_len=${#status_content}
+    # --- Status Line 1 (Theme) ---
+    local status1_content="Mode: ${SETTINGS[mode]} | Type: ${SETTINGS[type]} | Cont: ${SETTINGS[contrast]} | Idx: ${SETTINGS[index]} | B16: ${SETTINGS[base16]}"
+    local -i raw_len1=${#status1_content}
 
-    if (( raw_len > BOX_INNER_WIDTH - 2 )); then raw_len=$(( BOX_INNER_WIDTH - 2 )); fi
-    left_pad=$(( (BOX_INNER_WIDTH - raw_len) / 2 ))
-    right_pad=$(( BOX_INNER_WIDTH - raw_len - left_pad ))
+    if (( raw_len1 > BOX_INNER_WIDTH - 2 )); then raw_len1=$(( BOX_INNER_WIDTH - 2 )); fi
+    left_pad=$(( (BOX_INNER_WIDTH - raw_len1) / 2 ))
+    right_pad=$(( BOX_INNER_WIDTH - raw_len1 - left_pad ))
 
     printf -v pad_buf '%*s' "$left_pad" ''
     buf+="${C_MAGENTA}│${pad_buf}${C_MAGENTA}Mode: ${C_CYAN}${SETTINGS[mode]} ${C_MAGENTA}| Type: ${C_CYAN}${SETTINGS[type]} ${C_MAGENTA}| Cont: ${C_CYAN}${SETTINGS[contrast]} ${C_MAGENTA}| Idx: ${C_CYAN}${SETTINGS[index]} ${C_MAGENTA}| B16: ${C_CYAN}${SETTINGS[base16]}${C_RESET}"
     printf -v pad_buf '%*s' "$right_pad" ''
     buf+="${pad_buf}${C_MAGENTA}│${C_RESET}${CLR_EOL}"$'\n'
 
+    # --- Status Line 2 (Animation) ---
+    local d_type="${SETTINGS[t_type]}"; [[ "$d_type" == "disable" ]] && d_type="off"
+    local d_dur="${SETTINGS[t_dur]}"; [[ "$d_dur" == "disable" ]] && d_dur="off" || d_dur="${d_dur}s"
+    local d_fps="${SETTINGS[t_fps]}"; [[ "$d_fps" == "disable" ]] && d_fps="off"
+    local d_pos="${SETTINGS[t_pos]}"; [[ "$d_pos" == "disable" ]] && d_pos="off"
+    
+    local status2_content="Anim: ${d_type} | Dur: ${d_dur} | FPS: ${d_fps} | Pos: ${d_pos}"
+    local -i raw_len2=${#status2_content}
+
+    if (( raw_len2 > BOX_INNER_WIDTH - 2 )); then raw_len2=$(( BOX_INNER_WIDTH - 2 )); fi
+    left_pad=$(( (BOX_INNER_WIDTH - raw_len2) / 2 ))
+    right_pad=$(( BOX_INNER_WIDTH - raw_len2 - left_pad ))
+
+    printf -v pad_buf '%*s' "$left_pad" ''
+    buf+="${C_MAGENTA}│${pad_buf}${C_MAGENTA}Anim: ${C_CYAN}${d_type} ${C_MAGENTA}| Dur: ${C_CYAN}${d_dur} ${C_MAGENTA}| FPS: ${C_CYAN}${d_fps} ${C_MAGENTA}| Pos: ${C_CYAN}${d_pos}${C_RESET}"
+    printf -v pad_buf '%*s' "$right_pad" ''
+    buf+="${pad_buf}${C_MAGENTA}│${C_RESET}${CLR_EOL}"$'\n'
+
     # --- Tab Bar ---
-    local tab_line="${C_MAGENTA}│ "
+    local tab_line="${C_MAGENTA}│"
+    local -i printed_len=0
+    current_col=2
     TAB_ZONES=()
 
     for (( i = 0; i < TAB_COUNT; i++ )); do
@@ -829,16 +878,19 @@ draw_ui() {
         zone_start=$current_col
 
         if (( i == CURRENT_TAB )); then
-            tab_line+="${C_CYAN}${C_INVERSE} ${name} ${C_RESET}${C_MAGENTA}│ "
+            tab_line+="${C_CYAN}${C_INVERSE} ${name} ${C_RESET}${C_MAGENTA}│"
         else
-            tab_line+="${C_GREY} ${name} ${C_MAGENTA}│ "
+            tab_line+="${C_GREY} ${name} ${C_MAGENTA}│"
         fi
 
-        TAB_ZONES+=("${zone_start}:$(( zone_start + len + 1 ))")
-        current_col=$(( current_col + len + 4 ))
+        TAB_ZONES+=("${zone_start}:$(( zone_start + len + 2 ))")
+        current_col=$(( current_col + len + 3 ))
+        printed_len=$(( printed_len + len + 3 ))
     done
 
-    pad_needed=$(( BOX_INNER_WIDTH - current_col + 2 ))
+    # Decouple visual padding from the mouse-zone tracking index 'current_col' 
+    # to guarantee a flawless 80-character internal box width.
+    pad_needed=$(( BOX_INNER_WIDTH - printed_len ))
     if (( pad_needed < 0 )); then pad_needed=0; fi
 
     if (( pad_needed > 0 )); then
@@ -877,11 +929,16 @@ draw_ui() {
         item="${_draw_ref[i]}"
         val="${ITEM_MAP["${CURRENT_TAB}::${item}"]}"
 
-        if (( CURRENT_TAB == SETTINGS_TAB )); then
-            key="${val%%|*}"
-            setting_val="${SETTINGS[${key}]}"
-            display="${C_YELLOW}◀ ${setting_val} ▶${C_RESET}"
-            prefix=""
+        if (( CURRENT_TAB == THEME_TAB || CURRENT_TAB == ANIM_TAB )); then
+            if [[ "${val}" == "ACTION_APPLY_SETTINGS" ]]; then
+                display="${C_YELLOW}[Enter] to Apply & Save${C_RESET}"
+                prefix=""
+            else
+                key="${val%%|*}"
+                setting_val="${SETTINGS[${key}]}"
+                display="${C_YELLOW}◀ ${setting_val} ▶${C_RESET}"
+                prefix=""
+            fi
         elif (( CURRENT_TAB == CUSTOM_TAB )); then
             if [[ "${val}" == "ACTION_REGEN" ]]; then
                 display="${C_YELLOW}[Enter] to Run${C_RESET}"
@@ -890,7 +947,7 @@ draw_ui() {
             fi
             prefix=""
         else
-            # Color tabs (including Favorites): TrueColor dot
+            # TrueColor extraction processing natively
             dot=""
             if [[ "${val}" =~ ^#?([0-9a-fA-F]{2})([0-9a-fA-F]{2})([0-9a-fA-F]{2})$ ]]; then
                 cr=$(( 16#${BASH_REMATCH[1]} ))
@@ -905,7 +962,7 @@ draw_ui() {
                 display="${dot} ${C_GREY}${val}${C_RESET}"
             fi
 
-            # Favorite indicator for color tabs 1-5
+            # Favorite indicator injection
             if (( show_fav_icon )); then
                 if [[ -n "${FAV_HEX_LOOKUP["${val^^}"]:-}" ]]; then
                     prefix="${C_RED}${FAV_ICON}${C_RESET} "
@@ -919,14 +976,15 @@ draw_ui() {
 
         printf -v padded_item "%-${label_pad}s" "${item:0:${label_pad}}"
 
+        # Ensure selected/unselected rows are perfectly vertically aligned (both offset by exactly 4 visual chars)
         if (( i == SELECTED_ROW )); then
-            buf+="${C_CYAN} ➤ ${C_RESET}${prefix}${C_INVERSE}${padded_item}${C_RESET} : ${display}${CLR_EOL}"$'\n'
+            buf+="${C_CYAN}  ➤ ${C_RESET}${prefix}${C_INVERSE}${padded_item}${C_RESET} : ${display}${CLR_EOL}"$'\n'
         else
             buf+="    ${prefix}${padded_item} : ${display}${CLR_EOL}"$'\n'
         fi
     done
 
-    # Pad empty rows
+    # Pad empty rows seamlessly
     local -i rows_rendered=$(( _vis_end - _vis_start ))
     for (( i = rows_rendered; i < MAX_DISPLAY_ROWS; i++ )); do
         buf+="${CLR_EOL}"$'\n'
@@ -948,8 +1006,8 @@ draw_ui() {
         else
             buf+="${C_CYAN} No favorites yet! Use [f] on any color tab to add.  [Tab] Switch  [q] Quit${C_RESET}${CLR_EOL}"$'\n'
         fi
-    elif (( CURRENT_TAB == SETTINGS_TAB )); then
-        buf+="${C_CYAN} [←/→ h/l] Adjust  [Tab] Switch  [↑↓/jk] Nav  [q] Quit${C_RESET}${CLR_EOL}"$'\n'
+    elif (( CURRENT_TAB == THEME_TAB || CURRENT_TAB == ANIM_TAB )); then
+        buf+="${C_CYAN} [←/→ h/l] Adjust  [Enter] Apply  [Tab] Switch  [↑↓/jk] Nav  [q] Quit${C_RESET}${CLR_EOL}"$'\n'
     elif (( CURRENT_TAB == CUSTOM_TAB )); then
         buf+="${C_CYAN} [Enter] Action  [Tab] Switch  [↑↓/jk] Nav  [q] Quit${C_RESET}${CLR_EOL}"$'\n'
     else
@@ -961,7 +1019,7 @@ draw_ui() {
 }
 
 # =============================================================================
-# ▼ INPUT HANDLING (Template-aligned) ▼
+# ▼ INPUT HANDLING ▼
 # =============================================================================
 
 navigate() {
@@ -1011,10 +1069,15 @@ set_tab() {
 
 adjust_setting() {
     local -i dir=$1
-    if (( CURRENT_TAB != SETTINGS_TAB )); then return 0; fi
+    if (( CURRENT_TAB != THEME_TAB && CURRENT_TAB != ANIM_TAB )); then return 0; fi
     local -n _adj_ref="TAB_ITEMS_${CURRENT_TAB}"
     if (( ${#_adj_ref[@]} == 0 )); then return 0; fi
-    modify_setting "${_adj_ref[${SELECTED_ROW}]}" "${dir}"
+    
+    local label="${_adj_ref[${SELECTED_ROW}]}"
+    local val="${ITEM_MAP["${CURRENT_TAB}::${label}"]}"
+    if [[ "${val}" != ACTION_* ]]; then
+        modify_setting "${label}" "${dir}"
+    fi
 }
 
 handle_enter() {
@@ -1066,12 +1129,20 @@ handle_mouse() {
 
         if (( clicked_idx >= 0 && clicked_idx < count )); then
             SELECTED_ROW=$clicked_idx
+            local label="${_mouse_items_ref[${clicked_idx}]}"
+            local val="${ITEM_MAP["${CURRENT_TAB}::${label}"]}"
 
-            if (( x > ADJUST_THRESHOLD )); then
-                if (( CURRENT_TAB == SETTINGS_TAB )); then
-                    if (( button == 0 )); then adjust_setting 1; else adjust_setting -1; fi
-                elif (( button == 0 )); then
-                    trigger_action "${_mouse_items_ref[${clicked_idx}]}"
+            if (( CURRENT_TAB == THEME_TAB || CURRENT_TAB == ANIM_TAB )); then
+                if [[ "${val}" == ACTION_* ]]; then
+                    if (( button == 0 )); then trigger_action "${label}"; fi
+                else
+                    if (( x > ADJUST_THRESHOLD )); then
+                        if (( button == 0 )); then adjust_setting 1; else adjust_setting -1; fi
+                    fi
+                fi
+            else
+                if (( button == 0 && x > ADJUST_THRESHOLD )); then
+                    trigger_action "${label}"
                 fi
             fi
         fi
@@ -1097,7 +1168,7 @@ read_escape_seq() {
 }
 
 # =============================================================================
-# ▼ INPUT ROUTER (Template-aligned) ▼
+# ▼ INPUT ROUTER ▼
 # =============================================================================
 
 handle_key() {
@@ -1166,7 +1237,7 @@ main() {
     fi
 
     local _dep
-    for _dep in awk matugen; do
+    for _dep in matugen; do
         if ! command -v "$_dep" &>/dev/null; then
             log_err "Required dependency not found: ${_dep}"
             exit 1

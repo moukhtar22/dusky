@@ -1,166 +1,183 @@
-# KVM Networking Configuration
+# 🌐 KVM Networking: Bridging & LAN Access
 
-This guide covers how to configure the network interface for your Virtual Machine (VM). You will choose a configuration based on whether you want the VM to simply have internet access, or if you need it to appear as a separate physical device on your home network.
+This guide dictates how to properly attach your Virtual Machine (VM) to a network. Your choice depends entirely on whether the VM just needs generic internet access, or if it needs a dedicated IP address on your physical home network (LAN).
 
-> [!ABSTRACT] Prerequisite Check
+> [!abstract] Prerequisite: Identify Your Hardware
 > 
-> Before making changes, check the status of your internal bridges on the Host machine.
+> Before changing any network settings, you must know the true name of your physical network cards.
 > 
-> Run this in your terminal:
+> **Standard Method:**
+> 
+> Open your terminal and run the NetworkManager device check:
 > 
 > ```
-> ip -br link show type bridge
+> nmcli device status
 > ```
 > 
-> _If no VMs are running, `virbr0` might be listed as `DOWN`. This is normal._
+> Look for the device that says **connected**.
+> 
+> **Elite/Deterministic Method:**
+> 
+> If you want the absolute truth directly from the kernel routing table (useful for scripting), run:
+> 
+> ```
+> ip -j route show default
+> ```
+> 
+> Look for the `"dev"` value in the output block.
+> 
+> - **Ethernet** cards usually look like: `enp3s0`, `eno1`, or `enx...`
+>     
+> - **Wi-Fi** cards usually look like: `wlan0`, `wlp2s0`, or `wlo1`
+>     
+> 
+> Write down the name of your active connection.
 
-## 🚀 Performance Tip: Use Virtio
+## 🚀 Mandatory Performance Check: Use Virtio
 
-For **all** network types listed below, it is highly recommended to change the Device Model to `virtio`. This provides significantly better network performance than the default emulated cards (like e1000).
+Regardless of which network option you choose below, you **must** use the `virtio` driver. It bypasses heavy hardware emulation and talks directly to the kernel, providing near-native network throughput.
 
-1. Open **Virtual Machine Manager**.
+1. Open **Virtual Machine Manager** (`virt-manager`).
     
-2. Open your VM -> **Show virtual hardware details** (the lightbulb icon).
+2. Open your VM and click **Show virtual hardware details** (the lightbulb icon 💡).
     
-3. Select the **NIC** (Network Interface) on the left.
+3. Select **NIC** (Network Interface) on the left panel.
     
 4. Set **Device model** to: `virtio`.
     
----
-## Option 1: Basic Internet (NAT)
-
-**Use Case:** You just want the VM to have internet, and you want to SSH into the VM from _this_ computer (the Host). You do _not_ need other computers on your LAN to see the VM.
-
-1. Open your VM hardware details.
-    
-2. Select **NIC** on the left.
-    
-3. Locate **Network source**.
+5. Click **Apply**.
     
 
-- _Easiest Method:_ Select `Virtual network 'default' : NAT`.
+## Option 1: Basic Internet & Host Access (NAT)
+
+**Use Case:** The VM needs internet access, and you want to SSH into it from your host machine. You do _not_ need other devices (like your phone or a laptop in the living room) to communicate directly with the VM.
+
+This is the cleanest, most secure, and most common setup.
+
+1. Go to your VM's **NIC** settings.
+    
+2. Set **Network source** to: `Virtual network 'default' : NAT`.
+    
+3. Click **Apply**.
     
 
----
-# RECOMMENDED! this is both simple and achieves the best outcome. 
-## Option 2: Manual Bridge Method: For Host Access: Manually specify the bridge interface:
+> [!error] Network not showing up?
+> 
+> If the `default` network is missing, inactive, or fails to start, your KVM default network is broken. Follow the pristine repair steps in [[Activating Network and Setting it to Autostart]].
 
-1. Select **Bridge device**.
+## Option 2: Full LAN Access (Wi-Fi Host)
+
+**Use Case:** Your host computer is connected to the internet via **Wi-Fi**, and you want the VM to get its own IP address directly from your home router.
+
+> [!danger] Wi-Fi Bridging Limitations
+> 
+> The IEEE 802.11 Wi-Fi standard strictly prohibits multiple MAC addresses from communicating over a single wireless client connection. You _cannot_ create a standard system bridge on a Wi-Fi card.
+> 
+> **The Workaround:** We use a `macvtap` device.
+> 
+> **The Catch:** Due to kernel security preventing routing loops (hairpin mode), your Host PC and the VM will **not** be able to talk to each other. However, the VM _will_ be able to talk to the internet and any other device on your home network.
+
+1. Go to your VM's **NIC** settings.
     
-2. Run in a terminal to find your virtual bridge name (usually `virbr0`).
+2. Set **Network** source to: `Macvtap device`.
     
+3. In **Device name**, type your physical Wi-Fi card name (e.g., `wlan0`).
+    
+4. Set **Source mode** to: `Bridge`.
+    
+5. Click **Apply**.
+    
+
+## Option 3: Full LAN Access (Ethernet Host)
+
+**Use Case:** Your host computer is connected via **Ethernet**, and you want the VM to get its own IP address directly from your home router. Both the Host and the VM will be able to communicate flawlessly.
+
+This requires creating a **System Bridge** (`br0`). We will use `nmcli` (NetworkManager), ensuring we spell out the full option names to guarantee long-term compatibility against alias deprecations.
+
+### Step 1: Create the Bridge (Host Terminal)
+
+Replace `enp3s0` in the commands below with your actual Ethernet interface name from the Prerequisite step.
 
 ```
-ip -br link show type bridge
+# 1. Create a virtual bridge interface named 'br0' (and disable STP for faster handshakes)
+sudo nmcli connection add type bridge ifname br0 con-name br0 bridge.stp no
+
+# 2. Bind your physical ethernet card using modern 'controller' syntax
+# ⚠️ REPLACE 'enp3s0' WITH YOUR ACTUAL ETHERNET NAME!
+sudo nmcli connection add type ethernet ifname enp3s0 controller br0 con-name br0-port-enp3s0
+
+# 3. Bring up the bridge with a strict 15-second timeout safeguard
+# (Your internet will drop for about 2-5 seconds, then return)
+sudo nmcli --wait 15 connection up br0
 ```
 
-3. In the **Device name** box, type: `virbr0` or what ever you find to be listed in output for previous command..
-    
-4. Click **Apply**.
+### Step 2: Configure UFW for the Bridge
 
->[!tip] If you there's no output to the command, run the fixing `errors steps` in [[Activating Network and Setting it to Autostart]]
+Because you use UFW, the Arch kernel might filter traffic passing through the bridge, preventing your VMs from getting an IP address. Explicitly allow the bridge traffic:
 
----
-## Option 3: Local LAN Access (Layer 2 Bridging)
+```
+sudo ufw route allow in on br0
+sudo ufw route allow out on br0
+sudo ufw reload
+```
 
-**Use Case:** You want your VM to have its own IP address on your home network (e.g., `192.168.1.50`), just like your phone or laptop.
-
-> [!WARNING] Crucial Decision
-> 
-> The setup differs completely depending on whether your Host computer is connected via Ethernet or Wi-Fi.
-
-### Scenario A: You are using Wi-Fi
-
-You cannot bridge a standard Wi-Fi connection due to technical limitations (IEEE 802.11 3-address mode). We must use a workaround called **Macvtap**.
-
-> [!DANGER] Limitation Warning
-> 
-> The Host cannot talk to the VM.
-> 
-> Due to kernel limitations (hairpin mode), your Host computer will not be able to ping or SSH into the VM, and the VM cannot ping the Host.
-> 
-> However, other devices on your network (like your phone or another laptop) CAN communicate with the VM.
+### Step 3: Attach the VM
 
 1. Open **Virtual Machine Manager**.
     
 2. Go to the VM's **NIC** settings.
     
-3. Change **Network source** to: `Macvtap device`.
-    
-4. In **Device name**, select your physical Wi-Fi card (e.g., `wlan0` or `wlp3s0`).
-    
-5. Set **Source mode** to: `Bridge`.
-    
-6. Start the VM.
-    
-
-### Scenario B: You are using Ethernet (Recommended)
-
-You must create a **System Bridge** on your Host. This turns your PC's ethernet port into a "virtual switch."
-
-#### Step 1: Create the Bridge (Run on Host)
-
-Since you are likely using NetworkManager, run these commands.
-
-Note: Replace `eth0` in the commands below with your actual interface name (find it by running `ip link`).
-
-```bash
-# 1. Create a bridge interface named 'br0'
-nmcli con add type bridge ifname br0 con-name br0
-
-# 2. Disable STP (Spanning Tree Protocol) to speed up connection
-# (Optional, but recommended for simple home setups)
-nmcli con modify br0 bridge.stp no
-
-# 3. Add your physical ethernet 'eth0' as a slave to this bridge
-nmcli con add type bridge-slave ifname eth0 master br0
-
-# 4. CRITICAL: Ensure the slave connects automatically
-# Without this, the bridge might come up empty on reboot
-nmcli con modify br0 connection.autoconnect-slaves 1
-
-# 5. Bring up the bridge (Your network will restart momentarily)
-nmcli con up br0
-```
-
-#### Step 2: Configure the VM
-
-1. Open **Virtual Machine Manager**.
-    
-2. Go to the VM's **NIC** settings.
-    
-3. Change **Network source** to: `Bridge device`.
+3. Set **Network source** to: `Bridge device`.
     
 4. In **Device name**, type: `br0`.
     
-5. Start the VM. It will now request an IP directly from your physical router.
+5. Click **Apply**.
     
 
-### Summary for Automation
+When you start the VM, it will bypass the host's NAT and request a standard home LAN IP (e.g., `192.168.1.50`) directly from your physical router.
 
-If you plan to script this setup later:
+### 🌟 Advanced: Add Bridge to Virt-Manager Dropdown
 
-- **Ethernet:** Build a persistent `br0` via `nmcli` (as shown above) or `systemd-networkd`. This is the enterprise-standard approach.
-    
-- **Wi-Fi:** Use `macvtap` for quick LAN access, accepting the host-isolation limitation.
-    
+_(Optional: Do this AFTER completing Option 3)_
 
-## 🆘 Disaster Recovery: Reverting Bridge Settings
-
-If Option 3 (Ethernet Bridge) fails and you lose internet connectivity on the host, run these commands to delete the bridge and restore your default connection.
+If you don't want to type `br0` manually every time you make a VM, you can tell libvirt to track the bridge so it appears in your network dropdown list.
 
 ```
-# 1. Bring down the bridge
+# 1. Inject a clean XML wrapper into a temporary file
+cat <<EOF > /tmp/host-bridge.xml
+<network>
+  <name>host-bridge</name>
+  <forward mode='bridge'/>
+  <bridge name='br0'/>
+</network>
+EOF
+
+# 2. Define and start the wrapper in libvirt
+sudo virsh net-define /tmp/host-bridge.xml
+sudo virsh net-start host-bridge
+sudo virsh net-autostart host-bridge
+
+# 3. Clean up
+rm /tmp/host-bridge.xml
+```
+
+If you run `sudo virsh net-list --all`, you will now see `host-bridge`. You can now select this from the "Network source" dropdown in Virt-Manager!
+
+## 🆘 Disaster Recovery: Reverting Option 3
+
+If you messed up the Ethernet bridge creation and lost internet on your Host PC, do not panic. Run this block to instantly destroy the bridge and restore your physical connection to normal:
+
+```
+# 1. Bring down the broken bridge
 sudo nmcli connection down br0
 
-# 2. Delete the bridge definition
-sudo nmcli connection del br0
+# 2. Delete the bridge definition entirely
+sudo nmcli connection delete br0
 
-# 3. Delete the slave definition (the link between eth0 and br0)
-# (Name may vary, check 'nmcli con show')
-sudo nmcli connection del bridge-slave-eth0 
+# 3. Delete the port definition 
+# (This unbinds your physical ethernet card from the destroyed bridge)
+sudo nmcli connection delete br0-port-enp3s0 
 
-# 4. Bring your original wired connection back up
-# (Replace 'Wired connection 1' with your actual connection name)
-sudo nmcli connection up 'Wired connection 1'
+# 4. Restart NetworkManager to auto-detect your standard wired connection again
+sudo systemctl restart NetworkManager
 ```

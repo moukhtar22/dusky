@@ -41,9 +41,14 @@ if [[ -z ${USER:-} ]]; then
 fi
 readonly CURRENT_USER="$USER"
 
-# Prepare USER variable for SED (Escape slashes and ampersands)
-# This prevents sed from breaking if the username is exotic
-readonly USER_SED_SAFE="${CURRENT_USER//\//\\/}"
+# Prepare USER variable for SED substitution.
+# Since we use '|' as the delimiter in `s|old|new|g`, we must escape:
+# 1. Backslashes '\' (escape these first!)
+# 2. Pipe characters '|' (so sed doesn't prematurely end the command)
+# 3. Ampersands '&' (sed uses this to refer to the matched pattern)
+_SAFE_USER="${CURRENT_USER//\\/\\\\}"
+_SAFE_USER="${_SAFE_USER//|/\\|}"
+readonly USER_SED_SAFE="${_SAFE_USER//&/\\&}"
 
 # ------------------------------------------------------------------------------
 # 2. Target Files List
@@ -62,19 +67,21 @@ readonly TARGET_FILES=(
     "dusky_hypridle_timeout.desktop"
     "dusky_hypridle_toggle.desktop"
     "dusky_input.desktop"
+    "dusky_glance.desktop"
     "dusky_gsettings.desktop"
     "dusky_keybinds.desktop"
+    "dusky_locale_tui.desktop"
     "dusky_monitor.desktop"
     "dusky_matugen_presets.desktop"
     "dusky_network.desktop"
+    "dusky_packages.desktop"
     "dusky_power.desktop"
     "dusky_waybars.desktop"
     "dusky_wayclick_config.desktop"
     "dusky_window_rules.desktop"
-    "dusky_workspace_manager.desktop"
+    "dusky_workspace.desktop"
     "dusky_site_blocker.desktop"
-    "dusky_sliders.desktop"
-    "dusky_swaync_side.desktop"
+    "dusky_quickpanal.desktop"
     "dusky_service_toggle.desktop"
     "file_switcher.desktop"
     "google_image_search.desktop"
@@ -101,6 +108,7 @@ readonly TARGET_FILES=(
     "sysbench_benchmark.desktop"
     "tailscale_setup.desktop"
     "tailscale_uninstall.desktop"
+    "mako_tui.desktop"
     "update_dusky.desktop"
     "warp.desktop"
     "wayclick.desktop"

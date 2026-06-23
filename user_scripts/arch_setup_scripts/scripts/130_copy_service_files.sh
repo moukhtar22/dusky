@@ -39,10 +39,13 @@ readonly SERVICES_CONFIG=(
 
     # dusky update checker
     "$HOME/user_scripts/update_dusky/update_checker/service/update_checker.service | disable"
-    "$HOME/user_scripts/update_dusky/update_checker/service/update_checker.timer | enable"
+    "$HOME/user_scripts/update_dusky/update_checker/service/update_checker.timer | disable"
 
-    # dusky sliders
-    "$HOME/user_scripts/sliders/service/dusky_sliders.service | disable"
+    # dusky quickpanal
+    "$HOME/user_scripts/dusky_system/quickpanal/service/dusky_quickpanal.service | disable"
+
+    # dusky osd
+    "$HOME/user_scripts/mako_osd/osd_router/osd_lock.service | disable"
 )
 
 # XDG Standard: ~/.config/systemd/user

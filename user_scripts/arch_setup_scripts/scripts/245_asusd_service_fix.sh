@@ -23,6 +23,16 @@ log_success() { printf "${C_GREEN}[OK]${C_RESET}   %s\n" "$1"; }
 log_warn() { printf "${C_YELLOW}[WARN]${C_RESET} %s\n" "$1"; }
 log_err() { printf "${C_RED}[ERR]${C_RESET}  %s\n" "$1" >&2; exit 1; }
 
+# --- Early Exit Check ---
+# We check for the config file before escalating privileges.
+# This prevents unnecessary sudo prompts and failures in automated orchestrators.
+if [[ ! -f "$TARGET_FILE" ]]; then
+    log_warn "The file $TARGET_FILE was not found."
+    log_info "It appears 'asusd' is not installed on this system."
+    log_info "No actions are necessary. Exiting gracefully."
+    exit 0
+fi
+
 # --- Privilege Check ---
 if [[ $EUID -ne 0 ]]; then
     # Pass all arguments to the sudo call
@@ -31,19 +41,12 @@ fi
 
 # --- Main Logic ---
 main() {
-    # 1. Critical Check: Is asusd even installed?
-    # We check for the config file because that is what we intend to modify.
-    if [[ ! -f "$TARGET_FILE" ]]; then
-        log_warn "The file $TARGET_FILE was not found."
-        log_info "It appears 'asusd' is not installed on this system."
-        log_info "No actions are necessary. Exiting."
-        exit 0
-    fi
 
     # 2. User Interaction: Confirm Hardware
     # We use /dev/tty to force interaction even if script is piped (though unlikely here)
     printf "${C_YELLOW}[?]${C_RESET} Is this an ASUS laptop? [y/N] "
-    read -r -n 1 response < /dev/tty
+    response=""
+    read -r -n 1 response < /dev/tty || true
     echo "" # Newline for formatting
 
     if [[ ! "$response" =~ ^[yY]$ ]]; then
@@ -71,9 +74,12 @@ main() {
     fi
 
     # 6. Service Restart
-    log_info "Restarting $SERVICE_NAME..."
-    if systemctl restart "$SERVICE_NAME"; then
-        log_success "Service restarted successfully."
+    log_info "Reloading DBus and restarting $SERVICE_NAME..."
+    systemctl daemon-reload || true
+    systemctl reload dbus-broker 2>/dev/null || systemctl reload dbus 2>/dev/null || true
+
+    if systemctl restart --no-block "$SERVICE_NAME"; then
+        log_success "Service restart initiated (non-blocking)."
     else
         log_warn "Service restart failed. You may need to start it manually."
     fi

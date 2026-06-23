@@ -1,0 +1,39 @@
+#!/bin/sh
+action="$1"
+case "$action" in
+    now)
+        if command -v cmus-remote >/dev/null 2>&1; then
+            info=$(cmus-remote -Q 2>/dev/null)
+            if [ -n "$info" ]; then
+                title=$(echo "$info" | awk '/^tag title / {gsub(/^tag title /, ""); print}')
+                artist=$(echo "$info" | awk '/^tag artist / {gsub(/^tag artist /, ""); print}')
+                pos=$(echo "$info" | awk '/^position / {print $2}')
+                dur=$(echo "$info" | awk '/^duration / {print $2}')
+                stat=$(echo "$info" | awk '/^status / {print $2}')
+                
+                format_sec() {
+                    t=$1
+                    if [ -z "$t" ] || [ "$t" -le 0 ] 2>/dev/null; then echo "0:00"; return; fi
+                    m=$((t / 60))
+                    s=$((t % 60))
+                    printf "%d:%02d" $m $s
+                }
+                pos_fmt=$(format_sec "$pos")
+                dur_fmt=$(format_sec "$dur")
+                
+                case "$stat" in
+                    playing) status="Playing" ;;
+                    paused)  status="Paused" ;;
+                    *)       status="Stopped" ;;
+                esac
+                printf "%s|%s|%s|%s|%s\n" "$title" "$artist" "$pos_fmt" "$dur_fmt" "$status"
+                exit 0
+            fi
+        fi
+        printf "||||\n"
+        ;;
+    toggle) cmus-remote -u 2>/dev/null || true ;;
+    next)   cmus-remote -n 2>/dev/null || true ;;
+    prev)   cmus-remote -r 2>/dev/null || true ;;
+    stop)   cmus-remote -s 2>/dev/null || true ;;
+esac

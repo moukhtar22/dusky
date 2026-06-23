@@ -23,7 +23,7 @@
 
 
 ```bash
-sudo pacman -S --needed qemu-full libvirt virt-install virt-manager virt-viewer dnsmasq vde2 bridge-utils openbsd-netcat edk2-ovmf tuned qemu-img guestfs-tools iptables-nft libosinfo
+sudo pacman -S --needed qemu-full libvirt virt-install virt-manager virt-viewer dnsmasq vde2 bridge-utils openbsd-netcat edk2-ovmf qemu-img guestfs-tools iptables-nft libosinfo
 ```
 
 ```bash

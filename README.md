@@ -1,4 +1,4 @@
-## If you need help with installation or troubleshooting, join the Discord server.
+## If you need help with installation, troubleshooting or just want to hangout, join the Discord server.
 
 
 [Join Discord Server][discord]
@@ -30,6 +30,12 @@ here's what it looks like.
 
 ![waybar_minimal](Pictures/readme_assets/waybar_minimal.webp)
 
+## 🎨 Theming & Acknowledgments
+
+A massive shoutout to [@Ubaidullah-Web-Dev](https://github.com/Ubaidullah-Web-Dev) for his amazing project that enables website theming on gecko based browsers like firefox! This configuration wouldn't have been possible without him.
+
+⭐ **Support the Developer:** If you like the look of this setup, please head over and drop a star on his repository:
+👉 [MatugenFox on GitHub](https://github.com/Ubaidullah-Web-Dev/MatugenFox)
 
 ### There's also a brand new Dusky Control Center that acts as a system overview gui for settings and features, it's exhaustive in it's scope, almost anything you want to set/change can be done from this one stop shop intuitive gui app. I'll keep adding more quality of life features to it over time.
 
@@ -77,6 +83,13 @@ The setup scripts are written to auto detect your hardware and set the appropria
 **Best for:** Users who already have a fresh, unconfigured Arch Linux installation with Hyprland, set up either via the archinstall script or through a manual install. If you have not installed yet, use the Arch ISO and ensure you select Btrfs as the filesystem and Hyprland as the window manager.
 
 after installing arch, boot into the os and then run this in the terminal. 
+
+
+# Dusky ISO is now available!!, its an offline installer.
+```
+https://drive.google.com/drive/folders/1P368khN1p-IfzWoaDnPyQNEcpkKBsOte?usp=sharing
+```
+
 
 ### Step 1: Clone Dotfiles (Bare Repo Method)
 
@@ -130,7 +143,7 @@ The steepest learning curve will be the keybinds. I have designed them to be int
 
 > 💡 Pro Tip:
 >
-> Press CTRL + SHIFT + SPACE to open the Keybinds Cheatsheet. You can click commands in this menu to run them directly!
+> Press `CTRL + SHIFT + ?` to open the Keybinds Cheatsheet. You can click commands in this menu to run them directly!
 
 
 It's been tested to work on other arch based distros with hyprland installed (fresh installed) like catchyOS
@@ -283,7 +296,7 @@ togglalble with a keybind or from rofi.
     
 - **Accessibility:** Text-to-Speech (TTS) and Speech-to-Text (STT) capabilities (hardware dependent).
     
-- **Keybind Cheatsheet:** Press `CTRL` + `SHIFT` + `SPACE` anytime to see your controls.
+- **Keybind Cheatsheet:** Press `CTRL` + `SHIFT` + `?` anytime to see your controls.
     
 
 

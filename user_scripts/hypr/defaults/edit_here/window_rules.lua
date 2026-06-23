@@ -1,0 +1,22 @@
+-- ==============================================================================
+-- USER CONFIGURATION: window_rules.lua
+-- ==============================================================================
+-- Add your custom window rules here.
+-- These will override or add to the defaults found in ~/.config/hypr/source/
+--
+-- Syntax:
+--   hl.window_rule({
+--       name  = "my-rule-name",            -- unique identifier (required)
+--       match = { class = "^kitty$" },     -- match table
+--       float = true,
+--   })
+--
+--   hl.layer_rule({
+--       name  = "my-layer-rule",
+--       match = { namespace = "^waybar$" },
+--       blur  = true,
+--   })
+--
+-- See: https://wiki.hypr.land/Configuring/Basics/Window-Rules/
+-- ==============================================================================
+

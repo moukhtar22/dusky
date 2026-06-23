@@ -1,121 +1,123 @@
 #!/usr/bin/env bash
 #==============================================================================
-# FZF CLIPBOARD MANAGER
-# Role: Arch Linux / Hyprland / UWSM Clipboard Utility
-# Description: High-performance, secure clipboard manager with image previews
-# Dependencies: fzf, cliphist, wl-copy, (optional: chafa, bat, kitty)
+# FZF CLIPBOARD MANAGER (v2.5 - Unified Wayland/UWSM Edition)
+# Arch Linux / Hyprland / UWSM clipboard utility
+# Optimized for: Bash 5.3+, FZF 0.73.1+ (Strict 0.73 Syntax & Background Transformations)
 #==============================================================================
-# NOTE: `set -o errexit` is intentionally OMITTED. Functions rely on
-# `return 1` for control flow (cache miss, non-image entry, etc.).
+# NOTE: `set -o errexit` is intentionally omitted. Several functions use
+# `return 1` for normal control flow.
 #==============================================================================
-
-#
-#        CHANGE THIS LINE FOR CUSTOOMIZING THE UI , IT'S ON LINE 520
-#         --preview="'$SELF' --preview {}" --preview-window="right,45%,~1,wrap" \
 
 set -o nounset
 set -o pipefail
 shopt -s nullglob extglob
+umask 077
 
 #==============================================================================
-# CONFIGURATION
+# CONFIGURATION & STATE
 #==============================================================================
 readonly XDG_DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
 readonly XDG_CACHE_HOME="${XDG_CACHE_HOME:-$HOME/.cache}"
 
-# --- UWSM / Persistence Integration ---
-# Robustly parse ~/.config/uwsm/env to find CLIPHIST_DB_PATH
-if [[ -z "${CLIPHIST_DB_PATH:-}" ]]; then
-    # GUARDRAIL: Only parse the UWSM env file if the user is ACTUALLY running UWSM.
-    if [[ "${DESKTOP_SESSION:-}" == *"uwsm"* || -n "${UWSM_FINALIZE_VARNAMES:-}" ]]; then
-        _uwsm_env="$HOME/.config/uwsm/env"
-        if [[ -f "$_uwsm_env" ]]; then
-            # '|| [[ -n... ]]' prevents silent drops if the file lacks a trailing newline
-            while IFS= read -r _raw_line || [[ -n "$_raw_line" ]]; do
-                # Left-trim whitespace (utilizing extglob enabled at the top of the script)
-                _line="${_raw_line##+([[:space:]])}"
-                
-                # Skip empty lines and comments safely
-                [[ -z "$_line" || "$_line" == "#"* ]] && continue
-                
-                # Strip optional 'export ' prefix and subsequent spaces to catch bare assignments
-                _line="${_line#export }"
-                _line="${_line##+([[:space:]])}"
-                
-                # Match target variable
-                if [[ "$_line" == "CLIPHIST_DB_PATH="* ]]; then
-                    _raw_val="${_line#CLIPHIST_DB_PATH=}"
-                    
-                    # Strip surrounding quotes
-                    if [[ "$_raw_val" =~ ^\"(.*)\"$ || "$_raw_val" =~ ^\'(.*)\'$ ]]; then
-                        _raw_val="${BASH_REMATCH[1]}"
-                    fi
-                    
-                    # Expand variables securely (no eval)
-                    # Braced forms (always unambiguous)
-                    _raw_val="${_raw_val//\$\{XDG_RUNTIME_DIR\}/${XDG_RUNTIME_DIR:-}}"
-                    _raw_val="${_raw_val//\$\{HOME\}/${HOME}}"
-                    
-                    # Unbraced forms (append '/' to prevent greedy matches on longer variable names)
-                    _raw_val="${_raw_val//\$XDG_RUNTIME_DIR\//${XDG_RUNTIME_DIR:-}/}"
-                    _raw_val="${_raw_val//\$HOME\//${HOME}/}"
-                    
-                    export CLIPHIST_DB_PATH="$_raw_val"
-                    break
-                fi
-            done < "$_uwsm_env"
-        fi
-        unset _uwsm_env _raw_line _line _raw_val
-    fi
-    # NOTE: The non-UWSM fallback warning was intentionally removed here to prevent log spam 
-    # for users utilizing standard Hyprland sessions.
+# --- User State File (Configurable Settings) ---
+readonly USER_STATE_FILE="${HOME}/.config/dusky/settings/clipboard_state"
+
+if [[ ! -f "$USER_STATE_FILE" ]]; then
+    mkdir -p -m 700 -- "${USER_STATE_FILE%/*}" 2>/dev/null || :
+    cat << 'EOF' > "$USER_STATE_FILE"
+# =============================================================================
+# CLIPBOARD MANAGER USER SETTINGS
+# =============================================================================
+# FZF Preview window default layout (e.g., right,45%,~3,wrap-word OR down,50%,~3,wrap-word)
+PREVIEW_LAYOUT="right,45%,~3,wrap-word"
+
+# Keybinding mode: "false" for standard, "true" for vim
+VIM_MODE="false"
+
+# Future-proofing: Variables for external pruning scripts/cronjobs
+MAX_CLIP_ITEMS=5000
+MAX_CLIP_AGE_DAYS=7
+EOF
+fi
+
+# Safely extract configuration to prevent syntax/command errors from breaking FZF preview
+PREVIEW_LAYOUT="right,45%,~3,wrap-word"
+if [[ -r "$USER_STATE_FILE" ]]; then
+    _pl=$(grep '^PREVIEW_LAYOUT=' "$USER_STATE_FILE" 2>/dev/null | head -n1 | cut -d'"' -f2 | cut -d"'" -f1)
+    [[ -n "$_pl" ]] && PREVIEW_LAYOUT="$_pl"
+fi
+
+# --- Persistence Integration ---
+readonly STATE_FILE="${HOME}/.config/dusky/settings/clipboard_persistance"
+readonly DB_ENV_FILE="${HOME}/.config/dusky/settings/cliphist_db_env"
+if [[ -f "$DB_ENV_FILE" ]]; then
+    # We allow sourcing this specifically because it's managed entirely by your static toggler
+    source "$DB_ENV_FILE"
 fi
 
 readonly PINS_DIR="$XDG_DATA_HOME/rofi-cliphist/pins"
-readonly CACHE_DIR="$XDG_CACHE_HOME/rofi-cliphist/images"
 
-# Separator (Unit Separator ASCII 0x1F)
+# --- RAM-Disk Cache ---
+if [[ -d "/dev/shm" && -w "/dev/shm" ]]; then
+    readonly CACHE_DIR="/dev/shm/cliphist-fzf/images"
+else
+    readonly CACHE_DIR="$XDG_CACHE_HOME/rofi-cliphist/images"
+fi
+
+readonly SEARCH_INDEX_MAX=10000
+readonly PREVIEW_TEXT_LIMIT=50000
+
 readonly SEP=$'\x1f'
-
-# Icons
 readonly ICON_PIN="📌"
 readonly ICON_IMG="📸"
+readonly ICON_BIN="📦"
 
-# Self reference
+readonly TEXT_LOCALE="C.UTF-8"
+readonly LIST_LOCALE="C"
+
 readonly SELF="$(realpath "${BASH_SOURCE[0]}")"
+readonly SCRIPT_NAME="${SELF##*/}"
 
-# Hash command detection (done once)
 if command -v b2sum &>/dev/null; then
     readonly _HASH_CMD="b2sum"
 else
     readonly _HASH_CMD="md5sum"
 fi
 
-# --- Global Temp File Tracking (Template Pattern) ---
-declare _TMPFILE=""
-
-# --- Invocation Mode Detection ---
-# Determined once at startup so cleanup knows whether kitty_clear is safe.
-# Preview subprocesses must NOT clear kitty images on exit.
+declare -a _TMPFILES=()
 readonly _INVOCATION_MODE="${1:-__main__}"
 
 #==============================================================================
-# SYSTEM HELPERS
+# HELPERS
 #==============================================================================
-log_err() {
-    printf '\e[31m[ERROR]\e[0m %s\n' "$1" >&2
+have() { command -v "$1" &>/dev/null; }
+
+log_err() { printf '\e[31m[ERROR]\e[0m %s\n' "$1" >&2; }
+
+notify() {
+    local title="$1" msg="${2:-}" urgency="${3:-normal}"
+    if have notify-send; then
+        notify-send -u "$urgency" -a "Clipboard" "📋 $title" "$msg" 2>/dev/null
+    fi
+    [[ "$urgency" == "critical" ]] && log_err "$title: $msg"
 }
 
+is_uint() { [[ "${1:-}" =~ ^[0-9]+$ ]]; }
+is_pin_hash() { [[ "${1:-}" =~ ^[[:xdigit:]]{16}$ ]]; }
+is_kitty() { [[ -n "${KITTY_PID:-}${KITTY_WINDOW_ID:-}" || "${TERM:-}" == *kitty* ]]; }
+
+kitty_clear() { printf '\e_Ga=d,d=A\e\\'; }
+
 cleanup() {
-    # Secure temp file cleanup (template pattern)
-    if [[ -n "${_TMPFILE:-}" && -f "$_TMPFILE" ]]; then
-        rm -f "$_TMPFILE" 2>/dev/null || :
-    fi
-    # Kitty image protocol cleanup — ONLY for the main interactive session.
-    # Preview subprocesses (--preview) must NOT clear, or they destroy
-    # the image they just rendered before fzf can display it.
+    local tmp
+    for tmp in "${_TMPFILES[@]}"; do
+        [[ -n "${tmp:-}" && -e "$tmp" ]] && rm -f -- "$tmp" 2>/dev/null || :
+    done
+
     if [[ "$_INVOCATION_MODE" == "__main__" ]]; then
         is_kitty && kitty_clear 2>/dev/null || :
+        # Aggressively clean up any lingering F1 help state files
+        [[ -d "${CACHE_DIR:-}" ]] && rm -f -- "$CACHE_DIR/.show_help_"* 2>/dev/null || :
     fi
 }
 
@@ -123,105 +125,312 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-notify() {
-    local msg="$1" urgency="${2:-normal}"
-    if command -v notify-send &>/dev/null; then
-        notify-send -u "$urgency" -a "Clipboard" "📋 Clipboard" "$msg" 2>/dev/null
-    fi
-    [[ "$urgency" == "critical" ]] && log_err "$msg"
+dir_ready() {
+    [[ -d "$1" && ! -L "$1" ]]
 }
 
-check_deps() {
-    local cmd missing=()
-    for cmd in fzf cliphist wl-copy; do
-        command -v "$cmd" &>/dev/null || missing+=("$cmd")
-    done
-    if ((${#missing[@]})); then
-        notify "Missing: ${missing[*]}\nInstall: sudo pacman -S fzf wl-clipboard cliphist" "critical"
-        exit 1
-    fi
-
-    # Warn about optional deps once
-    local warn_flag="$CACHE_DIR/.warned"
-    if [[ ! -f "$warn_flag" ]]; then
-        mkdir -p "$CACHE_DIR"
-        local opt=()
-        command -v chafa &>/dev/null || opt+=("chafa")
-        command -v bat &>/dev/null || opt+=("bat")
-        ((${#opt[@]})) && notify "Recommended: sudo pacman -S ${opt[*]}" "low"
-        : > "$warn_flag" 2>/dev/null
-    fi
+ensure_private_dir() {
+    local dir="$1"
+    mkdir -p -m 700 -- "$dir" 2>/dev/null || return 1
+    [[ -d "$dir" && ! -L "$dir" ]] || return 1
 }
 
 setup_dirs() {
-    if [[ ! -d "$PINS_DIR" ]] || [[ ! -d "$CACHE_DIR" ]]; then
-        mkdir -p "$PINS_DIR" "$CACHE_DIR" 2>/dev/null
-        chmod 700 "$PINS_DIR" "$CACHE_DIR" 2>/dev/null
-    fi
+    ensure_private_dir "$PINS_DIR" || return 1
+    ensure_private_dir "$CACHE_DIR" || return 1
 }
 
-generate_hash() {
+make_tmpfile() {
+    local dir="$1" template="${2:-.tmp.XXXXXX}" tmp
+    dir_ready "$dir" || ensure_private_dir "$dir" || return 1
+    tmp=$(mktemp "${dir%/}/${template}") || return 1
+    _TMPFILES+=("$tmp")
+    printf '%s' "$tmp"
+}
+
+untrack_tmpfile() {
+    local path="$1" i
+    for i in "${!_TMPFILES[@]}"; do
+        [[ "${_TMPFILES[i]}" == "$path" ]] && { unset "_TMPFILES[$i]"; return 0; }
+    done
+    return 0
+}
+
+remove_tmpfile() {
+    local path="${1:-}"
+    [[ -n "$path" ]] || return 0
+    rm -f -- "$path" 2>/dev/null || :
+    untrack_tmpfile "$path"
+}
+
+cliphist_feed_id() { printf '%s\t\n' "$1"; }
+
+cliphist_decode_to_file() {
+    local id="$1" out="$2"
+    is_uint "$id" || return 1
+    cliphist_feed_id "$id" | cliphist decode > "$out" 2>/dev/null
+}
+
+decode_entry_to_tmp() {
+    local id="$1" dir="$2" template="${3:-.tmp.XXXXXX}" tmp
+    tmp=$(make_tmpfile "$dir" "$template") || return 1
+    if cliphist_decode_to_file "$id" "$tmp"; then
+        printf '%s' "$tmp"
+        return 0
+    fi
+    remove_tmpfile "$tmp"
+    return 1
+}
+
+mime_from_file() { file --mime-type -b -- "$1" 2>/dev/null; }
+describe_file() { file -b -- "$1" 2>/dev/null; }
+mime_is_image() { [[ "${1:-}" == image/* ]]; }
+
+generate_hash_file() {
     local hash_line hash
-    hash_line=$(printf '%s' "$1" | "$_HASH_CMD")
-    # Clean split to handle "hash  filename" output safely
+    hash_line=$("$_HASH_CMD" -- "$1" 2>/dev/null) || return 1
     hash="${hash_line%% *}"
     printf '%s' "${hash:0:16}"
 }
 
-#==============================================================================
-# IMAGE HANDLING
-#==============================================================================
-# Detects actual image files (file utility output)
-_file_is_image() {
-    local lower="${1,,}"
-    case "$lower" in
-        *image*|*bitmap*|*png*|*jpeg*|*gif*|*webp*|*bmp*|*tiff*) return 0 ;;
-    esac
+parse_item() {
+    local input="$1"
+    local -n _type="$2" _id="$3"
+    IFS="$SEP" read -r _ _type _id _ <<< "$input"
+    [[ -n "$_type" ]] || return 1
+    [[ "$_type" == "empty" || "$_type" == "error" || -n "$_id" ]] || return 1
+    return 0
+}
+
+proc_comm() {
+    local pid="$1" comm
+    [[ -r "/proc/$pid/comm" ]] || return 1
+    IFS= read -r comm < "/proc/$pid/comm" || return 1
+    printf '%s' "$comm"
+}
+
+proc_ppid() {
+    local pid="$1" key value
+    [[ -r "/proc/$pid/status" ]] || return 1
+    while IFS=: read -r key value; do
+        [[ "$key" == "PPid" ]] || continue
+        value="${value//[[:space:]]/}"
+        is_uint "$value" || return 1
+        printf '%s' "$value"
+        return 0
+    done < "/proc/$pid/status"
     return 1
 }
 
-cache_image() {
+close_spawned_terminal() {
+    [[ "${CLIPBOARD_FZF_EPHEMERAL:-0}" == "1" ]] || return 0
+    local pid="$PPID" comm
+    while is_uint "$pid" && (( pid > 1 )); do
+        comm=$(proc_comm "$pid") || break
+        case "$comm" in
+            kitty|foot|alacritty)
+                kill -TERM "$pid" 2>/dev/null || :
+                return 0
+                ;;
+        esac
+        pid=$(proc_ppid "$pid") || break
+    done
+}
+
+#==============================================================================
+# STATE FILE I/O (atomic, comment-preserving)
+#==============================================================================
+read_state_value() {
+    local key="$1" file="$2" line
+    [[ -r "$file" ]] || return 1
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        if [[ "$line" =~ ^[[:space:]]*${key}[[:space:]]*=[[:space:]]*\"([^\"]*)\"[[:space:]]*$ ]] \
+        || [[ "$line" =~ ^[[:space:]]*${key}[[:space:]]*=[[:space:]]*\'([^\']*)\'[[:space:]]*$ ]] \
+        || [[ "$line" =~ ^[[:space:]]*${key}[[:space:]]*=[[:space:]]*([^[:space:]#]+) ]]; then
+            printf '%s' "${BASH_REMATCH[1]}"
+            return 0
+        fi
+    done < "$file"
+    return 1
+}
+
+write_state_value() {
+    local key="$1" value="$2" file="$3"
+    local dir="${file%/*}" tmp line found=0
+
+    [[ -d "$dir" ]] || mkdir -p -m 700 -- "$dir" 2>/dev/null || return 1
+    tmp=$(mktemp "${file}.XXXXXX" 2>/dev/null) || return 1
+
+    if [[ -f "$file" ]]; then
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            if (( !found )) && [[ "$line" =~ ^[[:space:]]*${key}[[:space:]]*= ]]; then
+                printf '%s="%s"\n' "$key" "$value"
+                found=1
+            else
+                printf '%s\n' "$line"
+            fi
+        done < "$file" > "$tmp"
+    fi
+
+    (( found )) || printf '%s="%s"\n' "$key" "$value" >> "$tmp"
+
+    if mv -f -- "$tmp" "$file" 2>/dev/null; then
+        return 0
+    fi
+    rm -f -- "$tmp" 2>/dev/null
+    return 1
+}
+
+write_preview_size() {
+    local session_pid="${1:-}"
+    is_uint "$session_pid" || return 0
+
+    local p_cols="${FZF_PREVIEW_COLUMNS:-0}"
+    local t_cols="${FZF_COLUMNS:-0}"
+    local p_lines="${FZF_PREVIEW_LINES:-0}"
+    local t_lines="${FZF_LINES:-0}"
+
+    is_uint "$p_cols" && is_uint "$t_cols" && is_uint "$p_lines" && is_uint "$t_lines" || return 0
+    (( t_cols > 0 && t_lines > 0 && p_cols > 0 )) || return 0
+    [[ -d "$CACHE_DIR" ]] || return 0
+
+    local size_file="${CACHE_DIR}/.preview_size_${session_pid}"
+    local tmp
+    tmp=$(mktemp "${size_file}.XXXXXX" 2>/dev/null) || return 0
+
+    if printf '%s %s %s %s\n' "$p_cols" "$t_cols" "$p_lines" "$t_lines" > "$tmp" 2>/dev/null; then
+        mv -f -- "$tmp" "$size_file" 2>/dev/null || rm -f -- "$tmp" 2>/dev/null
+    else
+        rm -f -- "$tmp" 2>/dev/null
+    fi
+    return 0
+}
+
+#==============================================================================
+# TEXT PREVIEW HELPERS
+#==============================================================================
+safe_print_text_file() {
+    local path="$1" max_chars="${2:-0}"
+    LC_ALL="$TEXT_LOCALE" awk -v max_chars="$max_chars" '
+    BEGIN { out = 0; truncated = 0 }
+    {
+        gsub(/\x1B\[[0-9;]*[a-zA-Z]/, "", $0)
+        gsub(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/, " ", $0)
+
+        if (max_chars > 0) {
+            remaining = max_chars - out
+            if (remaining <= 0) { truncated = 1; exit }
+            if (NR > 1) {
+                if (remaining == 1) { printf "\n"; out++; truncated = 1; exit }
+                printf "\n"; out++; remaining--
+            }
+            line_len = length($0)
+            if (line_len > remaining) {
+                printf "%s", substr($0, 1, remaining)
+                out += remaining; truncated = 1; exit
+            }
+            printf "%s", $0; out += line_len
+        } else {
+            if (NR > 1) printf "\n"
+            printf "%s", $0
+        }
+    }
+    END { if (truncated) exit 10 }
+    ' "$path"
+}
+
+render_text_preview() {
+    local path="$1" max_chars="${2:-0}" status
+    if have bat; then
+        safe_print_text_file "$path" "$max_chars" | \
+            bat --style=plain --color=always --paging=never --wrap=character \
+                --language=txt --terminal-width="${FZF_PREVIEW_COLUMNS:-80}" - 2>/dev/null
+        status=$?
+        (( status == 0 || status == 10 )) || return "$status"
+    else
+        safe_print_text_file "$path" "$max_chars"
+        status=$?
+        (( status == 0 || status == 10 )) || return "$status"
+    fi
+    (( status == 10 )) && printf '\n\n\e[37m[...truncated...]\e[0m\n'
+    return 0
+}
+
+#==============================================================================
+# IMAGE / BINARY HANDLING
+#==============================================================================
+find_cached_image() {
+    local id="$1" path mime
+    for path in "$CACHE_DIR/${id}.img" "$CACHE_DIR/${id}.png"; do
+        [[ -f "$path" && ! -L "$path" ]] || continue
+        mime=$(mime_from_file "$path") || mime=""
+        if mime_is_image "$mime"; then
+            printf '%s' "$path"
+            return 0
+        fi
+        rm -f -- "$path" 2>/dev/null || :
+    done
+    return 1
+}
+
+remove_cached_files() {
     local id="$1"
+    rm -f -- "$CACHE_DIR/${id}.img" "$CACHE_DIR/${id}.png" 2>/dev/null || :
+}
 
-    # SECURITY: Prevent path traversal
-    [[ "$id" =~ ^[0-9]+$ ]] || return 1
+cache_image() {
+    local id="$1" path tmp mime
+    is_uint "$id" || return 1
 
-    local path="${CACHE_DIR}/${id}.png"
-
-    # Cache hit check (reject symlinks)
-    if [[ -f "$path" && ! -L "$path" ]]; then
+    if path=$(find_cached_image "$id"); then
         printf '%s' "$path"
         return 0
     fi
 
-    # Atomic creation with global tracking (template pattern)
-    _TMPFILE=$(mktemp "${CACHE_DIR}/tmp.XXXXXX") || return 1
-
-    # FIX: Use pipe with TAB to match cliphist expectation
-    if printf '%s\t\n' "$id" | cliphist decode > "$_TMPFILE" 2>/dev/null; then
-        local ftype
-        ftype=$(file -b -- "$_TMPFILE" 2>/dev/null)
-        if _file_is_image "${ftype:-}"; then
-            if mv -f "$_TMPFILE" "$path" 2>/dev/null; then
-                _TMPFILE=""
-                printf '%s' "$path"
-                return 0
-            fi
-        fi
+    tmp=$(decode_entry_to_tmp "$id" "$CACHE_DIR" ".img.XXXXXX") || return 1
+    mime=$(mime_from_file "$tmp") || mime=""
+    if ! mime_is_image "$mime"; then
+        remove_tmpfile "$tmp"
+        return 1
     fi
 
-    # Cleanup on failure
-    rm -f "$_TMPFILE" 2>/dev/null || :
-    _TMPFILE=""
+    path="$CACHE_DIR/${id}.img"
+    if mv -f -- "$tmp" "$path" 2>/dev/null; then
+        untrack_tmpfile "$tmp"
+        printf '%s' "$path"
+        return 0
+    fi
+
+    remove_tmpfile "$tmp"
     return 1
 }
 
-is_kitty() {
-    [[ -n "${KITTY_PID:-}${KITTY_WINDOW_ID:-}" || "${TERM:-}" == *kitty* ]]
+copy_text_entry() {
+    local id="$1"
+    is_uint "$id" || return 1
+    cliphist_feed_id "$id" | cliphist decode 2>/dev/null | wl-copy
+    cliphist_feed_id "$id" | cliphist decode 2>/dev/null | wl-copy -p 2>/dev/null || :
 }
 
-kitty_clear() {
-    printf '\e_Ga=d,d=A\e\\'
+copy_binary_entry() {
+    local id="$1" tmp mime status
+    tmp=$(decode_entry_to_tmp "$id" "$CACHE_DIR") || return 1
+    mime=$(mime_from_file "$tmp") || mime="application/octet-stream"
+    [[ -n "$mime" ]] || mime="application/octet-stream"
+    wl-copy --type "$mime" < "$tmp"
+    status=$?
+    wl-copy -p --type "$mime" < "$tmp" 2>/dev/null || :
+    remove_tmpfile "$tmp"
+    return "$status"
+}
+
+copy_image_entry() {
+    local id="$1" path mime
+    path=$(cache_image "$id") || return 1
+    mime=$(mime_from_file "$path") || return 1
+    mime_is_image "$mime" || return 1
+    wl-copy --type "$mime" < "$path"
+    wl-copy -p --type "$mime" < "$path" 2>/dev/null || :
 }
 
 display_image() {
@@ -229,57 +438,98 @@ display_image() {
     local cols="${FZF_PREVIEW_COLUMNS:-40}"
     local rows="${FZF_PREVIEW_LINES:-20}"
 
-    [[ ! -f "$img" ]] && { printf '\e[31mImage not found\e[0m\n'; return 1; }
+    [[ -f "$img" ]] || { printf '\e[31mImage not found\e[0m\n'; return 1; }
 
-    ((rows > 4)) && ((rows -= 3))
+    (( rows > 8 )) && (( rows -= 6 )) || rows=2
+    (( cols > 4 )) && (( cols -= 4 )) || cols=2
 
-    if is_kitty && command -v kitten &>/dev/null; then
-        kitten icat --clear --transfer-mode=memory --stdin=no \
-                    --place="${cols}x${rows}@0x1" "$img" 2>/dev/null
-    elif command -v chafa &>/dev/null; then
-        chafa --size="${cols}x${rows}" --animate=off "$img" 2>/dev/null
-    else
-        printf '\e[33mInstall chafa or use Kitty for image preview\e[0m\n'
+    if is_kitty && have kitten; then
+        if kitten icat --clear --transfer-mode=memory --stdin=no \
+            --place="${cols}x${rows}@0x1" "$img" 2>/dev/null; then
+            return 0
+        fi
     fi
+
+    if have chafa; then
+        chafa -f sixel --size="${cols}x${rows}" --animate=off "$img" 2>/dev/null
+        return $?
+    fi
+
+    printf '\e[33mInstall chafa or use Kitty for image preview\e[0m\n'
+    return 1
+}
+
+#==============================================================================
+# TIME FORMATTING
+#==============================================================================
+format_ts() {
+    local ts="$1"
+    [[ -n "$ts" && "$ts" =~ ^[0-9]+$ ]] || {
+        printf '[ 🕒 Unknown Time ]'
+        return 1
+    }
+    local now week_ago dow date_str time_str day_name
+    
+    printf -v now '%(%s)T' -1
+    week_ago=$(( now - 604800 ))
+
+    printf -v dow '%(%u)T' "$ts"
+    case "$dow" in
+        1) day_name="MON" ;; 2) day_name="TUE" ;; 3) day_name="WED" ;;
+        4) day_name="THU" ;; 5) day_name="FRI" ;; 6) day_name="SAT" ;;
+        7) day_name="SUN" ;; *) day_name="" ;;
+    esac
+
+    printf -v time_str '%(%-I:%M %p)T' "$ts"
+
+    if (( ts >= week_ago )); then
+        printf '[ 🕒 %s %s ]' "$day_name" "$time_str"
+    else
+        printf -v date_str '%(%m/%d)T' "$ts"
+        printf '[ 🕒 %s %s %s ]' "$date_str" "$day_name" "$time_str"
+    fi
+    return 0
 }
 
 #==============================================================================
 # CORE LOGIC: LIST GENERATION
 #==============================================================================
 cmd_list() {
-    local n=0
+    local n=0 pin hash content preview
 
-    # --- Pinned Items ---
-    local pin hash content preview
     while IFS= read -r pin; do
         [[ -r "$pin" ]] || continue
-        ((n++))
 
         hash="${pin##*/}"
         hash="${hash%.pin}"
+        is_pin_hash "$hash" || continue
 
-        # Zero-fork memory protection: Read max 512 bytes natively
         content=""
-        read -r -d '' -n 512 content < "$pin" || true
+        LC_ALL=C IFS= read -r -d '' -n "$SEARCH_INDEX_MAX" content < "$pin" || true
         [[ -z "$content" ]] && continue
 
-        # Inline sanitization
         preview="${content//$'\n'/ }"
         preview="${preview//$'\r'/}"
         preview="${preview//$'\t'/ }"
         preview="${preview//"$SEP"/ }"
-        if ((${#preview} > 55)); then preview="${preview:0:55}…"; fi
 
-        printf '%d %s %s%s%s%s%s\n' "$n" "$ICON_PIN" "$preview" "$SEP" "pin" "$SEP" "$hash"
-    done < <(find "${PINS_DIR:?}" -maxdepth 1 -name '*.pin' -type f -printf '%T@\t%p\n' 2>/dev/null | sort -rn | cut -f2)
+        ((n++))
+        ((${#preview} > SEARCH_INDEX_MAX)) && preview="${preview:0:SEARCH_INDEX_MAX}"
 
-    # --- History Items (Zero-Fork Pipeline) ---
-    # OPTIMIZATION: LC_ALL=C ensures 'tolower' works correctly on non-English locales (Template Compliance)
-    cliphist list 2>/dev/null | LC_ALL=C awk \
+        printf '%d %s %s%s%s%s%s\n' \
+            "$n" "$ICON_PIN" "$preview" "$SEP" "pin" "$SEP" "$hash"
+    done < <(
+        find "${PINS_DIR:?}" -maxdepth 1 -type f -name '*.pin' -printf '%T@\t%p\n' 2>/dev/null |
+        sort -rn |
+        cut -f2
+    )
+
+    cliphist list 2>/dev/null | LC_ALL="$LIST_LOCALE" awk \
         -v pin_count="$n" \
         -v icon_img="$ICON_IMG" \
+        -v icon_bin="$ICON_BIN" \
         -v sep="$SEP" \
-        -v max_len=55 \
+        -v max_len="$SEARCH_INDEX_MAX" \
     '
     BEGIN { FS = "\t"; n = 0 }
 
@@ -293,42 +543,57 @@ cmd_list() {
         n++
         idx = n + pin_count
 
-        # User output is: [[ binary data ... ]] (Space exists)
         if (content ~ /^\[\[ *binary data/) {
+            lc = tolower(content)
 
-            # 1. Extract Dimensions (e.g. 1091x430)
             dims = ""
             if (match(content, /[0-9]+[xX][0-9]+/)) {
                 dims = substr(content, RSTART, RLENGTH)
                 gsub(/[xX]/, "×", dims)
             }
 
-            # 2. Extract Format
             fmt = ""
-            lc = tolower(content)
             if (index(lc, "png")) fmt = "PNG"
             else if (index(lc, "jpeg") || index(lc, "jpg")) fmt = "JPG"
             else if (index(lc, "gif")) fmt = "GIF"
             else if (index(lc, "webp")) fmt = "WebP"
             else if (index(lc, "bmp")) fmt = "BMP"
             else if (index(lc, "tiff")) fmt = "TIFF"
+            else if (index(lc, "svg")) fmt = "SVG"
+            else if (index(lc, "avif")) fmt = "AVIF"
+            else if (index(lc, "heic") || index(lc, "heif")) fmt = "HEIF"
+            else if (index(lc, "jxl")) fmt = "JXL"
+            else if (index(lc, "ico")) fmt = "ICO"
+            else if (index(lc, "pnm") || index(lc, "ppm") || index(lc, "pgm") || index(lc, "pbm")) fmt = "PNM"
+            else if (index(lc, "tga")) fmt = "TGA"
 
-            # 3. Construct Display String
-            info = ""
-            if (dims != "" && fmt != "") info = dims " " fmt
-            else if (dims != "") info = dims
-            else if (fmt != "") info = fmt
-            else info = "[Image]"
-
-            printf "%d %s %s%s%s%s%s\n", idx, icon_img, info, sep, "img", sep, id
+            if (dims != "" || fmt != "") {
+                info = ""
+                if (dims != "" && fmt != "") info = dims " " fmt
+                else if (dims != "") info = dims
+                else info = fmt
+                if (info == "") info = "Image"
+                printf "%d %s %s%s%s%s%s\n", idx, icon_img, info, sep, "img", sep, id
+            } else {
+                info = content
+                sub(/^\[\[ *binary data */, "", info)
+                sub(/ *\]\]$/, "", info)
+                gsub(/[[:cntrl:]]/, " ", info)
+                gsub(/  +/, " ", info)
+                gsub(/^ +| +$/, "", info)
+                if (info == "") info = "Binary"
+                if (length(info) > max_len) info = substr(info, 1, max_len)
+                printf "%d %s %s%s%s%s%s\n", idx, icon_bin, info, sep, "bin", sep, id
+            }
         } else {
-            # Text Entry
             gsub(/[[:cntrl:]]/, " ", content)
             gsub(/  +/, " ", content)
             gsub(/^ +| +$/, "", content)
-            gsub(sep, " ", content) # Strip separator
+            gsub(sep, " ", content)
 
-            if (length(content) > max_len) content = substr(content, 1, max_len) "…"
+            if (content == "") content = "[Whitespace]"
+            if (length(content) > max_len) content = substr(content, 1, max_len)
+            
             printf "%d %s%s%s%s%s\n", idx, content, sep, "txt", sep, id
         }
     }
@@ -342,219 +607,652 @@ cmd_list() {
 }
 
 #==============================================================================
+# PREVIEW STATE PERSISTENCE & TOGGLES
+#==============================================================================
+cmd_move_preview() {
+    local dir="$1"
+    local current next pct
+
+    current=$(read_state_value "PREVIEW_LAYOUT" "$USER_STATE_FILE") || current=""
+    [[ -n "$current" ]] || current="right,45%,~3,wrap-word"
+
+    pct=45
+    [[ "$current" =~ ,([0-9]+)% ]] && pct="${BASH_REMATCH[1]}"
+
+    if [[ "$dir" == "hidden" ]]; then
+        if [[ "$current" == "hidden" ]]; then
+            # If already hidden, unhide it defaulting back to right side
+            next="right,${pct}%,~3,wrap-word"
+        else
+            next="hidden"
+        fi
+    else
+        next="${dir},${pct}%,~3,wrap-word"
+    fi
+
+    write_state_value "PREVIEW_LAYOUT" "$next" "$USER_STATE_FILE" 2>/dev/null || :
+
+    printf 'change-preview-window(%s)\n' "$next"
+}
+
+cmd_resize_preview() {
+    local arrow="$1"
+    local current direction pct rest new_pct
+
+    current=$(read_state_value "PREVIEW_LAYOUT" "$USER_STATE_FILE") || current=""
+    [[ -n "$current" ]] || current="right,45%,~3,wrap-word"
+
+    [[ "$current" == "hidden" ]] && return 0
+
+    if [[ "$current" =~ ^([a-zA-Z]+),([0-9]+)%(.*)$ ]]; then
+        direction="${BASH_REMATCH[1]}"
+        pct="${BASH_REMATCH[2]}"
+        rest="${BASH_REMATCH[3]}"
+    else
+        return 0
+    fi
+
+    new_pct=$pct
+
+    case "$direction" in
+        right)
+            [[ "$arrow" == "left" ]] && (( new_pct += 5 ))
+            [[ "$arrow" == "right" ]] && (( new_pct -= 5 ))
+            ;;
+        left)
+            [[ "$arrow" == "right" ]] && (( new_pct += 5 ))
+            [[ "$arrow" == "left" ]] && (( new_pct -= 5 ))
+            ;;
+        up)
+            [[ "$arrow" == "down" ]] && (( new_pct += 5 ))
+            [[ "$arrow" == "up" ]] && (( new_pct -= 5 ))
+            ;;
+        down)
+            [[ "$arrow" == "up" ]] && (( new_pct += 5 ))
+            [[ "$arrow" == "down" ]] && (( new_pct -= 5 ))
+            ;;
+    esac
+
+    # Do nothing if an irrelevant axis key was pressed
+    if (( new_pct == pct )); then
+        return 0
+    fi
+
+    # Maintain sensible boundaries
+    (( new_pct < 10 )) && new_pct=10
+    (( new_pct > 90 )) && new_pct=90
+
+    local next="${direction},${new_pct}%${rest}"
+    write_state_value "PREVIEW_LAYOUT" "$next" "$USER_STATE_FILE" 2>/dev/null || :
+
+    printf 'change-preview-window(%s)\n' "$next"
+}
+
+cmd_toggle_vim() {
+    local current
+    current=$(read_state_value "VIM_MODE" "$USER_STATE_FILE") || current="false"
+    [[ -z "$current" ]] && current="false"
+    
+    if [[ "$current" == "true" ]]; then
+        write_state_value "VIM_MODE" "false" "$USER_STATE_FILE" 2>/dev/null || :
+    else
+        write_state_value "VIM_MODE" "true" "$USER_STATE_FILE" 2>/dev/null || :
+    fi
+}
+
+#==============================================================================
 # PREVIEW LOGIC
 #==============================================================================
 cmd_preview() {
-    local input="$1"
+    # vim_mode is passed directly via $4 as a command line arg to avoid reading the file in the preview loop!
+    local type="${1:-}" id="${2:-}" session_pid="${3:-}" vim_mode="${4:-false}" pin_file img_path info tmp ts_str=""
 
-    # Clear previous kitty image BEFORE rendering new one (not on exit)
+    write_preview_size "$session_pid"
+
+    # --- F1 HELP MENU INTERCEPT ---
+    # Intercept normal preview rendering entirely if the toggle file is present
+    if [[ -n "$session_pid" && -f "${CACHE_DIR}/.show_help_${session_pid}" ]]; then
+        is_kitty && kitty_clear
+        
+        if [[ "$vim_mode" == "true" ]]; then
+            printf '\e[1;36m━━━ 💡 VIM SHORTCUTS ━━━\e[0m\n\n'
+            printf '  \e[33mF1\e[0m          : Toggle this help menu\n'
+            printf '  \e[33mAlt-M\e[0m       : Toggle Vim/Standard Keybinds\n\n'
+            printf '  \e[36m[ MOVEMENT & SEARCH ]\e[0m\n'
+            printf '  \e[33mj / k\e[0m       : Move Cursor Down / Up\n'
+            printf '  \e[33mg / G\e[0m       : Top / Bottom of list\n'
+            printf '  \e[33mCtrl-D/U\e[0m    : Half page Down / Up\n'
+            printf '  \e[33m/\e[0m           : Enter Search Mode\n'
+            printf '  \e[33mEsc\e[0m         : Exit Search Mode (Return to Normal)\n\n'
+            printf '  \e[36m[ SELECTION ]\e[0m\n'
+            printf '  \e[33mv / V\e[0m       : Toggle selection under cursor\n'
+            printf '  \e[33mJ / K\e[0m       : Toggle selection Down / Up\n'
+            printf '  \e[33mCtrl-A\e[0m      : Select All\n\n'
+            printf '  \e[36m[ PREVIEW & FILTERS ]\e[0m\n'
+            printf '  \e[33mAlt-H/J/K/L\e[0m : Move Preview Panel (Left/Down/Up/Right)\n'
+            printf '  \e[33mAlt-Arrows\e[0m  : Resize Preview Panel\n'
+            printf '  \e[33mAlt-V\e[0m       : Hide / Show Preview Panel\n'
+            printf '  \e[33mAlt-T\e[0m       : Filter Text\n'
+            printf '  \e[33mAlt-I\e[0m       : Filter Images Only\n'
+            printf '  \e[33mAlt-P\e[0m       : Filter Pinned Only\n'
+            printf '  \e[33mAlt-B\e[0m       : Filter Binaries Only\n\n'
+            printf '  \e[36m[ ACTIONS ]\e[0m\n'
+            printf '  \e[33mAlt-A\e[0m       : Pin selected item(s)\n'
+            printf '  \e[33mAlt-D\e[0m       : Delete selected item(s)\n'
+            printf '  \e[33mAlt-W\e[0m       : Wipe entire clipboard\n'
+            printf '  \e[33mEnter\e[0m       : Copy selected to clipboard & exit\n'
+            printf '  \e[33mq / Ctrl-C\e[0m  : Quit / Abort without copying\n'
+        else
+            printf '\e[1;36m━━━ 💡 SHORTCUTS ━━━\e[0m\n\n'
+            printf '  \e[33mF1\e[0m          : Toggle this help menu\n'
+            printf '  \e[33mAlt-M\e[0m       : Toggle Vim/Standard Keybinds\n\n'
+            printf '  \e[33mAlt-H/J/K/L\e[0m : Move Preview (Left/Down/Up/Right)\n'
+            printf '  \e[33mAlt-Arrows\e[0m  : Resize Preview\n'
+            printf '  \e[33mAlt-V\e[0m       : Hide / Show Preview\n\n'
+            printf '  \e[33mAlt-A\e[0m       : Pin selected item(s)\n'
+            printf '  \e[33mAlt-D\e[0m       : Delete selected item(s)\n'
+            printf '  \e[33mAlt-W\e[0m       : Wipe entire clipboard\n\n'
+            printf '  \e[33mAlt-T\e[0m       : Filter Text\n'
+            printf '  \e[33mAlt-I\e[0m       : Filter Images\n'
+            printf '  \e[33mAlt-P\e[0m       : Filter Pinned\n'
+            printf '  \e[33mAlt-B\e[0m       : Filter Binaries\n\n'
+            printf '  \e[33mEnter\e[0m       : Copy to clipboard & exit\n'
+            printf '  \e[33mEsc/Ctrl-C\e[0m  : Abort\n'
+        fi
+        return 0
+    fi
+    # ------------------------------
+
     is_kitty && kitty_clear
 
-    [[ -z "$input" ]] && { printf '\e[90mNo selection.\e[0m\n'; return 0; }
-    [[ "$input" == *"(clipboard empty)"* ]] && {
-        printf '\n\e[90mClipboard is empty.\nCopy something to get started!\e[0m\n'; return 0;
+    [[ -n "$type" ]] || {
+        printf '\e[37mNo selection.\e[0m\n'
+        return 0
     }
 
-    # Right-to-Left Parsing for safety
-    local type id rest
-    id="${input##*"${SEP}"}"
-    rest="${input%"${SEP}"*}"
-    type="${rest##*"${SEP}"}"
+    if [[ "$type" == "pin" ]]; then
+        pin_file="${PINS_DIR:?}/${id}.pin"
+        local ts
+        ts=$(stat -c %Y "$pin_file" 2>/dev/null)
+        ts_str=$(format_ts "$ts")
+    fi
 
     case "$type" in
+        empty)
+            printf '\n\e[37mClipboard is empty.\nCopy something to get started!\e[0m\n'
+            ;;
+        error)
+            printf '\n\e[31mClipboard backend unavailable.\nCheck cliphist and your session environment.\e[0m\n'
+            ;;
         pin)
-            printf '\e[1;33m━━━ %s PINNED ━━━\e[0m\n\n' "$ICON_PIN"
-            local pin_file="${PINS_DIR:?}/${id}.pin"
-            if [[ -f "$pin_file" ]]; then
-                if command -v bat &>/dev/null; then
-                    bat --style=plain --color=always --paging=never --wrap=character \
-                        --terminal-width="${FZF_PREVIEW_COLUMNS:-80}" "$pin_file" 2>/dev/null \
-                    || cat -- "$pin_file"
-                else
-                    cat -- "$pin_file"
-                fi
+            is_pin_hash "$id" || { printf '\e[31mInvalid pin id.\e[0m\n'; return 1; }
+            printf '\e[1;33m━━━ %s PINNED ━━━\e[0m\n' "$ICON_PIN"
+            printf '\e[36m%s\e[0m\n\n' "$ts_str"
+            
+            if [[ -f "$pin_file" && ! -L "$pin_file" ]]; then
+                render_text_preview "$pin_file" "$PREVIEW_TEXT_LIMIT" || {
+                    printf '\n\e[31mFailed to render pin preview.\e[0m\n'
+                    return 1
+                }
             else
                 printf '\e[31mPin file missing.\e[0m\n'
             fi
             ;;
         img)
-            printf '\e[1;36m━━━ %s IMAGE ━━━\e[0m\n' "$ICON_IMG"
-            local img_path
-            if img_path=$(cache_image "$id") && [[ -f "$img_path" ]]; then
-                file -b -- "$img_path" 2>/dev/null | head -c 80
-                printf '\n\n'
+            is_uint "$id" || { printf '\e[31mInvalid image id.\e[0m\n'; return 1; }
+            printf '\e[1;36m━━━ %s IMAGE ━━━\e[0m\n\n' "$ICON_IMG"
+            
+            if img_path=$(cache_image "$id"); then
+                info=$(describe_file "$img_path") || info="Unknown image data."
+                printf '%s\n\n' "${info:0:120}"
                 display_image "$img_path"
             else
                 printf '\n\e[31mFailed to decode image.\e[0m\n'
             fi
             ;;
-        txt)
-            printf '\e[1;32m━━━ TEXT ━━━\e[0m\n\n'
-            local content
-            # FIX: Included \t to ensure cliphist parses the ID correctly
-            if content=$(printf '%s\t\n' "$id" | cliphist decode 2>/dev/null) && [[ -n "$content" ]]; then
-                if ((${#content} > 50000)); then
-                    printf '%s' "${content:0:50000}"
-                    printf '\n\n\e[90m[...truncated...]\e[0m\n'
-                else
-                    printf '%s' "$content"
-                fi
+        bin)
+            is_uint "$id" || { printf '\e[31mInvalid binary id.\e[0m\n'; return 1; }
+            printf '\e[1;35m━━━ %s BINARY ━━━\e[0m\n\n' "$ICON_BIN"
+            tmp=$(decode_entry_to_tmp "$id" "$CACHE_DIR") || { printf '\e[31mFailed to decode entry.\e[0m\n'; return 1; }
+            
+            info=$(describe_file "$tmp") || info="Unknown binary data."
+            printf '%s\n\n' "${info:0:120}"
+            
+            if mime_is_image "$(mime_from_file "$tmp")"; then
+                display_image "$tmp"
             else
-                printf '\e[31mFailed to decode entry.\e[0m\n'
+                printf '\e[37mBinary preview unavailable.\e[0m\n'
             fi
+            remove_tmpfile "$tmp"
+            ;;
+        txt)
+            is_uint "$id" || { printf '\e[31mInvalid text id.\e[0m\n'; return 1; }
+            printf '\e[1;32m━━━ TEXT ━━━\e[0m\n\n'
+            tmp=$(decode_entry_to_tmp "$id" "$CACHE_DIR") || { printf '\e[31mFailed to decode entry.\e[0m\n'; return 1; }
+
+            render_text_preview "$tmp" "$PREVIEW_TEXT_LIMIT" || {
+                remove_tmpfile "$tmp"
+                printf '\n\e[31mFailed to render text preview.\e[0m\n'
+                return 1
+            }
+            remove_tmpfile "$tmp"
             ;;
         *)
             printf '\e[31mUnknown type: %q\e[0m\n' "$type"
+            return 1
             ;;
     esac
 }
 
 #==============================================================================
-# ACTIONS
+# ACTIONS (Multi-Select Batch Capabilities)
 #==============================================================================
-cmd_copy() {
-    local input="$1" visible type id
-    IFS="$SEP" read -r visible type id <<< "$input"
-    [[ -z "${type:-}" || -z "${id:-}" ]] && return 1
-
+cmd_copy_single() {
+    local type="$1" id="$2"
     case "$type" in
         pin)
-            [[ -f "$PINS_DIR/${id}.pin" ]] && wl-copy < "$PINS_DIR/${id}.pin"
+            is_pin_hash "$id" || return 1
+            local pin_file="${PINS_DIR:?}/${id}.pin"
+            [[ -f "$pin_file" && ! -L "$pin_file" ]] || return 1
+            wl-copy < "$pin_file"
+            wl-copy -p < "$pin_file" 2>/dev/null || :
             ;;
-        img)
-            # FIX: Included \t to ensure cliphist parses the ID correctly
-            printf '%s\t\n' "$id" | cliphist decode 2>/dev/null | wl-copy --type "image/png"
-            ;;
-        txt)
-            # FIX: Included \t to ensure cliphist parses the ID correctly
-            printf '%s\t\n' "$id" | cliphist decode 2>/dev/null | wl-copy
-            ;;
+        img) copy_image_entry "$id" ;;
+        bin) copy_binary_entry "$id" ;;
+        txt) copy_text_entry "$id" ;;
+        *) return 1 ;;
     esac
 }
 
-cmd_pin() {
-    local input="$1" visible type id
-    IFS="$SEP" read -r visible type id <<< "$input"
-    [[ -z "${type:-}" || -z "${id:-}" ]] && return 1
+cmd_batch_copy() {
+    local -a txt_chunks=()
+    local last_non_text_type="" last_non_text_id=""
+    local item type id
+    
+    local text_count=0
+    local non_text_count=0
 
-    case "$type" in
-        pin)
-            rm -f "$PINS_DIR/${id}.pin"
-            ;;
-        txt)
-            local content hash pin_file
-            # FIX: Included \t to ensure cliphist parses the ID correctly
-            content=$(printf '%s\t\n' "$id" | cliphist decode 2>/dev/null) || return 1
-            [[ -z "$content" ]] && return 1
+    for item in "$@"; do
+        parse_item "$item" type id || continue
+        if [[ "$type" == "txt" ]]; then
+            txt_chunks+=("$(cliphist_feed_id "$id" | cliphist decode 2>/dev/null)")
+            ((text_count++))
+        elif [[ "$type" == "pin" ]]; then
+            txt_chunks+=("$(cat "$PINS_DIR/${id}.pin" 2>/dev/null)")
+            ((text_count++))
+        elif [[ "$type" == "empty" || "$type" == "error" ]]; then
+            continue
+        else
+            last_non_text_type="$type"
+            last_non_text_id="$id"
+            ((non_text_count++))
+        fi
+    done
+    
+    local total_items=$(( text_count + non_text_count ))
 
-            hash=$(generate_hash "$content")
+    # Data loss mitigation: Explicitly notify the user if batches are mixed or invalid
+    if (( total_items > 1 )); then
+        if (( text_count > 0 && non_text_count > 0 )); then
+            notify "Mixed Batch Copy" "Images/Binaries ignored. Copied combined text only." "normal"
+        elif (( non_text_count > 1 && text_count == 0 )); then
+            notify "Multiple Images" "Cannot batch copy multiple images. Copied the last selected one." "normal"
+        fi
+    fi
+
+    # Merge text selections iteratively, otherwise default to latest img/bin
+    if (( text_count > 0 )); then
+        local IFS=$'\n'
+        local text_concat="${txt_chunks[*]}"
+        printf '%s' "$text_concat" | wl-copy
+        printf '%s' "$text_concat" | wl-copy -p 2>/dev/null || :
+    elif [[ -n "$last_non_text_type" ]]; then
+        cmd_copy_single "$last_non_text_type" "$last_non_text_id"
+    fi
+}
+
+cmd_batch_pin() {
+    local file="$1" input type id tmp hash pin_file
+    [[ -f "$file" ]] || return 1
+    while IFS= read -r input; do
+        parse_item "$input" type id || continue
+        if [[ "$type" == "pin" ]]; then
+            rm -f -- "$PINS_DIR/${id}.pin"
+        elif [[ "$type" == "txt" ]]; then
+            tmp=$(decode_entry_to_tmp "$id" "$PINS_DIR" ".pin.XXXXXX") || continue
+            [[ -s "$tmp" ]] || { remove_tmpfile "$tmp"; continue; }
+            hash=$(generate_hash_file "$tmp") || { remove_tmpfile "$tmp"; continue; }
             pin_file="$PINS_DIR/${hash}.pin"
-
-            # Atomic write with global tracking (template pattern)
-            # CRITICAL: Use cat > target to preserve any symlinks (template pattern)
-            _TMPFILE=$(mktemp "${PINS_DIR}/.pin.XXXXXX") || return 1
-
-            if printf '%s' "$content" > "$_TMPFILE"; then
-                cat "$_TMPFILE" > "$pin_file"
-                rm -f "$_TMPFILE" 2>/dev/null || :
-                _TMPFILE=""
-            else
-                rm -f "$_TMPFILE" 2>/dev/null || :
-                _TMPFILE=""
-                return 1
-            fi
-            ;;
-    esac
+            mv -f -- "$tmp" "$pin_file" 2>/dev/null || remove_tmpfile "$tmp"
+            untrack_tmpfile "$tmp"
+        fi
+    done < "$file"
 }
 
-cmd_delete() {
-    local input="$1" visible type id
-    IFS="$SEP" read -r visible type id <<< "$input"
-    [[ -z "${type:-}" || -z "${id:-}" ]] && return 1
-
-    case "$type" in
-        pin) rm -f "$PINS_DIR/${id}.pin" ;;
-        img)
-            # FIX: Included \t to ensure cliphist parses the ID correctly
-            printf '%s\t\n' "$id" | cliphist delete 2>/dev/null
-            rm -f "$CACHE_DIR/${id}.png"
-            ;;
-        txt)
-            # FIX: Included \t to ensure cliphist parses the ID correctly
-            printf '%s\t\n' "$id" | cliphist delete 2>/dev/null
-            ;;
-    esac
+cmd_batch_delete() {
+    local file="$1" input type id
+    [[ -f "$file" ]] || return 1
+    while IFS= read -r input; do
+        parse_item "$input" type id || continue
+        if [[ "$type" == "pin" ]]; then
+            rm -f -- "$PINS_DIR/${id}.pin"
+        elif [[ "$type" == "txt" || "$type" == "img" || "$type" == "bin" ]]; then
+            cliphist_feed_id "$id" | cliphist delete 2>/dev/null
+            [[ "$type" != "txt" ]] && remove_cached_files "$id"
+        fi
+    done < "$file"
 }
 
 cmd_wipe() {
-    cliphist wipe 2>/dev/null
-    rm -f "$CACHE_DIR"/*.png 2>/dev/null
-    rm -f "$PINS_DIR"/.pin.?????? 2>/dev/null
+    local status=0
+    cliphist wipe 2>/dev/null || status=$?
+    rm -f -- \
+        "$CACHE_DIR"/*.img \
+        "$CACHE_DIR"/*.png \
+        "$CACHE_DIR"/.img.?????? \
+        "$CACHE_DIR"/.tmp.?????? \
+        "$PINS_DIR"/.pin.?????? \
+        2>/dev/null || :
+    return "$status"
+}
+
+cmd_prune_cache() {
+    local list_output path base id
+    local -A live_ids=()
+
+    list_output=$(cliphist list 2>/dev/null) || return 0
+
+    while IFS=$'\t' read -r id _; do
+        is_uint "$id" || continue
+        live_ids["$id"]=1
+    done <<< "$list_output"
+
+    for path in "$CACHE_DIR"/*.img "$CACHE_DIR"/*.png; do
+        [[ -e "$path" || -L "$path" ]] || continue
+        if [[ -L "$path" ]]; then
+            rm -f -- "$path" 2>/dev/null || :
+            continue
+        fi
+        [[ -f "$path" ]] || continue
+
+        base="${path##*/}"
+        id="${base%%.*}"
+
+        if ! is_uint "$id" || [[ -z "${live_ids[$id]+x}" ]]; then
+            rm -f -- "$path" 2>/dev/null || :
+        fi
+    done
 }
 
 #==============================================================================
 # UI & ENTRY POINT
 #==============================================================================
 show_menu() {
-    if [[ ! -t 0 ]] || [[ ! -t 1 ]]; then
+    if [[ ! -t 0 || ! -t 1 ]]; then
         local term_cmd=()
-        if command -v kitty &>/dev/null; then
-            term_cmd=(kitty --class=cliphist-fzf --title="Clipboard" -o confirm_os_window_close=0 -e "$SELF")
-        elif command -v foot &>/dev/null; then
-            term_cmd=(foot --app-id=cliphist-fzf --title="Clipboard" --window-size-chars=95x20 "$SELF")
-        elif command -v alacritty &>/dev/null; then
-            term_cmd=(alacritty --class=cliphist-fzf --title="Clipboard" -o window.dimensions.columns=95 -o window.dimensions.lines=20 -e "$SELF")
+        if have kitty; then
+            term_cmd=(kitty --class=cliphist-fzf --title=Clipboard -o confirm_os_window_close=0 -e env CLIPBOARD_FZF_EPHEMERAL=1 "$SELF")
+        elif have foot; then
+            term_cmd=(foot --app-id=cliphist-fzf --title=Clipboard --window-size-chars=95x20 env CLIPBOARD_FZF_EPHEMERAL=1 "$SELF")
+        elif have alacritty; then
+            term_cmd=(alacritty --class=cliphist-fzf --title=Clipboard -o window.dimensions.columns=95 -o window.dimensions.lines=20 -e env CLIPBOARD_FZF_EPHEMERAL=1 "$SELF")
         else
             notify "No terminal found." "critical"; exit 1
         fi
         exec "${term_cmd[@]}"
     fi
 
-    local selection
-    selection=$(cmd_list | fzf \
-        --ansi --reverse --no-sort --exact --no-multi --cycle \
-        --margin=0 --padding=0 \
-        --border=rounded --border-label=" 📋 Clipboard " --border-label-pos=3 \
-        --info=hidden --header="Alt+ (t=Wipe u=Pin/Unpin y=Delete)" --header-first \
-        --prompt="  " --pointer="▌" --delimiter="$SEP" --with-nth=1 \
-        --preview="'$SELF' --preview {}" --preview-window="right,45%,~1,wrap" \
-        --bind="enter:accept" \
-        --bind="alt-u:execute-silent('$SELF' --pin {})+reload('$SELF' --list)" \
-        --bind="alt-y:execute-silent('$SELF' --delete {})+reload('$SELF' --list)" \
-        --bind="alt-t:execute-silent('$SELF' --wipe)+reload('$SELF' --list)" \
-        --bind="esc:abort" --bind="ctrl-c:abort"
-    ) || true
-
-    if [[ -n "$selection" ]]; then
-        cmd_copy "$selection"
+    local mode_label="DISK"
+    if [[ -f "$STATE_FILE" ]]; then
+        local p_state; read -r p_state < "$STATE_FILE" 2>/dev/null || true
+        [[ "$p_state" == "false" ]] && mode_label="RAM"
     fi
 
-    # SAFETY: Only kill the parent process if we are reasonably sure it is
-    # the ephemeral kitty window we spawned.
-    if [[ -n "${KITTY_PID:-}" || "${TERM:-}" == *kitty* ]]; then
-        sleep 0.10  # Allow wl-copy time to handshake with Wayland
-        kill -15 $PPID 2>/dev/null || :
+    local combined_label=" 📋 Clipboard [${mode_label}] "
+    local output=""
+
+    local cap="${SELF@Q} --capture-size $$"
+    
+    # Establish a fresh toggle state for the help menu based on this process ID
+    local help_file="${CACHE_DIR}/.show_help_$$"
+    local toggle_file="${CACHE_DIR}/.toggle_mode_$$"
+    local initial_query=""
+    
+    rm -f -- "$help_file" "$toggle_file" 2>/dev/null || :
+
+    # Wrap purely the execution phase so drag-resizes and original layout bindings remain completely intact
+    while true; do
+        local current_vim_mode
+        current_vim_mode=$(read_state_value "VIM_MODE" "$USER_STATE_FILE") || current_vim_mode="false"
+        [[ -z "$current_vim_mode" ]] && current_vim_mode="false"
+        
+        local current_preview_layout
+        current_preview_layout=$(read_state_value "PREVIEW_LAYOUT" "$USER_STATE_FILE") || current_preview_layout="${PREVIEW_LAYOUT:-right,45%,~3,wrap-word}"
+        [[ -n "$current_preview_layout" ]] || current_preview_layout="${PREVIEW_LAYOUT:-right,45%,~3,wrap-word}"
+
+        # Build arguments intelligently as an array to avoid quoting nightmares and maintain 1:1 original logic
+        local fzf_args=(
+            --multi --ansi --reverse --no-sort --exact --cycle --scheme=history
+            --margin=0 --padding=0 --highlight-line
+            --border=rounded --border-label="$combined_label" --border-label-pos=3
+            --info=hidden --header=" F1 Help | Alt-M VIM " --header-first
+            --pointer="▌" --delimiter="$SEP" --with-nth=1
+            --track --id-nth=3
+            --query="$initial_query"
+            --preview="${SELF@Q} --preview {2} {3} $$ ${current_vim_mode@Q} # \$FZF_PREVIEW_COLUMNS \$FZF_PREVIEW_LINES \$FZF_COLUMNS \$FZF_LINES"
+            --preview-window="$current_preview_layout"
+            
+            # Use `{...}` exclusively when dealing with bash test conditions containing `[` and `]` internally.
+            # Use `[...]` for everything else, neutralizing issues with `(`, `)`, `{`, and `}` strings entirely.
+            --bind="f1:execute-silent{if [ -f ${help_file@Q} ]; then rm -f ${help_file@Q}; else touch ${help_file@Q}; fi}+refresh-preview"
+            --bind="resize:execute-silent[ $cap & ]"
+            
+            --bind="alt-h:bg-transform[${SELF@Q} --move-preview left]"
+            --bind="alt-j:bg-transform[${SELF@Q} --move-preview down]"
+            --bind="alt-k:bg-transform[${SELF@Q} --move-preview up]"
+            --bind="alt-l:bg-transform[${SELF@Q} --move-preview right]"
+            --bind="alt-v:bg-transform[${SELF@Q} --move-preview hidden]"
+            
+            --bind="alt-left:bg-transform[${SELF@Q} --resize-preview left]"
+            --bind="alt-right:bg-transform[${SELF@Q} --resize-preview right]"
+            --bind="alt-up:bg-transform[${SELF@Q} --resize-preview up]"
+            --bind="alt-down:bg-transform[${SELF@Q} --resize-preview down]"
+
+            --bind="alt-t:change-query[!${ICON_IMG} !${ICON_PIN} !${ICON_BIN} ]"
+            --bind="alt-i:change-query[$ICON_IMG ]"
+            --bind="alt-p:change-query[$ICON_PIN ]"
+            --bind="alt-b:change-query[$ICON_BIN ]"
+            
+            --bind="alt-a:execute-silent[${SELF@Q} --batch-pin {+f}]+reload-sync[${SELF@Q} --list]"
+            --bind="alt-d:execute-silent[${SELF@Q} --batch-delete {+f}]+reload-sync[${SELF@Q} --list]"
+            --bind="alt-w:execute-silent[${SELF@Q} --wipe]+reload-sync[${SELF@Q} --list]"
+            --bind="enter:execute-silent[$cap]+accept"
+            --bind="alt-m:execute-silent[${SELF@Q} --toggle-vim]+execute-silent[printf '%s' {q} > ${toggle_file@Q}]+abort"
+        )
+
+        if [[ "$current_vim_mode" == "true" ]]; then
+            # Canonicalized mapping array WITHOUT backspace/delete.
+            # We let FZF's native `disable-search` implicitly freeze the query buffer during normal mode.
+            # This ensures their default `backward-delete-char` functions operate perfectly when you hit `/` to search.
+            local unmapped="a,b,c,d,e,f,h,i,l,m,n,o,p,r,s,t,u,w,x,y,z,A,B,C,D,E,F,H,I,L,M,N,O,P,Q,R,S,T,U,W,X,Y,Z,0,1,2,3,4,5,6,7,8,9,space"
+            local ignore_binds="${unmapped//,/:ignore,}:ignore"
+
+            fzf_args+=(
+                --prompt=" 🅝 (q:quit /:search) > "
+                --bind="start:disable-search"
+                --bind="$ignore_binds"
+                
+                # change-prompt contains nested parens; [...] securely wraps the payload.
+                --bind="esc:change-prompt[ 🅝 (q:quit /:search) > ]+disable-search+rebind[${unmapped},j,k,g,G,J,K,v,V,q,ctrl-a,ctrl-d,ctrl-u,/]"
+                --bind="ctrl-c:execute-silent[$cap]+abort"
+                --bind="j:down"
+                --bind="k:up"
+                --bind="g:first"
+                --bind="G:last"
+                --bind="J:toggle+down"
+                --bind="K:toggle+up"
+                --bind="v:toggle"
+                --bind="V:toggle"
+                --bind="ctrl-a:select-all"
+                --bind="ctrl-d:half-page-down"
+                --bind="ctrl-u:half-page-up"
+                --bind="q:execute-silent[$cap]+abort"
+                --bind="/:change-prompt[ 🔎 > ]+enable-search+unbind[${unmapped},j,k,g,G,J,K,v,V,q,ctrl-a,ctrl-d,ctrl-u,/]"
+            )
+        else
+            fzf_args+=(
+                --prompt="  "
+                --bind="esc:execute-silent[$cap]+abort"
+                --bind="ctrl-c:execute-silent[$cap]+abort"
+            )
+        fi
+
+        # Pass constructed array safely
+        output=$(
+            cmd_list | fzf "${fzf_args[@]}"
+        ) || true
+
+        # -------------------------------------------------------------------------
+        # Drag-resize persistence
+        # -------------------------------------------------------------------------
+        local size_file="${CACHE_DIR}/.preview_size_$$"
+        if [[ -f "$size_file" ]]; then
+            local p_cols=0 t_cols=0 p_lines=0 t_lines=0
+            read -r p_cols t_cols p_lines t_lines < "$size_file" 2>/dev/null || true
+            rm -f -- "$size_file" 2>/dev/null || :
+
+            # Re-read PREVIEW_LAYOUT in case the user moved it during the session.
+            local current_layout
+            current_layout=$(read_state_value "PREVIEW_LAYOUT" "$USER_STATE_FILE") \
+                || current_layout="$PREVIEW_LAYOUT"
+            [[ -n "$current_layout" ]] || current_layout="$PREVIEW_LAYOUT"
+
+            if [[ "$current_layout" != "hidden" ]] \
+                && is_uint "$p_cols" && is_uint "$t_cols" \
+                && is_uint "$p_lines" && is_uint "$t_lines" \
+                && (( t_cols > 0 && t_lines > 0 )); then
+
+                local orient="" old_pct=45
+                if [[ "$current_layout" == right* || "$current_layout" == left* ]]; then
+                    orient="h"
+                elif [[ "$current_layout" == up* || "$current_layout" == down* ]]; then
+                    orient="v"
+                fi
+                [[ "$current_layout" =~ ,([0-9]+)% ]] && old_pct="${BASH_REMATCH[1]}"
+
+                if [[ -n "$orient" && "$current_layout" =~ ,[0-9]+% ]]; then
+                    # FZF provides the *inner content* width/height in p_cols/p_lines.
+                    # To find the true layout percentage, we must add back the preview window's
+                    # overhead (borders, padding, scrollbars). 
+                    # ~3 columns for horizontal overhead, ~2 lines for vertical.
+                    # We also subtract 2 from total terminal size to account for the main rounded borders.
+                    local numer denom new_pct
+                    if [[ "$orient" == "h" ]]; then
+                        numer=$(( p_cols + 3 ))
+                        denom=$(( t_cols - 2 ))
+                    else
+                        numer=$(( p_lines + 2 ))
+                        denom=$(( t_lines - 2 ))
+                    fi
+
+                    if (( denom > 0 && numer > 0 )); then
+                        new_pct=$(( (numer * 100 + denom / 2) / denom ))
+                        (( new_pct < 10 )) && new_pct=10
+                        (( new_pct > 90 )) && new_pct=90
+
+                        # Drift threshold: rounding plus border-correction error
+                        # can produce a slight delta with no actual drag. Require >= 5%
+                        # change to count as a deliberate user drag — otherwise repeated
+                        # opens or toggles would iteratively creep the saved value.
+                        local diff=$(( new_pct > old_pct ? new_pct - old_pct : old_pct - new_pct ))
+                        if (( diff >= 5 )); then
+                            local new_layout="${current_layout/,${old_pct}%/,${new_pct}%}"
+                            if [[ "$new_layout" != "$current_layout" ]]; then
+                                write_state_value "PREVIEW_LAYOUT" "$new_layout" "$USER_STATE_FILE" 2>/dev/null || :
+                            fi
+                        fi
+                    fi
+                fi
+            fi
+        fi
+        
+        if [[ -f "$toggle_file" ]]; then
+            initial_query=$(cat "$toggle_file" 2>/dev/null)
+            rm -f -- "$toggle_file" 2>/dev/null || :
+            continue
+        fi
+        
+        break
+    done
+
+    # Clean up help and toggle files on natural exit
+    rm -f -- "$help_file" "$toggle_file" 2>/dev/null || :
+
+    mapfile -t lines <<< "$output"
+    if ((${#lines[@]} == 0)) || [[ -z "${lines[0]:-}" ]]; then
+        close_spawned_terminal
+        return
     fi
+
+    cmd_batch_copy "${lines[@]}"
+    
+    sleep 0.10
+    close_spawned_terminal
 }
 
 main() {
-    # Pre-flight: Bash version guard (template pattern)
     if (( BASH_VERSINFO[0] < 5 )); then
-        log_err "Bash 5.0+ required (found ${BASH_VERSION})"; exit 1
+        log_err "Bash 5.0+ required (found ${BASH_VERSION})"
+        exit 1
     fi
 
     case "${1:-}" in
-        --list)    cmd_list ;;
-        --preview) [[ $# -ge 2 ]] && { shift; cmd_preview "$1"; } ;;
-        --pin)     [[ $# -ge 2 ]] && { shift; cmd_pin "$1"; } ;;
-        --delete)  [[ $# -ge 2 ]] && { shift; cmd_delete "$1"; } ;;
-        --wipe)    cmd_wipe ;;
-        --help|-h)
-            printf 'Usage: clipboard-manager [launch|--help]\n'
-            printf 'Dependencies: fzf, cliphist, wl-clipboard\n'
+        --list) cmd_list ;;
+        --preview)
+            [[ $# -ge 3 ]] || exit 1
+            cmd_preview "$2" "$3" "${4:-}" "${5:-false}"
             ;;
-        "") check_deps; setup_dirs; show_menu ;;
-        *)  log_err "Unknown argument: ${1}"; exit 1 ;;
+        --capture-size)
+            write_preview_size "${2:-}"
+            ;;
+        --move-preview)
+            [[ $# -ge 2 ]] || exit 1
+            cmd_move_preview "$2"
+            ;;
+        --resize-preview)
+            [[ $# -ge 2 ]] || exit 1
+            cmd_resize_preview "$2"
+            ;;
+        --toggle-vim)
+            cmd_toggle_vim
+            ;;
+        --batch-pin)
+            setup_dirs >/dev/null 2>&1 || :
+            cmd_batch_pin "${2:-}"
+            ;;
+        --batch-delete)
+            setup_dirs >/dev/null 2>&1 || :
+            cmd_batch_delete "${2:-}"
+            ;;
+        --wipe)
+            setup_dirs >/dev/null 2>&1 || :
+            cmd_wipe
+            ;;
+        --prune-cache)
+            setup_dirs >/dev/null 2>&1 || :
+            cmd_prune_cache
+            ;;
+        --help|-h)
+            printf 'Usage: %s\nRun to open the clipboard menu.\n' "$SCRIPT_NAME"
+            ;;
+        "")
+            setup_dirs || { notify "Failed to create required directories." "critical"; exit 1; }
+            show_menu
+            ;;
+        *)
+            log_err "Unknown argument: $1"
+            exit 1
+            ;;
     esac
 }
 

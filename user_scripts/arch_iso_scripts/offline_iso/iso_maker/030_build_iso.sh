@@ -1,168 +1,526 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# 030_build_iso.sh - THE FACTORY ISO GENERATOR
-# Architecture: Bypasses airootfs RAM exhaustion via dynamic mkarchiso patching.
-# Payload: Injects and maps executable dotfiles directly into /etc/skel.
+# 030_build_iso.sh - THE MASTER FACTORY ISO GENERATOR (Dual-Arch Edition)
+# Description: Orchestrates ZRAM setup, dotfile injection, and offline ISO build.
+# Payload: Configures Live Environment, Overrides dots, merges Offline Repos.
 # ==============================================================================
 set -euo pipefail
+export LC_ALL=C
+export LANG=C
 
-# --- 1. CONFIGURATION ---
-readonly ZRAM_DIR="/mnt/zram1/dusky_iso"
-readonly PROFILE_DIR="${ZRAM_DIR}/profile"
-readonly WORK_DIR="${ZRAM_DIR}/work"
-readonly OUT_DIR="${ZRAM_DIR}/out"
+# ==============================================================================
+# SECTION 1 — PRIVILEGE ESCALATION & PATH RESOLUTION
+# ==============================================================================
+if [[ "${EUID}" -ne 0 ]]; then
+  _SELF="$(readlink -f "${BASH_SOURCE[0]}")"
+  if command -v sudo &>/dev/null; then
+    printf "\n\033[1;33m[!!]\033[0m Not running as root — elevating...\n"
+    exec sudo --preserve-env=TERM,NO_COLOR -- bash -- "${_SELF}" "$@"
+  else
+    printf "\n\033[1;31m[XX]\033[0m Must run as root; 'sudo' not found.\n" >&2
+    exit 1
+  fi
+fi
 
-# Repo Merge Paths
+if [[ -n "${SUDO_USER:-}" ]]; then
+    REAL_HOME=$(getent passwd "${SUDO_USER}" | cut -d: -f6)
+else
+    REAL_HOME="${HOME}"
+fi
+
+# ==============================================================================
+# SECTION 2 — CONFIGURATION & DYNAMIC VARIABLES
+# ==============================================================================
+readonly FINAL_DEST_DIR="/mnt/zram1"
+readonly SOURCE_DIR="${REAL_HOME}/user_scripts/arch_iso_scripts/offline_iso"
+readonly WORKSPACE="${FINAL_DEST_DIR}/dusky_iso"
+readonly PROFILE_DIR="${WORKSPACE}/profile"
+readonly WORK_DIR="${WORKSPACE}/work"
+readonly OUT_DIR="${WORKSPACE}/out"
+
 readonly OFFLINE_REPO_BASE="/srv/offline-repo"
 readonly OFFLINE_REPO_OFFICIAL="${OFFLINE_REPO_BASE}/official"
 readonly OFFLINE_REPO_AUR="${OFFLINE_REPO_BASE}/aur"
 
-readonly MKARCHISO_CUSTOM="${ZRAM_DIR}/mkarchiso_dusky"
-readonly PATCH_FILE="${ZRAM_DIR}/repo_inject.patch"
-
-# Output Naming (Format: dusky_MM_YY.iso)
+readonly MKARCHISO_CUSTOM="${WORKSPACE}/mkarchiso_dusky"
+readonly PATCH_FILE="${WORKSPACE}/repo_inject.patch"
 readonly FINAL_ISO_NAME="dusky_$(date +%m_%y).iso"
 
-# --- 2. PRE-FLIGHT CHECKS ---
-if (( EUID != 0 )); then
-    echo "[INFO] Root required — re-launching under sudo..."
-    exec sudo "$0" "$@"
-fi
+declare -g INTERACTIVE_MODE=1
+declare -g REPO_MODE=0  # 1 = Standard Arch, 2 = CachyOS
 
-if [[ ! -d "${OFFLINE_REPO_OFFICIAL}" ]]; then
-    echo "[ERR] Official offline repository not found at ${OFFLINE_REPO_OFFICIAL}!" >&2
-    exit 1
-fi
+# ==============================================================================
+# SECTION 3 — COLORS & LOGGING
+# ==============================================================================
+_setup_colors() {
+  BOLD='' GREEN='' YELLOW='' RED='' CYAN='' MAGENTA='' DIM='' RESET=''
+  if [[ -z "${NO_COLOR:-}" ]] && [[ -t 1 ]] && command -v tput &>/dev/null; then
+    BOLD=$(tput bold)
+    GREEN=$(tput setaf 2)
+    YELLOW=$(tput setaf 3)
+    RED=$(tput setaf 1)
+    CYAN=$(tput setaf 6)
+    MAGENTA=$(tput setaf 5)
+    DIM=$(tput dim 2>/dev/null || true)
+    RESET=$(tput sgr0)
+  fi
+  readonly BOLD GREEN YELLOW RED CYAN MAGENTA DIM RESET
+}
+_setup_colors
 
-if ! grep -q '^_build_iso_image() {' /usr/bin/mkarchiso; then
-    echo "[ERR] Could not locate '_build_iso_image() {' in /usr/bin/mkarchiso." >&2
-    exit 1
-fi
+log_info() { printf '\n%s==>%s %s\n' "${BOLD}${CYAN}" "${RESET}" "$*"; }
+log_step() { printf '  %s->%s %s\n' "${BOLD}${MAGENTA}" "${RESET}" "$*"; }
+log_ok()   { printf '%s[OK]%s %s\n' "${BOLD}${GREEN}" "${RESET}" "$*"; }
+log_warn() { printf '%s[!!]%s %s\n' "${BOLD}${YELLOW}" "${RESET}" "$*" >&2; }
+log_err()  { printf '%s[XX]%s %s\n' "${BOLD}${RED}" "${RESET}" "$*" >&2; }
+die()      { log_err "$*"; exit 1; }
 
-echo -e "\n\e[1;34m==>\e[0m \e[1mINITIATING DUSKY ARCH ISO FACTORY BUILD\e[0m\n"
+# ==============================================================================
+# SECTION 4 — ARGUMENT PARSING & INTERACTIVE UI
+# ==============================================================================
+_print_logo() {
+  printf '\n%s' "${BOLD}${CYAN}"
+  printf '╔══════════════════════════════════════════════════════════════╗\n'
+  printf '║       Dusky Arch ISO Factory Builder  (Dual-Arch)            ║\n'
+  printf '╚══════════════════════════════════════════════════════════════╝\n'
+  printf '%s\n' "${RESET}"
+}
 
-# --- 3. LIVE ENVIRONMENT HOOKS (Auto-Start & SSH) ---
-echo "  -> Configuring Auto-Start Payload and SSH Access..."
-cat << 'EOF' > "${PROFILE_DIR}/airootfs/root/.automated_script.sh"
+_parse_args() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --arch) REPO_MODE=1; shift ;;
+      --cachyos) REPO_MODE=2; shift ;;
+      --auto) INTERACTIVE_MODE=0; shift ;;
+      *) die "Unknown argument: $1\nUsage: $0 [--arch | --cachyos] [--auto]" ;;
+    esac
+  done
+}
+
+_prompt_build_mode() {
+  (( REPO_MODE != 0 )) && return 0
+  (( INTERACTIVE_MODE )) || { REPO_MODE=2; return 0; }
+
+  printf '\n%s==>%s %sSelect Live ISO Target Architecture%s\n' "${BOLD}${CYAN}" "${RESET}" "${BOLD}" "${RESET}"
+  printf '  1) Standard Arch Linux (Maximum Boot Compatibility)\n'
+  printf '  2) CachyOS x86-64-v3 (Optimized Live Environment)\n\n'
+  
+  local choice
+  while true; do
+    read -r -p "  Enter choice [1-2] (default=2): " choice
+    choice="${choice:-2}"
+    case "$choice" in
+      1) REPO_MODE=1; break ;;
+      2) REPO_MODE=2; break ;;
+      *) printf "  %sInvalid choice.%s\n" "${RED}" "${RESET}" ;;
+    esac
+  done
+}
+
+# ==============================================================================
+# SECTION 5 — DEPENDENCY RESOLUTION
+# ==============================================================================
+_install_dependencies() {
+  log_info "Resolving & Installing Host Build Dependencies"
+  
+  # Declare strict arrays of dependencies essential to the mkarchiso environment & script execution
+  local deps=(
+    archiso
+    git
+    curl
+    gawk
+    sed
+    grep
+  )
+
+  log_step "Enforcing required packages: ${deps[*]}..."
+  
+  # Explicitly sync and install strictly needed dependencies without user interaction
+  pacman -S --needed --noconfirm "${deps[@]}" >/dev/null || die "Failed to install required dependencies."
+  
+  log_ok "Core host dependencies are present."
+}
+
+# ==============================================================================
+# SECTION 6 — PREFLIGHT FORENSICS & KEYS
+# ==============================================================================
+_preflight_checks() {
+  log_info "Running preflight forensics"
+  
+  [[ -z "${WORKSPACE}" || "${WORKSPACE}" == "/" ]] && die "Workspace variable is unsafe (${WORKSPACE}). Aborting."
+  [[ ! -d "${OFFLINE_REPO_OFFICIAL}" ]] && die "Official offline repository missing at ${OFFLINE_REPO_OFFICIAL}."
+  
+  if [[ ! -d "${OFFLINE_REPO_AUR}" ]]; then
+      log_warn "AUR offline repository NOT found at ${OFFLINE_REPO_AUR}. Proceeding without AUR packages."
+  else
+      log_step "AUR cache object count:      $(ls -lah "${OFFLINE_REPO_AUR}/" | wc -l)"
+  fi
+  
+  if ! command -v git &>/dev/null; then die "git is required but not installed."; fi
+  if ! grep -q '^_build_iso_image() {' /usr/bin/mkarchiso; then die "Could not locate '_build_iso_image() {' in /usr/bin/mkarchiso. Is archiso updated?"; fi
+
+  log_step "Official cache object count: $(ls -lah "${OFFLINE_REPO_OFFICIAL}/" | wc -l)"
+
+  if (( REPO_MODE == 2 )); then
+    if ! pacman -Q cachyos-keyring &>/dev/null; then
+      log_warn "CachyOS mode requires 'cachyos-keyring' installed on the HOST build system."
+      if (( INTERACTIVE_MODE )); then
+        local install_keys
+        read -r -p "  Would you like to automatically install the CachyOS keyring now? [y/N]: " install_keys
+        if [[ "${install_keys}" =~ ^[Yy]$ ]]; then
+          log_info "Fetching and installing CachyOS keyring..."
+          pacman-key --recv-keys F3B607488DB35A47 --keyserver keyserver.ubuntu.com || die "Failed to receive CachyOS key."
+          pacman-key --lsign-key F3B607488DB35A47 || die "Failed to locally sign CachyOS key."
+          
+          local keyring_pkg
+          keyring_pkg=$(curl -sL https://mirror.cachyos.org/repo/x86_64/cachyos/ | grep -o 'cachyos-keyring-[0-9][^"]*\.pkg\.tar\.zst' | head -n1 || true)
+          if [[ -n "$keyring_pkg" ]]; then
+             pacman -U --noconfirm "https://mirror.cachyos.org/repo/x86_64/cachyos/${keyring_pkg}" || die "Failed to install cachyos-keyring."
+          else
+             pacman -U --noconfirm 'https://mirror.cachyos.org/repo/x86_64/cachyos/cachyos-keyring-20240331-1-any.pkg.tar.zst' || die "Failed fallback install."
+          fi
+          log_ok "CachyOS keyring successfully installed."
+        else
+          die "Cannot proceed without cachyos-keyring."
+        fi
+      else
+        die "Missing cachyos-keyring on host (running non-interactively)."
+      fi
+    fi
+  fi
+  log_ok "Preflight complete. Ready to build."
+}
+
+# ==============================================================================
+# SECTION 7 — ZRAM CLEAN ROOM & ARCHISO SETUP
+# ==============================================================================
+_setup_clean_room() {
+  log_info "Configuring Archiso Clean Room"
+
+  [[ -d "${WORKSPACE}" ]] && rm -rf "${WORKSPACE}"
+  rm -f "${FINAL_DEST_DIR}/dusky_"*.iso
+
+  mkdir -p "${WORKSPACE}"
+  log_step "Cloning 'releng' blueprint to workspace..."
+  cp -a /usr/share/archiso/configs/releng "${PROFILE_DIR}"
+  log_ok "Clean room established."
+}
+
+# ==============================================================================
+# SECTION 8 — STAGING ORCHESTRATION PAYLOADS & SYSTEMD KEYS
+# ==============================================================================
+_stage_payloads() {
+  log_info "Injecting Airootfs Staging Payloads"
+  mkdir -p "${PROFILE_DIR}/airootfs/root/arch_install"
+
+  shopt -s dotglob nullglob
+  cp -a "${SOURCE_DIR}/"* "${PROFILE_DIR}/airootfs/root/arch_install/"
+  shopt -u dotglob nullglob
+
+  log_step "Injecting predefined packages.x86_64 asset..."
+  cp -a "${SOURCE_DIR}/assets/iso_temp_packages/packages.x86_64" "${PROFILE_DIR}/packages.x86_64"
+
+  if (( REPO_MODE == 2 )); then
+      log_step "Appending CachyOS prerequisites to Live ISO package list..."
+      echo "cachyos-keyring" >> "${PROFILE_DIR}/packages.x86_64"
+      echo "cachyos-mirrorlist" >> "${PROFILE_DIR}/packages.x86_64"
+      echo "cachyos-v3-mirrorlist" >> "${PROFILE_DIR}/packages.x86_64"
+      echo "cachyos-rate-mirrors" >> "${PROFILE_DIR}/packages.x86_64"
+
+      log_step "Injecting Systemd drop-in to populate CachyOS cryptographic keys on Live ISO boot..."
+      mkdir -p "${PROFILE_DIR}/airootfs/etc/systemd/system/pacman-init.service.d/"
+      cat << 'EOF' > "${PROFILE_DIR}/airootfs/etc/systemd/system/pacman-init.service.d/cachyos.conf"
+[Service]
+ExecStart=/usr/bin/pacman-key --populate cachyos
+EOF
+  fi
+
+  log_ok "Payloads staged."
+}
+
+# ==============================================================================
+# SECTION 9 — LIVE ENVIRONMENT HOOKS (Auto-Start)
+# ==============================================================================
+_configure_live_hooks() {
+  log_info "Configuring Auto-Start Hooks"
+  cat << 'EOF' > "${PROFILE_DIR}/airootfs/root/.automated_script.sh"
 #!/usr/bin/env bash
-
 if [[ "$(tty)" == "/dev/tty1" ]]; then
     echo "root:0000" | chpasswd
     echo -e "\e[1;32m[INFO]\e[0m Root password set to 0000. SSH is available."
-
-    echo -e "\e[1;34m[INFO]\e[0m Waiting for background services to initialize..."
-    systemctl is-system-running --wait >/dev/null 2>&1 || true
+    echo -e "\e[1;34m[INFO]\e[0m Bootstrapping environment..."
+    systemctl is-system-running >/dev/null 2>&1 || true
 
     chmod -R +x /root/arch_install/
-
+    
     clear
     cd /root/arch_install/
     ./000_dusky_arch_install.sh
 fi
 EOF
+  chmod +x "${PROFILE_DIR}/airootfs/root/.automated_script.sh"
+  log_ok "Live hooks configured."
+}
 
-chmod +x "${PROFILE_DIR}/airootfs/root/.automated_script.sh"
+# ==============================================================================
+# SECTION 10 — SKELETON DIRECTORY & DOTFILES
+# ==============================================================================
+_inject_dotfiles() {
+  log_info "Fetching and Injecting GitHub Dotfiles"
+  local SKEL_DIR="${PROFILE_DIR}/airootfs/etc/skel"
+  rm -rf "${SKEL_DIR}" && mkdir -p "${SKEL_DIR}"
 
-# --- 4. SKELETON DIRECTORY PAYLOAD (Dotfiles) ---
-echo "  -> Preparing workspace for dotfiles (Enforcing Idempotency)..."
-SKEL_DIR="${PROFILE_DIR}/airootfs/etc/skel"
+  sed -i '/^# --- DUSKY PERMISSIONS START ---/,/^# --- DUSKY PERMISSIONS END ---/d' "${PROFILE_DIR}/profiledef.sh"
+  sed -i '/^grml-zsh-config$/d' "${PROFILE_DIR}/packages.x86_64" || true
 
-# 1. Wipe the existing directory to prevent git 'already exists' fatal errors on rebuilds.
-rm -rf "${SKEL_DIR}"
-mkdir -p "${SKEL_DIR}"
+  rm -rf "/tmp/dusky_dots" 
+  local attempt
+  for attempt in {1..3}; do
+      if git clone --depth 1 "https://github.com/dusklinux/dusky" "/tmp/dusky_dots" 2>/dev/null; then
+          log_step "Clone successful."
+          break
+      fi
+      if (( attempt == 3 )); then die "Git clone failed."; fi
+      log_warn "Git clone failed. Retrying in 5s..."
+      rm -rf "/tmp/dusky_dots"
+      sleep 5
+  done
 
-# 2. Wipe previous permission injections to prevent profiledef.sh from bloating indefinitely.
-sed -i '/^# --- DUSKY PERMISSIONS START ---/,/^# --- DUSKY PERMISSIONS END ---/d' "${PROFILE_DIR}/profiledef.sh"
+  cp -a /tmp/dusky_dots/. "${SKEL_DIR}/"
+  rm -rf "${SKEL_DIR}/.git" "/tmp/dusky_dots"
 
-# 3. Resolve Pacman Conflict: grml-zsh-config provides a default .zshrc that fatally 
-# collides with the dusky git checkout. We strip it from the build list.
-echo "  -> Pruning conflicting Archiso baseline packages..."
-sed -i '/^grml-zsh-config$/d' "${PROFILE_DIR}/packages.x86_64" || true
+  log_step "Injecting default editor exports and Yazi wrapper..."
+  # We inject into both 'skel' (for new users) and 'root' (for the live environment)
+  for rc_target in "${SKEL_DIR}" "${PROFILE_DIR}/airootfs/root"; do
+      mkdir -p "${rc_target}"
+      # Target both bash and zsh to guarantee availability
+      for rc_file in .bashrc .zshrc; do
+          
+          # Ensure a clean newline exists before appending to prevent syntax merging 
+          # in the event the cloned repo files lack a trailing empty line.
+          echo "" >> "${rc_target}/${rc_file}"
+          
+          cat << 'EOF' >> "${rc_target}/${rc_file}"
+# --- AUTOMATED ISO INJECTION: EDITOR & YAZI WRAPPER ---
+export EDITOR='nvim'
+export VISUAL='nvim'
 
-echo "  -> Fetching and staging dotfiles payload into /etc/skel..."
-# 4. Clone the bare repository natively into the skeleton dir.
-git clone --bare --depth 1 "https://github.com/dusklinux/dusky" "${SKEL_DIR}/dusky"
+# Yazi Wrapper (Changes directory upon exiting Yazi)
+y() {
+    local tmp="$(mktemp -t "yazi-cwd.XXXXXX")" cwd
+    yazi "$@" --cwd-file="$tmp"
+    if cwd="$(cat -- "$tmp")" && [ -n "$cwd" ] && [ "$cwd" != "$PWD" ]; then
+        builtin cd -- "$cwd"
+    fi
+    rm -f -- "$tmp"
+}
+# ------------------------------------------------------
+EOF
+      done
+  done
 
-# 5. Force checkout directly into /etc/skel so subdirectories manifest in the ISO.
-git --git-dir="${SKEL_DIR}/dusky/" --work-tree="${SKEL_DIR}" checkout -f
+  log_step "Injecting local hyprland.lua override..."
+  mkdir -p "${SKEL_DIR}/.config/hypr"
+  cp -a "${SOURCE_DIR}/assets/hyprland/hyprland.lua" "${SKEL_DIR}/.config/hypr/hyprland.lua"
 
-# 6. Preserve specific executable permissions dynamically.
-echo "  -> Locking in executable permissions for /etc/skel scripts..."
-echo "# --- DUSKY PERMISSIONS START ---" >> "${PROFILE_DIR}/profiledef.sh"
-while IFS= read -r -d '' exec_file; do
-    rel_path="/${exec_file#${PROFILE_DIR}/airootfs/}"
-    echo "file_permissions+=([\"${rel_path}\"]=\"0:0:0755\")" >> "${PROFILE_DIR}/profiledef.sh"
-done < <(find "${SKEL_DIR}" -path "${SKEL_DIR}/dusky" -prune -o -type f -executable -print0)
-echo "# --- DUSKY PERMISSIONS END ---" >> "${PROFILE_DIR}/profiledef.sh"
+  log_step "Locking executable permissions in profiledef.sh..."
+  echo "# --- DUSKY PERMISSIONS START ---" >> "${PROFILE_DIR}/profiledef.sh"
+  while IFS= read -r -d '' exec_file; do
+      local rel_path="/${exec_file#${PROFILE_DIR}/airootfs/}"
+      echo "file_permissions+=([\"${rel_path}\"]=\"0:0:0755\")" >> "${PROFILE_DIR}/profiledef.sh"
+  done < <(find "${SKEL_DIR}" -type f -executable -print0)
+  echo "# --- DUSKY PERMISSIONS END ---" >> "${PROFILE_DIR}/profiledef.sh"
+  
+  log_ok "Dotfiles and shell variables secured."
+}
 
+# ==============================================================================
+# SECTION 11 — DYNAMIC MKARCHISO PATCHING (The Core Magic)
+# ==============================================================================
+_patch_mkarchiso() {
+  log_info "Dynamically Patching Build Configurations"
+  
+  local aur_cache=""
+  if [[ -d "${OFFLINE_REPO_AUR}" ]]; then
+      aur_cache="CacheDir = ${OFFLINE_REPO_AUR}"
+  fi
 
-# --- 5. DYNAMIC MKARCHISO PATCHING (The payload) ---
-echo "  -> Cloning official mkarchiso..."
-cp /usr/bin/mkarchiso "$MKARCHISO_CUSTOM"
-chmod +x "$MKARCHISO_CUSTOM"
+  if (( REPO_MODE == 2 )); then
+    log_step "Routing pacman.conf for CachyOS v3 and injecting UI enhancements..."
+    
+    # 1. Create a safe sandbox for mirrorlists to avoid touching host files
+    local build_pacman_d="${PROFILE_DIR}/build_pacman.d"
+    mkdir -p "${build_pacman_d}"
+    
+    # 2. Copy mirrorlists from host to our local build directory
+    find /etc/pacman.d -maxdepth 1 -type f -exec cp {} "${build_pacman_d}/" \;
 
-echo "  -> Generating injection patch..."
-cat << EOF > "$PATCH_FILE"
+    # 3. Precise architecture patching for the build sandbox mirrorlists
+    if [[ -f "${build_pacman_d}/cachyos-v3-mirrorlist" ]]; then
+        sed -i 's/\$arch_v3/x86_64_v3/g' "${build_pacman_d}/cachyos-v3-mirrorlist"
+        sed -i 's/\$arch/x86_64_v3/g'    "${build_pacman_d}/cachyos-v3-mirrorlist"
+    fi
+    if [[ -f "${build_pacman_d}/cachyos-mirrorlist" ]]; then
+        sed -i 's/\$arch/x86_64/g'       "${build_pacman_d}/cachyos-mirrorlist"
+    fi
+    if [[ -f "${build_pacman_d}/mirrorlist" ]]; then
+        sed -i 's/\$arch/x86_64/g'       "${build_pacman_d}/mirrorlist"
+    fi
+    
+    # 4. Patch pacman.conf to accept v3 architecture, inject UI, and reroute Includes to the sandbox
+    awk -v off="CacheDir = ${OFFLINE_REPO_OFFICIAL}" \
+        -v aur="${aur_cache}" \
+        -v sandbox="${build_pacman_d}" '
+    /^#?VerbosePkgLists/ { next }
+    /^#?Color/ { next }
+    /^#?ILoveCandy/ { next }
+    /^#?ParallelDownloads/ { next }
+    /^\s*Architecture\s*=/ { next }
+    /^\[options\]/ {
+        print
+        print "Color"
+        print "ILoveCandy"
+        print "VerbosePkgLists"
+        print "ParallelDownloads = 10"
+        print off
+        if (aur != "") { print aur }
+        print "CacheDir = /var/cache/pacman/pkg"
+        print "Architecture = x86_64_v3 x86_64"
+        next
+    }
+    /^\[core\]/ {
+        skip_cachy = 0
+        print "# --- INJECTED CACHYOS v3 REPOSITORIES ---"
+        print "[cachyos-v3]"
+        print "Server = https://mirror.cachyos.org/repo/x86_64_v3/$repo"
+        print ""
+        print "[cachyos-core-v3]"
+        print "Server = https://mirror.cachyos.org/repo/x86_64_v3/$repo"
+        print ""
+        print "[cachyos-extra-v3]"
+        print "Server = https://mirror.cachyos.org/repo/x86_64_v3/$repo"
+        print ""
+        print "[cachyos]"
+        print "Server = https://mirror.cachyos.org/repo/x86_64/$repo"
+        print "# ----------------------------------------"
+        print ""
+        print "[core]"
+        next
+    }
+    /^\[cachyos/ { skip_cachy = 1; next }
+    /^\[/ { skip_cachy = 0 }
+    skip_cachy == 1 { next }
+    {
+        # Redirect Include statements to our modified sandbox mirrorlists
+        gsub("/etc/pacman.d/", sandbox "/")
+        
+        # Hardcode any inline Server definitions to x86_64
+        if ($0 ~ /^\s*Server\s*=/) {
+            gsub("\\$arch", "x86_64")
+        }
+        print
+    }
+    ' "${PROFILE_DIR}/pacman.conf" > "${PROFILE_DIR}/pacman.conf.tmp" && mv "${PROFILE_DIR}/pacman.conf.tmp" "${PROFILE_DIR}/pacman.conf"
+  else
+    log_step "Routing pacman.conf for Standard Arch Offline Cache & UI enhancements..."
+    awk -v off="CacheDir = ${OFFLINE_REPO_OFFICIAL}" -v aur="${aur_cache}" '
+    /^#?VerbosePkgLists/ { next }
+    /^#?Color/ { next }
+    /^#?ILoveCandy/ { next }
+    /^#?ParallelDownloads/ { next }
+    /^\[options\]/ {
+        print
+        print "Color"
+        print "ILoveCandy"
+        print "VerbosePkgLists"
+        print "ParallelDownloads = 10"
+        print off
+        if (aur != "") { print aur }
+        print "CacheDir = /var/cache/pacman/pkg"
+        next
+    }
+    {print}
+    ' "${PROFILE_DIR}/pacman.conf" > "${PROFILE_DIR}/pacman.conf.tmp" && mv "${PROFILE_DIR}/pacman.conf.tmp" "${PROFILE_DIR}/pacman.conf"
+  fi
+
+  log_step "Generating injection patch for offline repository merging..."
+  cp /usr/bin/mkarchiso "$MKARCHISO_CUSTOM"
+  chmod +x "$MKARCHISO_CUSTOM"
+
+  # The AUR directory is conditionally copied into the ISO structure only if it exists.
+  cat << EOF > "$PATCH_FILE"
     _msg_info ">>> INJECTING & MERGING REPOSITORIES DIRECTLY INTO ISO <<<"
     local repo_target="\${isofs_dir}/\${install_dir}/repo"
     mkdir -p "\${repo_target}"
-    
     cp -a "${OFFLINE_REPO_OFFICIAL}/." "\${repo_target}/"
-    if [[ -d "${OFFLINE_REPO_AUR}" ]]; then
+    
+    if [[ -d "${OFFLINE_REPO_AUR}" ]]; then 
         cp -a "${OFFLINE_REPO_AUR}/." "\${repo_target}/"
     fi
     
-    rm -f "\${repo_target}/archrepo.db"*
-    rm -f "\${repo_target}/archrepo.files"*
+    rm -f "\${repo_target}/archrepo.db"* "\${repo_target}/archrepo.files"*
     
-    _msg_info ">>> GENERATING MASTER DATABASE INSIDE ISO <<<"
     local _nullglob_state; shopt -q nullglob && _nullglob_state=1 || _nullglob_state=0
     shopt -s nullglob
     local all_files=("\${repo_target}/"*.pkg.tar.*)
     local pkg_files=()
-    for f in "\${all_files[@]}"; do
-        [[ "\$f" == *.sig ]] && continue
-        pkg_files+=("\$f")
-    done
+    for f in "\${all_files[@]}"; do [[ "\$f" == *.sig ]] && continue; pkg_files+=("\$f"); done
     (( _nullglob_state )) || shopt -u nullglob
     
     if (( \${#pkg_files[@]} > 0 )); then
         repo-add -q "\${repo_target}/archrepo.db.tar.gz" "\${pkg_files[@]}"
     else
-        echo "[ERR] No packages found to merge inside ISO!" >&2
-        return 1
+        echo "[ERR] No packages found to merge inside ISO!" >&2; return 1
     fi
-    
-    _msg_info ">>> INJECTION COMPLETE <<<"
 EOF
 
-echo "  -> Splicing hook into mkarchiso pipeline..."
-sed -i '/^_build_iso_image() {/r '"$PATCH_FILE"'' "$MKARCHISO_CUSTOM"
+  sed -i '/^_build_iso_image() {/r '"$PATCH_FILE"'' "$MKARCHISO_CUSTOM"
 
-if ! grep -q 'INJECTING & MERGING REPOSITORIES DIRECTLY INTO ISO' "$MKARCHISO_CUSTOM"; then
-    echo "[ERR] Patch was NOT injected — the sed pattern failed to match." >&2
-    exit 1
-fi
-echo "  -> Patch verified successfully."
+  if ! grep -q 'INJECTING & MERGING REPOSITORIES DIRECTLY INTO ISO' "$MKARCHISO_CUSTOM"; then
+      die "Patch was NOT injected — the sed pattern failed to match."
+  fi
+  rm -f "$PATCH_FILE"
+  log_ok "mkarchiso successfully patched."
+}
 
-rm -f "$PATCH_FILE"
+# ==============================================================================
+# SECTION 12 — ISO GENERATION & CLEANUP
+# ==============================================================================
+_build_iso() {
+  printf '\n%s==>%s %sSTARTING ARCHISO BUILD PROCESS%s\n\n' "${BOLD}${GREEN}" "${RESET}" "${BOLD}" "${RESET}"
+  
+  rm -rf "$WORK_DIR" "$OUT_DIR"
+  "$MKARCHISO_CUSTOM" -v -m iso -w "$WORK_DIR" -o "$OUT_DIR" "$PROFILE_DIR"
 
-# --- 6. ISO GENERATION ---
-echo "  -> Cleaning previous build artifacts..."
-rm -rf "$WORK_DIR" "$OUT_DIR"
+  log_info "Build finalization"
+  log_step "Relocating final ISO to root of ZRAM drive (${FINAL_DEST_DIR}/)..."
+  mv "${OUT_DIR}"/*.iso "${FINAL_DEST_DIR}/${FINAL_ISO_NAME}"
 
-echo -e "\n\e[1;32m==>\e[0m \e[1mSTARTING BUILD PROCESS\e[0m"
-"$MKARCHISO_CUSTOM" -v -m iso -w "$WORK_DIR" -o "$OUT_DIR" "$PROFILE_DIR"
+  if [[ -n "${SUDO_UID:-}" && -n "${SUDO_GID:-}" ]]; then
+      log_step "Restoring ownership of the final ISO to original user ID..."
+      chown "${SUDO_UID}:${SUDO_GID}" "${FINAL_DEST_DIR}/${FINAL_ISO_NAME}"
+  fi
 
-# --- 7. ARTIFACT RENAMING ---
-echo "  -> Renaming output to ${FINAL_ISO_NAME}..."
-mv "${OUT_DIR}"/*.iso "${OUT_DIR}/${FINAL_ISO_NAME}"
+  printf '\n%s%s[SUCCESS]%s Repository is primed for ISO integration.\n' "${BOLD}" "${GREEN}" "${RESET}"
+  printf 'Bootable ISO located at: %s\n\n' "${FINAL_DEST_DIR}/${FINAL_ISO_NAME}"
+}
 
-# --- 8. PERMISSIONS RESTORATION ---
-if [[ -n "${SUDO_USER:-}" ]]; then
-    echo "  -> Restoring ownership of the output directory to user: $SUDO_USER..."
-    chown -R "$SUDO_USER:$SUDO_USER" "$OUT_DIR"
-fi
+# ==============================================================================
+# SECTION 13 — MAIN ORCHESTRATOR
+# ==============================================================================
+main() {
+  _parse_args "$@"
+  _print_logo
+  
+  _prompt_build_mode
+  _install_dependencies
+  _preflight_checks
+  _setup_clean_room
+  _stage_payloads
+  _configure_live_hooks
+  _inject_dotfiles
+  _patch_mkarchiso
+  _build_iso
+}
 
-echo -e "\n\e[1;32m[SUCCESS]\e[0m \e[1mISO generation complete!\e[0m"
-echo "Your bootable ISO is located at: ${OUT_DIR}/${FINAL_ISO_NAME}"
+main "$@"

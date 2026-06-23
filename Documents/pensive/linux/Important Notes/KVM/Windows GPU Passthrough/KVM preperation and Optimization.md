@@ -42,8 +42,7 @@ You must choose **ONE** method for managing the virtualization services. Do not 
 
 - [ ] **Option A (Recommended):** [[libvert Modular daemon enable]]
     
-- [ ] **Option B (Classic):** [[KVM Services]] **CHOOSE THIS ONE ANYWAY, IT'S EASIER**
-    
+- [ ] **Option B (Classic):** [[KVM Services]] 
 
 ## 4. System Optimization
 
@@ -61,13 +60,13 @@ Ensure your virtual machines can connect to the internet.
 - [ ] [[Activating Network and Setting it to Autostart]]
     
 
-### Optional: Advanced Networking
+### 6.  Networking
 
 > [!example] Web Hosting / Bridging
 > 
 > Follow this (OPTION 3 Within the note) only if you need your VM to appear as a separate physical device on your router (useful for web hosting or LAN gaming).
 
-- [ ] [[Network Bridging for LAN access]] (FOLLOW OPTION 3)
+- [ ] [[Network Bridging for LAN access]] 
     
 
 ## 6. Permissions & Access

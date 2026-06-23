@@ -1,0 +1,47 @@
+Dusky Quick Panal Configuration (~/.config/dusky/quickpanal/config.toml)
+[layout]
+show_weather = true
+show_metrics = true
+show_quick_toggles = true
+show_power_profiles = true
+show_sliders = true
+show_notifications = true
+show_media = false
+==============================================================================
+QUICK TOGGLES (Grid)
+5 Essential Modules: Wi-Fi, Idle Inhibitor, Visuals, Updates, Notifications
+==============================================================================
+[[toggles]]
+id = "wifi"
+icon = "network-wireless-symbolic"
+label = "Wi-Fi"
+tooltip = "Wi-Fi\nLMB: Network Manager"
+on_left = "kitty --class dusky_network.sh ~/user_scripts/network_manager/dusky_network.sh"
+[[toggles]]
+id = "idle"
+icon = "timer-symbolic"
+label = "Hypridle"
+tooltip = "Hypridle\nLMB: Toggle | RMB: Lock Screen"
+on_left = "~/user_scripts/waybar/toggle_hypridle.sh"
+on_right = "~/user_scripts/hyprlock/lock.sh"
+[[toggles]]
+id = "blur"
+icon = "edit-opacity-symbolic"
+label = "Visuals"
+tooltip = "Visuals\nLMB: Toggle Blur/Shadow"
+on_left = "~/user_scripts/hypr/hypr_blur_opacity_shadow_toggle.sh toggle"
+[[toggles]]
+id = "updates"
+icon = "folder-download-symbolic"
+label = "Updates"
+tooltip = "Updates\nLMB: System Update | RMB: Dusky Update"
+on_left = "kitty --class system_update.sh --hold sh -c '~/user_scripts/update_dusky/system_update.sh --all'"
+on_right = "kitty --class update_dusky.sh --hold sh -c '~/user_scripts/update_dusky/update_dusky.sh'"
+[[toggles]]
+id = "dnd"
+icon = "notification-symbolic"
+label = "Notifications"
+tooltip = "Notifications\nLMB: Rofi Menu | MMB: Clear | RMB: Toggle DND"
+on_left = "~/user_scripts/rofi/rofi_mako.sh"
+on_middle = "~/user_scripts/waybar/mako.sh --clear && pkill -RTMIN+8 waybar"
+on_right = "makoctl mode -t do-not-disturb && pkill -RTMIN+8 waybar"

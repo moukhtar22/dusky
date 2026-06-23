@@ -1,19 +1,22 @@
 #!/usr/bin/env bash
-# ZRAM & System Desktop VM Policy Optimizer
-# -----------------------------------------------------------------------------
-# Description:
-#   Comprehensive VM sysctl tuning for Arch/Hyprland ecosystems.
-#   Combines strict ZRAM memory allocation with aggressive VFS caching 
-#   for maximum desktop snappiness, automatically scaling based on RAM size.
-# -----------------------------------------------------------------------------
+# =============================================================================
+# Elite Arch Linux ZRAM & VM Policy Optimizer
+# Target: Arch Linux Cutting-Edge (Kernel 7.0+, Bash 5.3+)
+# Scope: Platinum Grade. Pure performance, robust CLI, strict safety checks.
+# Priority: Absolute Minimum RAM Footprint, BBR Networking, Max RAM Recovery.
+# Updates: Synthesized exactly to Kernel 7.0 forensic tuning matrices & user overrides.
+# =============================================================================
 
 set -euo pipefail
 
-# --- Configuration ---
 readonly CONFIG_FILE="/etc/sysctl.d/99-vm-zram-parameters.conf"
+readonly MGLRU_CONFIG="/etc/tmpfiles.d/99-mglru-optimize.conf"
 readonly SCRIPT_NAME="${0##*/}"
 
-# --- Optional color output ---
+# --- Strict Path Resolution (Coreutils required) ---
+readonly SELF_PATH="$(realpath -e -- "${BASH_SOURCE[0]}")"
+
+# --- Formatting ---
 if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
     C_RESET=$'\033[0m'
     C_GREEN=$'\033[1;32m'
@@ -22,245 +25,36 @@ if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
     C_YELLOW=$'\033[1;33m'
     C_BOLD=$'\033[1m'
 else
-    C_RESET=''
-    C_GREEN=''
-    C_BLUE=''
-    C_RED=''
-    C_YELLOW=''
-    C_BOLD=''
+    C_RESET='' C_GREEN='' C_BLUE='' C_RED='' C_YELLOW='' C_BOLD=''
 fi
-
-readonly C_RESET C_GREEN C_BLUE C_RED C_YELLOW C_BOLD
 
 log_info()    { printf '%s[INFO]%s %s\n'  "$C_BLUE"   "$C_RESET" "$1"; }
 log_success() { printf '%s[OK]%s %s\n'    "$C_GREEN"  "$C_RESET" "$1"; }
 log_warn()    { printf '%s[WARN]%s %s\n'  "$C_YELLOW" "$C_RESET" "$1"; }
 log_error()   { printf '%s[ERROR]%s %s\n' "$C_RED"    "$C_RESET" "$1" >&2; }
-
-die() {
-    log_error "$1"
-    exit "${2:-1}"
-}
-
-resolve_self_path() {
-    local src="${BASH_SOURCE[0]:-$0}"
-
-    if [[ "$src" != */* ]]; then
-        if [[ -e "$src" ]]; then
-            src="./$src"
-        else
-            src="$(command -v "$src" 2>/dev/null || true)"
-            [[ -n "$src" ]] || return 1
-        fi
-    fi
-
-    printf '%s/%s\n' "$(cd -- "$(dirname -- "$src")" && pwd -P)" "$(basename -- "$src")"
-}
-
-readonly SELF_PATH="$(resolve_self_path)" || die "Failed to resolve script path for privilege escalation."
+die()         { log_error "$1"; exit "${2:-1}"; }
 
 print_help() {
     cat <<EOF
 ${C_BOLD}Usage:${C_RESET} ${SCRIPT_NAME} [OPTIONS]
 
-  --auto, -a           Auto-detect swap layout and RAM size (default)
-  --hybrid, --disk, -d Force hybrid swap policy (zram + physical disk swap)
-  --zram-only, -z      Force zram-only swap policy
-  --aggressive, -A     Force aggressive desktop VFS caching (Auto-enabled for 32GB+ RAM)
-  --standard, -S       Force standard desktop VFS caching
-  --dry-run, -n        Print the generated config and exit
-  --help, -h           Show this help
+  --auto, -a           Auto-detect RAM size and set dynamic profile (default)
+  --aggressive, -A     Force 32GB+ "Absolute Max" RAM usage profile
+  --standard, -S       Force <32GB "Dynamic Efficiency" RAM savings profile
+  --dry-run, -n        Print the generated config and exit without applying
+  --help, -h           Show this help menu
 EOF
 }
 
-usage_error() {
-    log_error "$1"
-    print_help >&2
-    exit 2
-}
+usage_error() { log_error "$1"; print_help >&2; exit 2; }
 
-# --- 1. Privilege Escalation ---
-if [[ $EUID -ne 0 ]]; then
-    command -v sudo >/dev/null 2>&1 || die "Root privileges are required and 'sudo' is not available."
-    log_info "Root privileges required. Escalating..."
-    exec sudo -- /usr/bin/bash "$SELF_PATH" "$@"
-fi
-
-# --- 2. Runtime Requirements ---
-require_runtime() {
-    [[ -r /proc/swaps ]] || die "Cannot read /proc/swaps."
-    [[ -r /proc/meminfo ]] || die "Cannot read /proc/meminfo."
-    [[ -r /proc/sys/vm/swappiness ]] || die "Kernel tunable /proc/sys/vm/swappiness is unavailable."
-    [[ -r /proc/sys/vm/vfs_cache_pressure ]] || die "Kernel tunable /proc/sys/vm/vfs_cache_pressure is unavailable."
-
-    command -v sysctl >/dev/null 2>&1 || die "'sysctl' command not found."
-    command -v install >/dev/null 2>&1 || die "'install' command not found."
-    command -v mktemp >/dev/null 2>&1 || die "'mktemp' command not found."
-    command -v cmp >/dev/null 2>&1 || die "'cmp' command not found."
-}
-
-# --- 3. System State Detection ---
-SWAP_LAYOUT="NONE"
-ZRAM_MAX_PRIO=""
-OTHER_MAX_PRIO=""
-ACTIVE_ZRAM_COUNT=0
-ACTIVE_OTHER_COUNT=0
-SYSTEM_RAM_GB=0
-
-detect_system_state() {
-    local path type size used prio
-    local has_zram=0
-    local has_other=0
-    local mem_kb
-
-    # A. Detect RAM Size
-    while read -r key value unit; do
-        if [[ "$key" == "MemTotal:" ]]; then
-            mem_kb=$value
-            break
-        fi
-    done < /proc/meminfo
-    SYSTEM_RAM_GB=$(( mem_kb / 1024 / 1024 ))
-
-    # B. Detect Swap Layout
-    while read -r path type size used prio; do
-        [[ -z "${path:-}" || "$path" == "Filename" ]] && continue
-
-        if [[ "$path" =~ ^/dev/zram[0-9]+$ ]]; then
-            has_zram=1
-            ((ACTIVE_ZRAM_COUNT += 1))
-            if [[ -z "$ZRAM_MAX_PRIO" || "$prio" -gt "$ZRAM_MAX_PRIO" ]]; then
-                ZRAM_MAX_PRIO="$prio"
-            fi
-        else
-            has_other=1
-            ((ACTIVE_OTHER_COUNT += 1))
-            if [[ -z "$OTHER_MAX_PRIO" || "$prio" -gt "$OTHER_MAX_PRIO" ]]; then
-                OTHER_MAX_PRIO="$prio"
-            fi
-        fi
-    done < /proc/swaps
-
-    if (( has_zram == 1 && has_other == 1 )); then
-        SWAP_LAYOUT="HYBRID"
-    elif (( has_zram == 1 )); then
-        SWAP_LAYOUT="ZRAM_ONLY"
-    elif (( has_other == 1 )); then
-        SWAP_LAYOUT="DISK_ONLY"
-    else
-        SWAP_LAYOUT="NONE"
-    fi
-}
-
-# --- 4. Tuning Profile Resolution ---
-resolve_tuning_profile() {
-    local target_layout="$1"
-    local target_mode="$2"
-
-    # Swap Logic
-    if [[ "$target_layout" == "ZRAM_ONLY" ]]; then
-        EXPECTED_SWAPPINESS=180
-    else
-        EXPECTED_SWAPPINESS=133 # Protect physical disk from thrashing
-    fi
-
-    # Caching/Desktop Logic
-    # Use 29 to account for hardware-reserved RAM on 32GB physical machines
-    if [[ "$target_mode" == "AGGRESSIVE" ]] || [[ "$target_mode" == "AUTO" && "$SYSTEM_RAM_GB" -ge 29 ]]; then
-        EXPECTED_MODE="AGGRESSIVE"
-        EXPECTED_VFS_PRESSURE=10
-        EXPECTED_SCALE_FACTOR=200
-        EXPECTED_DIRTY_BYTES=4294967296
-        EXPECTED_DIRTY_BG_BYTES=1073741824
-    else
-        EXPECTED_MODE="STANDARD"
-        EXPECTED_VFS_PRESSURE=100
-        EXPECTED_SCALE_FACTOR=125
-        EXPECTED_DIRTY_BYTES=268435456
-        EXPECTED_DIRTY_BG_BYTES=67108864
-    fi
-
-    # Static Constants
-    EXPECTED_PAGE_CLUSTER=0
-    EXPECTED_BOOST_FACTOR=0
-    EXPECTED_COMPACTION=10
-    EXPECTED_MIN_FREE=1048576
-    EXPECTED_MAX_MAP_COUNT=2147483642
-}
-
-generate_config() {
-    cat <<EOF
-# Managed by ${SCRIPT_NAME}
-# Scope: Comprehensive ZRAM & Desktop Performance VM policy
-# Detected State: Layout=${1}, Desktop Mode=${EXPECTED_MODE}, RAM=${SYSTEM_RAM_GB}GB
-
-# --- SWAP CONFIGURATION ---
-# Swappiness: 180 for pure ZRAM, 133 to protect hybrid disk setups
-vm.swappiness = ${EXPECTED_SWAPPINESS}
-vm.page-cluster = ${EXPECTED_PAGE_CLUSTER}
-
-# --- DESKTOP SNAPPINESS (VFS & CACHE) ---
-# Lower pressure retains directory maps longer for instant folder opening
-vm.vfs_cache_pressure = ${EXPECTED_VFS_PRESSURE}
-
-# Heavy NVMe write smoothing
-vm.dirty_bytes = ${EXPECTED_DIRTY_BYTES}
-vm.dirty_background_bytes = ${EXPECTED_DIRTY_BG_BYTES}
-
-# --- MEMORY ALLOCATION & COMPACTION ---
-# Prevent Direct Reclaim desktop stutters without starving the system
-vm.watermark_scale_factor = ${EXPECTED_SCALE_FACTOR}
-vm.watermark_boost_factor = ${EXPECTED_BOOST_FACTOR}
-vm.compaction_proactiveness = ${EXPECTED_COMPACTION}
-vm.min_free_kbytes = ${EXPECTED_MIN_FREE}
-
-# --- APPLICATION COMPATIBILITY ---
-# High limit for heavy Windows games via Proton/Wine
-vm.max_map_count = ${EXPECTED_MAX_MAP_COUNT}
-EOF
-}
-
-write_config_if_changed() {
-    local src="$1"
-
-    if [[ -f "$CONFIG_FILE" ]] && cmp -s "$src" "$CONFIG_FILE"; then
-        log_info "Configuration file already matches desired state. No disk write needed."
-    else
-        install -Dm0644 "$src" "$CONFIG_FILE"
-        log_success "Configuration written to ${CONFIG_FILE}"
-    fi
-}
-
-apply_and_verify() {
-    log_info "Applying sysctl parameters to live kernel..."
-    sysctl --load "$CONFIG_FILE" >/dev/null || die "Failed to apply sysctl settings from ${CONFIG_FILE}."
-
-    # Live Verification of key parameters
-    local actual_swappiness="$(< /proc/sys/vm/swappiness)"
-    local actual_vfs="$(< /proc/sys/vm/vfs_cache_pressure)"
-
-    [[ "$actual_swappiness" == "$EXPECTED_SWAPPINESS" ]] || die \
-        "Verification failed: vm.swappiness is '${actual_swappiness}', expected '${EXPECTED_SWAPPINESS}'."
-
-    [[ "$actual_vfs" == "$EXPECTED_VFS_PRESSURE" ]] || die \
-        "Verification failed: vm.vfs_cache_pressure is '${actual_vfs}', expected '${EXPECTED_VFS_PRESSURE}'."
-
-    log_success "Verified live kernel values:"
-    log_success "  vm.swappiness = ${actual_swappiness}"
-    log_success "  vm.vfs_cache_pressure = ${actual_vfs}"
-    log_success "  Full Desktop Mode [${EXPECTED_MODE}] successfully engaged."
-}
-
-# --- 5. CLI Parsing ---
-LAYOUT="AUTO"
+# --- 1. CLI Parsing ---
 MODE="AUTO"
-DRY_RUN=0
+declare -i DRY_RUN=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --auto|-a)           LAYOUT="AUTO"; MODE="AUTO"; shift ;;
-        --hybrid|--disk|-d)  LAYOUT="HYBRID"; shift ;;
-        --zram-only|-z)      LAYOUT="ZRAM_ONLY"; shift ;;
+        --auto|-a)           MODE="AUTO"; shift ;;
         --aggressive|-A)     MODE="AGGRESSIVE"; shift ;;
         --standard|-S)       MODE="STANDARD"; shift ;;
         --dry-run|-n)        DRY_RUN=1; shift ;;
@@ -269,75 +63,230 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# --- 6. Execution Flow ---
-require_runtime
-detect_system_state
-
-log_info "Initializing Elite ZRAM & VM Policy Optimizer..."
-log_info "Detected System RAM: ${SYSTEM_RAM_GB} GB"
-
-# Layout Output Logging
-case "$SWAP_LAYOUT" in
-    HYBRID)
-        log_info "Detected ${ACTIVE_ZRAM_COUNT} active zram device(s) and ${ACTIVE_OTHER_COUNT} non-zram swap device(s)."
-        ;;
-    ZRAM_ONLY)
-        log_info "Detected ${ACTIVE_ZRAM_COUNT} active zram device(s)."
-        ;;
-    DISK_ONLY)
-        log_info "Detected ${ACTIVE_OTHER_COUNT} non-zram swap device(s), but no active zram swap."
-        ;;
-    NONE)
-        log_info "No active swap devices detected."
-        ;;
-esac
-
-# Resolve Auto Layout
-if [[ "$LAYOUT" == "AUTO" ]]; then
-    case "$SWAP_LAYOUT" in
-        HYBRID|ZRAM_ONLY)
-            LAYOUT="$SWAP_LAYOUT"
-            log_info "Auto-detected Swap Layout: ${C_BOLD}${LAYOUT}${C_RESET}"
-            ;;
-        DISK_ONLY)
-            die "Active non-zram swap was detected, but no active zram swap is present. This script targets ZRAM architectures."
-            ;;
-        NONE)
-            die "No active swap devices were detected in /proc/swaps. Nothing to tune."
-            ;;
-    esac
-else
-    log_warn "Manual override: Swap layout forced to ${C_BOLD}${LAYOUT}${C_RESET}"
+# --- 2. Privilege Escalation ---
+if [[ $EUID -ne 0 && $DRY_RUN -eq 0 ]]; then
+    command -v sudo >/dev/null 2>&1 || die "'sudo' is not available."
+    log_info "Root privileges required. Escalating..."
+    exec sudo -- /usr/bin/bash "$SELF_PATH" "$@"
 fi
 
-# Trap: Priority Check (from Claude)
+# --- 3. System State Detection (Pure Bash 5.3 Regex) ---
+declare -i SYSTEM_RAM_GB=0
+declare -i ACTIVE_ZRAM_COUNT=0
+declare -i ACTIVE_OTHER_COUNT=0
+ZRAM_MAX_PRIO=""
+OTHER_MAX_PRIO=""
+
+if [[ $(< /proc/meminfo) =~ MemTotal:[[:space:]]+([0-9]+) ]]; then
+    SYSTEM_RAM_GB=$(( BASH_REMATCH[1] / 1048576 ))
+else
+    die "FATAL: Could not parse /proc/meminfo natively."
+fi
+
+while read -r path _ _ _ prio; do
+    [[ "$path" == "Filename" ]] && continue
+    if [[ "$path" == /dev/zram* ]]; then
+        ACTIVE_ZRAM_COUNT+=1
+        if [[ -z "$ZRAM_MAX_PRIO" || "$prio" -gt "$ZRAM_MAX_PRIO" ]]; then ZRAM_MAX_PRIO="$prio"; fi
+    elif [[ -n "$path" ]]; then
+        ACTIVE_OTHER_COUNT+=1
+        if [[ -z "$OTHER_MAX_PRIO" || "$prio" -gt "$OTHER_MAX_PRIO" ]]; then OTHER_MAX_PRIO="$prio"; fi
+    fi
+done < /proc/swaps
+
+SWAP_LAYOUT="NONE"
+if (( ACTIVE_ZRAM_COUNT > 0 && ACTIVE_OTHER_COUNT > 0 )); then
+    SWAP_LAYOUT="HYBRID"
+elif (( ACTIVE_ZRAM_COUNT > 0 )); then
+    SWAP_LAYOUT="ZRAM_ONLY"
+elif (( ACTIVE_OTHER_COUNT > 0 )); then
+    SWAP_LAYOUT="DISK_ONLY"
+fi
+
+# --- 4. Tuning Profile Resolution ---
+declare -i EXPECTED_SWAPPINESS
+declare -i EXPECTED_VFS_PRESSURE
+declare -i EXPECTED_SCALE_FACTOR
+declare -i EXPECTED_DIRTY_BYTES
+declare -i EXPECTED_DIRTY_BG_BYTES
+declare -i EXPECTED_MGLRU_TTL
+
+# The 30 GB Demarcation Line
+if [[ "$MODE" == "AGGRESSIVE" ]] || [[ "$MODE" == "AUTO" && SYSTEM_RAM_GB -ge 30 ]]; then
+    EXPECTED_MODE="PERFORMANCE_LEAN (32GB+)"
+    EXPECTED_SWAPPINESS=150
+    EXPECTED_VFS_PRESSURE=100
+    EXPECTED_SCALE_FACTOR=100
+    EXPECTED_DIRTY_BYTES=1073741824
+    EXPECTED_DIRTY_BG_BYTES=268435456
+    EXPECTED_MGLRU_TTL=3000
+else
+    EXPECTED_MODE="STRICT_RAM_SAVINGS (<32GB)"
+    EXPECTED_SWAPPINESS=190        # Force immediate compression of inactive RAM (User Override)
+    EXPECTED_VFS_PRESSURE=200      # Aggressively reclaim inode/dentry VFS caches to lower idle RAM
+    EXPECTED_SCALE_FACTOR=50       # 0.5% Emergency Buffer (40MB on 8GB RAM). Prevents UI direct reclaim stall.
+    EXPECTED_DIRTY_BYTES=134217728 # 128MB max. Prevents massive file transfers from bloating RAM.
+    EXPECTED_DIRTY_BG_BYTES=33554432 # 32MB bg threshold. Flushes data to disk sooner to free memory.
+    EXPECTED_MGLRU_TTL=2000         # Perfect CPU/ZRAM thrash shield balance.
+fi
+
+# Static Constants
+readonly EXPECTED_PAGE_CLUSTER=0        # Disables swap readahead (critical for ZRAM latency).
+readonly EXPECTED_BOOST_FACTOR=0        # Disables sudden fragmentation CPU spikes.
+readonly EXPECTED_COMPACTION=0          # Disables idle background CPU memory compaction.
+readonly EXPECTED_MAX_MAP_COUNT=2147483 # Caps vm_area_struct bloat, high enough for gaming compatibility.
+
+# --- 5. Generation & Verification ---
+log_info "Initializing Platinum ZRAM & VM Policy Optimizer..."
+log_info "Detected System RAM: ${C_BOLD}${SYSTEM_RAM_GB} GB${C_RESET}"
+log_info "Detected Swap Layout: ${C_BOLD}${SWAP_LAYOUT}${C_RESET} (${ACTIVE_ZRAM_COUNT} ZRAM / ${ACTIVE_OTHER_COUNT} Disk)"
+
+if [[ "$SWAP_LAYOUT" == "DISK_ONLY" || "$SWAP_LAYOUT" == "NONE" ]]; then
+    die "Active ZRAM swap is required to utilize this tuning profile."
+fi
+
+# Priority Inversion Safety Guard
 if [[ "$SWAP_LAYOUT" == "HYBRID" && -n "$ZRAM_MAX_PRIO" && -n "$OTHER_MAX_PRIO" ]]; then
     if (( ZRAM_MAX_PRIO <= OTHER_MAX_PRIO )); then
-        log_warn "Hybrid swap is active, but ZRAM priority (${ZRAM_MAX_PRIO}) is not strictly above disk swap priority (${OTHER_MAX_PRIO})."
-        log_warn "Swappiness alone cannot guarantee ZRAM is preferred. Ensure your zram-generator config sets a high priority."
+        log_warn "PRIORITY INVERSION DETECTED: Physical disk priority (${OTHER_MAX_PRIO}) is >= ZRAM priority (${ZRAM_MAX_PRIO})."
+        log_warn "This will cause severe SSD thrashing because swappiness is locked at ${EXPECTED_SWAPPINESS}."
+        log_warn "Fix your /etc/systemd/zram-generator.conf.d/ priority immediately."
+    else
+        log_info "Safety Check Passed: ZRAM (${ZRAM_MAX_PRIO}) overrides Disk (${OTHER_MAX_PRIO})."
     fi
 fi
 
-# Resolve Tuning Profile Data
-resolve_tuning_profile "$LAYOUT" "$MODE"
-if [[ "$MODE" == "AUTO" ]]; then
-    log_info "Auto-detected Cache Mode: ${C_BOLD}${EXPECTED_MODE}${C_RESET} (Threshold: 32GB RAM)"
-else
-    log_warn "Manual override: Cache Mode forced to ${C_BOLD}${EXPECTED_MODE}${C_RESET}"
+if [[ "$MODE" != "AUTO" ]]; then
+    log_warn "Manual Override Engaged: Cache Mode forced to ${C_BOLD}${EXPECTED_MODE}${C_RESET}"
 fi
 
-# Write & Verify
-tmpfile="$(mktemp)"
-trap 'rm -f "$tmpfile"' EXIT
+# Secure temp file generation
+tmpfile="$(umask 077 && mktemp)"
+tmpfile_mglru="$(umask 077 && mktemp)"
+trap 'rm -f "$tmpfile" "$tmpfile_mglru"' EXIT
 
-generate_config "$LAYOUT" > "$tmpfile"
+# --- SYSCTL Payload ---
+cat > "$tmpfile" <<EOF
+# Managed by ${SCRIPT_NAME}
+# Scope: Comprehensive ZRAM, Desktop Performance, & Network Matrix
+# Detected State: Layout=${SWAP_LAYOUT}, Desktop Mode=${EXPECTED_MODE}, RAM=${SYSTEM_RAM_GB}GB
 
+# --- SWAP CONFIGURATION ---
+vm.swappiness = ${EXPECTED_SWAPPINESS}
+vm.page-cluster = ${EXPECTED_PAGE_CLUSTER}
+
+# --- DESKTOP SNAPPINESS (VFS & CACHE) ---
+vm.vfs_cache_pressure = ${EXPECTED_VFS_PRESSURE}
+vm.dirty_bytes = ${EXPECTED_DIRTY_BYTES}
+vm.dirty_background_bytes = ${EXPECTED_DIRTY_BG_BYTES}
+
+# --- MEMORY ALLOCATION & COMPACTION ---
+vm.watermark_scale_factor = ${EXPECTED_SCALE_FACTOR}
+vm.watermark_boost_factor = ${EXPECTED_BOOST_FACTOR}
+vm.compaction_proactiveness = ${EXPECTED_COMPACTION}
+
+# --- APPLICATION COMPATIBILITY ---
+vm.max_map_count = ${EXPECTED_MAX_MAP_COUNT}
+
+# --- MODERN NETWORK STACK (BBR + CAKE) ---
+net.ipv4.tcp_congestion_control = bbr
+net.core.default_qdisc = cake
+net.ipv4.tcp_rmem = 4096 65536 4194304
+net.ipv4.tcp_wmem = 4096 65536 4194304
+net.core.netdev_max_backlog = 1000
+
+# --- eBPF SECURITY & MEMORY COMPACTION ---
+net.core.bpf_jit_enable = 1
+net.core.bpf_jit_harden = 0
+EOF
+
+# --- MGLRU Payload ---
+cat > "$tmpfile_mglru" <<EOF
+# Managed by ${SCRIPT_NAME}
+# Scope: MGLRU ZRAM Thrash Protection (CPU Shield)
+# Description: ${EXPECTED_MGLRU_TTL}ms NVMe/ZRAM threshold. Prevents hot pages from being repeatedly compressed/decompressed.
+w /sys/kernel/mm/lru_gen/min_ttl_ms - - - - ${EXPECTED_MGLRU_TTL}
+EOF
+
+# Dry Run Check
 if (( DRY_RUN == 1 )); then
+    log_info "DRY RUN EXECUTED. Generated configurations:"
+    echo -e "\n${C_BOLD}[ ${CONFIG_FILE} ]${C_RESET}"
     cat "$tmpfile"
+    echo -e "\n${C_BOLD}[ ${MGLRU_CONFIG} ]${C_RESET}"
+    cat "$tmpfile_mglru"
     exit 0
 fi
 
-write_config_if_changed "$tmpfile"
-apply_and_verify
+# --- Apply Sysctl ---
+if [[ -f "$CONFIG_FILE" ]] && cmp -s "$tmpfile" "$CONFIG_FILE"; then
+    log_info "Sysctl configuration already matches desired state."
+else
+    install -Dm0644 "$tmpfile" "$CONFIG_FILE"
+    log_success "Configuration written to ${CONFIG_FILE}"
+fi
+
+log_info "Applying sysctl parameters to live kernel..."
+sysctl --load "$CONFIG_FILE" >/dev/null || die "Failed to apply sysctl settings."
+
+# --- Apply MGLRU Tmpfiles ---
+if [[ -d "/sys/kernel/mm/lru_gen" ]]; then
+    if [[ -f "$MGLRU_CONFIG" ]] && cmp -s "$tmpfile_mglru" "$MGLRU_CONFIG"; then
+        log_info "MGLRU configuration already matches desired state."
+    else
+        install -Dm0644 "$tmpfile_mglru" "$MGLRU_CONFIG"
+        log_success "MGLRU Protection written to ${MGLRU_CONFIG}"
+    fi
+    
+    log_info "Applying MGLRU parameters to live kernel..."
+    systemd-tmpfiles --create "$MGLRU_CONFIG" || log_warn "Failed to apply systemd-tmpfiles for MGLRU."
+else
+    log_warn "MGLRU is not enabled in this kernel. Skipping min_ttl_ms protection."
+fi
+
+# --- Hardened Live Verification ---
+actual_swappiness="$(< /proc/sys/vm/swappiness)"
+actual_vfs="$(< /proc/sys/vm/vfs_cache_pressure)"
+actual_scale="$(< /proc/sys/vm/watermark_scale_factor)"
+actual_compaction="$(< /proc/sys/vm/compaction_proactiveness)"
+actual_bpf="$(< /proc/sys/net/core/bpf_jit_harden)"
+
+if [[ "$actual_swappiness" != "$EXPECTED_SWAPPINESS" ]]; then
+    die "Verification failed: vm.swappiness is '${actual_swappiness}', expected '${EXPECTED_SWAPPINESS}'."
+fi
+
+if [[ "$actual_vfs" != "$EXPECTED_VFS_PRESSURE" ]]; then
+    die "Verification failed: vm.vfs_cache_pressure is '${actual_vfs}', expected '${EXPECTED_VFS_PRESSURE}'."
+fi
+
+if [[ "$actual_scale" != "$EXPECTED_SCALE_FACTOR" ]]; then
+    die "Verification failed: vm.watermark_scale_factor is '${actual_scale}', expected '${EXPECTED_SCALE_FACTOR}'."
+fi
+
+if [[ "$actual_compaction" != "$EXPECTED_COMPACTION" ]]; then
+    die "Verification failed: vm.compaction_proactiveness is '${actual_compaction}', expected '${EXPECTED_COMPACTION}'."
+fi
+
+if [[ "$actual_bpf" != "0" ]]; then
+    die "Verification failed: net.core.bpf_jit_harden is '${actual_bpf}', expected '0'."
+fi
+
+log_success "Verified live kernel values:"
+log_success "  vm.swappiness = ${actual_swappiness} (Ideal ZRAM Reclaim)"
+log_success "  vm.vfs_cache_pressure = ${actual_vfs} (Slab Reclaim Active)"
+log_success "  vm.watermark_scale_factor = ${actual_scale} (0.5% Safe Direct Reclaim Buffer)"
+log_success "  vm.compaction_proactiveness = ${actual_compaction}"
+log_success "  net.core.bpf_jit_harden = ${actual_bpf} (Security Disabled / RAM Recovered)"
+
+if [[ -f "/sys/kernel/mm/lru_gen/min_ttl_ms" ]]; then
+    actual_ttl="$(< /sys/kernel/mm/lru_gen/min_ttl_ms)"
+    if [[ "$actual_ttl" == "$EXPECTED_MGLRU_TTL" ]]; then
+        log_success "  MGLRU min_ttl_ms = ${actual_ttl} (NVMe/ZRAM Thrash Protection Active)"
+    else
+        log_warn "  MGLRU min_ttl_ms verification failed. Read: ${actual_ttl}"
+    fi
+fi
+
+log_success "  Active Tuning Profile: [${C_BOLD}${EXPECTED_MODE}${C_RESET}]"
 
 exit 0

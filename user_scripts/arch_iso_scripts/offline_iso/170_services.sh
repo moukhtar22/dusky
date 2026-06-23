@@ -15,18 +15,20 @@ IFS=$'\n\t'
 # 2. Configuration
 readonly SERVICES=(
     "NetworkManager.service"
-    "tlp.service"
+#    "tlp.service"
     "udisks2.service"
     "thermald.service"
     "bluetooth.service"
-    "firewalld.service"
+    "ufw.service"
     "fstrim.timer"
     "systemd-timesyncd.service"
     "acpid.service"
-    "vsftpd.service"
-    "reflector.timer"
-    "swayosd-libinput-backend.service"
+#    "vsftpd.service"
+#    "reflector.timer"
     "systemd-resolved.service"
+    "snapper-cleanup.timer"
+    "snapper-cleanup.service"
+
 )
 
 # 3. Formatting

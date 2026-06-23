@@ -10,21 +10,18 @@ configuration {
     show-icons:     true;
     icon-theme:     "Papirus-Dark";
     font:           "JetBrainsMono Nerd Font 11";
-
     /* ─────────────────────────────────────────────────────────────────────
        Text Layout / Mode Labels
        ───────────────────────────────────────────────────────────────────── */
     display-drun:       " Apps";
     display-run:        " Run";
     display-clipboard:  "󰅌 Clip";
-    
     /* ─────────────────────────────────────────────────────────────────────
        Keybindings - General
        ───────────────────────────────────────────────────────────────────── */
     kb-cancel:              "Escape";
     kb-remove-char-back:    "BackSpace,Shift+BackSpace";
     kb-accept-entry:        "Return,KP_Enter";
-    
     /* ─────────────────────────────────────────────────────────────────────
        Keybindings - Custom Actions (for clipboard script)
        
@@ -34,6 +31,34 @@ configuration {
     kb-custom-1:            "Alt+u";
     kb-custom-2:            "Alt+y";
     kb-custom-3:            "Alt+t";
+    /* ─────────────────────────────────────────────────────────────────────
+       Mouse - Single primary-click activates an entry
+       (rofi's default is double-click, which is unintuitive for users
+       who reach for the mouse to pick an item from the visible list).
+       me-select-entry must be cleared first because MousePrimary is
+       bound there by default; rofi refuses to bind the same event twice.
+       ───────────────────────────────────────────────────────────────────── */
+    me-select-entry:        "";
+    me-accept-entry:        "MousePrimary";
+    /* ─────────────────────────────────────────────────────────────────────
+       Frecency-aware search
+
+       Rofi already tracks launch counts in ~/.cache/rofi3.druncache, but
+       its defaults don't use that signal once you start typing. These
+       three turn it on:
+
+         - sort + fzf      → score by match quality, with launch history
+                              breaking ties (PowerToys / Albert style).
+         - matching fuzzy  → forgiving typos ("netweok" still finds the
+                              Network apps).
+         - drun-match-fields drops `categories` so Firefox stops matching
+           every Network/WebBrowser query just because its .desktop file
+           lists those categories.
+       ───────────────────────────────────────────────────────────────────── */
+    sort:                   true;
+    sorting-method:         "fzf";
+    matching:               "fuzzy";
+    drun-match-fields:      "name,generic,exec,keywords";
     /* ─────────────────────────────────────────────────────────────────────
        Behavior Tweaks
        ───────────────────────────────────────────────────────────────────── */
@@ -55,7 +80,6 @@ configuration {
     var-urgent-bg:        @error-container;
     var-active-bg:        @primary;
     var-message-bg:       @surface-container;
-    
     /* Text Colors */
     var-text-def:         @on-surface;
     var-text-dim:         @on-surface-variant;
@@ -64,8 +88,6 @@ configuration {
     
     /* Borders */
     var-border:           @outline;
-
-
     /* =====================================================================
        2. ROFI INTERNAL VARIABLES
        ===================================================================== */
@@ -74,19 +96,16 @@ configuration {
     background-color:     @var-win-bg;
     text-color:           @var-text-def;
     border-color:         @var-border;
-
     /* Element States (Normal) */
-    normal-background:            transparent; 
+    normal-background:            transparent;
     normal-foreground:            @var-text-def;
     alternate-normal-background:  transparent;
     alternate-normal-foreground:  @var-text-def;
-
     /* Element States (Selected/Active) */
     selected-normal-background:   @var-active-bg;
     selected-normal-foreground:   @var-text-active;
     active-background:            @var-active-bg;
     active-foreground:            @var-text-active;
-
     /* Element States (Urgent) */
     urgent-background:            @var-urgent-bg;
     urgent-foreground:            @var-text-urgent;
@@ -132,7 +151,7 @@ inputbar {
 
 prompt {
     enabled:            true;
-    background-color:   inherit;
+    background-color:   transparent;
     text-color:         @var-text-dim;
     font:               "JetBrainsMono Nerd Font Bold 11";
 }
@@ -140,7 +159,7 @@ prompt {
 entry {
     placeholder:        "Search...";
     placeholder-color:  @var-text-dim;
-    background-color:   inherit;
+    background-color:   transparent;
     text-color:         @var-text-def;
     cursor:             text;
 }

@@ -1,0 +1,151 @@
+# monitor info
+mon_info() {
+  hyprctl monitors | awk '
+    # Mathematical GCD for Aspect Ratio calculation
+    function gcd(a, b,  t) {
+      a = (a < 0) ? -a : a
+      b = (b < 0) ? -b : b
+      while (b) { t = a % b; a = b; b = t }
+      return a
+    }
+
+    # The rendering engine
+    function flush(   w, h, mw, mh, diag_in, ppi, effw, effh, g, arw, arh, scale_num) {
+      if (name == "") return
+
+      # String to Number Coercion
+      split(res, r, "x")
+      split(phys, p, "x")
+      w = r[1] + 0
+      h = r[2] + 0
+      mw = p[1] + 0
+      mh = p[2] + 0
+      scale_num = scale + 0
+      if (scale_num == 0) scale_num = 1 # Fallback to prevent /0
+
+      # ANSI Color Palette
+      c_rst = "\033[0m"
+      c_dim = "\033[2;37m"   # Dim Gray
+      c_hdr = "\033[1;36m"   # Bold Cyan
+      c_key = "\033[1;34m"   # Bold Blue
+      c_val = "\033[1;37m"   # Bold White
+      c_met = "\033[1;33m"   # Bold Yellow (Metrics)
+      c_pos = "\033[1;32m"   # Bold Green (Positive status)
+      c_err = "\033[1;31m"   # Bold Red (Errors/Missing)
+
+      # 1. Header
+      printf "%s󰍹 %s%s\n", c_hdr, name, c_rst
+      
+      # 2. Hardware Make/Model
+      hw_string = "Unknown"
+      if (make != "" && model != "") hw_string = make " " model
+      else if (make != "") hw_string = make
+      else if (model != "") hw_string = model
+      printf " %s├─%s %s%-15s%s : %s%s%s\n", c_dim, c_rst, c_key, "Hardware", c_rst, c_val, hw_string, c_rst
+
+      # 3. Resolution & Refresh Rate
+      printf " %s├─%s %s%-15s%s : %s%dx%d%s @ %s%.2f Hz%s\n", c_dim, c_rst, c_key, "Resolution", c_rst, c_val, w, h, c_rst, c_met, refresh, c_rst
+
+      # 4. Scaling & Effective Res
+      effw = int((w / scale_num) + 0.5)
+      effh = int((h / scale_num) + 0.5)
+      scale_warn = (scale_num != 1) ? c_met " (Fractional)" c_rst : ""
+      printf " %s├─%s %s%-15s%s : %s%s%s%s\n", c_dim, c_rst, c_key, "Scaling", c_rst, c_val, scale, c_rst, scale_warn
+      printf " %s├─%s %s%-15s%s : %s%dx%d%s\n", c_dim, c_rst, c_key, "Effective Res", c_rst, c_val, effw, effh, c_rst
+
+      # 5. Physical Dimensions & PPI (Zero-Division Shielded)
+      if (mw > 0 && mh > 0) {
+        diag_in = sqrt(mw^2 + mh^2) / 25.4
+        ppi = sqrt(w^2 + h^2) / diag_in
+        printf " %s├─%s %s%-15s%s : %s%dx%d mm%s (%s%.2f\"%s)\n", c_dim, c_rst, c_key, "Physical Size", c_rst, c_val, mw, mh, c_rst, c_met, diag_in, c_rst
+        printf " %s├─%s %s%-15s%s : %s%.1f PPI%s\n", c_dim, c_rst, c_key, "Pixel Density", c_rst, c_met, ppi, c_rst
+      } else {
+        printf " %s├─%s %s%-15s%s : %sVirtual/Headless (0x0)%s\n", c_dim, c_rst, c_key, "Physical Size", c_rst, c_err, c_rst
+      }
+
+      # 6. Aspect Ratio
+      if (w > 0 && h > 0) {
+        g = gcd(w, h)
+        arw = w / g
+        arh = h / g
+        # Format 1366x768 to a human-readable format instead of 683:384
+        if (w == 1366 && h == 768) {
+          printf " %s├─%s %s%-15s%s : %s683:384%s (%s~16:9%s)\n", c_dim, c_rst, c_key, "Aspect Ratio", c_rst, c_val, c_rst, c_met, c_rst
+        } else {
+          printf " %s├─%s %s%-15s%s : %s%d:%d%s (%s%.3f:1%s)\n", c_dim, c_rst, c_key, "Aspect Ratio", c_rst, c_val, arw, arh, c_rst, c_met, w / h, c_rst
+        }
+      }
+
+      # 7. States (VRR & Focus)
+      if (vrr == "true" || vrr == "1") {
+         printf " %s├─%s %s%-15s%s : %sEnabled%s\n", c_dim, c_rst, c_key, "VRR", c_rst, c_pos, c_rst
+      } else {
+         printf " %s├─%s %s%-15s%s : %sDisabled%s\n", c_dim, c_rst, c_key, "VRR", c_rst, c_dim, c_rst
+      }
+
+      # 8. Terminal Branch (Focused)
+      if (focused == "yes" || focused == "1") {
+         printf " %s╰─%s %s%-15s%s : %sYes%s\n", c_dim, c_rst, c_key, "Focused", c_rst, c_pos, c_rst
+      } else {
+         printf " %s╰─%s %s%-15s%s : %sNo%s\n", c_dim, c_rst, c_key, "Focused", c_rst, c_dim, c_rst
+      }
+      
+      printf "\n"
+    }
+
+    # --- STATE MACHINE PARSER ---
+    
+    /^Monitor / {
+      flush()
+      name = $0
+      sub(/^Monitor /, "", name)
+      sub(/ \(ID [0-9]+\):[ \t]*$/, "", name)
+      res = phys = refresh = scale = focused = vrr = make = model = ""
+      next
+    }
+
+    /^[ \t]*[0-9]+x[0-9]+@[0-9.]+ at / {
+      split($1, parts, "@")
+      res = parts[1]
+      refresh = parts[2]
+      next
+    }
+
+    /^[ \t]*make:/ {
+      make = $0
+      sub(/^[ \t]*make:[ \t]*/, "", make)
+      next
+    }
+
+    /^[ \t]*model:/ {
+      model = $0
+      sub(/^[ \t]*model:[ \t]*/, "", model)
+      next
+    }
+
+    /^[ \t]*physical size \(mm\):/ {
+      phys = $NF
+      next
+    }
+
+    /^[ \t]*scale:/ {
+      scale = $NF
+      next
+    }
+
+    /^[ \t]*focused:/ {
+      focused = $NF
+      next
+    }
+
+    /^[ \t]*vrr:/ {
+      vrr = $NF
+      next
+    }
+
+    # Trigger flush on End of File
+    END { flush() }
+  '
+}
+
+alias ms='hyprmoninfo'

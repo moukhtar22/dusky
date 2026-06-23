@@ -11,49 +11,18 @@
 declare -ar pkgs_misc=(
     "wl-clip-persist"
 
-    # nemo
-    "nemo"
-    "nemo-fileroller"
-    "file-roller"
-    "gvfs"
-    "gvfs-smb"
-    "gvfs-mtp"
-    "gvfs-gphoto2"
-    "gvfs-nfs"
-    "gvfs-afc"
-    "gvfs-dnssd"
-    "ffmpegthumbnailer"
-    "webp-pixbuf-loader"
-    "poppler-glib"
-    "libgsf"
-    "gnome-epub-thumbnailer"
-    "resvg"
-    "nemo-python"
-    "nemo-compare"
-    "meld"
-    "nemo-media-columns"
-    "nemo-audio-tab"
-    "nemo-image-converter"
-    "nemo-emblems"
-    "nemo-repairer"
-    "nemo-share"
-    "python-gobject"
-    "dconf-editor"
-    "xreader"
-    "gst-libav"
-    "gst-plugins-good"
-    "nemo-pastebin"
+    #thunar
+"thunar" "thunar-archive-plugin" "file-roller" "thunar-volman" "thunar-media-tags-plugin" "thunar-shares-plugin" "thunar-vcs-plugin" "tumbler" "ffmpegthumbnailer" "webp-pixbuf-loader" "poppler-glib" "libgsf" "libgepub" "libopenraw" "resvg" "gvfs" "gvfs-mtp" "gvfs-nfs" "gvfs-smb" "gvfs-gphoto2" "gvfs-afc" "gvfs-dnssd" "catfish" "gnome-keyring" "meld" "xreader" "imagemagick"
 
-    # "nemo-terminal"
-
-
-    "satty"
-
-    "matugen"
-
-    "awww"
+    "mousepad"
+    "mako"
+    "python-evdev"
+    "python-pyudev"
+    "python-textual"
 
     "papirus-icon-theme"
+
+    "ufw"
 )
 
 
@@ -93,10 +62,22 @@ if (( EUID != 0 )); then
   exec "$sudo_bin" --preserve-env=TERM,NO_COLOR -- bash -- "$script_path" "$@"
 fi
 
-# --- 3. SAFETY ---
+# --- 3. SAFETY & STATE ---
 
 set -Eeuo pipefail
 shopt -s inherit_errexit
+
+TARGET_OS=""
+
+parse_args() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --cachyos|--cachy) TARGET_OS="cachyos"; shift ;;
+      --arch)            TARGET_OS="arch"; shift ;;
+      *)                 shift ;; # Safely ignore unknown flags
+    esac
+  done
+}
 
 # --- 4. UI ---
 
@@ -262,26 +243,55 @@ run_pacman() {
   done
 }
 
+determine_os_state() {
+  if [[ -z "${TARGET_OS}" ]]; then
+    print_info "Analyzing system state for keyring requirements..."
+    
+    if grep -qi "ID=cachyos" /etc/os-release 2>/dev/null; then
+       print_info "Pure CachyOS detected."
+       TARGET_OS="cachyos_pure"
+    elif pacman -Qq cachyos-mirrorlist &>/dev/null; then
+       print_ok "Franken-Arch detected (CachyOS packages found on Standard Arch)."
+       TARGET_OS="cachyos"
+    else
+       print_info "Standard Arch Linux detected."
+       TARGET_OS="arch"
+    fi
+  fi
+}
+
 ensure_keyring() {
   local keyring_dir='/etc/pacman.d/gnupg'
 
-  print_info "Checking Arch keyring"
+  print_info "Checking pacman keyring"
 
   if [[ -s ${keyring_dir}/trustdb.gpg ]] && { [[ -s ${keyring_dir}/pubring.kbx ]] || [[ -s ${keyring_dir}/pubring.gpg ]]; }; then
-    print_ok "Arch keyring already initialized."
+    print_ok "Pacman keyring already initialized."
     return 0
   fi
 
   print_warn "Pacman keyring is not initialized. Initializing now..."
   pacman-key --init
-  pacman-key --populate archlinux
-  print_ok "Arch keyring initialized."
+
+  if [[ "${TARGET_OS}" == "cachyos" ]]; then
+      print_info "Populating Arch Linux and CachyOS keyrings..."
+      pacman-key --populate archlinux cachyos
+  else
+      print_info "Populating standard Arch Linux keyring..."
+      pacman-key --populate archlinux
+  fi
+
+  print_ok "Keyring populated."
 }
 
 refresh_keyring_package() {
-  print_info "Refreshing Arch keyring package"
-  run_pacman --sync --refresh --needed --noconfirm -- archlinux-keyring
-  print_ok "Arch keyring package is current."
+  print_info "Refreshing keyring packages..."
+  if [[ "${TARGET_OS}" == "cachyos" ]]; then
+      run_pacman --sync --refresh --needed --noconfirm -- archlinux-keyring cachyos-keyring
+  else
+      run_pacman --sync --refresh --needed --noconfirm -- archlinux-keyring
+  fi
+  print_ok "Keyring packages are current."
 }
 
 upgrade_system() {
@@ -390,13 +400,23 @@ print_summary() {
 }
 
 main() {
+  parse_args "$@"
   local i
 
   ensure_arch_environment
   validate_group_configuration
   acquire_script_lock
-  ensure_keyring
-  refresh_keyring_package
+  
+  # Inject Auto-Detection Logic before touching pacman-keys
+  determine_os_state
+  
+  if [[ "${TARGET_OS}" != "cachyos_pure" ]]; then
+    ensure_keyring
+    refresh_keyring_package
+  else
+    print_info "Skipping manual keyring configuration (Managed by CachyOS)."
+  fi
+  
  # upgrade_system
 
   for i in "${!GROUP_LABELS[@]}"; do

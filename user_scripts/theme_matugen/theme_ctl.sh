@@ -4,6 +4,7 @@
 # ==============================================================================
 # Description: Centralized state manager for system theming.
 #              Handles Matugen config, physical directory swaps, and wallpaper updates.
+#              Provides full animation support for awww daemon.
 #
 # Ecosystem:   Arch Linux / Hyprland / UWSM / Wayland
 #
@@ -15,15 +16,19 @@
 #
 # Usage:
 #   theme_ctl set --mode dark --type scheme-vibrant
-#   theme_ctl set --index 1 --base16 wal
-#   theme_ctl set --no-wall --mode light
-#   theme_ctl next
+#   theme_ctl set --trans-type wave --trans-duration 2.5
+#   theme_ctl next --no-regen
 #   theme_ctl prev
-#   theme_ctl random
+#   theme_ctl random --no-regen
 #   theme_ctl refresh
 #   theme_ctl color FF0000
 #   theme_ctl get
 # ==============================================================================
+
+if (( BASH_VERSINFO[0] < 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] < 1) )); then
+    printf '\033[1;31mERROR:\033[0m This script requires Bash 5.1+ for SRANDOM support (Current: %s).\n' "${BASH_VERSION}" >&2
+    exit 1
+fi
 
 set -euo pipefail
 
@@ -43,11 +48,20 @@ readonly ACTIVE_THEME_DIR="${WALLPAPER_ROOT}/active_theme"
 readonly LOCK_FILE="${XDG_RUNTIME_DIR:-/tmp}/theme_ctl.lock"
 readonly FLOCK_TIMEOUT_SEC=30
 
+# State Defaults
 readonly DEFAULT_MODE="dark"
 readonly DEFAULT_TYPE="scheme-tonal-spot"
 readonly DEFAULT_CONTRAST="0"
 readonly DEFAULT_COLOR_INDEX="0"
 readonly DEFAULT_BASE16="disable"
+
+# awww Animation Defaults
+readonly DEFAULT_TRANS_TYPE="random"
+readonly DEFAULT_TRANS_DURATION="2"
+readonly DEFAULT_TRANS_FPS="60"
+readonly DEFAULT_TRANS_ANGLE="30"
+readonly DEFAULT_TRANS_POS="center"
+readonly DEFAULT_TRANS_BEZIER=".54,0,.34,.99"
 
 readonly DAEMON_POLL_INTERVAL=0.1
 readonly DAEMON_POLL_LIMIT=50
@@ -58,6 +72,13 @@ MATUGEN_TYPE=""
 MATUGEN_CONTRAST=""
 SOURCE_COLOR_INDEX=""
 BASE16_BACKEND=""
+AWWW_TRANS_TYPE=""
+AWWW_TRANS_DURATION=""
+AWWW_TRANS_FPS=""
+AWWW_TRANS_BEZIER=""
+AWWW_TRANS_ANGLE=""
+AWWW_TRANS_POS=""
+
 STATE_NEEDS_REWRITE=0
 
 # --- CLEANUP TRACKING ---
@@ -112,22 +133,18 @@ check_deps() {
 
 is_valid_matugen_type() {
     case "$1" in
-        disable|scheme-content|scheme-expressive|scheme-fidelity|scheme-fruit-salad|scheme-monochrome|scheme-neutral|scheme-rainbow|scheme-tonal-spot|scheme-vibrant)
-            return 0
-            ;;
-        *)
-            return 1
-            ;;
+        disable|scheme-content|scheme-expressive|scheme-fidelity|scheme-fruit-salad|scheme-monochrome|scheme-neutral|scheme-rainbow|scheme-tonal-spot|scheme-vibrant) return 0 ;;
+        *) return 1 ;;
     esac
 }
 
 is_valid_contrast() {
     local value="$1"
-
     [[ "$value" == "disable" ]] && return 0
-    [[ "$value" =~ ^[+-]?([0-9]+([.][0-9]*)?|[.][0-9]+)$ ]] || return 1
-
-    LC_ALL=C awk -v v="$value" 'BEGIN { exit !(v >= -1 && v <= 1) }'
+    # Pure native Bash float validation for [-1, 1] range 
+    # (Updated to safely handle leading zeros like 00.5 or 01.0 just like the old script did)
+    [[ "$value" =~ ^[+-]?(0*1(\.0*)?|0*\.[0-9]+|0+|\.[0-9]+)$ ]] && return 0
+    return 1
 }
 
 is_valid_base16_backend() {
@@ -169,55 +186,52 @@ read_state() {
     MATUGEN_CONTRAST="$DEFAULT_CONTRAST"
     SOURCE_COLOR_INDEX="$DEFAULT_COLOR_INDEX"
     BASE16_BACKEND="$DEFAULT_BASE16"
+    AWWW_TRANS_TYPE="$DEFAULT_TRANS_TYPE"
+    AWWW_TRANS_DURATION="$DEFAULT_TRANS_DURATION"
+    AWWW_TRANS_FPS="$DEFAULT_TRANS_FPS"
+    AWWW_TRANS_BEZIER="$DEFAULT_TRANS_BEZIER"
+    AWWW_TRANS_ANGLE="$DEFAULT_TRANS_ANGLE"
+    AWWW_TRANS_POS="$DEFAULT_TRANS_POS"
     STATE_NEEDS_REWRITE=0
 
-    local -i saw_mode=0
-    local -i saw_type=0
-    local -i saw_contrast=0
-    local -i saw_index=0
-    local -i saw_base16=0
+    local -A found_keys=()
     local key value
 
-    [[ -f "$STATE_FILE" ]] || {
+    if [[ ! -f "$STATE_FILE" ]]; then
         STATE_NEEDS_REWRITE=1
         return 0
-    }
+    fi
 
-    while IFS='=' read -r key value || [[ -n "$key" ]]; do
-        [[ -z "$key" || "${key:0:1}" == "#" ]] && continue
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        # Fast native trim
+        line="${line#"${line%%[![:space:]]*}"}"
+        line="${line%"${line##*[![:space:]]}"}"
 
+        [[ -z "$line" || "${line:0:1}" == "#" ]] && continue
+
+        key="${line%%=*}"
+        value="${line#*=}"
+        
+        # Trim internal key/values in case of dirty edits (e.g. KEY  =  VALUE)
+        key="${key%"${key##*[![:space:]]}"}"
+        value="${value#"${value%%[![:space:]]*}"}"
+
+        # Strip surrounding quotes safely
         if [[ ${#value} -ge 2 ]]; then
-            if [[ "${value:0:1}" == '"' && "${value: -1}" == '"' ]]; then
-                value="${value:1:-1}"
-            elif [[ "${value:0:1}" == "'" && "${value: -1}" == "'" ]]; then
+            if [[ "${value:0:1}" == '"' && "${value: -1}" == '"' ]] || [[ "${value:0:1}" == "'" && "${value: -1}" == "'" ]]; then
                 value="${value:1:-1}"
             fi
         fi
 
         case "$key" in
-            THEME_MODE)
-                THEME_MODE="$value"
-                saw_mode=1
-                ;;
-            MATUGEN_TYPE)
-                MATUGEN_TYPE="$value"
-                saw_type=1
-                ;;
-            MATUGEN_CONTRAST)
-                MATUGEN_CONTRAST="$value"
-                saw_contrast=1
-                ;;
-            SOURCE_COLOR_INDEX)
-                SOURCE_COLOR_INDEX="$value"
-                saw_index=1
-                ;;
-            BASE16_BACKEND)
-                BASE16_BACKEND="$value"
-                saw_base16=1
+            THEME_MODE|MATUGEN_TYPE|MATUGEN_CONTRAST|SOURCE_COLOR_INDEX|BASE16_BACKEND|AWWW_TRANS_TYPE|AWWW_TRANS_DURATION|AWWW_TRANS_FPS|AWWW_TRANS_BEZIER|AWWW_TRANS_ANGLE|AWWW_TRANS_POS)
+                printf -v "$key" "%s" "$value"
+                found_keys["$key"]=1
                 ;;
         esac
     done < "$STATE_FILE"
 
+    # Core Validations
     case "$THEME_MODE" in
         light|dark) ;;
         *)
@@ -250,95 +264,105 @@ read_state() {
         BASE16_BACKEND="$DEFAULT_BASE16"
         STATE_NEEDS_REWRITE=1
     fi
+    
+    # Animation Validations
+    case "$AWWW_TRANS_TYPE" in
+        disable|none|simple|fade|left|right|top|bottom|wipe|wave|grow|center|any|outer|random) ;;
+        *)
+            warn "Invalid AWWW_TRANS_TYPE. Resetting to ${DEFAULT_TRANS_TYPE}."
+            AWWW_TRANS_TYPE="$DEFAULT_TRANS_TYPE"
+            STATE_NEEDS_REWRITE=1
+            ;;
+    esac
 
-    (( saw_mode )) || STATE_NEEDS_REWRITE=1
-    (( saw_type )) || STATE_NEEDS_REWRITE=1
-    (( saw_contrast )) || STATE_NEEDS_REWRITE=1
-    (( saw_index )) || STATE_NEEDS_REWRITE=1
-    (( saw_base16 )) || STATE_NEEDS_REWRITE=1
+    if [[ "$AWWW_TRANS_DURATION" != "disable" && ! "$AWWW_TRANS_DURATION" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+        warn "Invalid AWWW_TRANS_DURATION. Resetting."
+        AWWW_TRANS_DURATION="$DEFAULT_TRANS_DURATION"
+        STATE_NEEDS_REWRITE=1
+    fi
+
+    if [[ "$AWWW_TRANS_FPS" != "disable" && ! "$AWWW_TRANS_FPS" =~ ^[0-9]+$ ]]; then
+        warn "Invalid AWWW_TRANS_FPS. Resetting."
+        AWWW_TRANS_FPS="$DEFAULT_TRANS_FPS"
+        STATE_NEEDS_REWRITE=1
+    fi
+
+    local required=(THEME_MODE MATUGEN_TYPE MATUGEN_CONTRAST SOURCE_COLOR_INDEX BASE16_BACKEND AWWW_TRANS_TYPE AWWW_TRANS_DURATION AWWW_TRANS_FPS AWWW_TRANS_BEZIER AWWW_TRANS_ANGLE AWWW_TRANS_POS)
+    for req in "${required[@]}"; do
+        if [[ -z "${found_keys[$req]:-}" ]]; then
+            STATE_NEEDS_REWRITE=1
+        fi
+    done
 }
 
 write_state() {
-    local mode="$1"
-    local type="$2"
-    local contrast="$3"
-    local index="$4"
-    local base16="$5"
+    # Strictly define the canonical ordering for the configuration file
+    local -a key_order=(
+        THEME_MODE
+        MATUGEN_TYPE
+        MATUGEN_CONTRAST
+        SOURCE_COLOR_INDEX
+        BASE16_BACKEND
+        AWWW_TRANS_TYPE
+        AWWW_TRANS_DURATION
+        AWWW_TRANS_FPS
+        AWWW_TRANS_BEZIER
+        AWWW_TRANS_ANGLE
+        AWWW_TRANS_POS
+    )
 
-    local -i wrote_mode=0
-    local -i wrote_type=0
-    local -i wrote_contrast=0
-    local -i wrote_index=0
-    local -i wrote_base16=0
-    local -i had_content=0
-    local line
+    local -A current_state=(
+        [THEME_MODE]="$THEME_MODE"
+        [MATUGEN_TYPE]="$MATUGEN_TYPE"
+        [MATUGEN_CONTRAST]="$MATUGEN_CONTRAST"
+        [SOURCE_COLOR_INDEX]="$SOURCE_COLOR_INDEX"
+        [BASE16_BACKEND]="$BASE16_BACKEND"
+        [AWWW_TRANS_TYPE]="$AWWW_TRANS_TYPE"
+        [AWWW_TRANS_DURATION]="$AWWW_TRANS_DURATION"
+        [AWWW_TRANS_FPS]="$AWWW_TRANS_FPS"
+        [AWWW_TRANS_BEZIER]="$AWWW_TRANS_BEZIER"
+        [AWWW_TRANS_ANGLE]="$AWWW_TRANS_ANGLE"
+        [AWWW_TRANS_POS]="$AWWW_TRANS_POS"
+    )
 
     ensure_dir "$STATE_DIR"
-
     _TEMP_FILE=$(mktemp "${STATE_DIR}/state.conf.XXXXXX")
 
     if [[ -s "$STATE_FILE" ]]; then
-        had_content=1
-
         while IFS= read -r line || [[ -n "$line" ]]; do
-            case "$line" in
-                THEME_MODE=*)
-                    if (( ! wrote_mode )); then
-                        printf 'THEME_MODE=%s\n' "$mode"
-                        wrote_mode=1
-                    fi
-                    ;;
-                MATUGEN_TYPE=*)
-                    if (( ! wrote_type )); then
-                        printf 'MATUGEN_TYPE=%s\n' "$type"
-                        wrote_type=1
-                    fi
-                    ;;
-                MATUGEN_CONTRAST=*)
-                    if (( ! wrote_contrast )); then
-                        printf 'MATUGEN_CONTRAST=%s\n' "$contrast"
-                        wrote_contrast=1
-                    fi
-                    ;;
-                SOURCE_COLOR_INDEX=*)
-                    if (( ! wrote_index )); then
-                        printf 'SOURCE_COLOR_INDEX=%s\n' "$index"
-                        wrote_index=1
-                    fi
-                    ;;
-                BASE16_BACKEND=*)
-                    if (( ! wrote_base16 )); then
-                        printf 'BASE16_BACKEND=%s\n' "$base16"
-                        wrote_base16=1
-                    fi
-                    ;;
-                *)
-                    printf '%s\n' "$line"
-                    ;;
-            esac
+            # Safely trim for evaluation without destroying user formatting
+            local eval_line="${line#"${line%%[![:space:]]*}"}"
+            
+            if [[ -z "$eval_line" || "${eval_line:0:1}" == "#" ]]; then
+                printf '%s\n' "$line"
+                continue
+            fi
+
+            local key="${eval_line%%=*}"
+            key="${key%"${key##*[![:space:]]}"}"
+
+            if [[ -n "$key" ]] && [[ -v current_state["$key"] ]]; then
+                printf '%s="%s"\n' "$key" "${current_state[$key]}"
+                unset 'current_state['"$key"']'
+            else
+                printf '%s\n' "$line"
+            fi
         done < "$STATE_FILE" > "$_TEMP_FILE"
+    else
+        printf '# Dusky Theme State File\n' > "$_TEMP_FILE"
     fi
 
-    if (( ! had_content )); then
-        printf '%s\n' "# Dusky Theme State File" > "$_TEMP_FILE"
-    fi
-
-    (( wrote_mode )) || printf 'THEME_MODE=%s\n' "$mode" >> "$_TEMP_FILE"
-    (( wrote_type )) || printf 'MATUGEN_TYPE=%s\n' "$type" >> "$_TEMP_FILE"
-    (( wrote_contrast )) || printf 'MATUGEN_CONTRAST=%s\n' "$contrast" >> "$_TEMP_FILE"
-    (( wrote_index )) || printf 'SOURCE_COLOR_INDEX=%s\n' "$index" >> "$_TEMP_FILE"
-    (( wrote_base16 )) || printf 'BASE16_BACKEND=%s\n' "$base16" >> "$_TEMP_FILE"
+    # Append any totally new/missing keys according to our STRICT canonical order
+    for key in "${key_order[@]}"; do
+        if [[ -v current_state["$key"] ]]; then
+            printf '%s="%s"\n' "$key" "${current_state[$key]}"
+        fi
+    done >> "$_TEMP_FILE"
 
     mv -fT -- "$_TEMP_FILE" "$STATE_FILE"
     _TEMP_FILE=""
 
-    write_public_state "$mode"
-
-    THEME_MODE="$mode"
-    MATUGEN_TYPE="$type"
-    MATUGEN_CONTRAST="$contrast"
-    SOURCE_COLOR_INDEX="$index"
-    BASE16_BACKEND="$base16"
+    write_public_state "$THEME_MODE"
     STATE_NEEDS_REWRITE=0
 }
 
@@ -346,11 +370,11 @@ init_state() {
     ensure_dir "$STATE_DIR"
     read_state
 
-    if [[ ! -s "$STATE_FILE" ]]; then
-        log "Initializing new state file at ${STATE_FILE}..."
-        write_state "$THEME_MODE" "$MATUGEN_TYPE" "$MATUGEN_CONTRAST" "$SOURCE_COLOR_INDEX" "$BASE16_BACKEND"
-    elif (( STATE_NEEDS_REWRITE )); then
-        write_state "$THEME_MODE" "$MATUGEN_TYPE" "$MATUGEN_CONTRAST" "$SOURCE_COLOR_INDEX" "$BASE16_BACKEND"
+    if [[ ! -s "$STATE_FILE" ]] || (( STATE_NEEDS_REWRITE )); then
+        if [[ ! -s "$STATE_FILE" ]]; then
+            log "Initializing new state file at ${STATE_FILE}..."
+        fi
+        write_state
     else
         write_public_state "$THEME_MODE"
     fi
@@ -423,31 +447,14 @@ ensure_awww_running() {
     log "Starting awww-daemon..."
 
     if command -v uwsm-app >/dev/null 2>&1; then
+        # Utilizing 99>&- to ensure uwsm/awww don't inherit the flock descriptor
         uwsm-app -- awww-daemon --format xrgb >/dev/null 2>&1 99>&- &
     else
         awww-daemon --format xrgb >/dev/null 2>&1 99>&- &
+        disown $! 2>/dev/null || true
     fi
 
     wait_for_process "awww-daemon" || die "awww-daemon failed to start"
-}
-
-ensure_swaync_running() {
-    process_running "swaync" && return 0
-
-    log "Starting swaync..."
-
-    if command -v uwsm-app >/dev/null 2>&1; then
-        uwsm-app -- swaync >/dev/null 2>&1 99>&- &
-    else
-        swaync >/dev/null 2>&1 99>&- &
-    fi
-
-    if ! wait_for_process "swaync"; then
-        warn "swaync failed to start. Matugen hooks might fail."
-        return 0
-    fi
-
-    sleep 0.5
 }
 
 # --- WALLPAPER SELECTION ---
@@ -458,7 +465,7 @@ load_wallpapers() {
     local -n out_paths_ref=$3
     local -n out_ids_ref=$4
     local -a found=()
-    local record path
+    local path
 
     out_paths_ref=()
     out_ids_ref=()
@@ -507,7 +514,6 @@ select_wallpaper() {
     fi
 
     count=${#wallpapers[@]}
-
     [[ -f "$track_file" ]] && last_id=$(<"$track_file")
 
     if [[ -n "$last_id" ]]; then
@@ -553,7 +559,6 @@ update_wallpaper_tracker() {
     local track_file
 
     track_file=$(tracker_file_for_mode "$THEME_MODE")
-
     ensure_dir "$STATE_DIR"
 
     _TEMP_FILE=$(mktemp "${STATE_DIR}/track.XXXXXX")
@@ -572,10 +577,9 @@ generate_colors() {
 
     [[ -f "$img" ]] || die "Image file does not exist: $img"
 
-    ensure_swaync_running
-
     log "Matugen: Mode=[${THEME_MODE}] Type=[${MATUGEN_TYPE}] Contrast=[${MATUGEN_CONTRAST}] Index=[${SOURCE_COLOR_INDEX}] Base16=[${BASE16_BACKEND}]"
 
+    # STRICT CLAP ALIGNMENT: Binary -> Global Options -> Subcommand -> Positional Args
     cmd=(matugen)
     [[ "$BASE16_BACKEND" != "disable" && -n "$BASE16_BACKEND" ]] && cmd+=(--base16-backend "$BASE16_BACKEND")
     cmd+=(--mode "$THEME_MODE")
@@ -600,7 +604,7 @@ generate_colors() {
             fi
 
             SOURCE_COLOR_INDEX="0"
-            write_state "$THEME_MODE" "$MATUGEN_TYPE" "$MATUGEN_CONTRAST" "$SOURCE_COLOR_INDEX" "$BASE16_BACKEND"
+            write_state
         else
             die "Matugen generation failed: $output"
         fi
@@ -619,10 +623,9 @@ apply_solid_color() {
     [[ "$hex" =~ ^#?[a-fA-F0-9]{6}$ ]] || die "Invalid HEX color: $hex"
     [[ "$hex" != \#* ]] && hex="#${hex}"
 
-    ensure_swaync_running
-
     log "Matugen Solid Color: Hex=[${hex}] Mode=[${THEME_MODE}] Type=[${MATUGEN_TYPE}] Contrast=[${MATUGEN_CONTRAST}] Base16=[${BASE16_BACKEND}]"
 
+    # STRICT CLAP ALIGNMENT: Binary -> Global Options -> Subcommand -> Sub-arguments
     cmd=(matugen)
     [[ "$BASE16_BACKEND" != "disable" && -n "$BASE16_BACKEND" ]] && cmd+=(--base16-backend "$BASE16_BACKEND")
     cmd+=(--mode "$THEME_MODE")
@@ -648,13 +651,22 @@ apply_wallpaper_selection() {
 
     select_wallpaper "$strategy" wallpaper wallpaper_id || die "No wallpapers found in ${ACTIVE_THEME_DIR} or ${WALLPAPER_ROOT}"
 
-    log "Selected: ${wallpaper##*/}"
+    log "Selected: ${wallpaper##*/} [Trans: ${AWWW_TRANS_TYPE}]"
 
     ensure_awww_running
-    awww img "$wallpaper" \
-        --transition-type grow \
-        --transition-duration 2 \
-        --transition-fps 60 || die "Failed to apply wallpaper with awww"
+    
+    # STRICT CLAP ALIGNMENT: `awww img [OPTIONS] <IMAGE>`
+    local -a awww_cmd=(awww img)
+    [[ -n "$AWWW_TRANS_TYPE" && "$AWWW_TRANS_TYPE" != "disable" ]] && awww_cmd+=(--transition-type "$AWWW_TRANS_TYPE")
+    [[ -n "$AWWW_TRANS_DURATION" && "$AWWW_TRANS_DURATION" != "disable" ]] && awww_cmd+=(--transition-duration "$AWWW_TRANS_DURATION")
+    [[ -n "$AWWW_TRANS_FPS" && "$AWWW_TRANS_FPS" != "disable" ]] && awww_cmd+=(--transition-fps "$AWWW_TRANS_FPS")
+    [[ -n "$AWWW_TRANS_ANGLE" && "$AWWW_TRANS_ANGLE" != "disable" ]] && awww_cmd+=(--transition-angle "$AWWW_TRANS_ANGLE")
+    [[ -n "$AWWW_TRANS_POS" && "$AWWW_TRANS_POS" != "disable" ]] && awww_cmd+=(--transition-pos "$AWWW_TRANS_POS")
+    [[ -n "$AWWW_TRANS_BEZIER" && "$AWWW_TRANS_BEZIER" != "disable" ]] && awww_cmd+=(--transition-bezier "$AWWW_TRANS_BEZIER")
+
+    awww_cmd+=("$wallpaper")
+
+    "${awww_cmd[@]}" 99>&- || die "Failed to apply wallpaper with awww"
 
     update_wallpaper_tracker "$wallpaper_id"
 
@@ -729,22 +741,26 @@ Commands:
               --contrast <num[-1..1]|disable>
               --index <n>            Set Matugen source color extraction index
               --base16 <wal|disable> Set Base16 backend generation
+              --trans-type <type>    Animation type (random, grow, wipe, wave, etc.)
+              --trans-duration <sec> Animation duration
+              --trans-fps <fps>      Animation frames per second
+              --trans-bezier <bez>   Animation bezier curve (e.g., .54,0,.34,.99)
+              --trans-angle <deg>    Animation angle (for wave, wipe)
+              --trans-pos <pos>      Animation position (e.g., center, top-left)
               --defaults             Reset all settings to defaults
               --no-wall              Prevent wallpaper change
               --no-regen             Prevent Matugen execution (useful for chaining)
-  next      Select the next wallpaper in chronological order.
-  prev      Select the previous wallpaper in chronological order.
-  random    Select a wallpaper randomly.
+  next      [--no-regen] Select the next wallpaper.
+  prev      [--no-regen] Select the previous wallpaper.
+  random    [--no-regen] Select a random wallpaper.
   refresh   Regenerate colors for current wallpaper.
   apply     Alias of refresh.
   color     <hex> Generate theme from a solid hex color (e.g., FF0000 or "#FF0000").
   get       Show current configuration.
 
 Examples:
-  theme_ctl set --mode dark --index 1 --base16 wal
-  theme_ctl set --no-wall --mode light
-  theme_ctl next
-  theme_ctl prev
+  theme_ctl set --mode dark --trans-type wave --trans-duration 2.5
+  theme_ctl next --no-regen
   theme_ctl random
   theme_ctl color FF0000
 EOF
@@ -761,153 +777,157 @@ cmd_get() {
 }
 
 cmd_set() {
-    local current_mode="$THEME_MODE"
-    local current_type="$MATUGEN_TYPE"
-    local current_contrast="$MATUGEN_CONTRAST"
-    local current_index="$SOURCE_COLOR_INDEX"
-    local current_base16="$BASE16_BACKEND"
-
-    local desired_mode="$THEME_MODE"
-    local desired_type="$MATUGEN_TYPE"
-    local desired_contrast="$MATUGEN_CONTRAST"
-    local desired_index="$SOURCE_COLOR_INDEX"
-    local desired_base16="$BASE16_BACKEND"
+    # Isolate exact diffs
+    local prev_mode="$THEME_MODE"
+    local prev_type="$MATUGEN_TYPE"
+    local prev_contrast="$MATUGEN_CONTRAST"
+    local prev_index="$SOURCE_COLOR_INDEX"
+    local prev_base16="$BASE16_BACKEND"
 
     local mode_request_kind=""
-    local -i settings_changed=0
-    local -i mode_changed=0
-    local -i same_mode_requested=0
     local -i skip_wall=0
     local -i skip_regen=0
-    local -i need_wall=0
-    local -i need_regen=0
-    local -i full_state_pending=0
 
     while (( $# > 0 )); do
         case "$1" in
             --mode)
                 [[ -n "${2:-}" ]] || die "--mode requires a value"
                 [[ "$2" == "light" || "$2" == "dark" ]] || die "--mode must be 'light' or 'dark'"
-                desired_mode="$2"
+                THEME_MODE="$2"
                 mode_request_kind="explicit"
                 shift 2
                 ;;
             --type)
                 [[ -n "${2:-}" ]] || die "--type requires a value"
-                is_valid_matugen_type "$2" || die "--type must be one of: disable, scheme-content, scheme-expressive, scheme-fidelity, scheme-fruit-salad, scheme-monochrome, scheme-neutral, scheme-rainbow, scheme-tonal-spot, scheme-vibrant"
-                desired_type="$2"
+                is_valid_matugen_type "$2" || die "--type must be valid"
+                MATUGEN_TYPE="$2"
                 shift 2
                 ;;
             --contrast)
                 [[ -n "${2:-}" ]] || die "--contrast requires a value"
-                is_valid_contrast "$2" || die "--contrast must be 'disable' or a numeric value in the range [-1, 1]"
-                desired_contrast="$2"
+                is_valid_contrast "$2" || die "--contrast must be valid"
+                MATUGEN_CONTRAST="$2"
                 shift 2
                 ;;
             --index)
-                [[ -n "${2:-}" ]] || die "--index requires a value (e.g., 0, 1, 2)"
-                [[ "$2" =~ ^[0-9]+$ ]] || die "--index must be a non-negative integer"
-                desired_index="$2"
+                [[ -n "${2:-}" ]] || die "--index requires a value"
+                [[ "$2" =~ ^[0-9]+$ ]] || die "--index must be non-negative integer"
+                SOURCE_COLOR_INDEX="$2"
                 shift 2
                 ;;
             --base16)
-                [[ -n "${2:-}" ]] || die "--base16 requires a value (e.g., wal, disable)"
+                [[ -n "${2:-}" ]] || die "--base16 requires a value"
                 is_valid_base16_backend "$2" || die "--base16 must be 'wal' or 'disable'"
-                desired_base16="$2"
+                BASE16_BACKEND="$2"
+                shift 2
+                ;;
+            --trans-type)
+                [[ -n "${2:-}" ]] || die "--trans-type requires a value"
+                case "$2" in
+                    disable|none|simple|fade|left|right|top|bottom|wipe|wave|grow|center|any|outer|random) ;;
+                    *) die "--trans-type must be a valid transition type" ;;
+                esac
+                AWWW_TRANS_TYPE="$2"
+                shift 2
+                ;;
+            --trans-duration)
+                [[ -n "${2:-}" ]] || die "--trans-duration requires a value"
+                [[ "$2" == "disable" || "$2" =~ ^[0-9]+([.][0-9]+)?$ ]] || die "--trans-duration must be a positive number or 'disable'"
+                AWWW_TRANS_DURATION="$2"
+                shift 2
+                ;;
+            --trans-fps)
+                [[ -n "${2:-}" ]] || die "--trans-fps requires a value"
+                [[ "$2" == "disable" || "$2" =~ ^[0-9]+$ ]] || die "--trans-fps must be an integer or 'disable'"
+                AWWW_TRANS_FPS="$2"
+                shift 2
+                ;;
+            --trans-bezier)
+                [[ -n "${2:-}" ]] || die "--trans-bezier requires a value"
+                AWWW_TRANS_BEZIER="$2"
+                shift 2
+                ;;
+            --trans-angle)
+                [[ -n "${2:-}" ]] || die "--trans-angle requires a value"
+                AWWW_TRANS_ANGLE="$2"
+                shift 2
+                ;;
+            --trans-pos)
+                [[ -n "${2:-}" ]] || die "--trans-pos requires a value"
+                AWWW_TRANS_POS="$2"
                 shift 2
                 ;;
             --defaults)
-                desired_mode="$DEFAULT_MODE"
-                desired_type="$DEFAULT_TYPE"
-                desired_contrast="$DEFAULT_CONTRAST"
-                desired_index="$DEFAULT_COLOR_INDEX"
-                desired_base16="$DEFAULT_BASE16"
+                THEME_MODE="$DEFAULT_MODE"
+                MATUGEN_TYPE="$DEFAULT_TYPE"
+                MATUGEN_CONTRAST="$DEFAULT_CONTRAST"
+                SOURCE_COLOR_INDEX="$DEFAULT_COLOR_INDEX"
+                BASE16_BACKEND="$DEFAULT_BASE16"
+                AWWW_TRANS_TYPE="$DEFAULT_TRANS_TYPE"
+                AWWW_TRANS_DURATION="$DEFAULT_TRANS_DURATION"
+                AWWW_TRANS_FPS="$DEFAULT_TRANS_FPS"
+                AWWW_TRANS_BEZIER="$DEFAULT_TRANS_BEZIER"
+                AWWW_TRANS_ANGLE="$DEFAULT_TRANS_ANGLE"
+                AWWW_TRANS_POS="$DEFAULT_TRANS_POS"
                 mode_request_kind="defaults"
                 shift
                 ;;
-            --no-wall)
-                skip_wall=1
-                shift
-                ;;
-            --no-regen)
-                skip_regen=1
-                shift
-                ;;
-            --help)
-                usage
-                exit 0
-                ;;
-            *)
-                die "Unknown option: $1"
-                ;;
+            --no-wall) skip_wall=1; shift ;;
+            --no-regen) skip_regen=1; shift ;;
+            --help) usage; exit 0 ;;
+            *) die "Unknown option: $1" ;;
         esac
     done
 
-    [[ "$desired_mode" != "$current_mode" ]] && mode_changed=1
+    # Boolean mapping for routing logic
+    local -i mode_changed=0
+    local -i matugen_settings_changed=0
+    local -i same_mode_requested=0
 
-    if [[ "$desired_type" != "$current_type" || "$desired_contrast" != "$current_contrast" || "$desired_index" != "$current_index" || "$desired_base16" != "$current_base16" ]]; then
-        settings_changed=1
+    [[ "$THEME_MODE" != "$prev_mode" ]] && mode_changed=1
+    
+    if [[ "$MATUGEN_TYPE" != "$prev_type" || "$MATUGEN_CONTRAST" != "$prev_contrast" || \
+          "$SOURCE_COLOR_INDEX" != "$prev_index" || "$BASE16_BACKEND" != "$prev_base16" ]]; then
+        matugen_settings_changed=1
     fi
 
-    if [[ "$mode_request_kind" == "explicit" && "$desired_mode" == "$current_mode" ]]; then
+    if [[ "$mode_request_kind" == "explicit" && "$THEME_MODE" == "$prev_mode" ]]; then
         same_mode_requested=1
     fi
 
-    if (( ! skip_wall )) && (( mode_changed || same_mode_requested )); then
-        need_wall=1
-    fi
-
-    if (( ! skip_regen )) && (( settings_changed || same_mode_requested || mode_changed )); then
-        need_regen=1
-    fi
-
     if (( mode_changed )); then
-        move_directories "$desired_mode"
-
-        if (( settings_changed && !skip_regen )); then
-            write_state "$desired_mode" "$current_type" "$current_contrast" "$current_index" "$current_base16"
-            full_state_pending=1
-        else
-            write_state "$desired_mode" "$desired_type" "$desired_contrast" "$desired_index" "$desired_base16"
-        fi
+        move_directories "$THEME_MODE"
     fi
 
-    THEME_MODE="$desired_mode"
-    MATUGEN_TYPE="$desired_type"
-    MATUGEN_CONTRAST="$desired_contrast"
-    SOURCE_COLOR_INDEX="$desired_index"
-    BASE16_BACKEND="$desired_base16"
+    write_state
 
-    if (( ! mode_changed && settings_changed && skip_regen )); then
-        write_state "$THEME_MODE" "$MATUGEN_TYPE" "$MATUGEN_CONTRAST" "$SOURCE_COLOR_INDEX" "$BASE16_BACKEND"
-    elif (( ! mode_changed && settings_changed )); then
-        full_state_pending=1
-    fi
-
-    if (( need_wall )); then
+    # Execute
+    if (( ! skip_wall )) && (( mode_changed || same_mode_requested )); then
         apply_wallpaper_selection next "$(( ! skip_regen ))"
-    elif (( need_regen )); then
+    elif (( ! skip_regen )) && (( matugen_settings_changed || same_mode_requested || mode_changed )); then
         regenerate_current
-    fi
-
-    if (( full_state_pending )); then
-        write_state "$THEME_MODE" "$MATUGEN_TYPE" "$MATUGEN_CONTRAST" "$SOURCE_COLOR_INDEX" "$BASE16_BACKEND"
     fi
 }
 
 next_command() {
+    local -i do_regen=1
+    for arg in "$@"; do [[ "$arg" == "--no-regen" ]] && do_regen=0; done
     move_directories "$THEME_MODE"
-    apply_wallpaper_selection next 1
+    apply_wallpaper_selection next "$do_regen"
 }
 
 prev_command() {
+    local -i do_regen=1
+    for arg in "$@"; do [[ "$arg" == "--no-regen" ]] && do_regen=0; done
     move_directories "$THEME_MODE"
-    apply_wallpaper_selection prev 1
+    apply_wallpaper_selection prev "$do_regen"
 }
 
 random_command() {
+    local -i do_regen=1
+    for arg in "$@"; do [[ "$arg" == "--no-regen" ]] && do_regen=0; done
     move_directories "$THEME_MODE"
-    apply_wallpaper_selection random 1
+    apply_wallpaper_selection random "$do_regen"
 }
 
 run_locked() {
@@ -934,34 +954,37 @@ case "${1:-}" in
             usage
             exit 0
         fi
-        check_deps flock awk pgrep find sort awww awww-daemon matugen
+        check_deps flock pgrep find sort awww awww-daemon matugen
         run_locked cmd_set "$@"
         ;;
     next)
-        check_deps flock awk pgrep find sort awww awww-daemon matugen
-        run_locked next_command
+        shift
+        check_deps flock pgrep find sort awww awww-daemon matugen
+        run_locked next_command "$@"
         ;;
     prev|previous)
-        check_deps flock awk pgrep find sort awww awww-daemon matugen
-        run_locked prev_command
+        shift
+        check_deps flock pgrep find sort awww awww-daemon matugen
+        run_locked prev_command "$@"
         ;;
     random)
-        check_deps flock awk pgrep find sort awww awww-daemon matugen
-        run_locked random_command
+        shift
+        check_deps flock pgrep find sort awww awww-daemon matugen
+        run_locked random_command "$@"
         ;;
     refresh|apply)
-        check_deps flock awk pgrep awww awww-daemon matugen
+        check_deps flock pgrep awww awww-daemon matugen
         run_locked regenerate_current
         ;;
     color)
         shift
         [[ -n "${1:-}" ]] || die "color command requires a hex value (e.g., FF0000 or \"#FF0000\")"
         hex_val="$1"
-        check_deps flock awk pgrep matugen
+        check_deps flock pgrep matugen
         run_locked apply_solid_color "$hex_val"
         ;;
     get)
-        check_deps flock awk
+        check_deps flock
         run_locked cmd_get
         ;;
     -h|--help|help)

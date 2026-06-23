@@ -1,63 +1,107 @@
-# Prerequisites & Hardware Verification
+# Hardware Verification & Virtualization Prereqs (Kernel 7.1+)
 
-Before installing any software, we need to ensure your computer's hardware is capable of virtualization and that these features are enabled in your BIOS/UEFI.
+Before configuring virtualization, we must guarantee your motherboard and the modern Linux kernel (7.1+) are actively cooperating. As of Kernel 7.x, the virtualization stack has entirely deprecated legacy [[VFIO]] Type 1 memory management in favor of **[[IOMMUFD]]**, and heavily relies on hardware-level [[ACS]] (Access Control Services).
 
-## Step 1: BIOS/UEFI Configuration
+## Step 1: UEFI/BIOS Configuration
 
-You must enter your BIOS/UEFI settings (usually by pressing `Del`, `F2`, or `F12` during boot) and enable the following settings. These are often found under **CPU Configuration**, **System Agent**, or **Advanced** tabs.
+You must enter your UEFI firmware settings. Modern PCIe passthrough requires far more than just basic CPU virtualization. Locate your **Advanced**, **System Agent**, or **PCIe Subsystem** menus and configure the following:
 
-> [!tip] Settings to Enable
+> [!warning] Essential Settings
 > 
-> 1. **Virtualization Technology:** Often labeled as **Intel VT-x** (or _SVM_ for AMD users).
+> 1. **CPU Virtualization:** Enable **Intel VT-x** or **AMD SVM**.
 >     
-> 2. **IOMMU:** Often labeled as **Intel VT-d** (or _AMD-Vi_ / _IOMMU_ for AMD users).
+> 2. **IOMMU / Directed I/O:** Enable **Intel VT-d** or **AMD-Vi**.
+>     
+> 3. **Above 4G Decoding:** **ENABLED**. (Mandatory for mapping 16GB+ GPUs into a VM).
+>     
+> 4. **Resizable BAR (ReBAR) / SAM:** **ENABLED**. (Required for zero-bottleneck GPU passthrough).
+>     
+> 5. **ACS (Access Control Services):** **ENABLED**. (Critical. Ensures the motherboard physically isolates PCIe devices from one another).
+>     
+> 6. **SR-IOV:** **ENABLED** (If you intend to use vGPU splitting or split network cards).
 >     
 
-Once enabled, save your changes and reboot into Arch Linux.
+## Step 2: Verification of the Kernel Environment
 
-## Step 2: Verification
+```
+flowchart LR
+    A[1. CPU Flags] --> B[2. IOMMUFD Modules]
+    B --> C[3. Boot Params]
+    C --> D[4. ACS Isolation Map]
+    D --> E[5. Interrupt Remapping]
+```
 
-Open your terminal. We will run a few checks to confirm the hardware features are active and the Linux kernel is ready.
+Once booted into Arch Linux, open your terminal. We will verify the entire chain: CPU features, kernel modules, boot parameters, and hardware isolation.
 
 ### 1. Verify CPU Virtualization Support
 
-Check if the CPU flags are active.
+First, confirm the CPU flags are actively passing to the OS.
 
-```bash
-lscpu | grep Virtualization
+```
+lscpu | grep -i virtualization
 ```
 
 > [!check] Expected Output
 > 
-> You should see VT-x (for Intel) or AMD-V (for AMD). If this returns nothing, check your BIOS settings again.
+> You should see `VT-x` (for Intel) or `AMD-V` (for AMD).
 
-### 2. Verify IOMMU Detection
+### 2. Verify Modern Kernel Modules (KVM & IOMMUFD)
 
-Check the kernel ring buffer to ensure the Input-Output Memory Management Unit (IOMMU) groups are being detected.
-
-```bash
-sudo dmesg | grep -e DMAR -e IOMMU
-```
-
-> [!info] What to look for
-> 
-> You are looking for lines indicating that IOMMU or DMAR (DMA Remapping) is enabled and tables are being read. If you see no output, IOMMU might be disabled in BIOS or requires kernel parameters (which we will handle in later steps).
-
-### 3. Verify Kernel Modules
-
-We need to ensure your running Kernel was compiled with KVM and VFIO support.
+We need to ensure your running Arch Kernel 7.1 was compiled with the modern virtualization stack.
 
 ```
-zgrep CONFIG_KVM /proc/config.gz
+zgrep -E "CONFIG_KVM=|CONFIG_VFIO_PCI=|CONFIG_IOMMUFD=" /proc/config.gz
 ```
 
 > [!example] Understanding the Results
 > 
-> You will see lines ending in =y or =m.
->  - look for `CONFIG_KVM=` and `CONFIG_KVM_VFIO=` should either be set to y or m
-> - **`=y`**: The feature is built directly into the kernel (Always active).
+> - **`=y`**: Built directly into the kernel (Always active).
 >     
-> - **`=m`**: The feature is a **Loadable Module** (Can be loaded/unloaded as needed).
+> - **`=m`**: Loadable Module (Arch default, loaded dynamically by QEMU/libvirt).
 >     
+
+### 3. Verify Boot Parameters
+
+Ensure your bootloader (GRUB or systemd-boot) has the correct IOMMU parameters injected at boot.
+
+```
+cat /proc/cmdline
+```
+
+> [!tip] Required Flags
 > 
-> _Arch Linux default kernels usually have these set to `m`._
+> Ensure your boot line includes `iommu=pt`. For Intel systems, explicitly adding `intel_iommu=on` is highly recommended even if the kernel defaults it to on.
+
+### 4. Verify IOMMU Groups & ACS Isolation (The Crucial Test)
+
+If your IOMMU is working and ACS is functioning, the kernel will physically separate your PCIe devices into distinct numbered groups.
+
+Run this bash script to map out your hardware:
+
+```
+for d in /sys/kernel/iommu_groups/*/devices/*; do 
+  n=${d#*/iommu_groups/*}; n=${n%%/*}
+  printf 'IOMMU Group %s ' "$n"
+  lspci -nns "${d##*/}"
+done
+```
+
+> [!info] How to Read Your IOMMU Map
+> 
+> Look through the output for the GPU you want to pass through.
+> 
+> **Success:** Your target GPU and its associated Audio Controller are alone in their own isolated `IOMMU Group`.
+> 
+> **Failure:** Your GPU is grouped with essential host devices (like your main NVMe drive). You would need an ACS Override Patch.
+
+### 5. Verify Interrupt Remapping (Advanced Testing)
+
+For modern PCIe passthrough to work cleanly, your hardware must support and enable Interrupt Remapping. If this fails, VMs cannot securely handle device interrupts.
+
+```
+sudo dmesg | grep 'remapping'
+```
+
+> [!check] Expected Output
+> 
+> You are looking for lines stating `DMAR-IR: Enabled IRQ remapping in x2apic mode` (for Intel) or `AMD-Vi: Interrupt remapping enabled` (for AMD).

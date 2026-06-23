@@ -1,73 +1,85 @@
 # KVM Kernel Modules Setup
 
-> [!ABSTRACT] What are we doing?
+> [!abstract] What are we doing?
 > 
-> Before installing any software, we need to ensure your computer's operating system (the Kernel) is allowed to act as a Hypervisor. We do this by checking for specific "modules" that bridge your hardware to the software.
+> Before installing tools like QEMU or libvirt, we must ensure your Arch Linux kernel is legally allowed to act as a Hypervisor. We do this by verifying the **[[KVM]] (Kernel-based Virtual Machine)** modules are actively bridging your hardware's virtualization extensions to the OS.
 
-## 1. Verify Existing Modules
+## 1. Verify Existing Modules (Modern Autoload)
 
-First, we need to check if your system has already loaded the necessary KVM modules automatically.
+In modern Arch Linux (Kernel 7.1+), the `systemd-udevd` service automatically detects your CPU capabilities during boot and loads the correct KVM modules.
 
-Open your terminal and run the following command. This asks the system to list all running modules (`lsmod`) and filters the text (`grep`) to show only lines containing "kvm".
+Let's verify that this automatic process succeeded. Open your terminal and check the loaded modules:
 
-```bash
-lsmod | grep kvm
+```
+lsmod | grep -iE kvm
 ```
 
 ### Understanding the Output
 
-Scenario A: Success
-
-If the modules are loaded correctly, you will see output similar to the block below. Look for kvm and kvm_intel. or amd related KVM modules. 
-
-> [!SUCCESS] Expected Output
+> [!success] Scenario A: Modules are Loaded
+> 
+> If the system successfully detected your hardware, you will see output similar to this:
 > 
 > ```
-> kvm_intel             364544  0
-> kvm                  1155072  1 kvm_intel
+> kvm_intel             401408  0
+> kvm                  1204224  1 kvm_intel
 > irqbypass             16384   1 kvm
 > ```
 > 
-> _If you see this, you can skip to the next note!_
-
-Scenario B: No Output
-
-If the command returns nothing (a blank line), the modules are not loaded. Please proceed to step 2.
-
-## 2. Load the Kernel Modules manually
-
-If the verification step returned nothing, we need to load the module manually for your current session.
-
-> [!NOTE] Hardware Specific
+> _(Note: AMD users will see `kvm_amd` instead of `kvm_intel`)_.
 > 
-> The commands below are specifically for Intel processors.
+> **Action:** If you see this output, you are done! The modern kernel handled it. You can skip the rest of this note.
 
-Run this command to load the module immediately:
+> [!failure] Scenario B: No Output
+> 
+> If the command returns nothing (a blank line), the modules are not loaded. This usually means **Virtualization is disabled in your BIOS/UEFI**, or you are running a custom kernel without KVM support. Double-check your firmware settings. If firmware is correct, proceed to Step 2 to force-load them.
 
-```bash
+## 2. Manual Loading (Fallback)
+
+If `udev` failed to load the modules but your BIOS is configured correctly, we can load them manually into the current session.
+
+Run the command corresponding to your CPU manufacturer:
+
+**For Intel Processors:**
+
+```
 sudo modprobe kvm_intel
 ```
 
-## 3. Configure Auto-load on Boot
+**For AMD Processors:**
 
-Loading the module with `modprobe` only lasts until you turn off your computer. To ensure KVM works every time you turn on your machine, we need to add a configuration file that tells the system to load it automatically.
+```
+sudo modprobe kvm_amd
+```
 
-We will create a specific config file inside `/etc/modules-load.d/`.
+Verify again with `lsmod | grep kvm`. If it worked, proceed to Step 3 to make it permanent.
 
-**Run the following command:**
+## 3. Configure Auto-load on Boot (Persistent)
 
-```bash
-echo kvm_intel | sudo tee /etc/modules-load.d/kvm.conf
+Using `modprobe` only injects the module until your next reboot. To enforce KVM loading every time your machine turns on, we must create a configuration file in `/etc/modules-load.d/`.
+
+Run the command for your specific CPU architecture:
+
+**For Intel:**
+
+```
+echo "kvm_intel" | sudo tee /etc/modules-load.d/kvm.conf
+```
+
+**For AMD:**
+
+```
+echo "kvm_amd" | sudo tee /etc/modules-load.d/kvm.conf
 ```
 
 > [!info] What did this command do?
 > 
-> It created a text file named kvm.conf and wrote the text kvm_intel inside it. When your computer boots, it reads this file and loads the module for you.
+> It created a persistent text file named `kvm.conf`. During the boot sequence, `systemd` reads this directory and guarantees the hypervisor modules are injected into the kernel before your graphical desktop even starts.
 
 ## 4. Apply Changes
 
-To ensure everything is locked in and working correctly, reboot your system now.
+To ensure the persistent configuration hooks in properly, reboot your system.
 
-```bash
+```
 systemctl reboot
 ```

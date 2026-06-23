@@ -1,0 +1,150 @@
+{
+  "reload_style_on_change": true,
+  "layer": "top",
+  "position": "top",
+  "spacing": 0,
+  "height": 15,
+  "width": 0,
+  "margin-top": 0,
+  "margin-bottom": 0,
+  "modules-left": ["custom/omarchy", "hyprland/workspaces"],
+  "modules-center": ["clock#horizontal", "clock#vertical", "custom/weather", "custom/voxtype", "custom/screenrecording-indicator", "custom/notification-silencing-indicator"],
+  "modules-right": [
+    "tray",
+    "bluetooth",
+    "network",
+    "pulseaudio",
+    "battery",
+    "custom/power"
+  ],
+  "hyprland/workspaces": {
+    "on-click": "activate",
+    "format": "{icon}",
+    "format-icons": {
+      "default": "",
+      "1": "1",
+      "2": "2",
+      "3": "3",
+      "4": "4",
+      "5": "5",
+      "6": "6",
+      "7": "7",
+      "8": "8",
+      "9": "9",
+      "10": "0",
+      "active": "󱓻"
+    },
+    "persistent-workspaces": {
+      "1": [],
+      "2": [],
+      "3": [],
+      "4": [],
+      "5": []
+    }
+  },
+  "custom/omarchy": {
+    "format": "󰣇",
+    "on-click": "rofi -show drun -run-command 'uwsm app -- {cmd}'",
+    "on-click-right": "uwsm-app -- kitty",
+    "tooltip-format": "Apps Menu"
+  },
+
+  "clock#horizontal": {
+    "format": "{:L%A %H:%M}",
+    "format-alt": "{:L%d %B W%V %Y}",
+    "tooltip": false,
+    "on-click-right": "uwsm-app -- gnome-clocks"
+  },
+  "clock#vertical": {
+    "format": "{:%H\n  —\n%M}",
+    "format-alt": "{:L%d %B W%V %Y}",
+    "tooltip": false,
+    "on-click-right": "uwsm-app -- gnome-clocks"
+  },
+  "custom/weather": {
+    "format": "{}",
+    "exec": "python3 ~/user_scripts/waybar/weather.py",
+    "return-type": "json",
+    "interval": 1800,
+    "tooltip": true
+  },
+  "network": {
+    "format-icons": ["󰤯", "󰤟", "󰤢", "󰤥", "󰤨"],
+    "format": "{icon}",
+    "format-wifi": "{icon}",
+    "format-ethernet": "󰀂",
+    "format-disconnected": "󰤮",
+    "tooltip-format-wifi": "{essid} ({frequency} GHz)",
+    "tooltip-format-ethernet": "Connected",
+    "tooltip-format-disconnected": "Disconnected",
+    "interval": 3,
+    "spacing": 1,
+    "on-click": "foot --app-id=dusky_network.sh $HOME/user_scripts/network_manager/dusky_network.sh"
+  },
+  "battery": {
+    "format": "{capacity}% {icon}",
+    "format-discharging": "{icon}",
+    "format-charging": "{icon}",
+    "format-plugged": "",
+    "format-icons": {
+      "charging": ["󰢜", "󰂆", "󰂇", "󰂈", "󰢝", "󰂉", "󰢞", "󰂊", "󰂋", "󰂅"],
+      "default": ["󰁺", "󰁻", "󰁼", "󰁽", "󰁾", "󰁿", "󰂀", "󰂁", "󰂂", "󰁹"]
+    },
+    "format-full": "󰂅",
+    "tooltip-format-discharging": "{power:>1.0f}W↓ {capacity}%",
+    "tooltip-format-charging": "{power:>1.0f}W↑ {capacity}%",
+    "interval": 5,
+    "on-click": "uwsm-app -- kitty --class power_saver.sh --hold -e $HOME/user_scripts/battery/power_saver.sh --interactive",
+    "on-click-right": "uwsm-app -- kitty --class dusky_hypridle.sh -e $HOME/user_scripts/hypridle/dusky_hypridle.sh",
+    "states": {
+      "warning": 20,
+      "critical": 10
+    }
+  },
+  "bluetooth": {
+    "format": "",
+    "format-off": "󰂲",
+    "format-disabled": "󰂲",
+    "format-connected": "󰂱",
+    "format-no-controller": "",
+    "tooltip-format": "Devices connected: {num_connections}",
+    "on-click": "uwsm-app -- kitty --class bluetui -e bluetui"
+  },
+  "pulseaudio": {
+    "format": "{icon}",
+    "on-click": "uwsm-app -- pavucontrol",
+    "on-click-right": "pactl set-sink-mute @DEFAULT_SINK@ toggle",
+    "tooltip-format": "Playing at {volume}%",
+    "scroll-step": 5,
+    "format-muted": "",
+    "format-icons": {
+      "headphone": "",
+      "headset": "",
+      "default": ["", "", ""]
+    }
+  },
+  "custom/screenrecording-indicator": {
+    "exec": "if pgrep -x -f 'gpu-screen-recorder|wf-recorder|obs' > /dev/null; then echo '{\"text\": \"󰑋 Recording\", \"class\": \"active\"}'; else echo ''; fi",
+    "interval": 2,
+    "return-type": "json"
+  },
+  "custom/notification-silencing-indicator": {
+    "exec": "if makoctl mode | grep -q 'do-not-disturb'; then echo '{\"text\": \"󰂛 DND\", \"class\": \"active\"}'; else echo ''; fi",
+    "interval": 2,
+    "return-type": "json",
+    "on-click": "makoctl mode -t do-not-disturb"
+  },
+  "custom/voxtype": {
+    "exec": "echo ''",
+    "interval": 3600
+  },
+  "tray": {
+    "icon-size": 11,
+    "spacing": 10
+  },
+  "custom/power": {
+    "format": "⏻",
+    "on-click": "uwsm-app -- ~/user_scripts/wlogout/wlogout_scale.sh",
+    "tooltip-format": "Power Menu"
+  }
+}

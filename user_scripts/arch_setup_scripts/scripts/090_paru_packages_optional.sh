@@ -58,6 +58,10 @@ Productivity| blanket               | Ambient noise player for focus and product
 Productivity| errands               | Simple to-do list application
 Productivity| obsidian              | Markdown-based knowledge base and note taking
 Productivity| xournalpp             | Handwriting notetaking software with PDF annotation support
+Productivity| opencode              | CLI harness for coding
+Productivity| antigravity           | Google's IDE for coding
+Productivity| speech-dispatcher     | For getting speech to text for firefox to work 1 of 2
+Productivity| espeakup              | For getting speech to text for firefox to work 2 of 2
 Docs        | arch-wiki-lite        | Compressed Wiki reader (Pair with arch-wiki-docs)
 Docs        | arch-wiki-docs        | Arch Wiki data pages (Pair with arch-wiki-lite)
 Media       | pear-desktop-bin      | Youtube Music GUI
@@ -86,7 +90,6 @@ Media       | vlc                   | The ultimate media player for all formats
 Media       | vlc-plugins-all       | Plugins for VLC
 Games       | pipes-rs-bin          | Rust port of the classic pipes screensaver
 Games       | 2048.c                | The 2048 sliding tile game in C
-Games       | edex-ui-bin           | Sci-Fi/Tron-inspired terminal emulator
 Games       | clidle-bin            | Wordle clone for the command line
 Games       | maze-tui              | Visual maze generator and solver
 Games       | vitetris              | Classic Tetris clone for the terminal
@@ -98,6 +101,9 @@ Drivers     | usbmuxd               | Socket daemon to multiplex connections to 
 Drivers     | cuda                  | NVIDIA's parallel computing architecture toolkit
 Drivers     | cudnn                 | NVIDIA CUDA Deep Neural Network library
 Hardware    | asusctl               | ASUS ROG/TUF control
+Hardware    | fcitx5                | For Non-English Keyboard charactors
+Hardware    | fcitx5-gtk            | GTK-front end For Non-English Keyboard charactors
+Hardware    | fcitx5-qt             | QT-front end For Non-English Keyboard charactors
 Hardware    | broadcom-wl-dkms      | Broadcom 802.11 Linux STA wireless driver
 Hardware    | macbook12-spi-driver-dkms | Driver for the keyboard, touchpad and touchbar found in newer MacBook (Pro) models
 "
@@ -161,6 +167,7 @@ declare RIGHT_ARROW_ZONE=""
 # Selection State
 declare -A SELECTIONS=()
 declare -A DESCRIPTIONS=()
+declare -A INSTALLED_PKGS=()
 
 # Execution State
 declare -i DO_INSTALL=0
@@ -200,6 +207,11 @@ trim() {
 # --- Core Logic Engine ---
 
 parse_data() {
+    # Pre-cache installed packages for O(1) rendering checks
+    while read -r _inst_pkg; do
+        INSTALLED_PKGS["$_inst_pkg"]=1
+    done < <(pacman -Qq 2>/dev/null || true)
+
     local line category pkg desc
     local -A category_map
     local -i cat_idx
@@ -317,7 +329,9 @@ render_item_list() {
         desc="${DESCRIPTIONS[$item]:-}"
 
         if [[ "$selected" == "true" ]]; then
-            check_mark="${C_GREEN}[x]${C_RESET}"
+            check_mark="${C_GREEN}[]${C_RESET}"
+        elif [[ -n "${INSTALLED_PKGS[$item]:-}" ]]; then
+            check_mark="${C_GREEN}[✓]${C_RESET}"
         else
             check_mark="${C_GREY}[ ]${C_RESET}"
         fi
@@ -659,6 +673,17 @@ detect_aur_helper() {
     return 1
 }
 
+run_pkg_cmd() {
+    # If not connected to a TTY (like when run via orchestrator), use 'script' to trick paru/pacman into showing the progress bar
+    if ! [[ -t 1 ]] && command -v script >/dev/null 2>&1; then
+        local cmd_str
+        printf -v cmd_str '%q ' "$@"
+        script -q -e -c "$cmd_str" /dev/null
+    else
+        "$@"
+    fi
+}
+
 run_installer() {
     local helper="$1"
     local -a targets=()
@@ -691,7 +716,7 @@ run_installer() {
     fi
 
     log_info "Attempting Batch Installation..."
-    if "$helper" -S --needed --noconfirm "${to_install[@]}"; then
+    if run_pkg_cmd "$helper" -S --needed --noconfirm "${to_install[@]}"; then
         log_info "Batch installation successful."
         return 0
     fi
@@ -704,13 +729,13 @@ run_installer() {
     local pkg
     for pkg in "${remaining[@]}"; do
         log_info "Processing: $pkg"
-        if "$helper" -S --needed --noconfirm "$pkg"; then
+        if run_pkg_cmd "$helper" -S --needed --noconfirm "$pkg"; then
             log_info "$pkg installed."
         else
             log_err "Failed to install $pkg automatically."
             read -rp "Retry manually? [y/N]: " choice
             if [[ "${choice,,}" == "y" ]]; then
-                "$helper" -S "$pkg" || log_err "$pkg failed manual install."
+                run_pkg_cmd "$helper" -S "$pkg" || log_err "$pkg failed manual install."
             fi
         fi
     done

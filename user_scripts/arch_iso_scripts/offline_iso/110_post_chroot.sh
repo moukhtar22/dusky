@@ -162,8 +162,6 @@ log_success "Chroot environment confirmed."
 
 # --- 5. Resilient Timezone Resolution (Offline) ---
 get_dynamic_timezone() {
-    # In an offline environment, we cannot cURL an IP API.
-    # Return the static default gracefully.
     printf '%s\n' "$DEFAULT_TZ"
 }
 
@@ -192,7 +190,6 @@ fi
 # --- 7. Data Ingestion ---
 log_step "Configuration Ingestion"
 
-# INJECTED: Read the credentials safely transported across the chroot boundary
 if [[ -f "./.arch_credentials" ]]; then
     log_info "Sourcing staged credentials from Live ISO RAM..."
     source "./.arch_credentials"
@@ -352,9 +349,18 @@ if ! command -v visudo &>/dev/null; then
 fi
 
 mkdir -p /etc/sudoers.d
-printf '%%wheel ALL=(ALL:ALL) ALL\n' | EDITOR='tee' visudo -f /etc/sudoers.d/10_wheel >/dev/null
+# Direct write, strict permissions
+printf '%%wheel ALL=(ALL:ALL) ALL\n' > /etc/sudoers.d/10_wheel
 chmod 0440 /etc/sudoers.d/10_wheel
-visudo -cf /etc/sudoers >/dev/null
+chown root:root /etc/sudoers.d/10_wheel
+
+# Validate syntax, permissions, and policy completeness natively and quietly
+if ! visudo -c -q; then
+    log_error "Sudoers syntax or permission validation failed. Reverting changes."
+    rm -f /etc/sudoers.d/10_wheel
+    exit 1
+fi
+
 log_success "Wheel group privileges granted."
 
 printf "\n${GREEN}${BOLD}Post-Chroot configuration complete. Proceeding to next orchestrator step...${RESET}\n"

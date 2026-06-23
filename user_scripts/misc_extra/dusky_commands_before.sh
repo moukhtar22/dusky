@@ -23,11 +23,15 @@ set -o pipefail
 declare -ra FLEET_COMMANDS=(
     # --- UI & Theming ---
 #    "U | gsettings set org.gnome.desktop.interface icon-theme 'Papirus'"
-    "U | gsettings set org.cinnamon.desktop.default-applications.terminal exec 'kitty'"
-    "U | rm -f ~/.config/hypr/edit_here/source/workspace_rules.conf || true"
-    "U | sed -i 's/^zen$/zen-browser/' ~/.config/dusky/settings/browser_switch.smart || true"
+#    for nemo right click
+#    "U | gsettings set org.cinnamon.desktop.default-applications.terminal exec 'kitty'"
     "U | mkdir -p ~/.config/opencode/themes || true"
     "U | mkdir -p ~/.config/Kvantum/matugen || true"
+    "U | systemctl --user disable --now dusky_sliders.service || true"
+    # --- Remove old dusky_snaapshot timer (typo) before re-deploying dusky_snapshot ---
+    "S | systemctl stop dusky_snaapshot.timer dusky_snaapshot.service 2>/dev/null; systemctl disable dusky_snaapshot.timer 2>/dev/null; true"
+    "S | rm -f /etc/systemd/system/dusky_snaapshot.service /etc/systemd/system/dusky_snaapshot.timer"
+    "S | systemctl daemon-reload"
     # --- System Services ---
 #    "U | systemctl --user disable dusky.service || true"
 #    "S | systemctl enable --now tlp.service || true"
@@ -95,8 +99,14 @@ init_sudo() {
     # Hardened Keepalive
     (
         exec 9>&- # Ensure keepalive subshell doesn't hold the flock
+        exec >/dev/null 2>&1 # FIX: Detach FDs so we don't hold the logger pipe open
+        
+        # Allow immediate termination without leaving orphaned sleep processes
+        trap 'exit 0' TERM
+        
         while kill -0 $$ 2>/dev/null; do
-            sleep "$SUDO_REFRESH_INTERVAL"
+            sleep "$SUDO_REFRESH_INTERVAL" &
+            wait $! 2>/dev/null
             sudo -n true 2>/dev/null || exit 0
         done
     ) &
@@ -106,7 +116,7 @@ init_sudo() {
 
 # 7. Cleanup & I/O Flushing
 cleanup() {
-    # FIX: Capture the incoming exit code BEFORE executing any commands that reset $?
+    # Capture the incoming exit code BEFORE executing any commands that reset $?
     local exit_code=$?
     set +o errexit
     
@@ -172,7 +182,6 @@ main() {
             local cmd="${BASH_REMATCH[2]}"
             local entry_orig="${mode} | ${cmd}"
             
-            # FIX: Generate the hash in Phase 1 to accurately verify state
             local cmd_hash
             read -r cmd_hash _ < <(printf '%s' "$entry_orig" | sha256sum)
 
@@ -180,7 +189,6 @@ main() {
             parsed_cmds+=("$cmd")
             parsed_hashes+=("$cmd_hash")
 
-            # FIX: Only flag for sudo if the root command hasn't been executed yet
             if [[ "$mode" == "S" ]] && [[ -z "${COMPLETED_PATCHES[$cmd_hash]:-}" ]]; then
                 needs_sudo=1
             fi
@@ -220,9 +228,8 @@ main() {
             COMPLETED_PATCHES["$cmd_hash"]=1
             log "SUCCESS" "Patch applied successfully."
         else
-            log "ERROR" "Patch failed with exit code $result: $cmd"
-            log "WARN" "Halting fleet patcher to prevent cascading failures."
-            exit 1
+            log "WARN" "Patch failed with exit code $result: $cmd"
+            log "WARN" "Continuing orchestration despite failure..."
         fi
     done
 }

@@ -6,20 +6,21 @@ A GTK4/Libadwaita configuration launcher for the Dusky Dotfiles.
 Fully UWSM-compliant for Arch Linux/Hyprland environments.
 
 Validated Production Improvements:
+- Match/Case Structural Pattern Matching for hyper-fast config validation.
+- Extensive domain widgets: Colors, Secrets, Keybinds, Paths, and Multi-line text.
 - Error UI: Config structure/type errors are surfaced via Adw.StatusPage.
 - Grid Isolation: Malformed grid cards fallback to error rows without breaking the FlowBox.
 - Hot Reload: Reload requests are coalesced; failed rebuilds roll back UI/CSS.
-- Search: Results navigate to nested navigation pages and cover implicit sections.
 - Search Performance: Directory generators are cached per loaded config.
 - Resource Safety: CSS provider lifecycle is fully guarded against leaks.
 - UX: Hot reload preserves selection; search restore behavior is deterministic.
-- Stability: Plain-text widget properties are passed as plain text, avoiding escaped entity artifacts.
 """
 
 from __future__ import annotations
 
 import gc
 import logging
+import subprocess
 import sys
 import threading
 import traceback
@@ -40,8 +41,8 @@ from typing import (
 # =============================================================================
 # VERSION CHECK
 # =============================================================================
-if sys.version_info < (3, 13):
-    sys.exit("[FATAL] Python 3.13+ is required.")
+if sys.version_info < (3, 14, 5):
+    sys.exit("[FATAL] Python 3.14.5+ is required.")
 
 # =============================================================================
 # LOGGING CONFIGURATION
@@ -88,15 +89,13 @@ from gi.repository import Adw, Gdk, Gio, GLib, Gtk, Pango
 
 import lib.rows as rows
 
-if TYPE_CHECKING:
-    pass
 
 # =============================================================================
 # CONSTANTS
 # =============================================================================
 APP_ID: Final[str] = "com.github.dusky.controlcenter"
 APP_TITLE: Final[str] = "Dusky Control Center"
-CONFIG_FILENAME: Final[str] = "dusky_config.yaml"
+CONFIG_FILENAME: Final[str] = "dusky_config.toml"
 CSS_FILENAME: Final[str] = "dusky_style.css"
 SCRIPT_DIR: Final[Path] = Path(__file__).resolve().parent
 
@@ -133,31 +132,37 @@ ICON_SIDEBAR_TOGGLE: Final[str] = "sidebar-show-symbolic"
 # =============================================================================
 class ItemType(StrEnum):
     """Valid item types in config."""
-
     BUTTON = "button"
     TOGGLE = "toggle"
     LABEL = "label"
     SLIDER = "slider"
+    SPIN = "spin"
     SELECTION = "selection"
     ENTRY = "entry"
+    SECRET = "secret"
+    MULTI_TEXT = "multi_text"
+    KEYBIND = "keybind"
+    COLOR = "color"
+    PATH = "path"
     NAVIGATION = "navigation"
     WARNING_BANNER = "warning_banner"
     TOGGLE_CARD = "toggle_card"
     GRID_CARD = "grid_card"
     EXPANDER = "expander"
     DIRECTORY_GENERATOR = "directory_generator"
+    FILE_GENERATOR = "file_generator"
     ASYNC_SELECTOR = "async_selector"
+    FLAG_GROUP = "flag_group"
+
 
 class SectionType(StrEnum):
     """Valid section types."""
-
     SECTION = "section"
     GRID_SECTION = "grid_section"
 
 
 class ItemProperties(TypedDict, total=False):
     """Properties for UI items."""
-
     title: str
     description: str
     icon: str
@@ -171,8 +176,10 @@ class ItemProperties(TypedDict, total=False):
     max: float
     step: float
     default: float
+    mode: str
     debounce: bool
-    options: list[str]
+    options: list[Any]
+    exclusive: bool
     options_map: dict[str, str]
     placeholder: str
     path: str
@@ -181,10 +188,11 @@ class ItemProperties(TypedDict, total=False):
     display_max_length: int
     list_command: str
     display_template: str
+    hyprland_event: str
+
 
 class ConfigItem(TypedDict, total=False):
     """A single item in the configuration."""
-
     type: str
     properties: ItemProperties
     on_press: dict[str, Any] | None
@@ -199,7 +207,6 @@ class ConfigItem(TypedDict, total=False):
 
 class ConfigSection(TypedDict, total=False):
     """A section containing items."""
-
     type: str
     properties: ItemProperties
     items: list[ConfigItem]
@@ -207,7 +214,6 @@ class ConfigSection(TypedDict, total=False):
 
 class ConfigPage(TypedDict):
     """A navigation page (required keys)."""
-
     id: NotRequired[str]
     title: str
     icon: NotRequired[str]
@@ -216,13 +222,11 @@ class ConfigPage(TypedDict):
 
 class AppConfig(TypedDict):
     """Root configuration object."""
-
     pages: list[ConfigPage]
 
 
 class RowContext(TypedDict):
     """Shared context passed to row builders."""
-
     stack: Adw.ViewStack | None
     config: AppConfig
     sidebar: Gtk.ListBox | None
@@ -234,7 +238,6 @@ class RowContext(TypedDict):
 
 class ConfigLoadResult(TypedDict):
     """Result from config loading operation."""
-
     success: bool
     config: AppConfig
     css: str
@@ -258,7 +261,6 @@ class ApplicationState:
     All mutations occur on the main GTK thread via GLib.idle_add,
     eliminating the need for explicit locking in the main controller.
     """
-
     config: AppConfig = field(default_factory=lambda: {"pages": []})
     css_content: str = ""
     last_visible_page: str | None = None
@@ -274,25 +276,6 @@ class DuskyControlCenter(Adw.Application):
     and search capabilities for the Dusky Control Center.
     """
 
-    __slots__ = (
-        "_state",
-        "_sidebar_list",
-        "_stack",
-        "_toast_overlay",
-        "_search_bar",
-        "_search_entry",
-        "_search_btn",
-        "_search_page",
-        "_search_results_group",
-        "_css_provider",
-        "_display",
-        "_window",
-        "_split_view",
-        "_reload_running",
-        "_reload_queued",
-        "_directory_generator_cache",
-    )
-
     def __init__(self) -> None:
         super().__init__(
             application_id=APP_ID,
@@ -307,6 +290,7 @@ class DuskyControlCenter(Adw.Application):
         self._reload_running = False
         self._reload_queued = False
         self._directory_generator_cache: dict[int, tuple[ConfigItem, ...]] = {}
+        self._file_generator_cache: dict[int, tuple[ConfigItem, ...]] = {}
 
     def _init_widget_refs(self) -> None:
         """Initialize or reset all widget references to None."""
@@ -358,6 +342,7 @@ class DuskyControlCenter(Adw.Application):
         self._cancel_debounce()
         self._remove_css_provider()
         self._directory_generator_cache.clear()
+        self._file_generator_cache.clear()
         Adw.Application.do_shutdown(self)
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -401,58 +386,51 @@ class DuskyControlCenter(Adw.Application):
             "error": config_error,
         }
 
-    def _validate_config_list(self, value: Any, where: str, seen: set[int]) -> None:
-        if not isinstance(value, list):
-            raise TypeError(f"{where} must be a list")
-
-        value_id = id(value)
-        if value_id in seen:
-            raise ValueError(f"{where} contains a recursive reference")
-
-        seen.add(value_id)
-        try:
-            for idx, child in enumerate(value):
-                self._validate_config_node(child, f"{where}[{idx}]", seen)
-        finally:
-            seen.remove(value_id)
-
-    def _validate_config_node(
-        self,
-        value: Any,
-        where: str,
-        seen: set[int] | None = None,
-    ) -> None:
+    def _validate_config_node(self, value: Any, where: str, seen: set[int] | None = None) -> None:
+        """Deep validation utilizing blazing-fast structural pattern matching."""
         if seen is None:
             seen = set()
-
-        if not isinstance(value, dict):
-            raise TypeError(f"{where} must be a dictionary")
-
-        value_id = id(value)
-        if value_id in seen:
+            
+        vid = id(value)
+        if vid in seen:
             raise ValueError(f"{where} contains a recursive reference")
+        seen.add(vid)
 
-        seen.add(value_id)
         try:
-            if "properties" in value and not isinstance(value["properties"], dict):
-                raise TypeError(f"{where}.properties must be a dictionary")
-
-            for key in ("on_press", "on_toggle", "on_change", "on_action", "value"):
-                if key in value and value[key] is not None and not isinstance(value[key], dict):
-                    raise TypeError(f"{where}.{key} must be a dictionary or null")
-
-            if "item_template" in value:
-                if not isinstance(value["item_template"], dict):
-                    raise TypeError(f"{where}.item_template must be a dictionary")
-                self._validate_config_node(value["item_template"], f"{where}.item_template", seen)
-
-            if "layout" in value:
-                self._validate_config_list(value["layout"], f"{where}.layout", seen)
-
-            if "items" in value:
-                self._validate_config_list(value["items"], f"{where}.items", seen)
+            match value:
+                case dict():
+                    for key, val in value.items():
+                        match key, val:
+                            case "item_template", dict():
+                                self._validate_config_node(val, f"{where}.{key}", seen)
+                            case "properties", dict():
+                                pass
+                            case "properties" | "item_template", _:
+                                raise TypeError(f"{where}.{key} must be a dictionary")
+                            case "layout" | "items", list() as lst:
+                                lst_id = id(lst)
+                                if lst_id in seen:
+                                    raise ValueError(f"{where}.{key} contains a recursive reference")
+                                seen.add(lst_id)
+                                try:
+                                    for i, child in enumerate(lst):
+                                        self._validate_config_node(child, f"{where}.{key}[{i}]", seen)
+                                finally:
+                                    seen.remove(lst_id)
+                            case "layout" | "items", _:
+                                raise TypeError(f"{where}.{key} must be a list")
+                            case "on_press" | "on_toggle" | "on_change" | "on_action", dict() | None:
+                                pass
+                            case "on_press" | "on_toggle" | "on_change" | "on_action", _:
+                                raise TypeError(f"{where}.{key} must be a dictionary or null")
+                            case "value", dict() | str() | None:
+                                pass
+                            case "value", _:
+                                raise TypeError(f"{where}.value must be a dictionary, string, or null")
+                case _:
+                    raise TypeError(f"{where} must be a dictionary")
         finally:
-            seen.remove(value_id)
+            seen.remove(vid)
 
     def _do_load_config(self) -> tuple[AppConfig, str | None]:
         """
@@ -465,27 +443,24 @@ class DuskyControlCenter(Adw.Application):
 
         try:
             loaded = utility.load_config(config_path)
-
-            if not isinstance(loaded, dict):
-                return {"pages": []}, (
-                    f"Config is not a dictionary (got {type(loaded).__name__})"
-                )
-
-            if "pages" not in loaded:
-                return {"pages": []}, "Config missing required 'pages' key"
-
-            pages = loaded.get("pages")
-            if not isinstance(pages, list):
-                return {"pages": []}, "'pages' must be a list"
-
-            for idx, page in enumerate(pages):
-                if not isinstance(page, dict):
-                    return {"pages": []}, f"Page {idx} is not a dictionary"
-                if "title" not in page:
-                    return {"pages": []}, f"Page {idx} missing required 'title' key"
-                self._validate_config_node(page, f"pages[{idx}]")
-
-            return loaded, None  # type: ignore[return-value]
+            match loaded:
+                case {"pages": list() as pages}:
+                    for idx, page in enumerate(pages):
+                        match page:
+                            case {"title": title_val}:
+                                page["title"] = str(title_val)
+                                self._validate_config_node(page, f"pages[{idx}]")
+                            case dict():
+                                return {"pages": []}, f"Page {idx} missing required 'title' key"
+                            case _:
+                                return {"pages": []}, f"Page {idx} is not a dictionary"
+                    return loaded, None # type: ignore
+                case {"pages": _}:
+                    return {"pages": []}, "'pages' must be a list"
+                case dict():
+                    return {"pages": []}, "Config missing required 'pages' key"
+                case _:
+                    return {"pages": []}, f"Config is not a dictionary (got {type(loaded).__name__})"
 
         except FileNotFoundError:
             return {"pages": []}, f"Config file not found: {config_path}"
@@ -637,8 +612,7 @@ class DuskyControlCenter(Adw.Application):
                 self._activate_search()
                 return True
             case (True, Gdk.KEY_q):
-                if self._window:
-                    self._window.close()
+                self.quit()
                 return True
             case (False, Gdk.KEY_Escape):
                 if self._search_bar and self._search_bar.get_search_mode():
@@ -754,7 +728,6 @@ class DuskyControlCenter(Adw.Application):
         """
         Execute a task in a background thread and callback on main thread.
         """
-
         def wrapper() -> None:
             result: Any = None
             error: BaseException | None = None
@@ -775,6 +748,7 @@ class DuskyControlCenter(Adw.Application):
         """
         self._cancel_debounce()
         self._directory_generator_cache.clear()
+        self._file_generator_cache.clear()
         self._state.last_visible_page = None
 
         self._search_page = None
@@ -882,6 +856,7 @@ class DuskyControlCenter(Adw.Application):
             self._search_btn.set_active(False)
         if self._search_entry:
             self._search_entry.set_text("")
+            self._cancel_debounce()
 
         if self._state.last_visible_page and self._stack:
             self._stack.set_visible_child_name(self._state.last_visible_page)
@@ -1000,7 +975,7 @@ class DuskyControlCenter(Adw.Application):
         go_icon.set_valign(Gtk.Align.CENTER)
         row.add_suffix(go_icon)
 
-        row.connect("activated", lambda _row, hit=hit: self._navigate_from_search(hit))
+        row.connect("activated", lambda _row, h=hit: self._navigate_from_search(h))
         return row
 
     def _navigate_from_search(self, hit: SearchHit) -> None:
@@ -1149,6 +1124,11 @@ class DuskyControlCenter(Adw.Application):
 
         if item_type == ItemType.DIRECTORY_GENERATOR:
             for gen_item in self._process_directory_generator(item):
+                yield from self._iter_item_hits(gen_item, query, breadcrumb, page_idx, nav_path)
+            return
+
+        if item_type == ItemType.FILE_GENERATOR:
+            for gen_item in self._process_file_generator(item):
                 yield from self._iter_item_hits(gen_item, query, breadcrumb, page_idx, nav_path)
             return
 
@@ -1324,12 +1304,10 @@ class DuskyControlCenter(Adw.Application):
     def _create_sidebar_row(self, title: str, icon_name: str) -> Gtk.ListBoxRow:
         """Create a styled sidebar navigation row."""
         row = Gtk.ListBoxRow(css_classes=["sidebar-row"])
-
         box = Gtk.Box()
-
         icon = Gtk.Image.new_from_icon_name(icon_name)
         icon.add_css_class("sidebar-row-icon")
-
+        
         label = Gtk.Label(
             label=title,
             xalign=0,
@@ -1337,7 +1315,7 @@ class DuskyControlCenter(Adw.Application):
             css_classes=["sidebar-row-label"],
         )
         label.set_ellipsize(Pango.EllipsizeMode.END)
-
+        
         box.append(icon)
         box.append(label)
         row.set_child(box)
@@ -1408,7 +1386,7 @@ class DuskyControlCenter(Adw.Application):
                 continue
 
             group = Adw.PreferencesGroup()
-            group.add(self._build_item_row(section, ctx))
+            group.add(self._build_item_row(section, ctx))  # type: ignore
             page.add(group)
 
     def _build_grid_section(
@@ -1463,6 +1441,9 @@ class DuskyControlCenter(Adw.Application):
             if item.get("type") == ItemType.DIRECTORY_GENERATOR:
                 for gen_item in self._process_directory_generator(item):
                     append_grid_item(gen_item)
+            elif item.get("type") == ItemType.FILE_GENERATOR:
+                for gen_item in self._process_file_generator(item):
+                    append_grid_item(gen_item)
             else:
                 append_grid_item(item)
 
@@ -1486,6 +1467,9 @@ class DuskyControlCenter(Adw.Application):
         for item in section.get("items", []):
             if item.get("type") == ItemType.DIRECTORY_GENERATOR:
                 for gen_item in self._process_directory_generator(item):
+                    group.add(self._build_item_row(gen_item, ctx))
+            elif item.get("type") == ItemType.FILE_GENERATOR:
+                for gen_item in self._process_file_generator(item):
                     group.add(self._build_item_row(gen_item, ctx))
             else:
                 group.add(self._build_item_row(item, ctx))
@@ -1543,6 +1527,109 @@ class DuskyControlCenter(Adw.Application):
         self._directory_generator_cache[cache_key] = frozen
         yield from frozen
 
+    def _process_file_generator(self, config: ConfigItem) -> Iterator[ConfigItem]:
+        """Generate items from files in a directory, with per-loaded-config caching.
+
+        Properties:
+          path      – base directory to scan
+          glob      – glob pattern (default "*.conf")
+          recursive – if true, also scans immediate subdirectories (default false)
+
+        Template variables:
+          {name}        – filename stem (e.g. "wg0", "us-nyc-wg-506")
+          {filename}    – filename with extension (e.g. "wg0.conf")
+          {path}        – absolute path (e.g. "/etc/wireguard/wg0.conf")
+          {name_pretty} – human-readable stem (e.g. "Wg0", "Us Nyc Wg 506")
+          {relpath}     – path relative to base (e.g. "wg0.conf", "mullvad/us-nyc-wg-506.conf")
+          {subdir}      – parent dir name for subdir files, empty for top-level
+
+        The cache is scoped to the loaded config generation and is cleared on hot
+        reload. This keeps generated widget IDs stable between UI construction and
+        search/highlight traversal without hiding newly added files after Ctrl+R.
+        Symlinks are included — wg-quick resolves them as root; we only need the name.
+        """
+        cache_key = id(config)
+        cached = self._file_generator_cache.get(cache_key)
+        if cached is not None:
+            yield from cached
+            return
+
+        generated: list[ConfigItem] = []
+
+        props = config.get("properties", {})
+        if not isinstance(props, dict):
+            self._file_generator_cache[cache_key] = ()
+            return
+
+        template = config.get("item_template")
+        if not isinstance(template, dict):
+            self._file_generator_cache[cache_key] = ()
+            return
+
+        path_str = props.get("path", "")
+        glob_raw = props.get("glob", "*.conf")
+        glob_pattern = glob_raw if isinstance(glob_raw, str) and glob_raw else "*.conf"
+        recursive = bool(props.get("recursive", False))
+
+        if not isinstance(path_str, str) or not path_str.strip():
+            self._file_generator_cache[cache_key] = ()
+            return
+
+        base_path = Path(path_str).expanduser()
+
+        def _iter_files() -> Iterator[Path]:
+            try:
+                for p in base_path.glob(glob_pattern):
+                    if p.is_file() or p.is_symlink():
+                        yield p
+            except (OSError, PermissionError, ValueError):
+                return
+
+            if not recursive:
+                return
+
+            try:
+                subdirs = sorted(
+                    (p for p in base_path.iterdir() if p.is_dir() and not p.is_symlink()),
+                    key=lambda p: p.name.casefold(),
+                )
+            except (OSError, PermissionError):
+                return
+
+            for subdir in subdirs:
+                try:
+                    for p in subdir.glob(glob_pattern):
+                        if p.is_file() or p.is_symlink():
+                            yield p
+                except (OSError, PermissionError, ValueError):
+                    continue
+
+        files = sorted(
+            _iter_files(),
+            key=lambda p: (p.parent != base_path, p.parent.name.casefold(), p.name.casefold()),
+        )
+
+        for filepath in files:
+            stem = filepath.stem
+            is_subdir = filepath.parent != base_path
+            subdir_name = filepath.parent.name if is_subdir else ""
+            relpath = f"{subdir_name}/{filepath.name}" if is_subdir else filepath.name
+            variables = {
+                "name": stem,
+                "filename": filepath.name,
+                "path": str(filepath),
+                "name_pretty": stem.replace("_", " ").replace("-", " ").title(),
+                "relpath": relpath,
+                "subdir": subdir_name,
+            }
+            gen_item = self._inject_variables(template, variables)
+            if isinstance(gen_item, dict):
+                generated.append(gen_item)
+
+        frozen = tuple(generated)
+        self._file_generator_cache[cache_key] = frozen
+        yield from frozen
+
     def _inject_variables(self, item: Any, vars: dict[str, str]) -> Any:
         """Recursively replace variables in strings."""
         if isinstance(item, str):
@@ -1570,22 +1657,30 @@ class DuskyControlCenter(Adw.Application):
 
         try:
             match item_type:
-                case ItemType.BUTTON:
+                case ItemType.BUTTON | ItemType.GRID_CARD:
                     row = rows.ButtonRow(props, item.get("on_press"), ctx)
-                case ItemType.TOGGLE:
-                    row = rows.ToggleRow(props, item.get("on_toggle"), ctx)
-                case ItemType.GRID_CARD:
-                    row = rows.ButtonRow(props, item.get("on_press"), ctx)
-                case ItemType.TOGGLE_CARD:
+                case ItemType.TOGGLE | ItemType.TOGGLE_CARD:
                     row = rows.ToggleRow(props, item.get("on_toggle"), ctx)
                 case ItemType.LABEL:
                     row = rows.LabelRow(props, item.get("value"), ctx)
                 case ItemType.SLIDER:
                     row = rows.SliderRow(props, item.get("on_change"), ctx)
+                case ItemType.SPIN:
+                    row = rows.SpinRow(props, item.get("on_change"), ctx)
                 case ItemType.SELECTION:
                     row = rows.SelectionRow(props, item.get("on_change"), ctx)
                 case ItemType.ENTRY:
                     row = rows.EntryRow(props, item.get("on_action"), ctx)
+                case ItemType.SECRET:
+                    row = rows.SecretRow(props, item.get("on_action"), ctx)
+                case ItemType.MULTI_TEXT:
+                    row = rows.MultiTextRow(props, item.get("on_action"), ctx)
+                case ItemType.KEYBIND:
+                    row = rows.KeybindRow(props, item.get("on_action"), ctx)
+                case ItemType.COLOR:
+                    row = rows.ColorRow(props, item.get("on_action"), ctx)
+                case ItemType.PATH:
+                    row = rows.PathRow(props, item.get("on_action"), ctx)
                 case ItemType.NAVIGATION:
                     row = rows.NavigationRow(props, item.get("layout"), ctx)
                 case ItemType.EXPANDER:
@@ -1594,6 +1689,8 @@ class DuskyControlCenter(Adw.Application):
                     row = self._build_warning_banner(props)
                 case ItemType.ASYNC_SELECTOR:
                     row = rows.AsyncSelectorRow(props, item.get("on_action"), ctx)
+                case ItemType.FLAG_GROUP:
+                    row = rows.FlagGroupRow(props, item.get("on_action"), ctx)
                 case _:
                     log.warning("Unknown item type '%s', defaulting to button", item_type)
                     row = rows.ButtonRow(props, item.get("on_press"), ctx)

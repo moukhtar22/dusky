@@ -37,6 +37,8 @@ declare -A NVIM_PATHS=(
 )
 
 CURRENT_BACKUP_PATH=""
+AUTONOMOUS_MODE=false
+INSTALL_TARGET=""
 
 # ==============================================================================
 # Initialization & Traps
@@ -69,6 +71,62 @@ check_dependencies() {
         trap - INT TERM EXIT
         exit 1
     fi
+}
+
+# ==============================================================================
+# CLI Argument Parsing
+# ==============================================================================
+
+print_help() {
+    clear || true
+    printf "${BOLD}====================================================${RESET}\n"
+    printf "${BOLD}               Dusky Neovim Manager                 ${RESET}\n"
+    printf "${BOLD}====================================================${RESET}\n\n"
+    printf "Usage: %s [OPTIONS]\n\n" "$(basename "$0")"
+    printf "${BOLD}Options:${RESET}\n"
+    printf "  ${GREEN}-h, --help${RESET}      Show this help menu and exit.\n"
+    printf "  ${GREEN}-a, --auto${RESET}      Enable autonomous (non-interactive) mode.\n"
+    printf "  ${GREEN}-t, --target${RESET}    Specify installation target (nvchad, lazyvim, astronvim, dusky).\n"
+    printf "\n"
+    printf "${BOLD}Description:${RESET}\n"
+    printf "  When executed without flags, launches the interactive UI.\n"
+    printf "  In autonomous mode (-a), the script implicitly enforces safety by backing up\n"
+    printf "  the existing state and running a headless plugin sync post-installation.\n"
+    printf "\n"
+    printf "${BOLD}Examples:${RESET}\n"
+    printf "  %s -a -t lazyvim\n" "$(basename "$0")"
+    printf "  %s --auto --target nvchad\n\n" "$(basename "$0")"
+}
+
+parse_arguments() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -h|--help)
+                print_help
+                trap - INT TERM EXIT
+                exit 0
+                ;;
+            -a|--auto)
+                AUTONOMOUS_MODE=true
+                shift
+                ;;
+            -t|--target)
+                if [[ -z "${2:-}" || "$2" == -* ]]; then
+                    log_error "Target missing for $1 flag."
+                    trap - INT TERM EXIT
+                    exit 1
+                fi
+                INSTALL_TARGET="$2"
+                shift 2
+                ;;
+            *)
+                log_error "Unknown argument: $1"
+                print_help
+                trap - INT TERM EXIT
+                exit 1
+                ;;
+        esac
+    done
 }
 
 # ==============================================================================
@@ -315,7 +373,16 @@ prompt_reset_management() {
     
     select opt in "Backup before reset (Includes config)" "Wipe state directly (No Backup)" "Cancel"; do
         case "${REPLY}" in
-            1) backup_neovim_state; reset_neovim_state; state_handled=true; reset_status=0; break ;;
+            1) 
+                backup_neovim_state
+                if [[ -n "${CURRENT_BACKUP_PATH}" && -d "${CURRENT_BACKUP_PATH}/config" ]]; then
+                    cp -a "${CURRENT_BACKUP_PATH}/config" "${NVIM_PATHS[config]}"
+                fi
+                log_success "State reset successfully. Configuration preserved."
+                state_handled=true
+                reset_status=0
+                break 
+                ;;
             2) reset_neovim_state; state_handled=true; reset_status=0; break ;;
             3) 
                 log_info "Reset cancelled."
@@ -376,106 +443,139 @@ prompt_headless_sync() {
 # ==============================================================================
 
 main() {
+    parse_arguments "$@"
     check_dependencies
     
-    clear
-    printf "${BOLD}====================================================${RESET}\n"
-    printf "${BOLD}               Dusky Neovim Manager                 ${RESET}\n"
-    printf "${BOLD}====================================================${RESET}\n\n"
-
-    local original_columns="${COLUMNS:-}"
-    COLUMNS=1
-    
-    local action_taken=false
-    local skip_sync_prompt=false
-    local nvim_config
-    
-    PS3="${BOLD}${YELLOW}Select an operation (1-6): ${RESET}"
-    select nvim_config in "Install NvChad" "Install LazyVim" "Install AstroNvim" "Install Dusky Neovim" "Maintenance & Utilities" "Quit"; do
-        case "${REPLY}" in
-            1) prompt_state_management; install_nvchad; action_taken=true; break ;;
-            2) prompt_state_management; install_lazyvim; action_taken=true; break ;;
-            3) prompt_state_management; install_astronvim; action_taken=true; break ;;
-            4) prompt_state_management; install_dusky_nvim; action_taken=true; break ;;
-            5) 
-                echo ""
-                local main_ps3="${PS3}"
-                PS3="${BOLD}${YELLOW}Select a utility (1-5): ${RESET}"
-                
-                select util in "Backup Current Configuration" "Restore Backup" "Sync Plugins" "Reset State (Keep Config)" "Back to Main Menu"; do
-                    case "${REPLY}" in
-                        1)
-                            echo ""
-                            backup_neovim_state
-                            echo ""
-                            REPLY=""
-                            continue
-                            ;;
-                        2)
-                            if restore_neovim_state; then
-                                action_taken=true
-                                break 2 # Breaks out of both Utility and Main Menu loops
-                            else
-                                REPLY=""
-                                continue
-                            fi
-                            ;;
-                        3)
-                            echo ""
-                            execute_headless_sync
-                            action_taken=true
-                            skip_sync_prompt=true
-                            break 2
-                            ;;
-                        4)
-                            if prompt_reset_management; then
-                                action_taken=true
-                                break 2
-                            else
-                                REPLY=""
-                                continue
-                            fi
-                            ;;
-                        5)
-                            echo ""
-                            break # Exits the Utility menu loop
-                            ;;
-                        *) log_error "Invalid option. Select 1-5." ;;
-                    esac
-                done
-                
-                # Restore Main Menu environment and redraw
-                PS3="${main_ps3}"
-                REPLY=""
-                continue
-                ;; 
-            6) 
-                log_info "Exiting gracefully."
+    if [[ "${AUTONOMOUS_MODE}" == "true" ]]; then
+        if [[ -z "${INSTALL_TARGET}" ]]; then
+            log_error "Autonomous mode requires a target. Provide one using -t or --target."
+            trap - INT TERM EXIT
+            exit 1
+        fi
+        
+        log_info "Running in Autonomous Mode..."
+        
+        # Enforce Safe Defaults (Moves existing configuration out of the way securely)
+        backup_neovim_state
+        
+        case "${INSTALL_TARGET,,}" in
+            nvchad)    install_nvchad ;;
+            lazyvim)   install_lazyvim ;;
+            astronvim) install_astronvim ;;
+            dusky)     install_dusky_nvim ;;
+            *)
+                log_error "Invalid target: ${INSTALL_TARGET}. Valid options: nvchad, lazyvim, astronvim, dusky."
                 trap - INT TERM EXIT
-                exit 0 
+                exit 1
                 ;;
-            *) log_error "Invalid option. Select 1-6." ;;
         esac
-    done
-    
-    if ! ${action_taken}; then
-        log_error "Input terminated. Exiting."
+        
+        execute_headless_sync
+        
         trap - INT TERM EXIT
-        exit 1
+        echo ""
+        log_success "Autonomous deployment complete. You can now start Neovim."
+        exit 0
+        
+    else
+        # INTERACTIVE FALLBACK (Classic Flow)
+        clear || true
+        printf "${BOLD}====================================================${RESET}\n"
+        printf "${BOLD}               Dusky Neovim Manager                 ${RESET}\n"
+        printf "${BOLD}====================================================${RESET}\n\n"
+
+        local original_columns="${COLUMNS:-}"
+        COLUMNS=1
+        
+        local action_taken=false
+        local skip_sync_prompt=false
+        local nvim_config
+        
+        PS3="${BOLD}${YELLOW}Select an operation (1-6): ${RESET}"
+        select nvim_config in "Install NvChad" "Install LazyVim" "Install AstroNvim" "Install Dusky Neovim" "Maintenance & Utilities" "Quit"; do
+            case "${REPLY}" in
+                1) prompt_state_management; install_nvchad; action_taken=true; break ;;
+                2) prompt_state_management; install_lazyvim; action_taken=true; break ;;
+                3) prompt_state_management; install_astronvim; action_taken=true; break ;;
+                4) prompt_state_management; install_dusky_nvim; action_taken=true; break ;;
+                5) 
+                    echo ""
+                    local main_ps3="${PS3}"
+                    PS3="${BOLD}${YELLOW}Select a utility (1-5): ${RESET}"
+                    
+                    select util in "Backup Current Configuration" "Restore Backup" "Sync Plugins" "Reset State (Keep Config)" "Back to Main Menu"; do
+                        case "${REPLY}" in
+                            1)
+                                echo ""
+                                backup_neovim_state
+                                echo ""
+                                REPLY=""
+                                continue
+                                ;;
+                            2)
+                                if restore_neovim_state; then
+                                    action_taken=true
+                                    break 2 # Exits util select and main menu select
+                                else
+                                    REPLY=""
+                                    continue
+                                fi
+                                ;;
+                            3)
+                                echo ""
+                                execute_headless_sync
+                                action_taken=true
+                                skip_sync_prompt=true
+                                break 2 # Exits util select and main menu select
+                                ;;
+                            4)
+                                if prompt_reset_management; then
+                                    action_taken=true
+                                    break 2 # Exits util select and main menu select
+                                else
+                                    REPLY=""
+                                    continue
+                                fi
+                                ;;
+                            5)
+                                echo ""
+                                break # Exits the Utility menu loop
+                                ;;
+                            *) log_error "Invalid option. Select 1-5." ;;
+                        esac
+                    done
+                    
+                    # Restore Main Menu environment and redraw
+                    PS3="${main_ps3}"
+                    REPLY=""
+                    continue
+                    ;; 
+                6) 
+                    log_info "Exiting gracefully."
+                    trap - INT TERM EXIT
+                    exit 0 
+                    ;;
+                *) log_error "Invalid option. Select 1-6." ;;
+            esac
+        done
+        
+        if ! ${action_taken}; then
+            log_error "Input terminated. Exiting."
+            trap - INT TERM EXIT
+            exit 1
+        fi
+
+        COLUMNS="${original_columns}"
+
+        if ! ${skip_sync_prompt}; then
+            prompt_headless_sync
+        fi
+
+        trap - INT TERM EXIT
+        echo ""
+        log_success "Operations complete. You can now start Neovim."
+        exit 0
     fi
-
-    COLUMNS="${original_columns}"
-
-    if ! ${skip_sync_prompt}; then
-        prompt_headless_sync
-    fi
-
-    trap - INT TERM EXIT
-    echo ""
-    log_success "Operations complete. Bootstrapping Neovim..."
-    sleep 1
-    
-    exec nvim
 }
 
 # Execute

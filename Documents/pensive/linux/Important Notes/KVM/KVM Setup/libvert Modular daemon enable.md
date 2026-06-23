@@ -4,122 +4,156 @@ In this step, we are configuring the "engine" that runs your virtual machines. W
 
 ## Why are we doing this?
 
-By default, many systems use a **Monolithic** daemon (`libvirtd`). This is like having one giant manager trying to do everyone's job at once—it handles storage, networks, and the VMs themselves. It works, but it can be heavy on system resources.
+By default, older setups used a **Monolithic** daemon (`libvirtd`). This is like having one giant manager trying to do everyone's job at once—it handles storage, networks, and the VMs themselves. It works, but it unnecessarily hogs system memory.
 
-We are switching to **Modular** daemons. This is like having a team of specialists. If you aren't touching the network, the network manager sleeps. This makes your system faster and more efficient.
+We are switching to **Modular** daemons using **Systemd Socket Activation**. This is like having a team of specialists. Because we are only enabling their _sockets_ (the communication doorways), the actual daemons stay completely asleep. If you aren't touching the network, the network manager uses 0MB of RAM. It only wakes up the microsecond it receives a request, making your system incredibly efficient.
 
 > [!INFO] Service Breakdown: What are we enabling?
 > 
-> You asked to see the individual services. Here is exactly what each piece of the puzzle does:
+> Here is exactly what each specialist piece of the puzzle does:
 > 
-> - **`virtqemud`** (QEMU Daemon): The most important one. It manages the actual "compute" part of the Virtual Machine (CPU/RAM).
+> - **`virtqemud`**: The core compute daemon (QEMU/KVM). Manages CPU/RAM allocation.
 >     
-> - **`virtinterfaced`** (Interface Daemon): Manages the physical network interfaces on your host computer so the VM can see them.
+> - **`virtnetworkd`**: Creates virtual networks (NAT/Bridging) for VM internet access.
 >     
-> - **`virtnetworkd`** (Network Daemon): Creates virtual networks (like a virtual router) inside your computer so VMs can talk to each other or the internet.
+> - **`virtnodedevd`**: Handles physical hardware passthrough (PCIe/USB/GPU).
 >     
-> - **`virtnodedevd`** (Node Device Daemon): Handles physical hardware passthrough (like passing a USB drive or GPU directly to a VM).
+> - **`virtstoraged`**: Manages the virtual hard drives (.qcow2) and storage pools.
 >     
-> - **`virtnwfilterd`** (Network Filter Daemon): Acts like a firewall, controlling network traffic rules for the VMs.
+> - **`virtinterfaced`**: Manages physical host network interfaces.
 >     
-> - **`virtsecretd`** (Secret Daemon): Safely stores passwords and encryption keys needed by your VMs.
+> - **`virtnwfilterd`**: Acts like a firewall, controlling network traffic rules.
 >     
-> - **`virtstoraged`** (Storage Daemon): Manages the virtual hard drives and storage pools.
+> - **`virtsecretd`**: Safely stores passwords and encryption keys needed by your VMs.
+>     
+> - **`virtproxyd`**: The translator. Routes commands from older tools that still look for the monolithic `libvirtd` socket.
+>     
+> - **`virtlogd`**: Extremely critical. Handles console logging. VMs will fail to start if they cannot write logs here.
+>     
+> - **`virtlockd`**: Prevents data corruption by locking virtual disks so two VMs don't write to the same file at once.
+>     
+> - **`virtlxcd` / `virtvboxd` / `virtchd`**: Alternative hypervisor support (LXC, VirtualBox, Cloud-Hypervisor) that sit entirely asleep until requested.
 >     
 
-## Step 1: Enable the Services
+## Step 1: Kill the Monolithic Daemon Securely
 
-We need to enable the service (`.service`) and the connection points (`.socket`) for every driver listed above.
+Before starting the modular specialists, we must completely eradicate the old manager and its listening sockets (including TCP/TLS remnants) to prevent port conflicts.
 
-Instead of typing 25+ commands manually, copy and paste this entire code block into your terminal. It loops through the list of drivers and enables them all at once.
+> [!NOTE] Expected Terminal Output
+> 
+> If you see a warning stating `The unit files have no installation config`, or `Unit is masked, ignoring`, this is completely normal and confirms the legacy daemon is effectively dead.
 
+# Stop, disable, and mask the service and ALL legacy sockets
 ```bash
-for drv in qemu interface network nodedev nwfilter secret storage; do \
-sudo systemctl enable virt${drv}d.service; \
-sudo systemctl enable virt${drv}d{,-ro,-admin}.socket; \
+sudo systemctl stop libvirtd.service libvirtd.socket libvirtd-ro.socket libvirtd-admin.socket libvirtd-tcp.socket libvirtd-tls.socket
+sudo systemctl disable libvirtd.service libvirtd.socket libvirtd-ro.socket libvirtd-admin.socket libvirtd-tcp.socket libvirtd-tls.socket
+sudo systemctl mask libvirtd.service libvirtd.socket libvirtd-ro.socket libvirtd-admin.socket libvirtd-tcp.socket libvirtd-tls.socket
+```
+
+## Step 2: Enable and Start the Modular Sockets
+
+We need to enable the connection points (`.socket`) for every driver.
+
+> [!WARNING] Critical Systemd Rule
+> 
+> Do **NOT** enable the `.service` units directly. If you enable the services, they will run 24/7. By only enabling the `.socket` units, systemd handles waking them up automatically when a client requests them.
+
+Copy and paste these loops into your terminal. We do this in two batches because logging/locking daemons have a different socket structure than the main drivers.
+
+**First, Enable all sockets to persist across reboots:**
+
+```
+# Enable the primary modular sockets (including alternative hypervisors)
+for drv in qemu interface network nodedev nwfilter secret storage proxy lxc ch vbox; do \
+  sudo systemctl enable virt${drv}d.socket virt${drv}d-ro.socket virt${drv}d-admin.socket; \
+done
+
+# Enable the logging and locking sockets
+for drv in log lock; do \
+  sudo systemctl enable virt${drv}d.socket virt${drv}d-admin.socket; \
 done
 ```
 
-then start it. yes do these sperately, enabling and starting not with the --now flag. and this will says some modules dont exist, you can safely ignore those. 
-```bash
-for drv in qemu interface network nodedev nwfilter secret storage; do \
-sudo systemctl start virt${drv}d.service; \
-sudo systemctl start virt${drv}d{,-ro,-admin}.socket; \
+**Second, Start the sockets for the current session:**
+
+```
+# Start the primary modular sockets
+for drv in qemu interface network nodedev nwfilter secret storage proxy lxc ch vbox; do \
+  sudo systemctl start virt${drv}d.socket virt${drv}d-ro.socket virt${drv}d-admin.socket; \
+done
+
+# Start the logging and locking sockets
+for drv in log lock; do \
+  sudo systemctl start virt${drv}d.socket virt${drv}d-admin.socket; \
 done
 ```
 
-> [!NOTE]- This is what will output when you run it. 
-> ```ini
-> Created symlink '/etc/systemd/system/multi-user.target.wants/virtqemud.service' → '/usr/lib/systemd/system/virtqemud.service'.
-> Created symlink '/etc/systemd/system/sockets.target.wants/virtqemud.socket' → '/usr/lib/systemd/system/virtqemud.socket'.
-> Created symlink '/etc/systemd/system/sockets.target.wants/virtqemud-ro.socket' → '/usr/lib/systemd/system/virtqemud-ro.socket'.
-> Created symlink '/etc/systemd/system/sockets.target.wants/virtqemud-admin.socket' → '/usr/lib/systemd/system/virtqemud-admin.socket'.
-> Created symlink '/etc/systemd/system/sockets.target.wants/virtlogd.socket' → '/usr/lib/systemd/system/virtlogd.socket'.
-> Created symlink '/etc/systemd/system/sockets.target.wants/virtlockd.socket' → '/usr/lib/systemd/system/virtlockd.socket'.
-> Created symlink '/etc/systemd/system/sockets.target.wants/virtlogd-admin.socket' → '/usr/lib/systemd/system/virtlogd-admin.socket'.
-> Created symlink '/etc/systemd/system/sockets.target.wants/virtlockd-admin.socket' → '/usr/lib/systemd/system/virtlockd-admin.socket'.
-> Created symlink '/etc/systemd/system/multi-user.target.wants/virtinterfaced.service' → '/usr/lib/systemd/system/virtinterfaced.service'.
-> Created symlink '/etc/systemd/system/sockets.target.wants/virtinterfaced.socket' → '/usr/lib/systemd/system/virtinterfaced.socket'.
-> Created symlink '/etc/systemd/system/sockets.target.wants/virtinterfaced-ro.socket' → '/usr/lib/systemd/system/virtinterfaced-ro.socket'.
-> Created symlink '/etc/systemd/system/sockets.target.wants/virtinterfaced-admin.socket' → '/usr/lib/systemd/system/virtinterfaced-admin.socket'.
-> Created symlink '/etc/systemd/system/multi-user.target.wants/virtnetworkd.service' → '/usr/lib/systemd/system/virtnetworkd.service'.
-> Created symlink '/etc/systemd/system/sockets.target.wants/virtnetworkd.socket' → '/usr/lib/systemd/system/virtnetworkd.socket'.
-> Created symlink '/etc/systemd/system/sockets.target.wants/virtnetworkd-ro.socket' → '/usr/lib/systemd/system/virtnetworkd-ro.socket'.
-> Created symlink '/etc/systemd/system/sockets.target.wants/virtnetworkd-admin.socket' → '/usr/lib/systemd/system/virtnetworkd-admin.socket'.
-> Created symlink '/etc/systemd/system/multi-user.target.wants/virtnodedevd.service' → '/usr/lib/systemd/system/virtnodedevd.service'.
-> Created symlink '/etc/systemd/system/sockets.target.wants/virtnodedevd.socket' → '/usr/lib/systemd/system/virtnodedevd.socket'.
-> Created symlink '/etc/systemd/system/sockets.target.wants/virtnodedevd-ro.socket' → '/usr/lib/systemd/system/virtnodedevd-ro.socket'.
-> Created symlink '/etc/systemd/system/sockets.target.wants/virtnodedevd-admin.socket' → '/usr/lib/systemd/system/virtnodedevd-admin.socket'.
-> Created symlink '/etc/systemd/system/multi-user.target.wants/virtnwfilterd.service' → '/usr/lib/systemd/system/virtnwfilterd.service'.
-> Created symlink '/etc/systemd/system/sockets.target.wants/virtnwfilterd.socket' → '/usr/lib/systemd/system/virtnwfilterd.socket'.
-> Created symlink '/etc/systemd/system/sockets.target.wants/virtnwfilterd-ro.socket' → '/usr/lib/systemd/system/virtnwfilterd-ro.socket'.
-> Created symlink '/etc/systemd/system/sockets.target.wants/virtnwfilterd-admin.socket' → '/usr/lib/systemd/system/virtnwfilterd-admin.socket'.
-> Created symlink '/etc/systemd/system/multi-user.target.wants/virtsecretd.service' → '/usr/lib/systemd/system/virtsecretd.service'.
-> Created symlink '/etc/systemd/system/sockets.target.wants/virtsecretd.socket' → '/usr/lib/systemd/system/virtsecretd.socket'.
-> Created symlink '/etc/systemd/system/sockets.target.wants/virtsecretd-ro.socket' → '/usr/lib/systemd/system/virtsecretd-ro.socket'.
-> Created symlink '/etc/systemd/system/sockets.target.wants/virtsecretd-admin.socket' → '/usr/lib/systemd/system/virtsecretd-admin.socket'.
-> Created symlink '/etc/systemd/system/multi-user.target.wants/virtstoraged.service' → '/usr/lib/systemd/system/virtstoraged.service'.
-> Created symlink '/etc/systemd/system/sockets.target.wants/virtstoraged.socket' → '/usr/lib/systemd/system/virtstoraged.socket'.
-> Created symlink '/etc/systemd/system/sockets.target.wants/virtstoraged-ro.socket' → '/usr/lib/systemd/system/virtstoraged-ro.socket'.
-> Created symlink '/etc/systemd/system/sockets.target.wants/virtstoraged-admin.socket' → '/usr/lib/systemd/system/virtstoraged-admin.socket'.
-> ```
+## Step 3: Enable Graceful VM Shutdowns (Data Safety)
 
+To prevent your virtual machines from being brutally hard-killed (which corrupts data) when you shut down or reboot your host computer, you must enable the `libvirt-guests` service. This tells systemd to gracefully pause or shut down your VMs when the host turns off.
 
-Make sure the monolotic daemon is dead and not enabled
-```bash
-# Ensure the "old style" monolithic daemon is stopped and masked
-sudo systemctl stop libvirtd
-sudo systemctl disable libvirtd
-sudo systemctl mask libvirtd
+```
+sudo systemctl enable --now libvirt-guests.service
 ```
 
-## Step 2: Apply Changes
+## Step 4: Apply Changes
 
-For these changes to fully take effect and for the new daemons to replace the old ones, you must reboot your computer.
+For systemd to clean up the IPC namespaces and transition to the modular architecture smoothly, reboot your computer.
 
 ```
 systemctl reboot
 ```
 
+## Step 5: Verify the Configuration
+
+Once your system has rebooted, you can verify that your new modular setup is working flawlessly.
+
+**1. Check if the sockets are listening:**
+
+```
+systemctl list-sockets | grep virt
+```
+
+> [!SUCCESS] Expected Output
+> 
+> You should see a long list showing sockets like `virtqemud.socket`, `virtnetworkd.socket`, etc., sitting in the `LISTEN` state. This means the doorways are open and waiting.
+
+**2. Prove the daemons are sleeping:**
+
+```
+systemctl status virtqemud.service
+```
+
+> [!SUCCESS] Expected Output
+> 
+> It should say `Active: inactive (dead)`.
+> 
+> _This is exactly what we want!_ It proves the daemon is using 0MB of RAM. The moment you open your virtual machine manager or run a `virsh` command, systemd will instantly flip this to `active (running)`.
+
 ## Appendix: How to Undo (Disable)
 
-> [!WARNING] Only run this if you messed up or want to stop using KVM.
+> [!WARNING] Reverting
 > 
-> If you need to revert these changes later, you can use the following commands to stop and disable the modular daemons.
+> If you ever need to revert to the old monolithic mode, stop and disable all modular sockets first.
 
-**1. Stop the running services:**
+**1. Stop the running sockets & services:**
 
-```bash
-for drv in qemu interface network nodedev nwfilter secret storage; do \
-sudo systemctl stop "virt${drv}d.service" "virt${drv}d"{,-ro,-admin}.socket; \
+```
+for drv in qemu interface network nodedev nwfilter secret storage proxy lxc ch vbox log lock; do \
+  sudo systemctl stop virt${drv}d.service virt${drv}d.socket virt${drv}d-ro.socket virt${drv}d-admin.socket 2>/dev/null; \
 done
 ```
 
 **2. Disable them from starting on boot:**
 
-```bash
-for drv in qemu interface network nodedev nwfilter secret storage; do \
-sudo systemctl disable virt${drv}d.service; \
-sudo systemctl disable virt${drv}d{,-ro,-admin}.socket; \
+```
+for drv in qemu interface network nodedev nwfilter secret storage proxy lxc ch vbox log lock; do \
+  sudo systemctl disable virt${drv}d.socket virt${drv}d-ro.socket virt${drv}d-admin.socket 2>/dev/null; \
 done
+```
+
+**3. Unmask the legacy daemon:**
+
+```
+sudo systemctl unmask libvirtd.service libvirtd.socket libvirtd-ro.socket libvirtd-admin.socket libvirtd-tcp.socket libvirtd-tls.socket
 ```

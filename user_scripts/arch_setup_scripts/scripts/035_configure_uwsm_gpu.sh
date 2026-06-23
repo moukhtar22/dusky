@@ -20,6 +20,7 @@ readonly NVIDIA_VAAPI_DRIVER="$DRI_DIR/nvidia_drv_video.so"
 readonly INTEL_IHD_DRIVER="$DRI_DIR/iHD_drv_video.so"
 readonly INTEL_I965_DRIVER="$DRI_DIR/i965_drv_video.so"
 readonly AMD_VAAPI_DRIVER="$DRI_DIR/radeonsi_drv_video.so"
+readonly NOUVEAU_VAAPI_DRIVER="$DRI_DIR/nouveau_drv_video.so"
 
 if [[ -t 1 ]]; then
     readonly BOLD=$'\033[1m'
@@ -75,6 +76,7 @@ declare -gA CARD_NAME
 declare -gA CARD_PCI_ADDRESS
 declare -gA CARD_BY_PATH
 declare -gA CARD_BOOT_VGA
+declare -gA CARD_KERNEL_DRIVER
 
 declare -g SELECTED_PRIMARY_CARD=''
 declare -g SELECTED_MODE=''
@@ -190,6 +192,8 @@ detect_topology() {
     local human_name=''
     local boot_vga=''
     local by_path_link=''
+    local driver_symlink=''
+    local kernel_driver=''
 
     log_info "Scanning GPU topology via sysfs..."
 
@@ -217,6 +221,13 @@ detect_topology() {
         boot_vga=0
         [[ -r "$card_path/device/boot_vga" ]] && boot_vga=$(<"$card_path/device/boot_vga")
 
+        kernel_driver='unknown'
+        if [[ -e "$card_path/device/driver" ]]; then
+            # Bulletproof readlink execution ensuring inherit_errexit is never tripped
+            driver_symlink=$(readlink -f -- "$card_path/device/driver" 2>/dev/null || true)
+            [[ -n $driver_symlink ]] && kernel_driver="${driver_symlink##*/}"
+        fi
+
         by_path_link="/dev/dri/by-path/pci-${pci_address}-card"
         human_name=$(get_pci_name "$pci_address")
 
@@ -227,6 +238,7 @@ detect_topology() {
         CARD_PCI_ADDRESS["$dev_node"]="$pci_address"
         CARD_BY_PATH["$dev_node"]="$by_path_link"
         CARD_BOOT_VGA["$dev_node"]="$boot_vga"
+        CARD_KERNEL_DRIVER["$dev_node"]="$kernel_driver"
     done
 
     if (( ${#ALL_CARDS[@]} == 0 )); then
@@ -277,13 +289,14 @@ print_topology() {
         [[ $card == "$DEFAULT_PRIMARY_CARD" ]] && marker+=" ${GREEN}[default]${RESET}"
 
         printf '  • %s%s%s%s\n' "$BOLD" "$card" "$RESET" "$marker"
-        printf '      ├─ Name: %s\n' "${CARD_NAME[$card]}"
-        printf '      ├─ PCI : %s\n' "${CARD_PCI_ADDRESS[$card]}"
+        printf '      ├─ Name  : %s\n' "${CARD_NAME[$card]}"
+        printf '      ├─ PCI   : %s\n' "${CARD_PCI_ADDRESS[$card]}"
+        printf '      ├─ Driver: %s\n' "${CARD_KERNEL_DRIVER[$card]}"
 
         if [[ -e "${CARD_BY_PATH[$card]}" ]]; then
-            printf '      └─ Link: %s\n' "${CARD_BY_PATH[$card]}"
+            printf '      └─ Link  : %s\n' "${CARD_BY_PATH[$card]}"
         else
-            printf '      └─ Link: unavailable\n'
+            printf '      └─ Link  : unavailable\n'
         fi
     done
 
@@ -398,10 +411,12 @@ generate_config() {
     local -a ordered_cards=()
     local aq_runtime_string=''
     local primary_vendor_id=''
+    local kernel_driver=''
 
     build_ordered_cards "$SELECTED_PRIMARY_CARD" ordered_cards
     aq_runtime_string=$(build_aq_runtime_string ordered_cards)
     primary_vendor_id=${CARD_VENDOR_ID[$SELECTED_PRIMARY_CARD]}
+    kernel_driver=${CARD_KERNEL_DRIVER[$SELECTED_PRIMARY_CARD]}
 
     mkdir -p -- "$ENV_DIR"
     TEMP_OUTPUT=$(mktemp "$ENV_DIR/.gpu.XXXXXX")
@@ -415,7 +430,7 @@ generate_config() {
             "${CARD_NAME[$SELECTED_PRIMARY_CARD]}" \
             "${CARD_PCI_ADDRESS[$SELECTED_PRIMARY_CARD]}"
         printf '# -----------------------------------------------------------------\n'
-        printf 'export ELECTRON_OZONE_PLATFORM_HINT=auto\n'
+        printf 'export ELECTRON_OZONE_PLATFORM_HINT=wayland\n'
         printf 'export MOZ_ENABLE_WAYLAND=1\n'
         printf '\n'
         
@@ -441,12 +456,26 @@ generate_config() {
                 fi
                 ;;
             0x10de)
-                printf '# NVIDIA Primary Session\n'
-                printf 'export GBM_BACKEND=nvidia-drm\n'
-                printf 'export __GLX_VENDOR_LIBRARY_NAME=nvidia\n'
-                if [[ -e $NVIDIA_VAAPI_DRIVER ]]; then
-                    printf 'export LIBVA_DRIVER_NAME=nvidia\n'
-                fi
+                case "${kernel_driver}" in
+                    nvidia)
+                        printf '# NVIDIA Primary Session (Proprietary)\n'
+                        printf 'export GBM_BACKEND=nvidia-drm\n'
+                        printf 'export __GLX_VENDOR_LIBRARY_NAME=nvidia\n'
+                        if [[ -e $NVIDIA_VAAPI_DRIVER ]]; then
+                            printf 'export LIBVA_DRIVER_NAME=nvidia\n'
+                        fi
+                        ;;
+                    nouveau)
+                        printf '# NVIDIA Primary Session (Nouveau)\n'
+                        printf 'export MESA_LOADER_DRIVER_OVERRIDE=nouveau\n'
+                        if [[ -e $NOUVEAU_VAAPI_DRIVER ]]; then
+                            printf 'export LIBVA_DRIVER_NAME=nouveau\n'
+                        fi
+                        ;;
+                    *)
+                        printf '# NVIDIA Primary Session (Unknown Kernel Driver: %s)\n' "$kernel_driver"
+                        ;;
+                esac
                 ;;
         esac
 
@@ -468,7 +497,7 @@ generate_config() {
 preview_config() {
     log_info "Previewing active config parameters:"
     printf '%s\n' '-------------------------------------'
-    grep -E 'AQ_DRM_DEVICES|GBM_BACKEND|__GLX_VENDOR_LIBRARY_NAME|LIBVA_DRIVER_NAME|Mode:|Primary DRM node:|Primary GPU:' "$OUTPUT_FILE" || true
+    grep -E 'AQ_DRM_DEVICES|GBM_BACKEND|__GLX_VENDOR_LIBRARY_NAME|MESA_LOADER_DRIVER_OVERRIDE|LIBVA_DRIVER_NAME|Mode:|Primary DRM node:|Primary GPU:' "$OUTPUT_FILE" || true
     printf '%s\n' '-------------------------------------'
 }
 

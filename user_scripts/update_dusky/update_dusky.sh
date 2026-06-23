@@ -8,22 +8,19 @@
 #
 #  HOW TO USE THIS ENGINE:
 #  You only need to care about TWO arrays to configure this updater:
-#    1. CUSTOM_SCRIPT_PATHS (Tells the engine WHERE a script lives)
+#    1. SCRIPT_SEARCH_DIRS  (Tells the engine WHERE to look for scripts)
 #    2. UPDATE_SEQUENCE     (Tells the engine WHEN and HOW to run a script)
 #
 # ==============================================================================
-#  1. THE CUSTOM_SCRIPT_PATHS ARRAY (The "Where")
+#  1. THE SCRIPT_SEARCH_DIRS ARRAY (The "Where")
 # ==============================================================================
-#  By default, the engine assumes ALL scripts live in:
-#  ~/user_scripts/arch_setup_scripts/scripts/
+#  Directories to search for scripts (in order — first match wins).
+#  By default, the engine will scan these paths relative to your home/work tree.
+#  Entries WITHOUT a '/' in the name are searched across these directories.
+#  Entries WITH a '/' are treated as direct paths.
 #
-#  If you have a script living SOMEWHERE ELSE in your home directory, you MUST
-#  map its exact location here. 
-#
-#  Syntax:  ["script_filename.sh"]="relative/path/from/home/script_filename.sh"
-#
-#  ⚠️ CRITICAL RULE: Adding a script here DOES NOT run it! It only acts as a 
-#  dictionary lookup for the engine. To actually run it, you must ALSO add it 
+#  ⚠️ CRITICAL RULE: Adding a directory here DOES NOT run its scripts! It only acts 
+#  as a search path for the engine. To actually run a script, you must ALSO add it 
 #  to the UPDATE_SEQUENCE array below.
 #
 # ==============================================================================
@@ -91,6 +88,8 @@ set -euo pipefail
 shopt -s inherit_errexit 2>/dev/null || true
 shopt -s extglob 2>/dev/null || true
 
+export PYTHONUNBUFFERED=1 # Unbuffer Python outputs explicitly ensuring real-time log piping.
+
 if (( BASH_VERSINFO[0] < 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] < 3) )); then
     printf 'Error: Bash 5.3+ required (found %s)\n' "$BASH_VERSION" >&2
     exit 1
@@ -110,7 +109,7 @@ declare -ri LOG_RETENTION_DAYS=14
 declare -ri BACKUP_RETENTION_DAYS=14
 declare -ri DISK_MIN_FREE_MB=100
 declare -ri DISK_COPY_RESERVE_MB=64
-declare -r VERSION="8.0.1"
+declare -r VERSION="8.0.3"
 declare -ri SYNC_RC_RECOVERABLE=10
 declare -ri SYNC_RC_UNSAFE=20
 
@@ -119,7 +118,6 @@ declare -ri SYNC_RC_UNSAFE=20
 # ==============================================================================
 declare -r DOTFILES_GIT_DIR="${HOME}/dusky"
 declare -r WORK_TREE="${HOME}"
-declare -r SCRIPT_DIR="${HOME}/user_scripts/arch_setup_scripts/scripts"
 declare -r LOG_BASE_DIR="${HOME}/Documents/logs"
 declare -r BACKUP_BASE_DIR="${HOME}/Documents/dusky_backups"
 declare -r STATE_HOME_DIR="${XDG_STATE_HOME:-${HOME}/.local/state}/dusky"
@@ -135,91 +133,87 @@ declare -r UPSTREAM_TRACKING_REF="refs/dusky-updater/upstream/${BRANCH}"
 # ==============================================================================
 
 # ------------------------------------------------------------------------------
-# CUSTOM SCRIPT PATHS Guide
+# SCRIPT SEARCH DIRECTORIES Guide
 # ------------------------------------------------------------------------------
-# DO NOT REMOVE THESE COMMENTS, THESE ARE INSTRUCTIONS FOR ADDING SCRIPTS WITH CUSTOM PATH
-# Map specific scripts to custom paths relative to ${HOME}.
-# If a script in UPDATE_SEQUENCE matches a key here, this path is used.
-# Format: ["script_name.sh"]="path/from/home/script_name.sh"
-
-# ⚠️ IMPORTANT INSTRUCTIONS:
-# 1. DEFINITION ONLY: This array ONLY maps the script name to a custom file location.
-#    Adding a script here DOES NOT cause it to run automatically.
+# Directories to search for scripts (in order — first match wins)
+# If a script in UPDATE_SEQUENCE does not contain a '/', it is searched here.
 #
-# 2. EXECUTION REQUIRED: To actually run the script, you MUST also add it to the
-#    'UPDATE_SEQUENCE' list further down in this file.
+# Format: "${WORK_TREE}/path/from/home/directory"
+#
+# Example:
+#   "${WORK_TREE}/user_scripts/networking"
+#   Then in UPDATE_SEQUENCE add:
+#     "S | warp_toggle.sh"
+
+declare -a SCRIPT_SEARCH_DIRS=(
+    "${WORK_TREE}/user_scripts/arch_setup_scripts/scripts"
+    "${WORK_TREE}/user_scripts/arch_setup_scripts"
+    "${WORK_TREE}/user_scripts/networking"
+    "${WORK_TREE}/user_scripts/misc_extra"
+    "${WORK_TREE}/user_scripts/misc_extra/delete_in_3_weeks"
+    "${WORK_TREE}/user_scripts/update_dusky/update_checker"
+    "${WORK_TREE}/user_scripts/dusky_system/reload_cc"
+    "${WORK_TREE}/user_scripts/services"
+    "${WORK_TREE}/user_scripts/update_dusky"
+    "${WORK_TREE}/user_scripts/rofi"
+    "${WORK_TREE}/user_scripts/images"
+    "${WORK_TREE}/user_scripts/theme_matugen/config"
+    "${WORK_TREE}/user_scripts/theme_matugen/firefox"
+    "${WORK_TREE}/user_scripts/theme_matugen"
+    "${WORK_TREE}/user_scripts/waybar"
+    "${WORK_TREE}/user_scripts/tts_stt/dusky_kokoro"
+    "${WORK_TREE}/user_scripts/tts_stt/dusky_parakeet"
+)
+
+# ------------------------------------------------------------------------------
+# SCRIPT CONFLICT RESOLUTIONS
+# ------------------------------------------------------------------------------
+# If a script exists in multiple search directories, the engine will normally 
+# prompt you at startup to choose which one to run. You can pre-configure the 
+# exact path here to bypass the prompt and run autonomously.
 #
 # Format: ["script_name.sh"]="path/relative/to/home/script_name.sh"
 #
-# Example:
-#   ["warp_toggle.sh"]="user_scripts/networking/warp_toggle.sh"
-#   Then in UPDATE_SEQUENCE add:
-#     "S | warp_toggle.sh"
-#     "S | ignore-fail | warp_toggle.sh --auto"
-
-# ------------------------------------------------------------------------------
-# CUSTOM SCRIPT PATHS
-# ------------------------------------------------------------------------------
-declare -A CUSTOM_SCRIPT_PATHS=(
-    ["warp_toggle.sh"]="user_scripts/networking/warp_toggle.sh"
-    ["fix_theme_dir.sh"]="user_scripts/misc_extra/fix_theme_dir.sh"
-    ["pacman_packages.sh"]="user_scripts/misc_extra/pacman_packages.sh"
-    ["paru_packages.sh"]="user_scripts/misc_extra/paru_packages.sh"
-    ["copy_service_files.sh"]="user_scripts/misc_extra/copy_service_files.sh"
-    ["update_checker.sh"]="user_scripts/update_dusky/update_checker/update_checker.sh"
-    ["cc_restart.sh"]="user_scripts/dusky_system/reload_cc/cc_restart.sh"
-    ["dusky_service_manager.sh"]="user_scripts/services/dusky_service_manager.sh"
-    ["append_defaults_keybinds_edit_here.sh"]="user_scripts/misc_extra/append_defaults_keybinds_edit_here.sh"
-    ["append_sourcing_line_workspace.sh"]="user_scripts/misc_extra/delete_in_3_weeks/append_sourcing_line_workspace.sh"
-    ["append_gaps_line_in_appearance.sh"]="user_scripts/misc_extra/delete_in_3_weeks/append_gaps_line_in_appearance.sh"
-    ["dusky_commands_before.sh"]="user_scripts/misc_extra/dusky_commands_before.sh"
-    ["dusky_commands_after.sh"]="user_scripts/misc_extra/dusky_commands_after.sh"
-    ["rofi_wallpaper_selctor.sh"]="user_scripts/rofi/rofi_wallpaper_selctor.sh"
-    ["hypr_anim.sh"]="user_scripts/rofi/hypr_anim.sh"
-    ["dusky_matugen_config_tui.sh"]="user_scripts/theme_matugen/dusky_matugen_config_tui.sh"
-    ["dusky_firefox_tui.sh"]="user_scripts/theme_matugen/dusky_firefox_tui.sh"
-    ["theme_ctl.sh"]="user_scripts/theme_matugen/theme_ctl.sh"
+# TIP: If you want to run BOTH versions of the script at different times in 
+# your sequence, do NOT use this array. Instead, provide the full relative 
+# path directly in the UPDATE_SEQUENCE (e.g. "U | folderA/script.sh" and 
+# "U | folderB/script.sh"). The engine natively handles this perfectly.
+declare -A SCRIPT_CONFLICT_RESOLUTIONS=(
+    # ["update_checker.sh"]="user_scripts/update_dusky/update_checker.sh"
 )
 
 # ------------------------------------------------------------------------------
 # UPDATE SEQUENCE
 # ------------------------------------------------------------------------------
-# Entry formats:
-#   "U | script.sh --auto"
-#   "S | ignore-fail | script.sh --auto"
-#   "U | | script.sh --auto"
-#
-# Rules:
-#   - Field 1: U or S
-#   - Field 2: optional flags; currently supported: ignore-fail
-#   - Field 3: script name plus whitespace-separated arguments
-#   - Legacy form "U | true script.sh --auto" is still accepted
-#   - Quotes, backslash escapes, and additional "|" characters inside the
-#     command field are not supported
 declare -ra UPDATE_SEQUENCE=(
 
 #================= CUSTOM=====================
+    "U | backup_hyprlang_files.sh"
     "U | dusky_commands_before.sh"
 #================= Scripts =====================
 
-    "U | 005_hypr_custom_config_setup.sh"
+#    "U | 002_pre_generated_colors.sh"
+#    "U | 003_network_connect.sh"
+    "U | 005_hypr_custom_config_setup.py"
+    "U | 006_animation_default.sh"
+    "U | 005_hypr_custom_config_setup.py --force --workspace_rules"
     "U | 010_package_removal.sh --auto"
 
 
 #================= CUSTOM=====================
     "S | pacman_packages.sh"
     "U | paru_packages.sh"
-    "U | rofi_wallpaper_selctor.sh --cache-only --progress"
 #================= Scripts =====================
 
-
-    "U | 015_set_thunar_terminal_kitty.sh"
-    "U | 020_desktop_apps_username_setter.sh --quiet"
-#    "U | 025_configure_keyboard.sh"
+    "U | 015_set_thunar_terminal.py -t foot"
+#    "U | 020_desktop_apps_username_setter.sh"
+    "U | 020_desktop_entries.py"
+    "U | 025_configure_keyboard.sh"
 #    "U | 035_configure_uwsm_gpu.sh --auto"
 #    "U | 040_long_sleep_timeout.sh"
 #    "S | 045_battery_limiter.sh"
 #    "S | 050_pacman_config.sh --auto"
+    "S | 051_pacman_hooks.sh --auto"
 #    "S | 055_pacman_reflector.sh"
 #    "S | 060_package_installation.sh"
 #    "U | 065_enabling_user_services.sh"
@@ -233,18 +227,17 @@ declare -ra UPDATE_SEQUENCE=(
 #    "S | 110_aur_packages_sudo_services.sh"
 #    "U | 115_aur_packages_user_services.sh"
 #    "S | 120_create_mount_directories.sh"
-#    "S | 125_pam_keyring.sh"
-    "U | 130_copy_service_files.sh --default"
+#    "S | 127_pam_keyring_greetd.sh --mode auto"
+#    "U | 130_copy_service_files.sh --default"
     "U | 131_dbus_copy_service_files.sh"
 #    "U | 135_battery_notify_service.sh"
+#    "U | 137_snapper_isolation_subvolume.sh --auto"
 #    "U | 140_fc_cache_fv.sh"
-#    "U | 145_matugen_directories.sh"
+    "U | 145_matugen_directories.py"
 #    "U | 150_wallpapers_download.sh"
 #    "U | 155_blur_shadow_opacity.sh"
 #    "U | ignore-fail | 160_theme_ctl.sh"
 #    "U | 165_qtct_config.sh"
-    "U | 170_waypaper_config_reset.sh"
-#    "U | 175_animation_default.sh"
 #    "S | 180_udev_usb_notify.sh"
 #    "U | 185_terminal_default.sh"
 #    "S | 190_dusk_fstab.sh"
@@ -255,7 +248,7 @@ declare -ra UPDATE_SEQUENCE=(
 #    "S | 215_powerkey_lid_close_behaviour.sh"
 #    "S | 220_logrotate_optimization.sh"
 #    "S | 225_faillock_timeout.sh"
-    "U | 230_non_asus_laptop.sh --auto"
+#    "U | 230_asus_tuf_tweaks.sh"
     "U | 235_file_manager_switch.sh --apply-state"
     "U | 236_browser_switcher.sh --apply-state"
     "U | 237_text_editer_switcher.sh --apply-state"
@@ -267,14 +260,13 @@ declare -ra UPDATE_SEQUENCE=(
 #    "U | 260_spotify.sh"
 #    "U | 265_mouse_button_reverse.sh --right"
 #    "U | 280_dusk_clipboard_errands_delete.sh --delete"
-#    "S | 285_tty_autologin.sh"
 #    "S | 290_system_services.sh"
-#    "S | 295_initramfs_optimization.sh"
+#    "S | 295_initramfs_optimization.py"
 #    "U | 300_git_config.sh"
 #    "U | 305_new_github_repo_to_backup.sh"
 #    "U | 310_reconnect_and_push_new_changes_to_github.sh"
 #    "S | 315_grub_optimization.sh"
-#    "S | 320_systemdboot_optimization.sh"
+#    "S | 320_systemdboot_optimization.py --auto"
 #    "S | 325_hosts_files_block.sh"
 #    "S | 330_gtk_root_symlink.sh"
 #    "S | 335_preload_config.sh"
@@ -292,8 +284,9 @@ declare -ra UPDATE_SEQUENCE=(
 #    "U | 390_clipboard_persistance.sh"
 #    "S | 395_intel_media_sdk_check.sh"
 #    "U | 400_firefox_matugen_pywalfox.sh"
+#     "U | 402_gecko_engine_colors_extention.sh"
 #    "U | 405_spicetify_matugen_setup.sh"
-#    "U | 410_waybar_swap_config.sh"
+#    "U | 410_waybar_swap_config.py --state"
 #    "U | 415_mpv_setup.sh"
 #    "U | 420_kokoro_gpu_setup.sh"
 #    "U | 425_parakeet_gpu_setup.sh"
@@ -303,9 +296,10 @@ declare -ra UPDATE_SEQUENCE=(
 #    "U | 440_config_bat_notify.sh --default"
 #    "U | 450_generate_colorfiles_for_current_wallpaer.sh"
     "U | 455_hyprctl_reload.sh"
-    "U | 460_switch_clipboard.sh --terminal --force"
+#    "U | 460_switch_clipboard.sh --terminal --force" no longer required!
 #    "S | 465_sddm_setup.sh"
 #    "U | 470_vesktop_matugen.sh"
+    "S | 473_add_user_to_group.sh --auto"
 #    "U | 475_reverting_sleep_timeout.sh"
 #    "U | 480_dusky_commands.sh"
     "S | 485_sudoers_nopassword.sh"
@@ -314,16 +308,18 @@ declare -ra UPDATE_SEQUENCE=(
 
     "U | copy_service_files.sh --default"
     "U | update_checker.sh --num"
-    "U | cc_restart.sh --quiet"
+#    "U | cc_restart.sh --quiet"
+    "U | wallpaper_selector.py --build-cache"
     "S | dusky_service_manager.sh"
-    "U | append_defaults_keybinds_edit_here.sh"
-    "U | append_sourcing_line_workspace.sh"
-    "U | append_gaps_line_in_appearance.sh"
+#    "U | append_defaults_keybinds_edit_here.sh"
     "U | ignore-fail | dusky_matugen_config_tui.sh --smart"
 #    "U | ignore-fail | dusky_firefox_tui.sh --sync --all"
     "U | ignore-fail | hypr_anim.sh --current"
     "U | ignore-fail | theme_ctl.sh refresh"
+    "U | ignore-fail | update_counter.sh"
     "U | dusky_commands_after.sh"
+#    "U | system_update.sh --pacman"
+    "U | reboot_post_lua_update.sh"
 )
 
 # ==============================================================================
@@ -378,6 +374,8 @@ declare -gA COLLISION_MOVED_PATHS=()
 declare -ga HARD_FAILED_SCRIPTS=()
 declare -ga SOFT_FAILED_SCRIPTS=()
 declare -ga SKIPPED_SCRIPTS=()
+declare -ga EXECUTED_SCRIPTS=()
+declare -gA FAILED_SCRIPT_DIRS=()
 
 declare -ga CHANGE_PATHS=()
 declare -gA CHANGE_STATUS=()
@@ -391,7 +389,7 @@ declare -ga MANIFEST_IGNORE_FAIL=()
 declare -ga MANIFEST_ARGV_NAME=()
 declare -ga MANIFEST_PATH=()
 declare -ga MANIFEST_PATH_STATE=()
-declare -ga MANIFEST_IS_CUSTOM=()
+declare -ga MANIFEST_INTERPRETER=()
 
 declare -g OPT_DRY_RUN=false
 declare -g OPT_SKIP_SYNC=false
@@ -650,8 +648,45 @@ file_sha256() {
 }
 
 # ==============================================================================
-# MANIFEST PARSING
+# MANIFEST PARSING & RESOLUTION
 # ==============================================================================
+validate_search_dirs() {
+    local needs_search_dirs=0
+    local i=""
+    local valid=0
+    local dir=""
+
+    for i in "${!MANIFEST_SCRIPT[@]}"; do
+        if [[ "${MANIFEST_SCRIPT[$i]}" != */* ]]; then
+            needs_search_dirs=1
+            break
+        fi
+    done
+
+    if (( needs_search_dirs == 0 )); then
+        return 0
+    fi
+
+    if [[ ${#SCRIPT_SEARCH_DIRS[@]} -eq 0 ]]; then
+        log ERROR "SCRIPT_SEARCH_DIRS is empty, but search-based entries are configured."
+        exit 1
+    fi
+
+    for dir in "${SCRIPT_SEARCH_DIRS[@]}"; do
+        if [[ -d "$dir" ]]; then
+            (( ++valid ))
+        fi
+    done
+
+    if (( valid == 0 )); then
+        log ERROR "None of the configured script search directories exist!"
+        log ERROR "Check your SCRIPT_SEARCH_DIRS configuration."
+        exit 1
+    fi
+
+    return 0
+}
+
 parse_update_sequence_manifest() {
     local entry="" mode="" flags_part="" command_part="" script=""
     local ignore_fail=false
@@ -667,7 +702,7 @@ parse_update_sequence_manifest() {
     MANIFEST_ARGV_NAME=()
     MANIFEST_PATH=()
     MANIFEST_PATH_STATE=()
-    MANIFEST_IS_CUSTOM=()
+    MANIFEST_INTERPRETER=()
 
     for entry in "${UPDATE_SEQUENCE[@]}"; do
         [[ -z "${entry//[[:space:]]/}" ]] && continue
@@ -765,10 +800,201 @@ parse_update_sequence_manifest() {
         MANIFEST_ARGV_NAME+=("$argv_name")
         MANIFEST_PATH+=("")
         MANIFEST_PATH_STATE+=("unknown")
-        MANIFEST_IS_CUSTOM+=("false")
+        MANIFEST_INTERPRETER+=("")
 
         ((idx++)) || true
     done
+}
+
+resolve_and_validate_manifest() {
+    local i=0 script="" script_path=""
+    local -a matches=()
+    local preflight_failures=0
+    local needs_python=false
+
+    log INFO "Performing pre-flight validation and conflict resolution..."
+
+    for i in "${!MANIFEST_MODE[@]}"; do
+        script="${MANIFEST_SCRIPT[$i]}"
+        matches=()
+
+        # Step 1: Scan for paths
+        if [[ "$script" == */* ]]; then
+            local explicit_path="$script"
+            [[ "$script" != /* && "$script" != ~* ]] && explicit_path="${WORK_TREE}/${script}"
+            if [[ -f "$explicit_path" && -r "$explicit_path" ]]; then
+                matches+=("$explicit_path")
+            fi
+        else
+            local dir=""
+            for dir in "${SCRIPT_SEARCH_DIRS[@]}"; do
+                if [[ -f "${dir}/${script}" && -r "${dir}/${script}" ]]; then
+                    matches+=("${dir}/${script}")
+                fi
+            done
+        fi
+
+        # Step 2: Handle missing/duplicate scripts
+        if ((${#matches[@]} == 0)); then
+            MANIFEST_PATH[$i]="$script"
+            MANIFEST_PATH_STATE[$i]="missing"
+            log ERROR "Required script not found or unreadable: $script"
+            ((preflight_failures++))
+            continue
+        elif ((${#matches[@]} == 1)); then
+            script_path="${matches[0]}"
+        else
+            # CONFLICT RESOLUTION
+            local predefined="${SCRIPT_CONFLICT_RESOLUTIONS[$script]:-}"
+            if [[ -n "$predefined" ]]; then
+                local explicit_pre="${predefined}"
+                [[ "$explicit_pre" != /* && "$explicit_pre" != ~* ]] && explicit_pre="${WORK_TREE}/${explicit_pre}"
+                if [[ -f "$explicit_pre" && -r "$explicit_pre" ]]; then
+                    script_path="$explicit_pre"
+                    log INFO "Resolved duplicate '$script' using SCRIPT_CONFLICT_RESOLUTIONS -> $script_path"
+                else
+                    log ERROR "Predefined resolution for '$script' is missing or unreadable: $explicit_pre"
+                    MANIFEST_PATH[$i]="$script"
+                    MANIFEST_PATH_STATE[$i]="missing"
+                    ((preflight_failures++))
+                    continue
+                fi
+            else
+                if [[ "$OPT_DRY_RUN" == true || "$OPT_FORCE" == true || ! -t 0 ]]; then
+                    log ERROR "Conflict: Multiple versions of '$script' found."
+                    local m
+                    for m in "${matches[@]}"; do log ERROR "  Found at: $m"; done
+                    log ERROR "Cannot prompt in non-interactive/dry-run mode. Add to SCRIPT_CONFLICT_RESOLUTIONS."
+                    MANIFEST_PATH[$i]="$script"
+                    MANIFEST_PATH_STATE[$i]="conflict"
+                    ((preflight_failures++))
+                    continue
+                fi
+
+                printf '\n%s[CONFLICT DETECTED]%s Multiple versions of %s found:\n' "$CLR_YLW" "$CLR_RST" "$script"
+                local j
+                for ((j=0; j<${#matches[@]}; j++)); do
+                    printf '  %d) %s\n' "$((j+1))" "${matches[$j]}"
+                done
+                local choice=""
+                while true; do
+                    if ! read -r -p "Which one should be executed? (1-${#matches[@]}): " choice; then
+                        log ERROR "Input interrupted. Aborting."
+                        exit 1
+                    fi
+                    if [[ "$choice" =~ ^[0-9]+$ ]] && ((choice >= 1 && choice <= ${#matches[@]})); then
+                        script_path="${matches[$((choice-1))]}"
+                        log OK "Selected: $script_path"
+                        log INFO "Tip: Add [\"$script\"]=\"$script_path\" to SCRIPT_CONFLICT_RESOLUTIONS to automate this."
+                        break
+                    fi
+                    echo "Invalid choice. Please enter a number between 1 and ${#matches[@]}."
+                done
+            fi
+        fi
+
+        MANIFEST_PATH[$i]="$script_path"
+        MANIFEST_PATH_STATE[$i]="ok"
+
+        # Step 3: Precise Interpreter Detection
+        local first_line=""
+        read -r first_line < "$script_path" || true
+        first_line="${first_line%$'\r'}" # Strips hidden Windows carriage returns
+        local has_py_ext=false
+        local has_sh_ext=false
+        local has_py_shebang=false
+        local has_bash_shebang=false
+        local extracted_interpreter=""
+
+        [[ "$script_path" == *.py ]] && has_py_ext=true
+        [[ "$script_path" == *.sh ]] && has_sh_ext=true
+        
+        local shebang_regex='^#![[:space:]]*(.+)'
+        if [[ "$first_line" =~ $shebang_regex ]]; then
+            extracted_interpreter="${BASH_REMATCH[1]}"
+            [[ "$extracted_interpreter" =~ python ]] && has_py_shebang=true
+            local _interp_base
+            _interp_base="$(basename "${extracted_interpreter%% *}")"
+            [[ "$_interp_base" =~ ^(bash|sh|zsh|dash|ksh)$ ]] && has_bash_shebang=true
+        fi
+
+        local resolved_interpreter=""
+
+        # Check for explicit contradictions
+        if [[ "$has_py_ext" == true && "$has_bash_shebang" == true ]] || [[ "$has_sh_ext" == true && "$has_py_shebang" == true ]]; then
+            if [[ "$OPT_DRY_RUN" == true || "$OPT_FORCE" == true || ! -t 0 ]]; then
+                log ERROR "Interpreter conflict for '$script': File extension and Shebang disagree."
+                log ERROR "Cannot prompt in non-interactive/dry-run mode. Please fix the file extension or shebang."
+                ((preflight_failures++))
+                continue
+            fi
+
+            printf '\n%s[INTERPRETER CONFLICT]%s Script %s has conflicting indicators (e.g. .py with bash shebang, or .sh with python shebang).\n' "$CLR_YLW" "$CLR_RST" "$script"
+            printf '  1) Run with Bash\n'
+            printf '  2) Run with Python\n'
+            local int_choice=""
+            while true; do
+                if ! read -r -p "Select interpreter (1-2): " int_choice; then
+                    log ERROR "Input interrupted. Aborting."
+                    exit 1
+                fi
+                case "$int_choice" in
+                    1) resolved_interpreter="$BASH_BIN"; break ;;
+                    2) resolved_interpreter="python"; needs_python=true; break ;;
+                    *) echo "Invalid choice." ;;
+                esac
+            done
+        else
+            if [[ "$has_py_ext" == true || "$has_py_shebang" == true ]]; then
+                needs_python=true
+                if [[ -n "$extracted_interpreter" ]]; then
+                    resolved_interpreter="$extracted_interpreter"
+                else
+                    resolved_interpreter="python"
+                fi
+            elif [[ -n "$extracted_interpreter" ]]; then
+                resolved_interpreter="$extracted_interpreter"
+            else
+                resolved_interpreter="$BASH_BIN"
+            fi
+        fi
+
+        MANIFEST_INTERPRETER[$i]="$resolved_interpreter"
+    done
+
+    if ((preflight_failures > 0)); then
+        log ERROR "Aborting preflight due to ${preflight_failures} resolution error(s)"
+        local _pf_idx
+        for _pf_idx in "${!MANIFEST_PATH_STATE[@]}"; do
+            local _pf_state="${MANIFEST_PATH_STATE[$_pf_idx]}"
+            [[ "$_pf_state" != "ok" ]] && HARD_FAILED_SCRIPTS+=("${MANIFEST_SCRIPT[$_pf_idx]} ($_pf_state)")
+        done
+        return 1
+    fi
+
+    # Preflight Python check and automatic pacman installation
+    if [[ "$needs_python" == true ]] && ! command -v python >/dev/null 2>&1; then
+        if [[ "$OPT_DRY_RUN" == true ]]; then
+            log WARN "[DRY-RUN] Python dependency detected but not installed. Would install python via pacman."
+        else
+            log WARN "Python dependency detected, but 'python' binary is not installed."
+            log INFO "Installing Python via pacman..."
+            
+            if [[ -z "$SUDO_PID" ]]; then
+                init_sudo
+            fi
+
+            if run_logged_command sudo pacman -S python --noconfirm --needed; then
+                log OK "Python installed successfully."
+            else
+                log ERROR "Failed to install Python. Aborting update sequence."
+                return 1
+            fi
+        fi
+    fi
+
+    log OK "Preflight validation complete."
+    return 0
 }
 
 list_active_scripts() {
@@ -1014,7 +1240,33 @@ acquire_lock() {
         if [[ -n "$summary" ]]; then
             log WARN "Processes currently holding the lock:"
             log RAW "${summary%$'\n'}"
+        else
+            log WARN "No live lock holder could be identified."
         fi
+
+        if [[ -t 0 && "$OPT_FORCE" != true && "$OPT_DRY_RUN" != true ]]; then
+            local choice=""
+            log INFO "The lock itself can only be safely cleared by acquiring it, not by deleting the path."
+            if ! read -r -p "If you are sure no other instance is still active, retry acquiring the lock now? [y/N]: " choice; then
+                choice="n"
+            fi
+            
+            case "${choice,,}" in
+                y|yes)
+                    log INFO "Waiting up to 2 seconds for lock..."
+                    if flock -w 2 "$LOCK_FD"; then
+                        log WARN "Lock became available after user-confirmed retry."
+                        return 0
+                    fi
+                    log ERROR "Lock is still held by another process."
+                    return 1
+                    ;;
+                *)
+                    return 1
+                    ;;
+            esac
+        fi
+        
         return 1
     fi
 
@@ -1274,7 +1526,9 @@ get_repo_state() {
 
         if [[ -t 0 && "$OPT_FORCE" != true ]]; then
             printf '\n%s[GIT LOCK DETECTED]%s A previous Git operation may have crashed and left a stale lock behind.\n' "$CLR_YLW" "$CLR_RST"
-            read -r -t "$PROMPT_TIMEOUT_SHORT" -p "Do you want to clear the lock and continue? [y/N] " prompt_ans || prompt_ans="n"
+            if ! read -r -t "$PROMPT_TIMEOUT_SHORT" -p "Do you want to clear the lock and continue? [y/N] " prompt_ans; then
+                prompt_ans="n"
+            fi
 
             if [[ "$prompt_ans" =~ ^[Yy]$ ]]; then
                 can_auto_delete=true
@@ -1766,7 +2020,9 @@ handle_unrelated_upstream_history() {
             "$CLR_GRN" "$CLR_RST"
         printf '     Current tracked files and Git history will be backed up before reset.\n\n'
 
-        read -r -t "$PROMPT_TIMEOUT_LONG" -p "Choice [1-2] (default: 1): " sync_choice 2>/dev/null || sync_choice="1"
+        if ! read -r -t "$PROMPT_TIMEOUT_LONG" -p "Choice [1-2] (default: 1): " sync_choice; then
+            sync_choice="1"
+        fi
     elif [[ "$OPT_ALLOW_DIVERGED_RESET" == true ]]; then
         sync_choice="2"
     else
@@ -2406,7 +2662,9 @@ initial_clone() {
 
     if [[ -t 0 && "$OPT_FORCE" != true ]]; then
         printf '\n'
-        read -r -t "$PROMPT_TIMEOUT_LONG" -p "Clone from ${REPO_URL}? [y/N] " do_clone || do_clone="n"
+        if ! read -r -t "$PROMPT_TIMEOUT_LONG" -p "Clone from ${REPO_URL}? [y/N] " do_clone; then
+            do_clone="n"
+        fi
         do_clone="${do_clone:-n}"
     fi
 
@@ -2615,7 +2873,9 @@ pull_updates() {
             printf '  %s2) Reset to upstream [RECOMMENDED]%s\n' "$CLR_GRN" "$CLR_RST"
             printf '     Your uncommitted tweaks will be backed up and auto-restored where safe.\n'
             printf '  3) Attempt rebase (may fail)\n\n'
-            read -r -t "$PROMPT_TIMEOUT_LONG" -p "Choice [1-3] (default: 1): " sync_choice 2>/dev/null || sync_choice="1"
+            if ! read -r -t "$PROMPT_TIMEOUT_LONG" -p "Choice [1-3] (default: 1): " sync_choice; then
+                sync_choice="1"
+            fi
         elif [[ "$OPT_ALLOW_DIVERGED_RESET" == true ]]; then
             sync_choice="2"
         else
@@ -2729,71 +2989,10 @@ stop_sudo() {
 execute_scripts() {
     log SECTION "Executing Update Sequence"
 
-    local script_dir_missing=false
-    if [[ ! -d "$SCRIPT_DIR" ]]; then
-        script_dir_missing=true
-        log WARN "Default script directory is missing: $SCRIPT_DIR"
-    fi
-
     local i=0 total="${#MANIFEST_MODE[@]}"
-    local mode="" script="" ignore_fail="" script_path="" is_custom=false
-    local path_state="" quoted_args=""
-    local preflight_failures=0
+    local mode="" script="" ignore_fail="" script_path=""
+    local path_state="" quoted_args="" interpreter=""
     local -a args=()
-
-    for i in "${!MANIFEST_MODE[@]}"; do
-        script="${MANIFEST_SCRIPT[$i]}"
-
-        if [[ -v "CUSTOM_SCRIPT_PATHS[$script]" && -n "${CUSTOM_SCRIPT_PATHS[$script]}" ]]; then
-            script_path="${WORK_TREE}/${CUSTOM_SCRIPT_PATHS[$script]}"
-            is_custom=true
-        else
-            script_path="${SCRIPT_DIR}/${script}"
-            is_custom=false
-        fi
-
-        MANIFEST_PATH[$i]="$script_path"
-        MANIFEST_IS_CUSTOM[$i]="$is_custom"
-
-        if [[ "$is_custom" != "true" && "$script_dir_missing" == "true" ]]; then
-            MANIFEST_PATH_STATE[$i]="missing"
-        elif [[ -e "$script_path" || -L "$script_path" ]]; then
-            if [[ ! -f "$script_path" ]]; then
-                MANIFEST_PATH_STATE[$i]="not-a-file"
-            elif [[ ! -r "$script_path" ]]; then
-                MANIFEST_PATH_STATE[$i]="unreadable"
-            else
-                MANIFEST_PATH_STATE[$i]="ok"
-            fi
-        else
-            MANIFEST_PATH_STATE[$i]="missing"
-        fi
-
-        case "${MANIFEST_PATH_STATE[$i]}" in
-            ok)
-                ;;
-            missing)
-                log ERROR "Required script not found: $script -> $(quote_for_log "$script_path")"
-                HARD_FAILED_SCRIPTS+=("$script (missing)")
-                ((preflight_failures++)) || true
-                ;;
-            unreadable)
-                log ERROR "Required script is unreadable: $script -> $(quote_for_log "$script_path")"
-                HARD_FAILED_SCRIPTS+=("$script (unreadable)")
-                ((preflight_failures++)) || true
-                ;;
-            not-a-file)
-                log ERROR "Required script path is not a regular file: $script -> $(quote_for_log "$script_path")"
-                HARD_FAILED_SCRIPTS+=("$script (not-a-file)")
-                ((preflight_failures++)) || true
-                ;;
-        esac
-    done
-
-    if ((preflight_failures > 0)); then
-        log ERROR "Aborting script execution due to ${preflight_failures} manifest path error(s)"
-        return 0
-    fi
 
     for i in "${!MANIFEST_MODE[@]}"; do
         mode="${MANIFEST_MODE[$i]}"
@@ -2801,6 +3000,7 @@ execute_scripts() {
         ignore_fail="${MANIFEST_IGNORE_FAIL[$i]}"
         script_path="${MANIFEST_PATH[$i]}"
         path_state="${MANIFEST_PATH_STATE[$i]}"
+        interpreter="${MANIFEST_INTERPRETER[$i]}"
         local -n argv_ref="${MANIFEST_ARGV_NAME[$i]}"
         args=("${argv_ref[@]}")
         quoted_args="$(join_quoted_argv "${args[@]}")"
@@ -2809,6 +3009,8 @@ execute_scripts() {
             ok)
                 ;;
             *)
+                # Conflicts or missing scripts were already caught and logged in Preflight
+                HARD_FAILED_SCRIPTS+=("$script ($path_state)")
                 continue
                 ;;
         esac
@@ -2837,21 +3039,28 @@ execute_scripts() {
         local -i auto_retry_limit=3
         local -i auto_retry_count=0
 
+        local -a interpreter_cmd=()
+        read -r -a interpreter_cmd <<< "$interpreter" # Safe word-splitting (prevents globbing)
+
         # The Retry/Skip prompt logic natively integrated into the execution sequence
         while true; do
             local rc=0
+            
+            # Execute in the root WORK_TREE (maintaining expected relative path resolution)
             case "$mode" in
-                S) run_logged_command sudo "$BASH_BIN" "$script_path" "${args[@]}" || rc=$? ;;
-                U) run_logged_command "$BASH_BIN" "$script_path" "${args[@]}" || rc=$? ;;
+                S) run_logged_command sudo "${interpreter_cmd[@]}" "$script_path" "${args[@]}" || rc=$? ;;
+                U) run_logged_command "${interpreter_cmd[@]}" "$script_path" "${args[@]}" || rc=$? ;;
             esac
 
             if ((rc == 0)); then
+                EXECUTED_SCRIPTS+=("$script")
                 break
             fi
 
             if [[ "$ignore_fail" == "true" ]]; then
                 log WARN "$script failed (exit $rc) - ignored via ignore-fail"
                 SOFT_FAILED_SCRIPTS+=("$script")
+                FAILED_SCRIPT_DIRS["${script_path%/*}"]=1
                 break
             fi
 
@@ -2866,13 +3075,26 @@ execute_scripts() {
 
             if [[ -t 0 && "$OPT_FORCE" != true && "$OPT_DRY_RUN" != true ]]; then
                 local _fail_choice=""
+                
+                # 1. Drain any accidental type-ahead keystrokes to prevent instant auto-skipping
+                while read -r -t 0.01; do : ; done 2>/dev/null
+
                 printf '\n%s[ACTION REQUIRED]%s Script execution failed: %s\n' "$CLR_YLW" "$CLR_RST" "$script"
-                read -r -p "Do you want to [S]kip, [R]etry, or [Q]uit? (s/r/q): " _fail_choice
+                
+                # 2. Split prompt across two lines to protect against stray \r from async logs wiping it
+                printf 'Do you want to [S]kip, [R]etry, or [Q]uit?\n(S/r/q): '
+                
+                if ! read -r _fail_choice; then
+                    _fail_choice="q"
+                fi
+
+                _fail_choice="${_fail_choice:-s}"
 
                 case "${_fail_choice,,}" in
                     s|skip)
                         log WARN "Skipping $script (User Selection)."
                         HARD_FAILED_SCRIPTS+=("$script (skipped by user)")
+                        FAILED_SCRIPT_DIRS["${script_path%/*}"]=1
                         break
                         ;;
                     r|retry)
@@ -2883,11 +3105,13 @@ execute_scripts() {
                     *)
                         log ERROR "Stopping execution as requested."
                         HARD_FAILED_SCRIPTS+=("$script")
+                        FAILED_SCRIPT_DIRS["${script_path%/*}"]=1
                         return 1
                         ;;
                 esac
             else
                 HARD_FAILED_SCRIPTS+=("$script")
+                FAILED_SCRIPT_DIRS["${script_path%/*}"]=1
                 if [[ "$OPT_STOP_ON_FAIL" == true ]]; then
                     log ERROR "Stopping execution sequence due to --stop-on-fail"
                     return 1
@@ -2909,6 +3133,10 @@ print_summary() {
     fi
     SUMMARY_PRINTED=true
 
+    local duration=$SECONDS
+    local minutes=$((duration / 60))
+    local seconds=$((duration % 60))
+
     printf '\n'
     log SECTION "Summary"
 
@@ -2921,30 +3149,48 @@ print_summary() {
     fi
 
     if ((${#HARD_FAILED_SCRIPTS[@]} > 0)); then
-            log ERROR "${#HARD_FAILED_SCRIPTS[@]} required script(s) failed:"
-            local fs=""
-            for fs in "${HARD_FAILED_SCRIPTS[@]}"; do
-                log RAW "    • $fs"
-            done
-        elif [[ "$SYNC_FAILED" != true && ( "$CURRENT_PHASE" == "script execution" || "$CURRENT_PHASE" == "summary" || "$CURRENT_PHASE" == "cleanup" ) ]]; then
-            log OK "All required operations completed successfully."
-        fi
+        log ERROR "${#HARD_FAILED_SCRIPTS[@]} required script(s) failed:"
+        local fs=""
+        for fs in "${HARD_FAILED_SCRIPTS[@]}"; do
+            log RAW "    • $fs"
+        done
+    elif [[ "$SYNC_FAILED" != true && ( "$CURRENT_PHASE" == "script execution" || "$CURRENT_PHASE" == "summary" || "$CURRENT_PHASE" == "cleanup" ) ]]; then
+        log OK "All required operations completed successfully."
+    fi
 
-        if ((${#SOFT_FAILED_SCRIPTS[@]} > 0)); then
-            log WARN "${#SOFT_FAILED_SCRIPTS[@]} script(s) soft failed (ignored):"
-            local fs=""
-            for fs in "${SOFT_FAILED_SCRIPTS[@]}"; do
-                log RAW "    • $fs"
-            done
-        fi
+    if ((${#SOFT_FAILED_SCRIPTS[@]} > 0)); then
+        log WARN "${#SOFT_FAILED_SCRIPTS[@]} script(s) soft failed (ignored):"
+        local fs=""
+        for fs in "${SOFT_FAILED_SCRIPTS[@]}"; do
+            log RAW "    • $fs"
+        done
+    fi
 
-        if ((${#SKIPPED_SCRIPTS[@]} > 0)); then
-            log INFO "${#SKIPPED_SCRIPTS[@]} script(s) skipped:"
-            local fs=""
-            for fs in "${SKIPPED_SCRIPTS[@]}"; do
-                log RAW "    • $fs"
-            done
-        fi
+    if ((${#SKIPPED_SCRIPTS[@]} > 0)); then
+        log INFO "${#SKIPPED_SCRIPTS[@]} script(s) skipped:"
+        local fs=""
+        for fs in "${SKIPPED_SCRIPTS[@]}"; do
+            log RAW "    • $fs"
+        done
+    fi
+
+    if ((${#EXECUTED_SCRIPTS[@]} > 0)); then
+        log OK "${#EXECUTED_SCRIPTS[@]} script(s) executed successfully."
+    fi
+
+    log INFO "Execution Time: ${minutes}m ${seconds}s"
+
+    if ((${#FAILED_SCRIPT_DIRS[@]} > 0)); then
+        log INFO "You can run the missing scripts individually from their respective directories:"
+        local -a sorted_dirs=()
+        mapfile -d '' -t sorted_dirs < <(printf '%s\0' "${!FAILED_SCRIPT_DIRS[@]}" | sort -z)
+        local fdir=""
+        for fdir in "${sorted_dirs[@]}"; do
+            if [[ -d "$fdir" ]]; then
+                log RAW "    • ${fdir}/"
+            fi
+        done
+    fi
 
     if [[ -n "$LOG_FILE" ]]; then
         log INFO "Log saved to: $LOG_FILE"
@@ -3020,7 +3266,9 @@ main() {
         printf '\n%sNote:%s Avoid interrupting the update while it'\''s running.\n' "${CLR_YLW}" "${CLR_RST}"
         printf 'Interruptions during git operations can leave the repository in a broken state.\n\n'
         local start_confirm=""
-        read -r -p "Start the update? [y/N] " start_confirm
+        if ! read -r -p "Start the update? [y/N] " start_confirm; then
+            start_confirm="n"
+        fi
         if [[ ! "$start_confirm" =~ ^[Yy]$ ]]; then
             printf 'Update cancelled.\n'
             exit 0
@@ -3041,10 +3289,6 @@ main() {
         auto_prune
         acquire_lock || exit 1
     fi
-
-    CURRENT_PHASE="preflight"
-    parse_update_sequence_manifest
-    require_sudo_if_needed || exit 1
 
     local self_hash_before=""
     if [[ "$OPT_DRY_RUN" != true && "$OPT_POST_SELF_UPDATE" != true && -r "$SELF_PATH" ]]; then
@@ -3090,7 +3334,9 @@ main() {
             fi
 
             if ((sync_rc == SYNC_RC_RECOVERABLE)) && [[ -t 0 ]]; then
-                read -r -t "$PROMPT_TIMEOUT_SHORT" -p "Continue with local scripts? [y/N] " cont || cont="n"
+                if ! read -r -t "$PROMPT_TIMEOUT_SHORT" -p "Continue with local scripts? [y/N] " cont; then
+                    cont="n"
+                fi
             else
                 cont="n"
             fi
@@ -3102,6 +3348,12 @@ main() {
     if [[ "$OPT_SYNC_ONLY" == true ]]; then
         log OK "Sync-only mode — skipping script execution."
     elif [[ "$SYNC_FAILED" != true || "$cont" =~ ^[Yy]$ ]]; then
+        CURRENT_PHASE="preflight"
+        parse_update_sequence_manifest
+        validate_search_dirs
+        resolve_and_validate_manifest || exit 1
+        require_sudo_if_needed || exit 1
+
         CURRENT_PHASE="script execution"
         execute_scripts || true
     fi

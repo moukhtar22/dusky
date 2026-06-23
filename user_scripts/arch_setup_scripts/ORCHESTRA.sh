@@ -20,10 +20,24 @@ SCRIPT_SEARCH_DIRS=(
     "${HOME}/user_scripts/arch_setup_scripts/scripts"
     "${HOME}/user_scripts/arch_setup_scripts"
     "${HOME}/user_scripts/rofi"
+    "${HOME}/user_scripts/images"
     "${HOME}/user_scripts/theme_matugen"
-    "${HOME}/user_scripts/btrfs_snapshots"
+    "${HOME}/user_scripts/theme_matugen/config"
+    "${HOME}/user_scripts/theme_matugen/firefox"
+    "${HOME}/user_scripts/nvim"
+    "${HOME}/user_scripts/mako_osd/dusky_keys"
     # "${HOME}/my_other_scripts"
     # "/opt/shared_team_scripts"
+)
+
+# ------------------------------------------------------------------------------
+# SCRIPT CONFLICT RESOLUTIONS
+# ------------------------------------------------------------------------------
+# Pre-configure exact paths to bypass prompts if a script exists in multiple
+# search directories.
+# Format: ["script_name.sh"]="path/relative/to/home/script_name.sh"
+declare -A SCRIPT_CONFLICT_RESOLUTIONS=(
+    # ["update_checker.sh"]="user_scripts/update_dusky/update_checker.sh"
 )
 
 # Delay (in seconds) after each successful script. Set to 0 to disable.
@@ -31,6 +45,7 @@ POST_SCRIPT_DELAY=0
 
 INSTALL_SEQUENCE=(
 
+    "U | 002_pre_generated_colors.sh"
     "U | 003_network_connect.sh"
 
 # ------ CUSTOM PATH SCRIPTS -------
@@ -38,18 +53,23 @@ INSTALL_SEQUENCE=(
 
 # ------ Setup SCRIPTS -------
 
-    "U | 005_hypr_custom_config_setup.sh"
+    "U | 005_hypr_custom_config_setup.py --force"
+    "U | 006_animation_default.sh"
     "U | 010_package_removal.sh --auto"
-    "U | 015_set_thunar_terminal_kitty.sh"
-    "U | 020_desktop_apps_username_setter.sh"
+    "U | 013_matugen_state_file_placment.py"
+    "U | 015_set_thunar_terminal.py -t foot"
+#    "U | 020_desktop_apps_username_setter.sh"
+    "U | 020_desktop_entries.py"
     "U | 025_configure_keyboard.sh"
     "U | 035_configure_uwsm_gpu.sh --auto"
     "U | 040_long_sleep_timeout.sh --auto"
 #    "S | 045_battery_limiter.sh"
     "S | 050_pacman_config.sh --auto"
+    "S | 051_pacman_hooks.sh --auto"
     "S | 055_pacman_reflector.sh"
     "S | 060_package_installation.sh"
     "U | 065_enabling_user_services.sh"
+    "S | 068_ufw_firewall.sh"
     "S | 070_openssh_setup.sh --auto"
     "U | 075_changing_shell_zsh.sh"
     "S | 080_aur_paru_fallback_yay.sh --paru"
@@ -60,50 +80,55 @@ INSTALL_SEQUENCE=(
     "S | 110_aur_packages_sudo_services.sh"
     "U | 115_aur_packages_user_services.sh"
 #    "S | 120_create_mount_directories.sh"
-    "S | 125_pam_keyring.sh"
+    "S | 127_pam_keyring_greetd.sh --mode auto"
     "U | 130_copy_service_files.sh --default"
     "U | 131_dbus_copy_service_files.sh"
     "U | 135_battery_notify_service.sh --auto"
+    "U | 137_snapper_isolation_subvolume.sh --auto"
     "U | 140_fc_cache_fv.sh"
 
     "U | dusky_matugen_config_tui.sh --smart"
 
-    "U | 145_matugen_directories.sh"
+    "U | 145_matugen_directories.py"
 #    "U | 150_wallpapers_download.sh"
     "U | 155_blur_shadow_opacity.sh"
     "U | 160_theme_ctl.sh"
     "U | 165_qtct_config.sh"
-    "U | 170_waypaper_config_reset.sh"
-    "U | 175_animation_default.sh"
     "S | 180_udev_usb_notify.sh"
-    "U | 185_terminal_default.sh"
+    "U | 185_terminal_default.py -t foot"
 #    "S | 190_dusk_fstab.sh"
 #    "S | 195_firefox_symlink_parition.sh"
 #    "S | 200_tlp_config.sh"
     "S | 205_zram_configuration.sh"
-#    "S | 210_zram_optimize_swappiness.sh"
+    "S | 206_zram_tmpfs_mounts.py --zram"
+    "S | 207_systemd_service_for_both_zram0_zram1.py"
+    "S | 210_zram_optimize_swappiness.sh"
+    "S | 211_systemd_oomd_zram.sh"
+    "S | 212_thp_sysfs_optimizer.sh"
+    "S | 213_systemd_journaling_optimizer.sh"
 #    "S | 215_powerkey_lid_close_behaviour.sh"
     "S | 220_logrotate_optimization.sh"
 #    "S | 225_faillock_timeout.sh"
-    "U | 230_non_asus_laptop.sh --auto"
-    "U | 235_file_manager_switch.sh --nemo"
+#    "U | 230_asus_tuf_tweaks.sh"
+    "U | 235_file_manager_switch.sh --thunar"
     "U | 236_browser_switcher.sh --firefox"
 
 #    "U | dusky_firefox_tui.sh --sync --all"
 
-    "U | 237_text_editer_switcher.sh --gnome-text-editor"
+    "U | 237_text_editer_switcher.sh --mousepad"
     "U | 238_terminal_switcher.sh --kitty"
-    "U | 240_swaync_dgpu_fix.sh --disable"
+    "U | 241_thunar_defaults.py"
+    "U | 242_file_manager_bookmarks_sidepane.py"
+    "U | 243_mousepad_defaults.py"
 #    "S | 245_asusd_service_fix.sh"
 #    "S | 250_ftp_arch.sh"
 #    "U | 255_tldr_update.sh"
 #    "U | 260_spotify.sh"
 #    "U | 265_mouse_button_reverse.sh --right"
     "U | 280_dusk_clipboard_errands_delete.sh --delete"
-#    "S | 285_tty_autologin.sh"
     "S | 290_system_services.sh"
-#    "S | 295_initramfs_optimization.sh"
-#    "U | 300_git_config.sh"
+#    "S | 295_initramfs_optimization.py"
+    "U | 300_git_config.sh"
 #    "U | 305_new_github_repo_to_backup.sh"
 #    "U | 310_reconnect_and_push_new_changes_to_github.sh"
 #    "S | 315_grub_optimization.sh"
@@ -111,8 +136,6 @@ INSTALL_SEQUENCE=(
 #    "S | 325_hosts_files_block.sh"
     "S | 330_gtk_root_symlink.sh"
 #    "S | 335_preload_config.sh"
-#    "U | 340_kokoro_cpu.sh"
-#    "U | 345_faster_whisper_cpu.sh"
     "S | 350_dns_systemd_resolve.sh"
 #    "U | 355_hyprexpo_plugin.sh"
 #    "U | 356_dusky_plugin_manager.sh"
@@ -127,32 +150,30 @@ INSTALL_SEQUENCE=(
     "U | 390_clipboard_persistance.sh --ram --quiet"
     "S | 395_intel_media_sdk_check.sh --auto"
     "U | 400_firefox_matugen_pywalfox.sh"
-#    "U | 405_spicetify_matugen_setup.sh"
-    "U | 410_waybar_swap_config.sh --toggle"
+#    "U | 402_gecko_engine_colors_extention.sh"
+#    "U | 401_gecko_engine_colors.sh"
+    "U | 410_waybar_swap_config.py --set waybar=15"
     "U | 415_mpv_setup.sh"
-#    "U | 420_kokoro_gpu_setup.sh" #requires nvidia gpu with at least 4gb vram
-#    "U | 425_parakeet_gpu_setup.sh" #requires nvidia gpu with at least 4gb vram
 #    "S | 430_btrfs_zstd_compression_stats.sh"
     "U | 434_wayclick_soundpacks_download.sh --auto"
-#    "U | 435_key_sound_wayclick_setup.sh --setup"
+    "U | 435_key_sound_wayclick_setup.sh --setup"
+
+    "U | dusky_keys.sh --setup"
+
     "U | 440_config_bat_notify.sh --default"
     "U | 455_hyprctl_reload.sh"
-    "U | 460_switch_clipboard.sh --terminal"
+#    "U | 460_switch_clipboard.sh --terminal --force" no longer required!
 #    "S | 465_sddm_setup.sh --auto"
 #    "U | 470_vesktop_matugen.sh --auto"
+    "S | 473_add_user_to_group.sh --auto"
     "U | 475_reverting_sleep_timeout.sh"
     "U | 480_dusky_commands.sh"
     "S | 485_sudoers_nopassword.sh"
 
 # ------ CUSTOM PATH SCRIPTS -------
 
-    "U | rofi_wallpaper_selctor.sh --cache-only --progress"
-
-# ------ Btrfs Snapshot configuration -------
-
-    "U | 01_limine_setup.sh --auto"
-    "U | 02_snapper_isolation_subvolume.sh --auto"
-    "U | 03_snapper_pacman_hooks.sh --auto"
+    "U | wallpaper_selector.py --build-cache"
+#    "U | dusky_neovim_manager.sh"
 )
 
 # ==============================================================================
@@ -175,9 +196,14 @@ declare -g SUDO_PID=""
 declare -g LOGGING_INITIALIZED=0
 declare -g EXECUTION_PHASE=0
 
-# 4. O(1) Arrays
+# 4. O(1) Arrays & Tracking
 declare -gA COMPLETED_SCRIPTS=()
 declare -gA SCRIPT_CACHE=()
+declare -gA SCRIPT_INTERPRETERS=()
+declare -ga EXECUTED_SCRIPTS=()
+declare -ga SKIPPED_SCRIPTS=()
+declare -ga SOFT_FAILED_SCRIPTS=()
+declare -ga FAILED_SCRIPTS=()
 
 # 5. Colors
 declare -g RED="" GREEN="" BLUE="" YELLOW="" BOLD="" RESET=""
@@ -420,24 +446,74 @@ resolve_script() {
     unset 'SCRIPT_CACHE[$name]'
 
     if [[ "$name" == */* ]]; then
-        if [[ -f "$name" && -r "$name" ]]; then
-            SCRIPT_CACHE["$name"]="$name"
-            printf '%s' "$name"
+        local explicit_path="$name"
+        [[ "$name" != /* && "$name" != ~* ]] && explicit_path="${HOME}/${name}"
+        if [[ -f "$explicit_path" && -r "$explicit_path" ]]; then
+            SCRIPT_CACHE["$name"]="$explicit_path"
+            printf '%s' "$explicit_path"
             return 0
         fi
         return 1
     fi
 
     local dir=""
+    local -a matches=()
     for dir in "${SCRIPT_SEARCH_DIRS[@]}"; do
         if [[ -f "${dir}/${name}" && -r "${dir}/${name}" ]]; then
-            SCRIPT_CACHE["$name"]="${dir}/${name}"
-            printf '%s' "${dir}/${name}"
-            return 0
+            matches+=("${dir}/${name}")
         fi
     done
 
-    return 1
+    if ((${#matches[@]} == 0)); then
+        return 1
+    elif ((${#matches[@]} == 1)); then
+        SCRIPT_CACHE["$name"]="${matches[0]}"
+        printf '%s' "${matches[0]}"
+        return 0
+    else
+        # CONFLICT RESOLUTION
+        local predefined="${SCRIPT_CONFLICT_RESOLUTIONS[$name]:-}"
+        if [[ -n "$predefined" ]]; then
+            local explicit_pre="${predefined}"
+            [[ "$explicit_pre" != /* ]] && explicit_pre="${HOME}/${explicit_pre}"
+            if [[ -f "$explicit_pre" && -r "$explicit_pre" ]]; then
+                SCRIPT_CACHE["$name"]="$explicit_pre"
+                log "INFO" "Resolved duplicate '$name' using SCRIPT_CONFLICT_RESOLUTIONS -> $explicit_pre" >&2
+                printf '%s' "$explicit_pre"
+                return 0
+            else
+                log "ERROR" "Predefined resolution for '$name' is missing or unreadable: $explicit_pre" >&2
+                return 1
+            fi
+        else
+            if [[ ! -t 0 ]]; then
+                log "ERROR" "Conflict: Multiple versions of '$name' found." >&2
+                local m
+                for m in "${matches[@]}"; do log "ERROR" "  Found at: $m" >&2; done
+                log "ERROR" "Cannot prompt in non-interactive mode. Add to SCRIPT_CONFLICT_RESOLUTIONS." >&2
+                return 1
+            fi
+
+            printf '\n%s[CONFLICT DETECTED]%s Multiple versions of %s found:\n' "${YELLOW:-}" "${RESET:-}" "$name" >&2
+            local j
+            for ((j=0; j<${#matches[@]}; j++)); do
+                printf '  %d) %s\n' "$((j+1))" "${matches[$j]}" >&2
+            done
+            local choice=""
+            while true; do
+                read -r -p "Which one should be executed? (1-${#matches[@]}): " choice >&2
+                if [[ "$choice" =~ ^[0-9]+$ ]] && ((choice >= 1 && choice <= ${#matches[@]})); then
+                    local chosen_path="${matches[$((choice-1))]}"
+                    log "SUCCESS" "Selected: $chosen_path" >&2
+                    log "INFO" "Tip: Add [\"$name\"]=\"$chosen_path\" to SCRIPT_CONFLICT_RESOLUTIONS to automate this." >&2
+                    SCRIPT_CACHE["$name"]="$chosen_path"
+                    printf '%s' "$chosen_path"
+                    return 0
+                fi
+                echo "Invalid choice. Please enter a number between 1 and ${#matches[@]}." >&2
+            done
+        fi
+    fi
 }
 
 report_search_locations() {
@@ -521,14 +597,14 @@ preflight_check() {
     local script_path=""
     local -a args=()
 
-    log "INFO" "Performing pre-flight validation..."
+    log "INFO" "Performing pre-flight validation and conflict resolution..."
 
     for entry in "${INSTALL_SEQUENCE[@]}"; do
         [[ -n "${entry//[[:space:]]/}" ]] || continue
         parse_install_entry "$entry" mode filename args base_state_key ignore_fail
 
         if ! script_path="$(resolve_script "$filename")"; then
-            log "ERROR" "Missing or unreadable: ${filename}"
+            log "ERROR" "Missing, unreadable, or unresolved conflict: ${filename}"
             (( ++missing ))
         fi
     done
@@ -791,8 +867,9 @@ main() {
 
     local start_ts=$SECONDS
 
-    # Check for sudo requirement
+    # --- PRE-EXECUTION DEPENDENCY SCANNING ---
     local needs_sudo=0
+    local needs_python=0
     local entry=""
     local mode=""
     local filename=""
@@ -800,17 +877,99 @@ main() {
     local ignore_fail=0
     local -a args=()
 
+    log "INFO" "Performing dependency and interpreter resolution..."
+
     for entry in "${INSTALL_SEQUENCE[@]}"; do
         [[ -n "${entry//[[:space:]]/}" ]] || continue
         parse_install_entry "$entry" mode filename args base_state_key ignore_fail
+        
         if [[ "$mode" == "S" ]]; then
             needs_sudo=1
-            break
+        fi
+
+        # Dynamically evaluate script interpreter and dependencies
+        local script_path=""
+        if script_path="$(resolve_script "$filename" 2>/dev/null)"; then
+            local first_line=""
+            read -r first_line < "$script_path" || true
+            first_line="${first_line%$'\r'}" # Strips hidden Windows carriage returns
+            local has_py_ext=0
+            local has_sh_ext=0
+            local has_py_shebang=0
+            local has_bash_shebang=0
+            local extracted_interpreter=""
+
+            [[ "$script_path" == *.py ]] && has_py_ext=1
+            [[ "$script_path" == *.sh ]] && has_sh_ext=1
+            
+            local shebang_regex='^#![[:space:]]*(.+)'
+            if [[ "$first_line" =~ $shebang_regex ]]; then
+                extracted_interpreter="${BASH_REMATCH[1]}"
+                [[ "$extracted_interpreter" =~ python ]] && has_py_shebang=1
+                local _interp_base
+                _interp_base="$(basename "${extracted_interpreter%% *}")"
+                [[ "$_interp_base" =~ ^(bash|sh|zsh|dash|ksh)$ ]] && has_bash_shebang=1
+            fi
+
+            local resolved_interpreter=""
+
+            # Check for explicit contradictions
+            if [[ "$has_py_ext" -eq 1 && "$has_bash_shebang" -eq 1 ]] || [[ "$has_sh_ext" -eq 1 && "$has_py_shebang" -eq 1 ]]; then
+                if [[ ! -t 0 ]]; then
+                    log "ERROR" "Interpreter conflict for '$filename': File extension and Shebang disagree."
+                    log "ERROR" "Cannot prompt in non-interactive mode. Please fix the file extension or shebang."
+                    exit 1
+                fi
+
+                printf '\n%s[INTERPRETER CONFLICT]%s Script %s has conflicting indicators (e.g. .py with bash shebang, or .sh with python shebang).\n' "${YELLOW}" "${RESET}" "$filename"
+                printf '  1) Run with Bash\n'
+                printf '  2) Run with Python\n'
+                local int_choice=""
+                while true; do
+                    read -r -p "Select interpreter (1-2): " int_choice
+                    case "$int_choice" in
+                        1) resolved_interpreter="bash"; break ;;
+                        2) resolved_interpreter="python"; needs_python=1; break ;;
+                        *) echo "Invalid choice." ;;
+                    esac
+                done
+            else
+                if [[ "$has_py_ext" -eq 1 || "$has_py_shebang" -eq 1 ]]; then
+                    needs_python=1
+                    if [[ -n "$extracted_interpreter" ]]; then
+                        resolved_interpreter="$extracted_interpreter"
+                    else
+                        resolved_interpreter="python"
+                    fi
+                elif [[ -n "$extracted_interpreter" ]]; then
+                    resolved_interpreter="$extracted_interpreter"
+                else
+                    resolved_interpreter="bash"
+                fi
+            fi
+            SCRIPT_INTERPRETERS["$filename"]="$resolved_interpreter"
         fi
     done
 
+    # If Python is missing but required, we will forcibly require Sudo for installation
+    if [[ $needs_python -eq 1 ]] && ! command -v python >/dev/null 2>&1; then
+        needs_sudo=1
+    fi
+
+    # Authenticate via Sudo globally once if required
     if [[ $needs_sudo -eq 1 ]]; then
         init_sudo
+    fi
+
+    # Automated Arch repo provisioning for Python 
+    if [[ $needs_python -eq 1 ]] && ! command -v python >/dev/null 2>&1; then
+        log "WARN" "Python dependency detected, but 'python' binary is not installed."
+        log "RUN" "Installing Python via pacman..."
+        sudo pacman -S python --noconfirm --needed || {
+            log "ERROR" "Failed to install Python. Aborting orchestrator."
+            exit 1
+        }
+        log "SUCCESS" "Python installed successfully."
     fi
 
     ensure_state_dir
@@ -893,10 +1052,10 @@ main() {
     local current_index=0
     log "INFO" "Processing ${total_scripts} scripts..."
 
-    local -a SKIPPED_OR_FAILED=()
     local -A seen_state_keys=()
 
     EXECUTION_PHASE=1
+    export PYTHONUNBUFFERED=1 # Unbuffer Python outputs explicitly ensuring real-time log piping.
 
     for entry in "${INSTALL_SEQUENCE[@]}"; do
         [[ -n "${entry//[[:space:]]/}" ]] || continue
@@ -929,7 +1088,7 @@ main() {
             case "${_choice,,}" in
                 s|skip)
                     log "WARN" "Skipping $display_name (User Selection)"
-                    SKIPPED_OR_FAILED+=("$display_name")
+                    SKIPPED_SCRIPTS+=("$display_name")
                     continue 2
                     ;;
                 r|retry)
@@ -959,7 +1118,7 @@ main() {
             case "${_user_confirm,,}" in
                 s|skip)
                     log "WARN" "Skipping $display_name (User Selection)"
-                    SKIPPED_OR_FAILED+=("$display_name")
+                    SKIPPED_SCRIPTS+=("$display_name")
                     continue
                     ;;
                 q|quit)
@@ -986,10 +1145,20 @@ main() {
                 log "RUN" "[${current_index}/${total_scripts}] Executing: ${display_name} (${mode})"
             fi
 
+            local cached_int="${SCRIPT_INTERPRETERS["$filename"]:-}"
+            local -a interpreter_cmd=()
+
+            if [[ -n "$cached_int" ]]; then
+                read -r -a interpreter_cmd <<< "$cached_int" # Safe word-splitting (prevents globbing)
+            else
+                # Fallback if somehow missed in dependency scan
+                interpreter_cmd=("bash")
+            fi
+
             if [[ "$mode" == "S" ]]; then
-                ( exec 9>&-; cd "$(dirname "$script_path")" && sudo bash "$(basename "$script_path")" "${args[@]}" ) || result=$?
+                ( exec 9>&-; sudo "${interpreter_cmd[@]}" "$script_path" "${args[@]}" ) || result=$?
             elif [[ "$mode" == "U" ]]; then
-                ( exec 9>&-; cd "$(dirname "$script_path")" && bash "$(basename "$script_path")" "${args[@]}" ) || result=$?
+                ( exec 9>&-; "${interpreter_cmd[@]}" "$script_path" "${args[@]}" ) || result=$?
             else
                 log "ERROR" "Invalid mode '$mode' in config. Use 'S' or 'U'."
                 exit 1
@@ -999,6 +1168,7 @@ main() {
                 printf '%s\n' "$state_key" >> "$STATE_FILE"
                 COMPLETED_SCRIPTS["$state_key"]=1
                 log "SUCCESS" "Finished $display_name"
+                EXECUTED_SCRIPTS+=("$display_name")
 
                 if [[ "$POST_SCRIPT_DELAY" != "0" ]]; then
                     sleep "$POST_SCRIPT_DELAY"
@@ -1009,7 +1179,7 @@ main() {
 
             if [[ $ignore_fail -eq 1 ]]; then
                 log "WARN" "Failed $display_name (Exit Code: $result) - ignored via ignore-fail flag"
-                SKIPPED_OR_FAILED+=("$display_name (soft failed)")
+                SOFT_FAILED_SCRIPTS+=("$display_name")
                 break
             fi
 
@@ -1024,12 +1194,16 @@ main() {
             auto_retry_limit=0
 
             echo -e "${YELLOW}Action Required:${RESET} Script execution failed."
-            read -r -p "Do you want to [S]kip to next, [R]etry, or [Q]uit? (s/r/q): " _fail_choice
+            
+            # --- STDIN SAFETY FIX: Fallback if 'read' abruptly closes (e.g. TTY detached) ---
+            if ! read -r -p "Do you want to [S]kip to next, [R]etry, or [Q]uit? (s/r/q): " _fail_choice; then
+                _fail_choice="q"
+            fi
 
             case "${_fail_choice,,}" in
                 s|skip)
                     log "WARN" "Skipping $display_name (User Selection). NOT marking as complete."
-                    SKIPPED_OR_FAILED+=("$display_name")
+                    FAILED_SCRIPTS+=("$display_name")
                     break
                     ;;
                 r|retry)
@@ -1045,31 +1219,45 @@ main() {
         done
     done
 
-    # --- SUMMARY OF FAILED / SKIPPED SCRIPTS ---
-    if [[ ${#SKIPPED_OR_FAILED[@]} -gt 0 ]]; then
-        echo -e "\n${YELLOW}================================================================${RESET}"
-        echo -e "${YELLOW}NOTE: Some scripts were skipped or failed:${RESET}"
+    # --- PHASE SUMMARY ---
+    local end_ts=$SECONDS
+    local duration=$((end_ts - start_ts))
+    local minutes=$((duration / 60))
+    local seconds=$((duration % 60))
 
-        local f=""
-        for f in "${SKIPPED_OR_FAILED[@]}"; do
-            echo " - $f"
-        done
+    echo -e "\n${BLUE}${BOLD}=== EXECUTION SUMMARY ===${RESET}"
+    
+    if (( ${#EXECUTED_SCRIPTS[@]} > 0 )); then
+        echo -e "${GREEN}[Executed]${RESET}    ${#EXECUTED_SCRIPTS[@]} script(s)"
+    fi
+    
+    if (( ${#SKIPPED_SCRIPTS[@]} > 0 )); then
+        echo -e "${YELLOW}[Skipped]${RESET}     ${#SKIPPED_SCRIPTS[@]} script(s):"
+        for f in "${SKIPPED_SCRIPTS[@]}"; do echo "  - $f"; done
+    fi
 
-        echo -e "\nYou can run them individually from their respective directories:"
+    if (( ${#SOFT_FAILED_SCRIPTS[@]} > 0 )); then
+        echo -e "${YELLOW}[Soft-Failed]${RESET} ${#SOFT_FAILED_SCRIPTS[@]} script(s) (Ignored):"
+        for f in "${SOFT_FAILED_SCRIPTS[@]}"; do echo "  - $f"; done
+    fi
+    
+    if (( ${#FAILED_SCRIPTS[@]} > 0 )); then
+        echo -e "${RED}[Failed]${RESET}      ${#FAILED_SCRIPTS[@]} script(s):"
+        for f in "${FAILED_SCRIPTS[@]}"; do echo "  - $f"; done
+    fi
+
+    echo -e "\n${BLUE}Execution Time:${RESET} ${minutes}m ${seconds}s"
+    echo -e "${BLUE}Log file:${RESET}       ${LOG_FILE}"
+
+    if (( ${#SKIPPED_SCRIPTS[@]} > 0 || ${#FAILED_SCRIPTS[@]} > 0 || ${#SOFT_FAILED_SCRIPTS[@]} > 0 )); then
+        echo -e "\n${YELLOW}You can run the missing scripts individually from their respective directories:${RESET}"
         local dir=""
         for dir in "${SCRIPT_SEARCH_DIRS[@]}"; do
             if [[ -d "$dir" ]]; then
                 echo -e "  ${BOLD}${dir}/${RESET}"
             fi
         done
-
-        echo -e "${YELLOW}================================================================${RESET}\n"
     fi
-
-    local end_ts=$SECONDS
-    local duration=$((end_ts - start_ts))
-    local minutes=$((duration / 60))
-    local seconds=$((duration % 60))
 
     # --- COMPLETION & REBOOT NOTICE ---
     echo -e "\n${GREEN}================================================================${RESET}"

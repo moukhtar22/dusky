@@ -59,6 +59,12 @@ declare -a COPY_TASKS=(
 
     # 3. Network Manager Script
     "dusky/user_scripts/network_manager/dusky_network.sh :: /etc/skel/wifi_connect.sh"
+
+    # 4. foot color file
+    "/etc/skel/.config/matugen/generated_fresh/foot-colors.ini :: /etc/skel/.config/foot/foot-colors.ini"
+
+    # 5. Mako color file
+    "/etc/skel/.config/matugen/generated_fresh/mako-colors.ini :: /etc/skel/.config/matugen/generated/mako-colors.ini"
 )
 
 # Files matching these patterns will be forced to be executable (755)

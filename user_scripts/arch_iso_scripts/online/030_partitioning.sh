@@ -453,7 +453,7 @@ run_provisioning_wizard() {
         echo -e "  [1] Wipe Entire Drive     (Default - Erases all data and creates standard layout)"
         echo -e "  [2] Select Existing       (Dual Boot - Retains other partitions, overwrites selected)"
         echo -e "  [3] Manual Partitioning   (Advanced - Opens cfdisk to let you design layout manually)"
-        echo -e "  [4] Rescue / Chroot       (Mount Only - Unlocks existing LUKS root without formatting)"
+        echo -e "  [4] Rescue / Chroot       (Mount Only - Unlocks LUKS or maps plain root without formatting)"
         echo ""
         read -r -p "Enter your choice [1/2/3/4]: " strategy_choice
     fi
@@ -549,8 +549,9 @@ run_provisioning_wizard() {
         
         # Validation Check: Ensure the selected partition actually contains a LUKS header
         if ! cryptsetup isLuks "$part_root" >/dev/null 2>&1; then
-            echo -e "${C_RED}Critical: Partition $part_root does not contain a valid LUKS header. Aborting.${C_RESET}"
-            exit 1
+            echo -e "${C_YELLOW}>> Partition $part_root does not contain a valid LUKS header. Assuming unencrypted plain partition.${C_RESET}"
+            echo -e "${C_GREEN}>> Rescue setup complete. Proceed to 040_disk_mount.sh to map subvolumes.${C_RESET}"
+            return 0
         fi
         
         teardown_device "$target_dev"
@@ -602,7 +603,7 @@ run_provisioning_wizard() {
 
         echo -e "${C_YELLOW}>> Writing new GPT layout...${C_RESET}"
         if [[ "$BOOT_MODE" == "UEFI" ]]; then
-            sgdisk -n 1:0:+5G -t 1:ef00 -c 1:"EFI System" "$target_dev"
+            sgdisk -n 1:0:+1.5G -t 1:ef00 -c 1:"EFI System" "$target_dev"
             sgdisk -n 2:0:0   -t 2:8309 -c 2:"Linux LUKS" "$target_dev"
         else
             sgdisk -n 1:0:+1M -t 1:ef02 -c 1:"BIOS Boot"  "$target_dev"

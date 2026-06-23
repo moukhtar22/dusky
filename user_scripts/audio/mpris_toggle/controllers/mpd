@@ -1,0 +1,37 @@
+#!/bin/sh
+action="$1"
+case "$action" in
+    now)
+        if command -v mpc >/dev/null 2>&1; then
+            current=$(mpc current 2>/dev/null)
+            status_line=$(mpc status 2>/dev/null | tail -n2 | head -n1)
+            if [ -n "$current" ]; then
+                title="${current##* - }"
+                artist="${current%% - *}"
+                [ "$title" = "$artist" ] && artist=""
+                
+                if echo "$status_line" | grep -q 'playing'; then
+                    status="Playing"
+                elif echo "$status_line" | grep -q 'paused'; then
+                    status="Paused"
+                else
+                    status="Stopped"
+                fi
+                
+                pos_fmt="0:00"
+                dur_fmt="0:00"
+                if echo "$status_line" | grep -q '/'; then
+                    pos_fmt=$(echo "$status_line" | awk '{print $3}' | cut -d/ -f1)
+                    dur_fmt=$(echo "$status_line" | awk '{print $3}' | cut -d/ -f2 | cut -d' ' -f1)
+                fi
+                printf "%s|%s|%s|%s|%s\n" "$title" "$artist" "$pos_fmt" "$dur_fmt" "$status"
+                exit 0
+            fi
+        fi
+        printf "||||\n"
+        ;;
+    toggle) mpc toggle 2>/dev/null || true ;;
+    next)   mpc next 2>/dev/null || true ;;
+    prev)   mpc prev 2>/dev/null || true ;;
+    stop)   mpc stop 2>/dev/null || true ;;
+esac

@@ -16,22 +16,11 @@ declare -ar pkgs_aur=(
   "otf-atkinson-hyperlegible-next"
   "python-pywalfox"
   "hyprshade"
-  "hyprshutdown"
-  "waypaper"
   "peaclock"
   "tray-tui"
-  "wifitui-bin"
   "xdg-terminal-exec"
   "paru"
   "python-pywalfox"
-
-#  "papirus-icon-theme-git"
-#  "papirus-folders-git"
-# "fluent-icon-theme-git"
-
-##   snapshot & limine
-  "limine-mkinitcpio-hook"
-  "limine-snapper-sync"
 )
 
 
@@ -71,10 +60,22 @@ if (( EUID != 0 )); then
   exec "$sudo_bin" --preserve-env=TERM,NO_COLOR -- bash -- "$script_path" "$@"
 fi
 
-# --- 3. SAFETY ---
+# --- 3. SAFETY & ARGUMENT PARSING ---
 
 set -Eeuo pipefail
 shopt -s inherit_errexit
+
+TARGET_OS="arch"
+
+parse_args() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --cachyos|--cachy) TARGET_OS="cachyos"; shift ;;
+      --arch)            TARGET_OS="arch"; shift ;;
+      *)                 shift ;; # Safely ignore --auto or other unknown flags
+    esac
+  done
+}
 
 # --- 4. UI ---
 
@@ -198,10 +199,19 @@ run_pacman() {
     tee -- "$stderr_file" <"$stderr_pipe" >&2 &
     tee_pid=$!
 
-    if command env LC_ALL=C pacman "$@" 2>"$stderr_pipe"; then
-      rc=0
+    # FIXED: Use 'script' to emulate a TTY so pacman shows progress bars even when piped
+    if ! [[ -t 1 ]] && command -v script >/dev/null 2>&1; then
+      if script -q -c "env LC_ALL=C pacman $*" /dev/null 2>"$stderr_pipe"; then
+        rc=0
+      else
+        rc=$?
+      fi
     else
-      rc=$?
+      if command env LC_ALL=C pacman "$@" 2>"$stderr_pipe"; then
+        rc=0
+      else
+        rc=$?
+      fi
     fi
 
     rm -f -- "$stderr_pipe"
@@ -243,17 +253,25 @@ run_pacman() {
 ensure_keyring() {
   local keyring_dir='/etc/pacman.d/gnupg'
 
-  print_info "Checking Arch keyring"
+  print_info "Checking pacman keyring"
 
   if [[ -s ${keyring_dir}/trustdb.gpg ]] && { [[ -s ${keyring_dir}/pubring.kbx ]] || [[ -s ${keyring_dir}/pubring.gpg ]]; }; then
-    print_ok "Arch keyring already initialized."
+    print_ok "Pacman keyring already initialized."
     return 0
   fi
 
   print_warn "Pacman keyring is not initialized. Initializing now..."
   pacman-key --init
-  pacman-key --populate archlinux
-  print_ok "Arch keyring initialized."
+
+  if [[ "${TARGET_OS}" == "cachyos" ]]; then
+      print_info "Populating Arch Linux and CachyOS keyrings..."
+      pacman-key --populate archlinux cachyos
+  else
+      print_info "Populating standard Arch Linux keyring..."
+      pacman-key --populate archlinux
+  fi
+
+  print_ok "Keyring initialized."
 }
 
 install_group() {
@@ -337,7 +355,8 @@ print_summary() {
     return 0
   fi
 
-  printf '\n%s%s:: INSTALLATION FINISHED WITH FAILURES ::%s\n' "$BOLD" "$YELLOW" "$RESET"
+  # CHANGED: We warn the user, but we will no longer throw a failure code.
+  printf '\n%s%s:: INSTALLATION FINISHED WITH FAILURES (PROCEEDING ANYWAY) ::%s\n' "$BOLD" "$YELLOW" "$RESET"
   printf 'Failed groups: %d\n' "${#FAILED_GROUPS[@]}"
   printf 'Failed packages: %d\n' "${#FAILED_PACKAGES[@]}"
 
@@ -353,10 +372,12 @@ print_summary() {
     printf '  %s\n' "$item"
   done
 
-  return 1
+  # FIX: Return 0 instead of 1. This prevents 'set -e' from seeing this function as a failure.
+  return 0
 }
 
 main() {
+  parse_args "$@"
   local i
 
   ensure_arch_environment
@@ -368,11 +389,9 @@ main() {
     install_group "${GROUP_LABELS[i]}" "${GROUP_ARRAYS[i]}"
   done
 
-  if print_summary; then
-    exit 0
-  else
-    exit 1
-  fi
+  # FIX: Print the summary, but unconditionally exit with 0 so the orchestrator moves on.
+  print_summary
+  exit 0
 }
 
 main "$@"

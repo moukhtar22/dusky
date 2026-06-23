@@ -1,34 +1,33 @@
 #!/usr/bin/env bash
 # ==============================================================================
-#  Dusky NETWORK- Arch Linux / Hyprland WiFi Manager
-#  Engine: Dusky TUI Pattern v3.9.1 (Faithful Adaptation)
-#  Target: Bash 5.0+ / Arch Linux / Hyprland / UWSM / Wayland
+#  Dusky NETWORK - Arch Linux / Hyprland WiFi Manager
+#  Engine: Dusky TUI Pattern v5.9.1 (Asynchronous Adaptation)
+#  Target: Bash 5.0+ / Arch Linux / Hyprland / NetworkManager
 #  Dependencies: networkmanager (nmcli), coreutils, awk
 #
-#  v3.0.1 CHANGELOG:
-#    - CRITICAL FIX: (( attempts++ )) returns 1 when attempts=0, killed by set -e.
-#      Replaced with (( attempts += 1 )) and guarded all arithmetic.
-#    - FIX: navigate() skip logic rewired to handle wrapping without infinite loop.
-#    - FIX: Detail view info items are truly non-selectable; cursor always lands
-#      on first actionable item.
-#    - FIX: eval-based array assignment replaced with safe nameref pattern.
-#    - FIX: All arithmetic expressions guarded against set -e false-zero exits.
-#    - AUDIT: Full line-by-line trace analysis against bash -x output.
+#  CHANGELOG:
+#    - ARCHITECTURE: Fully asynchronous non-blocking data loading. The UI opens 
+#      instantly and loads `nmcli` data via a background subshell.
+#    - UX: Added real-time animated spinner while data is syncing.
+#    - FIX: Removed 'zone' from integer declaration in handle_mouse to prevent
+#      arithmetic syntax errors when assigning string coordinates (e.g., "5:14").
+#    - FEATURE: "Radio Up Front" toggle intercept is fully preserved.
 # ==============================================================================
 
-set -euo pipefail
+set -Eeuo pipefail
 shopt -s extglob
 
 # =============================================================================
-# ▼ CONFIGURATION ▼
+# ▼ USER CONFIGURATION ▼
 # =============================================================================
 
 declare -r APP_TITLE="Dusky Network"
-declare -r APP_VERSION="v3.0.1"
+declare -r APP_VERSION="v5.9-net"
 
 declare -ri MAX_DISPLAY_ROWS=14
-declare -ri BOX_INNER_WIDTH=72
-declare -ri ITEM_PADDING=36
+declare -ri BOX_INNER_WIDTH=76
+declare -ri ADJUST_THRESHOLD=38
+declare -ri ITEM_PADDING=32
 
 declare -ri HEADER_ROWS=4
 declare -ri TAB_ROW=3
@@ -37,16 +36,14 @@ declare -ri ITEM_START_ROW=$(( HEADER_ROWS + 1 ))
 declare -ra TABS=("Networks" "Saved" "Hotspot" "Status")
 
 # =============================================================================
-# ▲ END OF CONFIGURATION ▲
+# ▼ CONSTANTS AND STATE ▼
 # =============================================================================
 
-# --- Pre-computed Constants ---
 declare _h_line_buf
-printf -v _h_line_buf '%*s' "$BOX_INNER_WIDTH" ''
+printf -v _h_line_buf '%*s' "$BOX_INNER_WIDTH" '' || true
 declare -r H_LINE="${_h_line_buf// /─}"
 unset _h_line_buf
 
-# --- ANSI Constants ---
 declare -r C_RESET=$'\033[0m'
 declare -r C_CYAN=$'\033[1;36m'
 declare -r C_GREEN=$'\033[1;32m'
@@ -62,39 +59,53 @@ declare -r CLR_SCREEN=$'\033[2J'
 declare -r CURSOR_HOME=$'\033[H'
 declare -r CURSOR_HIDE=$'\033[?25l'
 declare -r CURSOR_SHOW=$'\033[?25h'
+declare -r ALT_SCREEN_ON=$'\033[?1049h'
+declare -r ALT_SCREEN_OFF=$'\033[?1049l'
 declare -r MOUSE_ON=$'\033[?1000h\033[?1002h\033[?1006h'
 declare -r MOUSE_OFF=$'\033[?1000l\033[?1002l\033[?1006l'
 
-declare -r ESC_READ_TIMEOUT=0.10
+declare -r ESC_READ_TIMEOUT=0.08
+declare -r READ_LOOP_TIMEOUT=0.25
 
-# --- State Management ---
-declare -i SELECTED_ROW=0
-declare -i CURRENT_TAB=0
-declare -i SCROLL_OFFSET=0
+declare -i SELECTED_ROW=0 CURRENT_TAB=0 SCROLL_OFFSET=0
 declare -ri TAB_COUNT=${#TABS[@]}
 declare -a TAB_ZONES=()
+declare -i TAB_SCROLL_START=0
 declare ORIGINAL_STTY=""
+declare -i TUI_STARTED=0
+
+declare -a TAB_SAVED_ROW=()
+declare -a TAB_SAVED_SCROLL=()
+for (( _ti = 0; _ti < TAB_COUNT; _ti++ )); do
+    TAB_SAVED_ROW+=("0")
+    TAB_SAVED_SCROLL+=("0")
+done
+unset _ti
 
 declare -i CURRENT_VIEW=0
-declare -i PARENT_ROW=0
-declare -i PARENT_SCROLL=0
+declare -i PARENT_ROW=0 PARENT_SCROLL=0
+declare -gi RESIZE_PENDING=0
 declare DETAIL_TITLE=""
 declare DETAIL_CTX=""
 
-# Per-tab item and display arrays
+declare LEFT_ARROW_ZONE=""
+declare RIGHT_ARROW_ZONE=""
+
+declare -i TERM_ROWS=0 TERM_COLS=0
+declare -ri MIN_TERM_COLS=$(( BOX_INNER_WIDTH + 2 ))
+declare -ri MIN_TERM_ROWS=$(( HEADER_ROWS + MAX_DISPLAY_ROWS + 6 ))
+
 for (( _ti = 0; _ti < TAB_COUNT; _ti++ )); do
     declare -ga "TAB_ITEMS_${_ti}=()"
     declare -ga "TAB_DISPLAY_${_ti}=()"
 done
 unset _ti
 
-# Detail/drilldown arrays
 declare -a DETAIL_ITEMS=()
 declare -a DETAIL_DISPLAY=()
-# Tracks which detail indices are actionable (not info/separator)
 declare -a DETAIL_ACTIONABLE=()
 
-# --- Network Data ---
+# Network State
 declare -A SAVED_CONNS=()
 declare -a SCAN_SSIDS=()
 declare -a SCAN_SECURITY=()
@@ -106,7 +117,6 @@ declare -a SAVED_NAMES=()
 declare -a SAVED_UUIDS_LIST=()
 declare -a SAVED_AUTOCONNECT=()
 
-# Cached status
 declare CACHED_RADIO=""
 declare CACHED_SSID=""
 declare HOTSPOT_ACTIVE="no"
@@ -114,35 +124,56 @@ declare HOTSPOT_SSID=""
 declare HOTSPOT_IF=""
 declare -i DATA_LOADED=0
 
+# Background Loading State
+declare BG_LOAD_FILE=""
+declare -i SPINNER_IDX=0
+declare -a SPINNER=("⠋" "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏")
+
 # ==============================================================================
 #  SYSTEM HELPERS
 # ==============================================================================
 
 log_err() {
-    printf '%s[ERROR]%s %s\n' "$C_RED" "$C_RESET" "$1" >&2
+    printf '%s[ERROR]%s %s\n' "$C_RED" "$C_RESET" "$1" >&2 || true
 }
 
 cleanup() {
-    printf '%s%s%s' "$MOUSE_OFF" "$CURSOR_SHOW" "$C_RESET" 2>/dev/null || :
-    if [[ -n "${ORIGINAL_STTY:-}" ]]; then
-        stty "$ORIGINAL_STTY" 2>/dev/null || :
+    if [[ -n $BG_LOAD_FILE && -f $BG_LOAD_FILE ]]; then
+        rm -f "$BG_LOAD_FILE" "${BG_LOAD_FILE}.tmp" 2>/dev/null || :
     fi
-    printf '\n' 2>/dev/null || :
+
+    if [[ -t 1 ]]; then
+        if (( TUI_STARTED )); then
+            printf '%s%s%s%s' "$MOUSE_OFF" "$CURSOR_SHOW" "$C_RESET" "$ALT_SCREEN_OFF" 2>/dev/null || :
+        elif [[ -n ${ORIGINAL_STTY:-} ]]; then
+            printf '%s%s%s' "$MOUSE_OFF" "$CURSOR_SHOW" "$C_RESET" 2>/dev/null || :
+        fi
+    fi
+
+    if [[ -n ${ORIGINAL_STTY:-} ]]; then
+        stty "$ORIGINAL_STTY" < /dev/tty 2>/dev/null || :
+    fi
+
+    if (( TUI_STARTED )) && [[ -t 1 ]]; then
+        printf '\n' 2>/dev/null || :
+    fi
 }
 
 trap cleanup EXIT
+trap 'exit 129' HUP
 trap 'exit 130' INT
+trap 'exit 131' QUIT
 trap 'exit 143' TERM
 
 strip_ansi() {
-    local v="$1"
-    v="${v//$'\033'\[*([0-9;:?<=>])@([@A-Z\[\\\]^_\`a-z\{|\}~])/}"
-    REPLY="$v"
+    local v=$1
+    v=${v//$'\033'\[*([0-9;:?<=>])@([@A-Z[\\\]^_\`a-z\{\|\}~])/}
+    REPLY=$v
 }
 
 notify() {
-    local -r title="${1:-Notification}"
-    local -r body="${2:-}"
+    local title=${1:-Notification}
+    local body=${2:-}
     if command -v notify-send &>/dev/null; then
         notify-send -a "Network Architect" -u low -i network-wireless "$title" "$body" &
         disown "$!" 2>/dev/null || :
@@ -150,7 +181,7 @@ notify() {
 }
 
 signal_to_bar() {
-    local -i sig="${1:-0}"
+    local -i sig=${1:-0}
     if   (( sig >= 80 )); then REPLY="▂▄▆█"
     elif (( sig >= 60 )); then REPLY="▂▄▆_"
     elif (( sig >= 40 )); then REPLY="▂▄__"
@@ -160,32 +191,55 @@ signal_to_bar() {
 }
 
 signal_color() {
-    local -i sig="${1:-0}"
-    if   (( sig >= 70 )); then REPLY="$C_GREEN"
-    elif (( sig >= 40 )); then REPLY="$C_YELLOW"
-    else                       REPLY="$C_RED"
+    local -i sig=${1:-0}
+    if   (( sig >= 70 )); then REPLY=$C_GREEN
+    elif (( sig >= 40 )); then REPLY=$C_YELLOW
+    else                       REPLY=$C_RED
     fi
 }
 
 # ==============================================================================
-#  INTERACTIVE MODE SWITCHING
+#  TERMINAL & INTERACTIVE MODES
 # ==============================================================================
+
+update_terminal_size() {
+    local size
+    if size=$(stty size < /dev/tty 2>/dev/null); then
+        TERM_ROWS=${size%% *}
+        TERM_COLS=${size##* }
+    else
+        TERM_ROWS=0
+        TERM_COLS=0
+    fi
+}
+
+terminal_size_ok() {
+    (( TERM_COLS >= MIN_TERM_COLS && TERM_ROWS >= MIN_TERM_ROWS ))
+}
+
+draw_small_terminal_notice() {
+    printf '%s%s' "$CURSOR_HOME" "$CLR_SCREEN" || true
+    printf '%sTerminal too small%s\n' "$C_RED" "$C_RESET" || true
+    printf '%sNeed at least:%s %d cols × %d rows\n' "$C_YELLOW" "$C_RESET" "$MIN_TERM_COLS" "$MIN_TERM_ROWS" || true
+    printf '%sCurrent size:%s %d cols × %d rows\n' "$C_WHITE" "$C_RESET" "$TERM_COLS" "$TERM_ROWS" || true
+    printf '%sResize the terminal, then continue. Press q to quit.%s%s' "$C_CYAN" "$C_RESET" "$CLR_EOS" || true
+}
 
 enter_interactive() {
     printf '%s%s' "$MOUSE_OFF" "$CURSOR_SHOW" 2>/dev/null || :
-    if [[ -n "${ORIGINAL_STTY:-}" ]]; then
-        stty "$ORIGINAL_STTY" 2>/dev/null || :
+    if [[ -n ${ORIGINAL_STTY:-} ]]; then
+        stty "$ORIGINAL_STTY" < /dev/tty 2>/dev/null || :
     fi
 }
 
 leave_interactive() {
-    ORIGINAL_STTY=$(stty -g 2>/dev/null) || ORIGINAL_STTY=""
-    stty -icanon -echo min 1 time 0 2>/dev/null
+    ORIGINAL_STTY=$(stty -g < /dev/tty 2>/dev/null) || ORIGINAL_STTY=""
+    stty -icanon -echo -ixon min 1 time 0 < /dev/tty 2>/dev/null || :
     printf '%s%s%s%s' "$MOUSE_ON" "$CURSOR_HIDE" "$CLR_SCREEN" "$CURSOR_HOME"
 }
 
 run_with_feedback() {
-    local -r msg="$1"
+    local msg=$1
     shift
     printf '%s➜ %s...%s ' "$C_MAGENTA" "$msg" "$C_RESET"
     if "$@" &>/dev/null; then
@@ -194,6 +248,48 @@ run_with_feedback() {
     else
         printf '%s[FAILED]%s\n' "$C_RED" "$C_RESET"
         return 1
+    fi
+}
+
+# ==============================================================================
+#  BACKGROUND LOADER ARCHITECTURE
+# ==============================================================================
+
+start_background_load() {
+    BG_LOAD_FILE=$(mktemp)
+    (
+        populate_all_tabs
+        
+        # Serialize the network state arrays into bash parseable text.
+        # We sed 'declare -' to 'declare -g -' so they become global when sourced.
+        {
+            declare -p SCAN_SSIDS SCAN_SECURITY SCAN_SIGNALS SCAN_STATES SCAN_UUIDS 2>/dev/null || :
+            declare -p SAVED_CONNS SAVED_NAMES SAVED_UUIDS_LIST SAVED_AUTOCONNECT 2>/dev/null || :
+            declare -p TAB_ITEMS_0 TAB_DISPLAY_0 2>/dev/null || :
+            declare -p TAB_ITEMS_1 TAB_DISPLAY_1 2>/dev/null || :
+            declare -p TAB_ITEMS_2 TAB_DISPLAY_2 2>/dev/null || :
+            declare -p TAB_ITEMS_3 TAB_DISPLAY_3 2>/dev/null || :
+            declare -p CACHED_RADIO CACHED_SSID HOTSPOT_ACTIVE HOTSPOT_SSID HOTSPOT_IF 2>/dev/null || :
+            echo "declare -g -i DATA_LOADED=1"
+        } | sed 's/^declare -/declare -g -/g' > "${BG_LOAD_FILE}.tmp"
+        
+        mv -f "${BG_LOAD_FILE}.tmp" "$BG_LOAD_FILE"
+    ) &
+    disown $! 2>/dev/null || :
+}
+
+check_background_load() {
+    if (( ! DATA_LOADED )) && [[ -n $BG_LOAD_FILE && -f $BG_LOAD_FILE ]]; then
+        if grep -q "DATA_LOADED=1" "$BG_LOAD_FILE" 2>/dev/null; then
+            source "$BG_LOAD_FILE" 2>/dev/null
+            rm -f "$BG_LOAD_FILE" "${BG_LOAD_FILE}.tmp" 2>/dev/null || :
+            BG_LOAD_FILE=""
+            
+            local count
+            get_current_count
+            count=$REPLY
+            compute_scroll_window "$count"
+        fi
     fi
 }
 
@@ -216,7 +312,6 @@ find_wifi_device() {
 refresh_cached_status() {
     CACHED_RADIO=$(get_radio_status)
     CACHED_SSID=$(get_active_ssid) || CACHED_SSID=""
-    DATA_LOADED=1
 
     HOTSPOT_ACTIVE="no"
     HOTSPOT_SSID=""
@@ -224,12 +319,12 @@ refresh_cached_status() {
 
     local line name type mode
     while IFS= read -r line; do
-        [[ -z "$line" ]] && continue
+        [[ -z $line ]] && continue
         type="${line##*:}"
-        [[ "$type" != "802-11-wireless" ]] && continue
+        [[ $type != "802-11-wireless" ]] && continue
         name="${line%%:*}"
         mode=$(nmcli --terse --fields 802-11-wireless.mode connection show "$name" 2>/dev/null | awk -F: '{print $2}') || mode=""
-        if [[ "$mode" == "ap" ]]; then
+        if [[ $mode == "ap" ]]; then
             HOTSPOT_ACTIVE="yes"
             HOTSPOT_SSID="$name"
             break
@@ -241,14 +336,14 @@ load_saved_connections() {
     SAVED_CONNS=()
     local line name uuid type
     while IFS= read -r line; do
-        [[ -z "$line" ]] && continue
+        [[ -z $line ]] && continue
         type="${line##*:}"
-        [[ "$type" != "802-11-wireless" ]] && continue
+        [[ $type != "802-11-wireless" ]] && continue
         line="${line%:802-11-wireless}"
         if (( ${#line} >= 37 )); then
             uuid="${line: -36}"
             name="${line:0:$(( ${#line} - 37 ))}"
-            if [[ -n "$name" && "$uuid" =~ ^[a-f0-9-]{36}$ ]]; then
+            if [[ -n $name && $uuid =~ ^[a-f0-9-]{36}$ ]]; then
                 SAVED_CONNS["$name"]="$uuid"
             fi
         fi
@@ -256,22 +351,14 @@ load_saved_connections() {
 }
 
 forget_network() {
-    local -r identifier="${1:?}"
-    local -r id_type="${2:-uuid}"
+    local identifier=${1:?}
+    local id_type=${2:-uuid}
     nmcli connection delete "$id_type" "$identifier" &>/dev/null
 }
-
-# ==============================================================================
-#  SAFE ARRAY POPULATION HELPERS
-# ==============================================================================
-
-# These replace dangerous eval-based array assignment.
-# Uses nameref to safely populate TAB_ITEMS_N and TAB_DISPLAY_N.
 
 _set_tab_data() {
     local -i tab_idx=$1
     shift
-    # Remaining args: pairs of (item display)
     local -n _items="TAB_ITEMS_${tab_idx}"
     local -n _display="TAB_DISPLAY_${tab_idx}"
     _items=()
@@ -283,27 +370,38 @@ _set_tab_data() {
     done
 }
 
-# ==============================================================================
-#  TAB DATA POPULATION
-# ==============================================================================
-
 populate_tab_networks() {
     load_saved_connections
     SCAN_SSIDS=(); SCAN_SECURITY=(); SCAN_SIGNALS=(); SCAN_STATES=(); SCAN_UUIDS=()
 
     local -a pairs=()
+    
+    if [[ $CACHED_RADIO != "enabled" ]]; then
+        SCAN_SSIDS+=("RADIO_OFF_TOGGLE")
+        SCAN_SECURITY+=("")
+        SCAN_SIGNALS+=("0")
+        SCAN_STATES+=("Special")
+        SCAN_UUIDS+=("")
+
+        local disp_line="${C_RED}睊 Wi-Fi Radio is OFF${C_RESET}  — Press Enter to enable"
+        pairs+=("Enable Radio" "$disp_line")
+        
+        _set_tab_data 0 "${pairs[@]}"
+        return 0
+    fi
+
     local -A seen=()
     local in_use ssid security signal
 
     while IFS=: read -r in_use ssid security signal; do
-        [[ -z "$ssid" ]] && continue
+        [[ -z $ssid ]] && continue
         [[ -v "seen[$ssid]" ]] && continue
         seen["$ssid"]=1
         signal="${signal//[^0-9]/}"
-        [[ -z "$signal" ]] && signal="0"
+        [[ -z $signal ]] && signal="0"
 
         local state="New" icon="○"
-        if [[ "$in_use" == "*" ]]; then
+        if [[ $in_use == "*" ]]; then
             state="Active"; icon="●"
         elif [[ -v "SAVED_CONNS[$ssid]" ]]; then
             state="Saved"; icon="◉"
@@ -311,9 +409,8 @@ populate_tab_networks() {
 
         signal_to_bar "$signal"; local bar="$REPLY"
         signal_color "$signal"; local scol="$REPLY"
-
         local sec_short="${security:-Open}"
-        [[ "$sec_short" == "--" ]] && sec_short="Open"
+        [[ $sec_short == "--" ]] && sec_short="Open"
 
         local disp_line
         printf -v disp_line '%s %-6s %-22.22s %-10.10s %s%3s%% %s%s' \
@@ -339,30 +436,28 @@ populate_tab_saved() {
     local line name uuid type autocon
 
     while IFS= read -r line; do
-        [[ -z "$line" ]] && continue
+        [[ -z $line ]] && continue
         type="${line##*:}"
-        [[ "$type" != "802-11-wireless" ]] && continue
+        [[ $type != "802-11-wireless" ]] && continue
         line="${line%:802-11-wireless}"
         if (( ${#line} >= 37 )); then
             uuid="${line: -36}"
             name="${line:0:$(( ${#line} - 37 ))}"
-            if [[ -n "$name" && "$uuid" =~ ^[a-f0-9-]{36}$ ]]; then
+            if [[ -n $name && $uuid =~ ^[a-f0-9-]{36}$ ]]; then
                 autocon=$(nmcli --terse --fields connection.autoconnect connection show uuid "$uuid" 2>/dev/null | awk -F: '{print $2}') || autocon="yes"
-                [[ -z "$autocon" ]] && autocon="yes"
+                [[ -z $autocon ]] && autocon="yes"
 
                 SAVED_NAMES+=("$name")
                 SAVED_UUIDS_LIST+=("$uuid")
                 SAVED_AUTOCONNECT+=("$autocon")
 
                 local ac_display
-                if [[ "$autocon" == "yes" ]]; then
-                    ac_display="${C_GREEN}auto${C_RESET}"
-                else
-                    ac_display="${C_GREY}manual${C_RESET}"
+                if [[ $autocon == "yes" ]]; then ac_display="${C_GREEN}auto${C_RESET}"
+                else ac_display="${C_GREY}manual${C_RESET}"
                 fi
 
                 local is_active=""
-                [[ "$name" == "$CACHED_SSID" ]] && is_active="${C_GREEN}● ${C_RESET}"
+                [[ $name == "$CACHED_SSID" ]] && is_active="${C_GREEN}● ${C_RESET}"
 
                 local disp
                 printf -v disp '%s%-28.28s  %s' "$is_active" "$name" "$ac_display"
@@ -377,74 +472,46 @@ populate_tab_saved() {
 
 populate_tab_hotspot() {
     local -a pairs=()
-
-    if [[ "$HOTSPOT_ACTIVE" == "yes" ]]; then
-        pairs+=(
-            "Stop Hotspot"      "${C_RED}■${C_RESET}  Stop current hotspot"
-            "Show Hotspot Info"  "${C_CYAN}ℹ${C_RESET}  View hotspot details & clients"
-        )
+    if [[ $HOTSPOT_ACTIVE == "yes" ]]; then
+        pairs+=("Stop Hotspot" "${C_RED}■${C_RESET}  Stop current hotspot")
+        pairs+=("Show Hotspot Info" "${C_CYAN}ℹ${C_RESET}  View hotspot details & clients")
     else
-        pairs+=(
-            "Start Hotspot (2.4 GHz)"  "${C_GREEN}▶${C_RESET}  Create AP on 2.4 GHz band"
-            "Start Hotspot (5 GHz)"    "${C_GREEN}▶${C_RESET}  Create AP on 5 GHz band"
-        )
+        pairs+=("Start Hotspot (2.4 GHz)" "${C_GREEN}▶${C_RESET}  Create AP on 2.4 GHz band")
+        pairs+=("Start Hotspot (5 GHz)" "${C_GREEN}▶${C_RESET}  Create AP on 5 GHz band")
     fi
-
     _set_tab_data 2 "${pairs[@]}"
 }
 
 populate_tab_status() {
     local -a pairs=()
-
-    if [[ "$CACHED_RADIO" == "enabled" ]]; then
-        pairs+=("Toggle Radio" "${C_GREEN}WiFi Radio: ON${C_RESET}  — select to disable")
-    elif [[ "$CACHED_RADIO" == "disabled" ]]; then
-        pairs+=("Toggle Radio" "${C_RED}WiFi Radio: OFF${C_RESET}  — select to enable")
-    else
-        pairs+=("Toggle Radio" "${C_YELLOW}WiFi Radio: ${CACHED_RADIO}${C_RESET}")
+    if [[ $CACHED_RADIO == "enabled" ]]; then pairs+=("Toggle Radio" "${C_GREEN}WiFi Radio: ON${C_RESET}  — select to disable")
+    elif [[ $CACHED_RADIO == "disabled" ]]; then pairs+=("Toggle Radio" "${C_RED}WiFi Radio: OFF${C_RESET}  — select to enable")
+    else pairs+=("Toggle Radio" "${C_YELLOW}WiFi Radio: ${CACHED_RADIO}${C_RESET}")
     fi
 
-    if [[ -n "$CACHED_SSID" ]]; then
-        pairs+=(
-            "Connection Info"  "${C_GREEN}●${C_RESET}  Connected: ${C_WHITE}${CACHED_SSID}${C_RESET}"
-            "Disconnect"       "${C_RED}✕${C_RESET}  Disconnect from ${CACHED_SSID}"
-        )
+    if [[ -n $CACHED_SSID ]]; then
+        pairs+=("Connection Info" "${C_GREEN}●${C_RESET}  Connected: ${C_WHITE}${CACHED_SSID}${C_RESET}")
+        pairs+=("Disconnect" "${C_RED}✕${C_RESET}  Disconnect from ${CACHED_SSID}")
     else
         pairs+=("Connection Info" "${C_GREY}○${C_RESET}  Not connected")
     fi
 
     local wifi_dev
     wifi_dev=$(find_wifi_device) || wifi_dev=""
-    if [[ -n "$wifi_dev" ]]; then
+    if [[ -n $wifi_dev ]]; then
         local ip_addr
         ip_addr=$(nmcli --terse --fields IP4.ADDRESS device show "$wifi_dev" 2>/dev/null | head -1 | awk -F: '{print $2}') || ip_addr=""
         pairs+=("Device Info" "${C_CYAN}⚙${C_RESET}  Device: ${wifi_dev}  IP: ${ip_addr:-N/A}")
     fi
 
     local dns=""
-    if [[ -n "$wifi_dev" ]]; then
-        dns=$(nmcli --terse --fields IP4.DNS device show "$wifi_dev" 2>/dev/null | head -1 | awk -F: '{print $2}') || dns=""
-    fi
-    if [[ -n "$dns" ]]; then
-        pairs+=("DNS Info" "${C_CYAN}◆${C_RESET}  DNS: ${dns}")
-    fi
+    if [[ -n $wifi_dev ]]; then dns=$(nmcli --terse --fields IP4.DNS device show "$wifi_dev" 2>/dev/null | head -1 | awk -F: '{print $2}') || dns=""; fi
+    if [[ -n $dns ]]; then pairs+=("DNS Info" "${C_CYAN}◆${C_RESET}  DNS: ${dns}"); fi
 
-    if [[ "$HOTSPOT_ACTIVE" == "yes" ]]; then
-        pairs+=("Hotspot Status" "${C_YELLOW}⊛${C_RESET}  Hotspot active: ${HOTSPOT_SSID}")
-    fi
+    if [[ $HOTSPOT_ACTIVE == "yes" ]]; then pairs+=("Hotspot Status" "${C_YELLOW}⊛${C_RESET}  Hotspot active: ${HOTSPOT_SSID}"); fi
 
     pairs+=("Refresh" "${C_MAGENTA}⟳${C_RESET}  Refresh all status information")
-
     _set_tab_data 3 "${pairs[@]}"
-}
-
-populate_current_tab() {
-    case $CURRENT_TAB in
-        0) populate_tab_networks ;;
-        1) populate_tab_saved ;;
-        2) populate_tab_hotspot ;;
-        3) populate_tab_status ;;
-    esac
 }
 
 populate_all_tabs() {
@@ -453,58 +520,14 @@ populate_all_tabs() {
     local -i t
     for (( t = 0; t < TAB_COUNT; t++ )); do
         CURRENT_TAB=$t
-        populate_current_tab
+        case $CURRENT_TAB in
+            0) populate_tab_networks ;;
+            1) populate_tab_saved ;;
+            2) populate_tab_hotspot ;;
+            3) populate_tab_status ;;
+        esac
     done
     CURRENT_TAB=$save_tab
-}
-
-# ==============================================================================
-#  LOADING FRAME
-# ==============================================================================
-
-draw_loading_frame() {
-    local -r msg="$1"
-    local -r sub="${2:-}"
-    local buf="" pad_buf=""
-    local -i left_pad right_pad
-
-    buf+="${CURSOR_HOME}"
-    buf+="${C_MAGENTA}┌${H_LINE}┐${C_RESET}${CLR_EOL}"$'\n'
-
-    strip_ansi "$APP_TITLE"; local -i t_len=${#REPLY}
-    strip_ansi "$APP_VERSION"; local -i v_len=${#REPLY}
-    local -i vis_len=$(( t_len + v_len + 1 ))
-    left_pad=$(( (BOX_INNER_WIDTH - vis_len) / 2 ))
-    right_pad=$(( BOX_INNER_WIDTH - vis_len - left_pad ))
-    (( left_pad < 0 )) && left_pad=0
-    (( right_pad < 0 )) && right_pad=0
-
-    printf -v pad_buf '%*s' "$left_pad" ''
-    buf+="${C_MAGENTA}│${pad_buf}${C_WHITE}${APP_TITLE} ${C_CYAN}${APP_VERSION}${C_MAGENTA}"
-    printf -v pad_buf '%*s' "$right_pad" ''
-    buf+="${pad_buf}│${C_RESET}${CLR_EOL}"$'\n'
-
-    printf -v pad_buf '%*s' "$BOX_INNER_WIDTH" ''
-    buf+="${C_MAGENTA}│${pad_buf}│${C_RESET}${CLR_EOL}"$'\n'
-    buf+="${C_MAGENTA}└${H_LINE}┘${C_RESET}${CLR_EOL}"$'\n'
-    buf+="${CLR_EOL}"$'\n'
-
-    strip_ansi "$msg"; local -i m_len=${#REPLY}
-    left_pad=$(( (BOX_INNER_WIDTH - m_len - 3) / 2 ))
-    (( left_pad < 4 )) && left_pad=4
-    printf -v pad_buf '%*s' "$left_pad" ''
-    buf+="${pad_buf}${C_MAGENTA}⟳  ${msg}${C_RESET}${CLR_EOL}"$'\n'
-
-    if [[ -n "$sub" ]]; then
-        strip_ansi "$sub"; local -i s_len=${#REPLY}
-        left_pad=$(( (BOX_INNER_WIDTH - s_len) / 2 ))
-        (( left_pad < 4 )) && left_pad=4
-        printf -v pad_buf '%*s' "$left_pad" ''
-        buf+="${pad_buf}${C_GREY}${sub}${C_RESET}${CLR_EOL}"$'\n'
-    fi
-
-    buf+="${CLR_EOS}"
-    printf '%s' "$buf"
 }
 
 # ==============================================================================
@@ -514,58 +537,41 @@ draw_loading_frame() {
 compute_scroll_window() {
     local -i count=$1
     if (( count == 0 )); then
-        SELECTED_ROW=0; SCROLL_OFFSET=0
-        _vis_start=0; _vis_end=0
-        return
+        SELECTED_ROW=0; SCROLL_OFFSET=0; _vis_start=0; _vis_end=0; return 0
     fi
     if (( SELECTED_ROW < 0 )); then SELECTED_ROW=0; fi
     if (( SELECTED_ROW >= count )); then SELECTED_ROW=$(( count - 1 )); fi
-    if (( SELECTED_ROW < SCROLL_OFFSET )); then
-        SCROLL_OFFSET=$SELECTED_ROW
-    elif (( SELECTED_ROW >= SCROLL_OFFSET + MAX_DISPLAY_ROWS )); then
-        SCROLL_OFFSET=$(( SELECTED_ROW - MAX_DISPLAY_ROWS + 1 ))
-    fi
+    if (( SELECTED_ROW < SCROLL_OFFSET )); then SCROLL_OFFSET=$SELECTED_ROW; fi
+    if (( SELECTED_ROW >= SCROLL_OFFSET + MAX_DISPLAY_ROWS )); then SCROLL_OFFSET=$(( SELECTED_ROW - MAX_DISPLAY_ROWS + 1 )); fi
     local -i max_scroll=$(( count - MAX_DISPLAY_ROWS ))
-    (( max_scroll < 0 )) && max_scroll=0
+    if (( max_scroll < 0 )); then max_scroll=0; fi
     if (( SCROLL_OFFSET > max_scroll )); then SCROLL_OFFSET=$max_scroll; fi
     _vis_start=$SCROLL_OFFSET
     _vis_end=$(( SCROLL_OFFSET + MAX_DISPLAY_ROWS ))
     if (( _vis_end > count )); then _vis_end=$count; fi
+    return 0
 }
 
 render_scroll_indicator() {
-    local -n _rsi_buf=$1
-    local position="$2"
+    local -n _buf=$1
+    local position=$2
     local -i count=$3 boundary=$4
-
-    if [[ "$position" == "above" ]]; then
-        if (( SCROLL_OFFSET > 0 )); then
-            _rsi_buf+="${C_GREY}    ▲ (more above)${CLR_EOL}${C_RESET}"$'\n'
-        else
-            _rsi_buf+="${CLR_EOL}"$'\n'
-        fi
+    if [[ $position == above ]]; then
+        if (( SCROLL_OFFSET > 0 )); then _buf+="${C_GREY}    ▲ (more above)${CLR_EOL}${C_RESET}"$'\n'; else _buf+="${CLR_EOL}"$'\n'; fi
     else
         if (( count > MAX_DISPLAY_ROWS )); then
             local position_info="[$(( SELECTED_ROW + 1 ))/${count}]"
-            if (( boundary < count )); then
-                _rsi_buf+="${C_GREY}    ▼ (more below) ${position_info}${CLR_EOL}${C_RESET}"$'\n'
-            else
-                _rsi_buf+="${C_GREY}                   ${position_info}${CLR_EOL}${C_RESET}"$'\n'
-            fi
+            if (( boundary < count )); then _buf+="${C_GREY}    ▼ (more below) ${position_info}${CLR_EOL}${C_RESET}"$'\n'; else _buf+="${C_GREY}                   ${position_info}${CLR_EOL}${C_RESET}"$'\n'; fi
         else
-            _rsi_buf+="${CLR_EOL}"$'\n'
+            _buf+="${CLR_EOL}"$'\n'
         fi
     fi
 }
 
-# Renders rich display lines with proper selection highlighting.
-# For selected row: strips ANSI, pads, renders with INVERSE.
-# For unselected: renders display string with trailing C_RESET.
 render_display_list() {
     local -n _rdl_buf=$1
     local -n _rdl_display=$2
-    local -i _rdl_vs=$3 _rdl_ve=$4
-    local -i ri
+    local -i _rdl_vs=$3 _rdl_ve=$4 ri
 
     for (( ri = _rdl_vs; ri < _rdl_ve; ri++ )); do
         local disp="${_rdl_display[ri]}"
@@ -587,68 +593,127 @@ render_display_list() {
 }
 
 draw_main_view() {
-    local buf="" pad_buf=""
-    local -i i current_col=3 zone_start len count pad_needed
-    local -i left_pad right_pad vis_len
-    local -i _vis_start _vis_end
+    local buf="" pad_buf="" tab_line name display_name item_var
+    local -i i current_col=3 zone_start count left_pad right_pad vis_len _vis_start _vis_end
 
-    buf+="${CURSOR_HOME}"
-    buf+="${C_MAGENTA}┌${H_LINE}┐${C_RESET}${CLR_EOL}"$'\n'
-
+    buf+="${CURSOR_HOME}${C_MAGENTA}┌${H_LINE}┐${C_RESET}${CLR_EOL}"$'\n'
     strip_ansi "$APP_TITLE"; local -i t_len=${#REPLY}
     strip_ansi "$APP_VERSION"; local -i v_len=${#REPLY}
     vis_len=$(( t_len + v_len + 1 ))
     left_pad=$(( (BOX_INNER_WIDTH - vis_len) / 2 ))
+    if (( left_pad < 0 )); then left_pad=0; fi
     right_pad=$(( BOX_INNER_WIDTH - vis_len - left_pad ))
-
+    if (( right_pad < 0 )); then right_pad=0; fi
+    
     printf -v pad_buf '%*s' "$left_pad" ''
     buf+="${C_MAGENTA}│${pad_buf}${C_WHITE}${APP_TITLE} ${C_CYAN}${APP_VERSION}${C_MAGENTA}"
     printf -v pad_buf '%*s' "$right_pad" ''
     buf+="${pad_buf}│${C_RESET}${CLR_EOL}"$'\n'
 
-    # Tab bar (Template Pattern)
-    local tab_line="${C_MAGENTA}│ "
-    TAB_ZONES=()
-    for (( i = 0; i < TAB_COUNT; i++ )); do
-        local name="${TABS[i]}"
-        len=${#name}
-        zone_start=$current_col
-        if (( i == CURRENT_TAB )); then
-            tab_line+="${C_CYAN}${C_INVERSE} ${name} ${C_RESET}${C_MAGENTA}│ "
+    # Dynamic Tab Bar
+    if (( TAB_SCROLL_START > CURRENT_TAB )); then TAB_SCROLL_START=$CURRENT_TAB; fi
+    if (( TAB_SCROLL_START < 0 )); then TAB_SCROLL_START=0; fi
+    local -i max_tab_width=$(( BOX_INNER_WIDTH - 6 ))
+    LEFT_ARROW_ZONE=""
+    RIGHT_ARROW_ZONE=""
+
+    while true; do
+        tab_line="${C_MAGENTA}│ "
+        current_col=3
+        TAB_ZONES=()
+        local -i used_len=0
+        
+        if (( TAB_SCROLL_START > 0 )); then
+            tab_line+="${C_YELLOW}«${C_RESET} "
+            LEFT_ARROW_ZONE="$current_col:$(( current_col + 1 ))"
         else
-            tab_line+="${C_GREY} ${name} ${C_MAGENTA}│ "
+            tab_line+="  "
         fi
-        TAB_ZONES+=("${zone_start}:$(( zone_start + len + 1 ))")
-        current_col=$(( current_col + len + 4 ))
+        used_len=$(( used_len + 2 )); current_col=$(( current_col + 2 ))
+
+        for (( i = TAB_SCROLL_START; i < TAB_COUNT; i++ )); do
+            name=${TABS[i]}; display_name=$name
+            local -i tab_name_len=${#name}
+            
+            local -i is_last=0
+            if (( i == TAB_COUNT - 1 )); then is_last=1; fi
+            
+            local -i chunk_len=$(( tab_name_len + 2 ))
+            if (( ! is_last )); then chunk_len=$(( chunk_len + 2 )); fi
+            
+            local -i reserve=0
+            if (( ! is_last )); then reserve=2; fi
+            
+            if (( used_len + chunk_len + reserve > max_tab_width )); then
+                if (( i < CURRENT_TAB || (i == CURRENT_TAB && TAB_SCROLL_START < CURRENT_TAB) )); then
+                    TAB_SCROLL_START=$(( TAB_SCROLL_START + 1 )); continue 2
+                fi
+                if (( i == CURRENT_TAB )); then
+                    local -i avail_label=$(( max_tab_width - used_len - reserve - 2 ))
+                    if (( ! is_last )); then avail_label=$(( avail_label - 2 )); fi
+                    
+                    if (( avail_label < 1 )); then avail_label=1; fi
+                    if (( tab_name_len > avail_label )); then
+                        if (( avail_label == 1 )); then display_name="…"; else display_name="${name:0:avail_label-1}…"; fi
+                        tab_name_len=${#display_name}
+                        chunk_len=$(( tab_name_len + 2 ))
+                        if (( ! is_last )); then chunk_len=$(( chunk_len + 2 )); fi
+                    fi
+                    zone_start=$current_col
+                    if (( is_last )); then tab_line+="${C_CYAN}${C_INVERSE} ${display_name} ${C_RESET}"
+                    else tab_line+="${C_CYAN}${C_INVERSE} ${display_name} ${C_RESET}${C_MAGENTA}│ "
+                    fi
+                    TAB_ZONES+=("${zone_start}:$(( zone_start + tab_name_len + 1 ))")
+                    used_len=$(( used_len + chunk_len )); current_col=$(( current_col + chunk_len ))
+                    if (( ! is_last )); then
+                        tab_line+="${C_YELLOW}» ${C_RESET}"
+                        RIGHT_ARROW_ZONE="$current_col:$(( current_col + 1 ))"
+                        used_len=$(( used_len + 2 ))
+                    fi
+                    break
+                fi
+                tab_line+="${C_YELLOW}» ${C_RESET}"
+                RIGHT_ARROW_ZONE="$current_col:$(( current_col + 1 ))"
+                used_len=$(( used_len + 2 ))
+                break
+            fi
+            
+            zone_start=$current_col
+            if (( i == CURRENT_TAB )); then
+                if (( is_last )); then tab_line+="${C_CYAN}${C_INVERSE} ${display_name} ${C_RESET}"
+                else tab_line+="${C_CYAN}${C_INVERSE} ${display_name} ${C_RESET}${C_MAGENTA}│ "
+                fi
+            else
+                if (( is_last )); then tab_line+="${C_GREY} ${display_name} ${C_RESET}"
+                else tab_line+="${C_GREY} ${display_name} ${C_MAGENTA}│ "
+                fi
+            fi
+            TAB_ZONES+=("${zone_start}:$(( zone_start + tab_name_len + 1 ))")
+            used_len=$(( used_len + chunk_len )); current_col=$(( current_col + chunk_len ))
+        done
+        local -i pad=$(( BOX_INNER_WIDTH - used_len - 1 ))
+        if (( pad > 0 )); then printf -v pad_buf '%*s' "$pad" ''; tab_line+="$pad_buf"; fi
+        tab_line+="${C_MAGENTA}│${C_RESET}"
+        break
     done
 
-    pad_needed=$(( BOX_INNER_WIDTH - current_col + 2 ))
-    (( pad_needed < 0 )) && pad_needed=0
-    if (( pad_needed > 0 )); then
-        printf -v pad_buf '%*s' "$pad_needed" ''
-        tab_line+="${pad_buf}"
-    fi
-    tab_line+="${C_MAGENTA}│${C_RESET}"
     buf+="${tab_line}${CLR_EOL}"$'\n'
     buf+="${C_MAGENTA}└${H_LINE}┘${C_RESET}${CLR_EOL}"$'\n'
 
-    # Status bar
+    # Status Bar / Spinner
     if (( DATA_LOADED )); then
         local status_str=""
-        if [[ "$CACHED_RADIO" == "disabled" ]]; then
-            status_str="${C_RED} 睊 Radio OFF${C_RESET}"
-        elif [[ -n "$CACHED_SSID" ]]; then
-            status_str="${C_GREEN} ● ${CACHED_SSID}${C_RESET}"
-        else
-            status_str="${C_GREY} ○ Disconnected${C_RESET}"
+        if [[ $CACHED_RADIO == "disabled" ]]; then status_str="${C_RED} 睊 Radio OFF${C_RESET}"
+        elif [[ -n $CACHED_SSID ]]; then status_str="${C_GREEN} ● ${CACHED_SSID}${C_RESET}"
+        else status_str="${C_GREY} ○ Disconnected${C_RESET}"
         fi
-        [[ "$HOTSPOT_ACTIVE" == "yes" ]] && status_str+="  ${C_YELLOW}⊛ AP:${HOTSPOT_SSID}${C_RESET}"
+        [[ $HOTSPOT_ACTIVE == "yes" ]] && status_str+="  ${C_YELLOW}⊛ AP:${HOTSPOT_SSID}${C_RESET}"
         buf+=" ${status_str}${CLR_EOL}"$'\n'
     else
-        buf+="${CLR_EOL}"$'\n'
+        buf+=" ${C_CYAN}${SPINNER[SPINNER_IDX]} Syncing with NetworkManager...${C_RESET}${CLR_EOL}"$'\n'
+        SPINNER_IDX=$(( (SPINNER_IDX + 1) % 10 ))
     fi
 
-    # Items
     local display_var="TAB_DISPLAY_${CURRENT_TAB}"
     local items_var="TAB_ITEMS_${CURRENT_TAB}"
     local -n _draw_display_ref="$display_var"
@@ -657,15 +722,17 @@ draw_main_view() {
 
     if (( count == 0 )); then
         buf+="${CLR_EOL}"$'\n'
-        case $CURRENT_TAB in
-            0) buf+="${C_YELLOW}    No networks found. Radio may be off.${C_RESET}${CLR_EOL}"$'\n' ;;
-            1) buf+="${C_YELLOW}    No saved connections.${C_RESET}${CLR_EOL}"$'\n' ;;
-            *) buf+="${C_GREY}    No items.${C_RESET}${CLR_EOL}"$'\n' ;;
-        esac
+        if (( ! DATA_LOADED )); then
+            buf+="${C_GREY}    Fetching data...${C_RESET}${CLR_EOL}"$'\n'
+        else
+            case $CURRENT_TAB in
+                0) buf+="${C_YELLOW}    No networks found. Radio may be off.${C_RESET}${CLR_EOL}"$'\n' ;;
+                1) buf+="${C_YELLOW}    No saved connections.${C_RESET}${CLR_EOL}"$'\n' ;;
+                *) buf+="${C_GREY}    No items.${C_RESET}${CLR_EOL}"$'\n' ;;
+            esac
+        fi
         local -i ri
-        for (( ri = 1; ri < MAX_DISPLAY_ROWS; ri++ )); do
-            buf+="${CLR_EOL}"$'\n'
-        done
+        for (( ri = 1; ri < MAX_DISPLAY_ROWS; ri++ )); do buf+="${CLR_EOL}"$'\n'; done
         buf+="${CLR_EOL}"$'\n'
     else
         compute_scroll_window "$count"
@@ -683,34 +750,34 @@ draw_main_view() {
     esac
     buf+=$'\n'"${C_CYAN}${footer}${C_RESET}${CLR_EOL}"$'\n'
     buf+="${CLR_EOS}"
-    printf '%s' "$buf"
+    printf '%s' "$buf" || true
 }
 
 draw_detail_view() {
-    local buf="" pad_buf=""
-    local -i count pad_needed
-    local -i left_pad right_pad vis_len
-    local -i _vis_start _vis_end
+    local buf="" pad_buf="" title sub breadcrumb
+    local -i count pad_needed left_pad right_pad vis_len _vis_start _vis_end
 
-    buf+="${CURSOR_HOME}"
-    buf+="${C_MAGENTA}┌${H_LINE}┐${C_RESET}${CLR_EOL}"$'\n'
-
-    local title=" ${DETAIL_TITLE} "
-    strip_ansi "$title"; local -i t_len=${#REPLY}
-    left_pad=$(( (BOX_INNER_WIDTH - t_len) / 2 ))
-    right_pad=$(( BOX_INNER_WIDTH - t_len - left_pad ))
-    (( left_pad < 0 )) && left_pad=0
-    (( right_pad < 0 )) && right_pad=0
-
+    buf+="${CURSOR_HOME}${C_MAGENTA}┌${H_LINE}┐${C_RESET}${CLR_EOL}"$'\n'
+    title=" DETAIL VIEW "; sub=" ${DETAIL_TITLE} "
+    strip_ansi "$title"; local -i t_len=${#REPLY}; strip_ansi "$sub"; local -i s_len=${#REPLY}
+    vis_len=$(( t_len + s_len ))
+    
+    left_pad=$(( (BOX_INNER_WIDTH - vis_len) / 2 ))
+    if (( left_pad < 0 )); then left_pad=0; fi
+    right_pad=$(( BOX_INNER_WIDTH - vis_len - left_pad ))
+    if (( right_pad < 0 )); then right_pad=0; fi
+    
     printf -v pad_buf '%*s' "$left_pad" ''
-    buf+="${C_MAGENTA}│${pad_buf}${C_YELLOW}${title}${C_MAGENTA}"
+    buf+="${C_MAGENTA}│${pad_buf}${C_YELLOW}${title}${C_GREY}${sub}${C_MAGENTA}"
     printf -v pad_buf '%*s' "$right_pad" ''
     buf+="${pad_buf}│${C_RESET}${CLR_EOL}"$'\n'
-
-    local breadcrumb=" « Back to ${TABS[CURRENT_TAB]}"
+    
+    breadcrumb=" « Back to ${TABS[CURRENT_TAB]}"
     strip_ansi "$breadcrumb"; local -i b_len=${#REPLY}
+    
     pad_needed=$(( BOX_INNER_WIDTH - b_len ))
-    (( pad_needed < 0 )) && pad_needed=0
+    if (( pad_needed < 0 )); then pad_needed=0; fi
+    
     printf -v pad_buf '%*s' "$pad_needed" ''
     buf+="${C_MAGENTA}│${C_CYAN}${breadcrumb}${C_RESET}${pad_buf}${C_MAGENTA}│${C_RESET}${CLR_EOL}"$'\n'
     buf+="${C_MAGENTA}└${H_LINE}┘${C_RESET}${CLR_EOL}"$'\n'
@@ -720,9 +787,7 @@ draw_detail_view() {
     if (( count == 0 )); then
         buf+="${C_GREY}    No options available.${C_RESET}${CLR_EOL}"$'\n'
         local -i ri
-        for (( ri = 1; ri < MAX_DISPLAY_ROWS + 2; ri++ )); do
-            buf+="${CLR_EOL}"$'\n'
-        done
+        for (( ri = 1; ri < MAX_DISPLAY_ROWS + 2; ri++ )); do buf+="${CLR_EOL}"$'\n'; done
     else
         compute_scroll_window "$count"
         render_scroll_indicator buf "above" "$count" "$_vis_start"
@@ -732,10 +797,12 @@ draw_detail_view() {
 
     buf+=$'\n'"${C_CYAN} [Esc/Shift+Tab] Back  [Enter] Select  [q] Quit${C_RESET}${CLR_EOL}"$'\n'
     buf+="${CLR_EOS}"
-    printf '%s' "$buf"
+    printf '%s' "$buf" || true
 }
 
 draw_ui() {
+    update_terminal_size
+    if ! terminal_size_ok; then draw_small_terminal_notice; return; fi
     case $CURRENT_VIEW in
         0) draw_main_view ;;
         1) draw_detail_view ;;
@@ -746,36 +813,30 @@ draw_ui() {
 #  DETAIL VIEW BUILDERS
 # ==============================================================================
 
-# Adds an info (non-actionable) row to detail arrays
 _detail_info() {
     DETAIL_ITEMS+=("$1")
     DETAIL_DISPLAY+=("$2")
     DETAIL_ACTIONABLE+=(0)
 }
 
-# Adds an actionable row to detail arrays
 _detail_action() {
     DETAIL_ITEMS+=("$1")
     DETAIL_DISPLAY+=("$2")
     DETAIL_ACTIONABLE+=(1)
 }
 
-# Returns the index of the first actionable item in DETAIL_ACTIONABLE
 _first_actionable_index() {
     local -i i
     for (( i = 0; i < ${#DETAIL_ACTIONABLE[@]}; i++ )); do
         if (( DETAIL_ACTIONABLE[i] == 1 )); then
-            REPLY=$i
-            return 0
+            REPLY=$i; return 0
         fi
     done
-    REPLY=0
-    return 0
+    REPLY=0; return 0
 }
 
 open_detail() {
-    local -r title="$1"
-    DETAIL_TITLE="$title"
+    DETAIL_TITLE="$1"
     PARENT_ROW=$SELECTED_ROW
     PARENT_SCROLL=$SCROLL_OFFSET
     CURRENT_VIEW=1
@@ -796,14 +857,27 @@ close_detail() {
 build_network_detail() {
     local -i idx=$1
     local ssid="${SCAN_SSIDS[idx]}"
+    
+    if [[ $ssid == "RADIO_OFF_TOGGLE" ]]; then
+        enter_interactive
+        printf '\n'
+        if run_with_feedback "Enabling Wi-Fi radio" nmcli radio wifi on; then
+            notify "Wi-Fi" "Radio enabled"
+            sleep 1
+        fi
+        leave_interactive
+        DATA_LOADED=0
+        start_background_load
+        SELECTED_ROW=0; SCROLL_OFFSET=0
+        return 0
+    fi
+
     local state="${SCAN_STATES[idx]}"
     local uuid="${SCAN_UUIDS[idx]}"
     local sec="${SCAN_SECURITY[idx]}"
     local sig="${SCAN_SIGNALS[idx]}"
 
-    DETAIL_ITEMS=()
-    DETAIL_DISPLAY=()
-    DETAIL_ACTIONABLE=()
+    DETAIL_ITEMS=(); DETAIL_DISPLAY=(); DETAIL_ACTIONABLE=()
     DETAIL_CTX="net:${idx}"
 
     signal_to_bar "$sig"; local bar="$REPLY"
@@ -842,29 +916,23 @@ build_saved_detail() {
     local uuid="${SAVED_UUIDS_LIST[idx]}"
     local autocon="${SAVED_AUTOCONNECT[idx]}"
 
-    DETAIL_ITEMS=()
-    DETAIL_DISPLAY=()
-    DETAIL_ACTIONABLE=()
+    DETAIL_ITEMS=(); DETAIL_DISPLAY=(); DETAIL_ACTIONABLE=()
     DETAIL_CTX="saved:${idx}"
 
     _detail_info "_info_name" "${C_WHITE}Name:${C_RESET}  ${name}"
     _detail_info "_info_uuid" "${C_WHITE}UUID:${C_RESET}  ${C_GREY}${uuid}${C_RESET}"
 
     local auto_disp
-    if [[ "$autocon" == "yes" ]]; then
-        auto_disp="${C_GREEN}yes${C_RESET}"
-    else
-        auto_disp="${C_RED}no${C_RESET}"
+    if [[ $autocon == "yes" ]]; then auto_disp="${C_GREEN}yes${C_RESET}"
+    else auto_disp="${C_RED}no${C_RESET}"
     fi
     _detail_info "_info_auto" "${C_WHITE}Autoconnect:${C_RESET}  ${auto_disp}"
     _detail_info "---"        "${C_GREY}────────────────────────────────────${C_RESET}"
 
     _detail_action "Connect"            "${C_GREEN}▶${C_RESET}  Connect to this network"
-
-    if [[ "$name" == "$CACHED_SSID" ]]; then
+    if [[ $name == "$CACHED_SSID" ]]; then
         _detail_action "Disconnect"     "${C_RED}✕${C_RESET}  Disconnect"
     fi
-
     _detail_action "Toggle Autoconnect" "${C_CYAN}⟳${C_RESET}  Toggle autoconnect (currently: ${autocon})"
     _detail_action "Forget Network"     "${C_YELLOW}✕${C_RESET}  Permanently delete this profile"
     _detail_action "Cancel"             "${C_GREY}←${C_RESET}  Go back"
@@ -878,25 +946,21 @@ build_saved_detail() {
 
 execute_detail_action() {
     local action="${DETAIL_ITEMS[SELECTED_ROW]}"
-
-    # Guard: skip non-actionable
-    if (( DETAIL_ACTIONABLE[SELECTED_ROW] == 0 )); then
-        return 0
-    fi
+    if (( DETAIL_ACTIONABLE[SELECTED_ROW] == 0 )); then return 0; fi
 
     local ctx_type="${DETAIL_CTX%%:*}"
     local ctx_idx="${DETAIL_CTX#*:}"
 
     case "$action" in
         "Connect")
-            if [[ "$ctx_type" == "net" ]]; then
+            if [[ $ctx_type == "net" ]]; then
                 local ssid="${SCAN_SSIDS[ctx_idx]}"
                 local uuid="${SCAN_UUIDS[ctx_idx]}"
                 local state="${SCAN_STATES[ctx_idx]}"
 
                 enter_interactive
                 printf '\n'
-                if [[ "$state" == "Saved" && -n "$uuid" ]]; then
+                if [[ $state == "Saved" && -n $uuid ]]; then
                     if run_with_feedback "Connecting to ${ssid}" nmcli connection up uuid "$uuid"; then
                         printf '%s✓ Connected to %s%s\n' "$C_GREEN" "$ssid" "$C_RESET"
                         notify "Wi-Fi" "Connected to ${ssid}"
@@ -907,11 +971,11 @@ execute_detail_action() {
                 else
                     printf '%sPassword (empty for open network):%s ' "$C_CYAN" "$C_RESET"
                     local password=""
-                    read -r password
+                    read -r password || :
                     printf '\n'
 
                     local -i ok=1
-                    if [[ -n "$password" ]]; then
+                    if [[ -n $password ]]; then
                         nmcli device wifi connect "$ssid" password "$password" &>/dev/null && ok=0 || :
                     else
                         nmcli device wifi connect "$ssid" &>/dev/null && ok=0 || :
@@ -922,14 +986,13 @@ execute_detail_action() {
                         notify "Wi-Fi" "Connected to ${ssid}"
                     else
                         printf '%s✗ Connection failed%s\n' "$C_RED" "$C_RESET"
-                        printf '%sBad password, out of range, or timeout.%s\n' "$C_GREY" "$C_RESET"
                         notify "Wi-Fi" "Failed: ${ssid}"
                     fi
                 fi
                 sleep 1
                 leave_interactive
 
-            elif [[ "$ctx_type" == "saved" ]]; then
+            elif [[ $ctx_type == "saved" ]]; then
                 local uuid="${SAVED_UUIDS_LIST[ctx_idx]}"
                 local name="${SAVED_NAMES[ctx_idx]}"
                 enter_interactive
@@ -944,42 +1007,36 @@ execute_detail_action() {
                 leave_interactive
             fi
             close_detail
-            draw_loading_frame "Refreshing..." "Updating network state"
-            populate_all_tabs
+            DATA_LOADED=0
+            start_background_load
             ;;
 
         "Disconnect")
             local target_uuid="" target_name=""
-            if [[ "$ctx_type" == "net" ]]; then
-                target_uuid="${SCAN_UUIDS[ctx_idx]}"
-                target_name="${SCAN_SSIDS[ctx_idx]}"
-            elif [[ "$ctx_type" == "saved" ]]; then
-                target_uuid="${SAVED_UUIDS_LIST[ctx_idx]}"
-                target_name="${SAVED_NAMES[ctx_idx]}"
+            if [[ $ctx_type == "net" ]]; then
+                target_uuid="${SCAN_UUIDS[ctx_idx]}"; target_name="${SCAN_SSIDS[ctx_idx]}"
+            elif [[ $ctx_type == "saved" ]]; then
+                target_uuid="${SAVED_UUIDS_LIST[ctx_idx]}"; target_name="${SAVED_NAMES[ctx_idx]}"
             fi
             enter_interactive
             printf '\n'
-            if [[ -n "$target_uuid" ]]; then
-                run_with_feedback "Disconnecting" nmcli connection down uuid "$target_uuid" || :
-            else
-                run_with_feedback "Disconnecting" nmcli connection down id "$target_name" || :
+            if [[ -n $target_uuid ]]; then run_with_feedback "Disconnecting" nmcli connection down uuid "$target_uuid" || :
+            else run_with_feedback "Disconnecting" nmcli connection down id "$target_name" || :
             fi
             notify "Wi-Fi" "Disconnected from ${target_name}"
             sleep 1
             leave_interactive
             close_detail
-            draw_loading_frame "Refreshing..." ""
-            populate_all_tabs
+            DATA_LOADED=0
+            start_background_load
             ;;
 
         "Forget Network")
             local target_uuid="" target_name=""
-            if [[ "$ctx_type" == "net" ]]; then
-                target_uuid="${SCAN_UUIDS[ctx_idx]}"
-                target_name="${SCAN_SSIDS[ctx_idx]}"
-            elif [[ "$ctx_type" == "saved" ]]; then
-                target_uuid="${SAVED_UUIDS_LIST[ctx_idx]}"
-                target_name="${SAVED_NAMES[ctx_idx]}"
+            if [[ $ctx_type == "net" ]]; then
+                target_uuid="${SCAN_UUIDS[ctx_idx]}"; target_name="${SCAN_SSIDS[ctx_idx]}"
+            elif [[ $ctx_type == "saved" ]]; then
+                target_uuid="${SAVED_UUIDS_LIST[ctx_idx]}"; target_name="${SAVED_NAMES[ctx_idx]}"
             fi
             enter_interactive
             printf '\n'
@@ -987,11 +1044,9 @@ execute_detail_action() {
             local confirm=""
             read -n 1 -r confirm || :
             printf '\n'
-            if [[ "$confirm" =~ ^[Yy]$ ]]; then
-                if [[ -n "$target_uuid" ]]; then
-                    forget_network "$target_uuid" "uuid"
-                else
-                    forget_network "$target_name" "id"
+            if [[ $confirm =~ ^[Yy]$ ]]; then
+                if [[ -n $target_uuid ]]; then forget_network "$target_uuid" "uuid"
+                else forget_network "$target_name" "id"
                 fi
                 printf '%s✓ Deleted%s\n' "$C_GREEN" "$C_RESET"
                 notify "Wi-Fi" "Forgot ${target_name}"
@@ -999,28 +1054,27 @@ execute_detail_action() {
             fi
             leave_interactive
             close_detail
-            draw_loading_frame "Refreshing..." ""
-            populate_all_tabs
+            DATA_LOADED=0
+            start_background_load
             ;;
 
         "Toggle Autoconnect")
             local target_uuid="" cur_auto="" new_auto=""
-            if [[ "$ctx_type" == "saved" ]]; then
+            if [[ $ctx_type == "saved" ]]; then
                 target_uuid="${SAVED_UUIDS_LIST[ctx_idx]}"
                 cur_auto="${SAVED_AUTOCONNECT[ctx_idx]}"
-            elif [[ "$ctx_type" == "net" ]]; then
+            elif [[ $ctx_type == "net" ]]; then
                 target_uuid="${SCAN_UUIDS[ctx_idx]}"
-                if [[ -n "$target_uuid" ]]; then
+                if [[ -n $target_uuid ]]; then
                     cur_auto=$(nmcli --terse --fields connection.autoconnect connection show uuid "$target_uuid" 2>/dev/null | awk -F: '{print $2}') || cur_auto="yes"
                 fi
             fi
 
-            if [[ -n "$target_uuid" ]]; then
-                if [[ "$cur_auto" == "yes" ]]; then new_auto="no"; else new_auto="yes"; fi
+            if [[ -n $target_uuid ]]; then
+                if [[ $cur_auto == "yes" ]]; then new_auto="no"; else new_auto="yes"; fi
                 enter_interactive
                 printf '\n'
-                if run_with_feedback "Setting autoconnect=${new_auto}" \
-                    nmcli connection modify uuid "$target_uuid" connection.autoconnect "$new_auto"; then
+                if run_with_feedback "Setting autoconnect=${new_auto}" nmcli connection modify uuid "$target_uuid" connection.autoconnect "$new_auto"; then
                     printf '%s✓ Autoconnect set to %s%s\n' "$C_GREEN" "$new_auto" "$C_RESET"
                 else
                     printf '%s✗ Failed%s\n' "$C_RED" "$C_RESET"
@@ -1029,13 +1083,11 @@ execute_detail_action() {
                 leave_interactive
             fi
             close_detail
-            draw_loading_frame "Refreshing..." ""
-            populate_all_tabs
+            DATA_LOADED=0
+            start_background_load
             ;;
 
-        "Cancel")
-            close_detail
-            ;;
+        "Cancel") close_detail ;;
     esac
 }
 
@@ -1046,21 +1098,29 @@ execute_hotspot_action() {
 
     case "$action" in
         "Start Hotspot (2.4 GHz)"|"Start Hotspot (5 GHz)")
+            if [[ $CACHED_RADIO != "enabled" ]]; then
+                enter_interactive
+                printf '\n%s✗ Wi-Fi radio is disabled. Please enable it first.%s\n' "$C_RED" "$C_RESET"
+                sleep 2
+                leave_interactive
+                return 0
+            fi
+
             local band="bg"
-            [[ "$action" == *"5 GHz"* ]] && band="a"
+            [[ $action == *"5 GHz"* ]] && band="a"
 
             enter_interactive
             printf '\n'
             printf '%sHotspot SSID (default: MyHotspot):%s ' "$C_CYAN" "$C_RESET"
             local hs_ssid=""
             read -r hs_ssid || :
-            [[ -z "$hs_ssid" ]] && hs_ssid="MyHotspot"
+            [[ -z $hs_ssid ]] && hs_ssid="MyHotspot"
 
             printf '%sPassword (min 8 chars, empty=open):%s ' "$C_CYAN" "$C_RESET"
             local hs_pass=""
             read -r hs_pass || :
 
-            if [[ -n "$hs_pass" && ${#hs_pass} -lt 8 ]]; then
+            if [[ -n $hs_pass && ${#hs_pass} -lt 8 ]]; then
                 printf '%s✗ Password must be at least 8 characters%s\n' "$C_RED" "$C_RESET"
                 sleep 2
                 leave_interactive
@@ -1070,7 +1130,7 @@ execute_hotspot_action() {
             printf '\n'
             local wifi_dev=""
             wifi_dev=$(find_wifi_device) || wifi_dev=""
-            if [[ -z "$wifi_dev" ]]; then
+            if [[ -z $wifi_dev ]]; then
                 printf '%s✗ No WiFi device found%s\n' "$C_RED" "$C_RESET"
                 sleep 2
                 leave_interactive
@@ -1078,21 +1138,19 @@ execute_hotspot_action() {
             fi
 
             local -a cmd=(nmcli device wifi hotspot ifname "$wifi_dev" ssid "$hs_ssid" band "$band")
-            [[ -n "$hs_pass" ]] && cmd+=(password "$hs_pass")
+            [[ -n $hs_pass ]] && cmd+=(password "$hs_pass")
 
             if run_with_feedback "Starting hotspot '${hs_ssid}'" "${cmd[@]}"; then
                 printf '%s✓ Hotspot active!%s\n' "$C_GREEN" "$C_RESET"
                 notify "Hotspot" "Started: ${hs_ssid}"
             else
                 printf '%s✗ Failed. Adapter may not support AP mode or band.%s\n' "$C_RED" "$C_RESET"
-                notify "Hotspot" "Failed to start"
             fi
             sleep 2
             leave_interactive
-            draw_loading_frame "Refreshing..." ""
-            populate_all_tabs
-            SELECTED_ROW=0
-            SCROLL_OFFSET=0
+            DATA_LOADED=0
+            start_background_load
+            SELECTED_ROW=0; SCROLL_OFFSET=0
             ;;
 
         "Stop Hotspot")
@@ -1100,19 +1158,17 @@ execute_hotspot_action() {
             printf '\n'
             local wifi_dev=""
             wifi_dev=$(find_wifi_device) || wifi_dev=""
-            if [[ -n "$wifi_dev" ]]; then
+            if [[ -n $wifi_dev ]]; then
                 run_with_feedback "Stopping hotspot" nmcli device disconnect "$wifi_dev" || :
                 printf '%s✓ Hotspot stopped%s\n' "$C_GREEN" "$C_RESET"
-                notify "Hotspot" "Stopped"
             else
                 printf '%s✗ No WiFi device%s\n' "$C_RED" "$C_RESET"
             fi
             sleep 1
             leave_interactive
-            draw_loading_frame "Refreshing..." ""
-            populate_all_tabs
-            SELECTED_ROW=0
-            SCROLL_OFFSET=0
+            DATA_LOADED=0
+            start_background_load
+            SELECTED_ROW=0; SCROLL_OFFSET=0
             ;;
 
         "Show Hotspot Info")
@@ -1123,14 +1179,14 @@ execute_hotspot_action() {
 
             local wifi_dev=""
             wifi_dev=$(find_wifi_device) || wifi_dev=""
-            if [[ -n "$wifi_dev" ]]; then
+            if [[ -n $wifi_dev ]]; then
                 local ip_addr=""
                 ip_addr=$(nmcli --terse --fields IP4.ADDRESS device show "$wifi_dev" 2>/dev/null | head -1 | awk -F: '{print $2}') || ip_addr=""
                 printf '%s   Device:%s %s\n' "$C_CYAN" "$C_RESET" "$wifi_dev"
                 printf '%s   IP:%s %s\n' "$C_CYAN" "$C_RESET" "${ip_addr:-N/A}"
             fi
 
-            if command -v iw &>/dev/null && [[ -n "$wifi_dev" ]]; then
+            if command -v iw &>/dev/null && [[ -n $wifi_dev ]]; then
                 local clients="0"
                 clients=$(iw dev "$wifi_dev" station dump 2>/dev/null | grep -c "^Station") || clients="0"
                 printf '%s   Clients:%s %s\n' "$C_CYAN" "$C_RESET" "$clients"
@@ -1152,32 +1208,29 @@ execute_status_action() {
         "Toggle Radio")
             enter_interactive
             printf '\n'
-            if [[ "$CACHED_RADIO" == "enabled" ]]; then
+            if [[ $CACHED_RADIO == "enabled" ]]; then
                 printf '%sTurn Wi-Fi OFF? [y/N]%s ' "$C_YELLOW" "$C_RESET"
                 local reply=""
                 read -n 1 -r reply || :
                 printf '\n'
-                if [[ "$reply" =~ ^[Yy]$ ]]; then
+                if [[ $reply =~ ^[Yy]$ ]]; then
                     run_with_feedback "Disabling radio" nmcli radio wifi off || :
                     notify "Wi-Fi" "Radio disabled"
                     sleep 1
                 fi
-            elif [[ "$CACHED_RADIO" == "disabled" ]]; then
+            elif [[ $CACHED_RADIO == "disabled" ]]; then
                 if run_with_feedback "Enabling radio" nmcli radio wifi on; then
                     notify "Wi-Fi" "Radio enabled"
-                    sleep 2
+                    sleep 1
                 fi
-            else
-                printf '%s⚠ Cannot determine radio state%s\n' "$C_RED" "$C_RESET"
-                sleep 1
             fi
             leave_interactive
-            draw_loading_frame "Refreshing..." ""
-            populate_all_tabs
+            DATA_LOADED=0
+            start_background_load
             ;;
 
         "Connection Info")
-            if [[ -n "$CACHED_SSID" ]]; then
+            if [[ -n $CACHED_SSID ]]; then
                 enter_interactive
                 printf '\n'
                 printf '%s── Connection Details ──%s\n' "$C_MAGENTA" "$C_RESET"
@@ -1185,7 +1238,7 @@ execute_status_action() {
 
                 local wifi_dev=""
                 wifi_dev=$(find_wifi_device) || wifi_dev=""
-                if [[ -n "$wifi_dev" ]]; then
+                if [[ -n $wifi_dev ]]; then
                     local ip_addr="" gateway="" dns=""
                     ip_addr=$(nmcli --terse --fields IP4.ADDRESS device show "$wifi_dev" 2>/dev/null | head -1 | awk -F: '{print $2}') || ip_addr=""
                     gateway=$(nmcli --terse --fields IP4.GATEWAY device show "$wifi_dev" 2>/dev/null | head -1 | awk -F: '{print $2}') || gateway=""
@@ -1193,16 +1246,7 @@ execute_status_action() {
                     printf '%s   IP:%s %s\n' "$C_CYAN" "$C_RESET" "${ip_addr:-N/A}"
                     printf '%s   Gateway:%s %s\n' "$C_CYAN" "$C_RESET" "${gateway:-N/A}"
                     printf '%s   DNS:%s %s\n' "$C_CYAN" "$C_RESET" "${dns:-N/A}"
-
-                    local cur_signal=""
-                    cur_signal=$(nmcli --terse --fields active,signal device wifi list 2>/dev/null | awk -F: '$1=="yes"{print $2;exit}') || cur_signal=""
-                    if [[ -n "$cur_signal" ]]; then
-                        signal_to_bar "$cur_signal"; local bar="$REPLY"
-                        signal_color "$cur_signal"; local scol="$REPLY"
-                        printf '%s   Signal:%s %s%s%% %s%s\n' "$C_CYAN" "$C_RESET" "$scol" "$cur_signal" "$bar" "$C_RESET"
-                    fi
                 fi
-
                 printf '\n%sPress any key...%s' "$C_GREY" "$C_RESET"
                 read -rsn1 || :
                 leave_interactive
@@ -1215,28 +1259,22 @@ execute_status_action() {
             local active_uuid=""
             active_uuid=$(nmcli --terse --fields NAME,UUID,TYPE connection show --active 2>/dev/null | \
                 awk -F: '$3=="802-11-wireless"{print $2;exit}') || active_uuid=""
-            if [[ -n "$active_uuid" ]]; then
+            if [[ -n $active_uuid ]]; then
                 run_with_feedback "Disconnecting" nmcli connection down uuid "$active_uuid" || :
-                notify "Wi-Fi" "Disconnected"
-            else
-                printf '%sNo active WiFi connection%s\n' "$C_GREY" "$C_RESET"
             fi
             sleep 1
             leave_interactive
-            draw_loading_frame "Refreshing..." ""
-            populate_all_tabs
+            DATA_LOADED=0
+            start_background_load
             ;;
 
         "Refresh")
-            draw_loading_frame "Refreshing all..." "Querying NetworkManager"
-            populate_all_tabs
-            SELECTED_ROW=0
-            SCROLL_OFFSET=0
+            DATA_LOADED=0
+            start_background_load
+            SELECTED_ROW=0; SCROLL_OFFSET=0
             ;;
 
-        "Device Info"|"DNS Info"|"Hotspot Status")
-            # Info-only items — no action
-            ;;
+        "Device Info"|"DNS Info"|"Hotspot Status") ;;
     esac
 }
 
@@ -1245,34 +1283,24 @@ execute_status_action() {
 # ==============================================================================
 
 get_current_count() {
-    if (( CURRENT_VIEW == 1 )); then
-        REPLY=${#DETAIL_ITEMS[@]}
-    else
-        local -n _gcc_ref="TAB_ITEMS_${CURRENT_TAB}"
-        REPLY=${#_gcc_ref[@]}
+    if (( CURRENT_VIEW == 1 )); then REPLY=${#DETAIL_ITEMS[@]}
+    else local -n _gcc_ref="TAB_ITEMS_${CURRENT_TAB}"; REPLY=${#_gcc_ref[@]}
     fi
 }
 
-# Navigate with skip logic for detail view info items.
-# CRITICAL: All arithmetic guarded against set -e.
 navigate() {
     local -i dir=$1
     get_current_count
     local -i count=$REPLY
     (( count == 0 )) && return 0
 
-    # Compute next position
     SELECTED_ROW=$(( (SELECTED_ROW + dir + count) % count ))
 
-    # In detail view, skip non-actionable items
     if (( CURRENT_VIEW == 1 && ${#DETAIL_ACTIONABLE[@]} > 0 )); then
         local -i attempts=0
         while (( attempts < count )); do
-            if (( DETAIL_ACTIONABLE[SELECTED_ROW] == 1 )); then
-                break
-            fi
+            if (( DETAIL_ACTIONABLE[SELECTED_ROW] == 1 )); then break; fi
             SELECTED_ROW=$(( (SELECTED_ROW + dir + count) % count ))
-            # CRITICAL: += 1 not ++ to avoid set -e exit on (( 0++ )) returning 1
             attempts=$(( attempts + 1 ))
         done
     fi
@@ -1284,28 +1312,20 @@ navigate_page() {
     get_current_count
     local -i count=$REPLY
     (( count == 0 )) && return 0
+    
     SELECTED_ROW=$(( SELECTED_ROW + dir * MAX_DISPLAY_ROWS ))
     if (( SELECTED_ROW < 0 )); then SELECTED_ROW=0; fi
     if (( SELECTED_ROW >= count )); then SELECTED_ROW=$(( count - 1 )); fi
 
-    # Clamp to actionable in detail view
     if (( CURRENT_VIEW == 1 && ${#DETAIL_ACTIONABLE[@]} > 0 )); then
         if (( DETAIL_ACTIONABLE[SELECTED_ROW] == 0 )); then
             local -i orig=$SELECTED_ROW
-            # Search forward for nearest actionable
             local -i i
             for (( i = orig; i < count; i++ )); do
-                if (( DETAIL_ACTIONABLE[i] == 1 )); then
-                    SELECTED_ROW=$i
-                    return 0
-                fi
+                if (( DETAIL_ACTIONABLE[i] == 1 )); then SELECTED_ROW=$i; return 0; fi
             done
-            # Search backward
             for (( i = orig; i >= 0; i-- )); do
-                if (( DETAIL_ACTIONABLE[i] == 1 )); then
-                    SELECTED_ROW=$i
-                    return 0
-                fi
+                if (( DETAIL_ACTIONABLE[i] == 1 )); then SELECTED_ROW=$i; return 0; fi
             done
         fi
     fi
@@ -1318,25 +1338,16 @@ navigate_end() {
     local -i count=$REPLY
     (( count == 0 )) && return 0
 
-    if (( target == 0 )); then
-        SELECTED_ROW=0
-    else
-        SELECTED_ROW=$(( count - 1 ))
-    fi
+    if (( target == 0 )); then SELECTED_ROW=0; else SELECTED_ROW=$(( count - 1 )); fi
 
-    # Clamp to actionable in detail view
     if (( CURRENT_VIEW == 1 && ${#DETAIL_ACTIONABLE[@]} > 0 )); then
         if (( DETAIL_ACTIONABLE[SELECTED_ROW] == 0 )); then
             if (( target == 0 )); then
-                _first_actionable_index
-                SELECTED_ROW=$REPLY
+                _first_actionable_index; SELECTED_ROW=$REPLY
             else
                 local -i i
                 for (( i = count - 1; i >= 0; i-- )); do
-                    if (( DETAIL_ACTIONABLE[i] == 1 )); then
-                        SELECTED_ROW=$i
-                        return 0
-                    fi
+                    if (( DETAIL_ACTIONABLE[i] == 1 )); then SELECTED_ROW=$i; return 0; fi
                 done
             fi
         fi
@@ -1346,21 +1357,26 @@ navigate_end() {
 
 switch_tab() {
     local -i dir=${1:-1}
+    TAB_SAVED_ROW[CURRENT_TAB]=$SELECTED_ROW
+    TAB_SAVED_SCROLL[CURRENT_TAB]=$SCROLL_OFFSET
     CURRENT_TAB=$(( (CURRENT_TAB + dir + TAB_COUNT) % TAB_COUNT ))
-    SELECTED_ROW=0
-    SCROLL_OFFSET=0
+    SELECTED_ROW=${TAB_SAVED_ROW[CURRENT_TAB]:-0}
+    SCROLL_OFFSET=${TAB_SAVED_SCROLL[CURRENT_TAB]:-0}
 }
 
 set_tab() {
     local -i idx=$1
     if (( idx != CURRENT_TAB && idx >= 0 && idx < TAB_COUNT )); then
+        TAB_SAVED_ROW[CURRENT_TAB]=$SELECTED_ROW
+        TAB_SAVED_SCROLL[CURRENT_TAB]=$SCROLL_OFFSET
         CURRENT_TAB=$idx
-        SELECTED_ROW=0
-        SCROLL_OFFSET=0
+        SELECTED_ROW=${TAB_SAVED_ROW[CURRENT_TAB]:-0}
+        SCROLL_OFFSET=${TAB_SAVED_SCROLL[CURRENT_TAB]:-0}
     fi
 }
 
 handle_enter_main() {
+    if (( ! DATA_LOADED )); then return 0; fi
     local -n _items_ref="TAB_ITEMS_${CURRENT_TAB}"
     local -i count=${#_items_ref[@]}
     if (( count == 0 || SELECTED_ROW < 0 || SELECTED_ROW >= count )); then return 0; fi
@@ -1382,34 +1398,15 @@ handle_enter_detail() {
 }
 
 handle_rescan() {
-    case $CURRENT_TAB in
-        0)
-            [[ "$CACHED_RADIO" == "disabled" ]] && return 0
-            draw_loading_frame "Scanning networks..." "This may take a few seconds"
-            populate_tab_networks
-            refresh_cached_status
-            SELECTED_ROW=0
-            SCROLL_OFFSET=0
-            ;;
-        1)
-            draw_loading_frame "Refreshing saved..." ""
-            populate_tab_saved
-            refresh_cached_status
-            SELECTED_ROW=0
-            SCROLL_OFFSET=0
-            ;;
-        3)
-            draw_loading_frame "Refreshing status..." ""
-            populate_all_tabs
-            SELECTED_ROW=0
-            SCROLL_OFFSET=0
-            ;;
-    esac
+    if (( ! DATA_LOADED )); then return 0; fi
+    DATA_LOADED=0
+    start_background_load
+    SELECTED_ROW=0; SCROLL_OFFSET=0
     return 0
 }
 
 # ==============================================================================
-#  MOUSE HANDLING (Template Pattern)
+#  INPUT ROUTING
 # ==============================================================================
 
 handle_mouse() {
@@ -1429,41 +1426,40 @@ handle_mouse() {
     [[ ! "$field3" =~ ^[0-9]+$ ]] && return 0
     button=$field1; x=$field2; y=$field3
 
-    # Scroll wheel
     if (( button == 64 )); then navigate -1; return 0; fi
     if (( button == 65 )); then navigate 1; return 0; fi
     [[ "$terminator" != "M" ]] && return 0
 
-    # Tab row click
     if (( y == TAB_ROW )); then
         if (( CURRENT_VIEW == 0 )); then
-            for (( i = 0; i < TAB_COUNT; i++ )); do
-                zone="${TAB_ZONES[i]:-}"
-                [[ -z "$zone" ]] && continue
+            if [[ -n "$LEFT_ARROW_ZONE" ]]; then
+                start="${LEFT_ARROW_ZONE%%:*}"
+                end="${LEFT_ARROW_ZONE##*:}"
+                if [[ -n $start && -n $end ]] && (( x >= start && x <= end )); then switch_tab -1; return 0; fi
+            fi
+            if [[ -n "$RIGHT_ARROW_ZONE" ]]; then
+                start="${RIGHT_ARROW_ZONE%%:*}"
+                end="${RIGHT_ARROW_ZONE##*:}"
+                if [[ -n $start && -n $end ]] && (( x >= start && x <= end )); then switch_tab 1; return 0; fi
+            fi
+            for (( i = 0; i < ${#TAB_ZONES[@]}; i++ )); do
+                if [[ -z "${TAB_ZONES[i]:-}" ]]; then continue; fi
+                zone="${TAB_ZONES[i]}"
                 start="${zone%%:*}"
                 end="${zone##*:}"
-                if (( x >= start && x <= end )); then set_tab "$i"; return 0; fi
+                if [[ -n $start && -n $end ]] && (( x >= start && x <= end )); then set_tab "$(( i + TAB_SCROLL_START ))"; return 0; fi
             done
         else
-            close_detail
+            if (( button == 0 )); then close_detail; fi
             return 0
         fi
     fi
 
-    # Breadcrumb row click (row 2 in header = go back in detail)
-    if (( CURRENT_VIEW == 1 && y == 3 )); then
-        close_detail
-        return 0
-    fi
+    if (( CURRENT_VIEW == 1 && y == 3 )); then close_detail; return 0; fi
 
-    # Item area
-    # Main: header(4) + status(1) + scroll_above(1) = row 7 is first item
-    # Detail: header(4) + scroll_above(1) = row 6 is first item
     local -i effective_start
-    if (( CURRENT_VIEW == 0 )); then
-        effective_start=$(( ITEM_START_ROW + 2 ))  # +status +scroll_above
-    else
-        effective_start=$(( ITEM_START_ROW + 1 ))  # +scroll_above
+    if (( CURRENT_VIEW == 0 )); then effective_start=$(( ITEM_START_ROW + 2 ))
+    else effective_start=$(( ITEM_START_ROW + 1 ))
     fi
 
     if (( y >= effective_start && y < effective_start + MAX_DISPLAY_ROWS )); then
@@ -1472,19 +1468,13 @@ handle_mouse() {
         local -i count=$REPLY
 
         if (( clicked_idx >= 0 && clicked_idx < count )); then
-            # Skip non-actionable in detail view
             if (( CURRENT_VIEW == 1 && ${#DETAIL_ACTIONABLE[@]} > 0 )); then
-                if (( DETAIL_ACTIONABLE[clicked_idx] == 0 )); then
-                    return 0
-                fi
+                if (( DETAIL_ACTIONABLE[clicked_idx] == 0 )); then return 0; fi
             fi
 
             if (( clicked_idx == SELECTED_ROW )); then
-                # Same item clicked again → activate
-                if (( CURRENT_VIEW == 0 )); then
-                    handle_enter_main
-                else
-                    handle_enter_detail
+                if (( CURRENT_VIEW == 0 )); then handle_enter_main
+                else handle_enter_detail
                 fi
             else
                 SELECTED_ROW=$clicked_idx
@@ -1494,22 +1484,16 @@ handle_mouse() {
     return 0
 }
 
-# ==============================================================================
-#  INPUT HANDLING (Template Pattern)
-# ==============================================================================
-
 read_escape_seq() {
     local -n _esc_out=$1
     _esc_out=""
     local char=""
-    if ! IFS= read -rsn1 -t "$ESC_READ_TIMEOUT" char; then
-        return 1
-    fi
+    if ! IFS= read -rsn1 -t "$ESC_READ_TIMEOUT" char < /dev/tty; then return 1; fi
     _esc_out+="$char"
     if [[ "$char" == '[' || "$char" == 'O' ]]; then
-        while IFS= read -rsn1 -t "$ESC_READ_TIMEOUT" char; do
+        while IFS= read -rsn1 -t "$ESC_READ_TIMEOUT" char < /dev/tty; do
             _esc_out+="$char"
-            if [[ "$char" =~ [a-zA-Z~] ]]; then break; fi
+            [[ "$char" =~ [a-zA-Z~] ]] && break
         done
     fi
     return 0
@@ -1566,17 +1550,19 @@ handle_key_detail() {
 }
 
 handle_input_router() {
-    local key="$1"
-    local escape_seq=""
-
-    if [[ "$key" == $'\x1b' ]]; then
+    local key=$1 escape_seq=""
+    if [[ $key == $'\x1b' ]]; then
         if read_escape_seq escape_seq; then
-            key="$escape_seq"
+            key=$escape_seq
+            if [[ $key == "" || $key == $'\n' ]]; then key=$'\e\n'; fi
         else
-            key="ESC"
+            key=ESC
         fi
     fi
-
+    if ! terminal_size_ok; then
+        case $key in q|Q|$'\x03') exit 0 ;; esac
+        return 0
+    fi
     case $CURRENT_VIEW in
         0) handle_key_main "$key" ;;
         1) handle_key_detail "$key" ;;
@@ -1589,10 +1575,10 @@ handle_input_router() {
 
 main() {
     if (( BASH_VERSINFO[0] < 5 )); then log_err "Bash 5.0+ required"; exit 1; fi
-    if [[ ! -t 0 ]]; then log_err "TTY required"; exit 1; fi
+    if [[ ! -t 0 || ! -t 1 ]]; then log_err "Interactive TTY stdin/stdout required"; exit 1; fi
 
     local _dep
-    for _dep in nmcli awk; do
+    for _dep in nmcli awk stty; do
         if ! command -v "$_dep" &>/dev/null; then
             log_err "Missing dependency: ${_dep}"; exit 1
         fi
@@ -1603,19 +1589,34 @@ main() {
         exit 1
     fi
 
-    ORIGINAL_STTY=$(stty -g 2>/dev/null) || ORIGINAL_STTY=""
-    stty -icanon -echo min 1 time 0 2>/dev/null
+    ORIGINAL_STTY=$(stty -g < /dev/tty 2>/dev/null) || ORIGINAL_STTY=""
+    if [[ -z $ORIGINAL_STTY ]]; then log_err "Failed to read terminal settings."; exit 1; fi
+    if ! stty -icanon -echo -ixon min 1 time 0 < /dev/tty 2>/dev/null; then log_err "Terminal config failed."; exit 1; fi
 
-    printf '%s%s%s%s' "$MOUSE_ON" "$CURSOR_HIDE" "$CLR_SCREEN" "$CURSOR_HOME"
+    TUI_STARTED=1
+    printf '%s%s%s%s%s' "$ALT_SCREEN_ON" "$MOUSE_ON" "$CURSOR_HIDE" "$CLR_SCREEN" "$CURSOR_HOME"
 
-    draw_loading_frame "Connecting to NetworkManager..." "Querying radio, connections, and networks"
-    populate_all_tabs
+    # 1. Fire off the async data fetcher. The UI launches immediately.
+    start_background_load
 
-    local key=""
+    # 2. UI Loop Armor 
+    set +Eeu
+    trap 'RESIZE_PENDING=1' WINCH
+
+    local key
     while true; do
-        draw_ui
-        IFS= read -rsn1 key || break
-        handle_input_router "$key"
+        # 3. Process async responses
+        check_background_load
+        
+        # 4. Render (Animates the spinner naturally via the READ_LOOP_TIMEOUT pulse)
+        draw_ui || true
+        
+        if IFS= read -rsn1 -t "$READ_LOOP_TIMEOUT" key < /dev/tty; then
+            if (( RESIZE_PENDING )); then RESIZE_PENDING=0; fi
+            handle_input_router "$key"
+        else
+            if (( RESIZE_PENDING )); then RESIZE_PENDING=0; fi
+        fi
     done
 }
 

@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# Auto-detects system keyboard layout and patches Hyprland config.
-# Target System: Arch Linux / Hyprland / UWSM
+# Auto-detects system keyboard layout and patches Hyprland Lua config.
+# Target System: Arch Linux / Hyprland (0.55+) / UWSM
 # Author: Elite DevOps
 # -----------------------------------------------------------------------------------------
 
 set -euo pipefail
 
 # --- Configuration ---
-readonly TARGET_CONF="${HOME}/.config/hypr/source/input.conf"
+readonly TARGET_CONF="${HOME}/.config/hypr/edit_here/source/input.lua"
 readonly DEFAULT_LAYOUT="us"
 
 # --- Styling (TTY-aware) ---
@@ -136,13 +136,13 @@ apply_patch() {
     fi
 
     # Check if the file actually has the key we want to replace
-    # Anchor to start of line to avoid comments
-    if ! grep -q '^[[:space:]]*kb_layout' "${TARGET_CONF}"; then
+    # Anchor to start of line to avoid comments, allows for whitespace
+    if ! grep -E -q '^[[:space:]]*kb_layout[[:space:]]*=' "${TARGET_CONF}"; then
         log_err "No active 'kb_layout' key found in config. Cannot patch."
         exit 1
     fi
 
-    log_info "Patching ${BOLD}${TARGET_CONF}${NC} → kb_layout = ${BOLD}${layout}${NC}"
+    log_info "Patching ${BOLD}${TARGET_CONF}${NC} → kb_layout = ${BOLD}\"${layout}\"${NC}"
 
     # --- Atomic Write Logic ---
     local target_dir
@@ -154,9 +154,10 @@ apply_patch() {
     # 2. Preserve original file permissions (if possible)
     chmod --reference="${TARGET_CONF}" "${_temp_file}" 2>/dev/null || true
 
-    # 3. Perform substitution
-    # Delimiter | used to avoid collision
-    if ! sed -E "s|^([[:space:]]*)kb_layout[[:space:]]*=.*|\1kb_layout = ${layout}|" \
+    # 3. Perform substitution for Lua Syntax
+    # Group 1: Captures leading whitespace
+    # Group 2: Captures the trailing comma and comments after the quoted value
+    if ! sed -E "s|^([[:space:]]*)kb_layout[[:space:]]*=[[:space:]]*[\"'][^\"']*[\"'](.*)|\1kb_layout = \"${layout}\"\2|" \
              "${TARGET_CONF}" > "${_temp_file}"; then
         log_err "sed processing failed."
         exit 1
@@ -169,7 +170,6 @@ apply_patch() {
     fi
 
     # 5. Clear global var so trap doesn't delete the successfully moved file
-    # (Though on successful mv, the source file is gone anyway, this is good hygiene)
     _temp_file=""
     
     log_ok "Configuration updated successfully."
