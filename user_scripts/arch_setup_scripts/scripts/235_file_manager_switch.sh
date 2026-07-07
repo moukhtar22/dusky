@@ -253,8 +253,8 @@ switch_file_manager() {
         release_lock "$lock_fd"; return 1
     fi
 
-    if [[ "$t_type" == "1" ]]; then exec_cmd='terminal .. " " .. fileManager'
-    else exec_cmd='fileManager'; fi
+    if [[ "$t_type" == "1" ]]; then exec_cmd='"uwsm-app -- " .. terminal .. " " .. fileManager'
+    else exec_cmd='"uwsm-app -- " .. fileManager'; fi
 
     new_binds=$(awk -v new_cmd="$exec_cmd" '
         { lines[NR] = $0 }

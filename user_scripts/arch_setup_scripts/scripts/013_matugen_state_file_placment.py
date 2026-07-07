@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# matugen color config after fresh install
 """
 Initializes or overwrites the 'state.conf' user configuration for Dusky Theme.
 Designed for Arch Linux environments using Python 3.

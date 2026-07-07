@@ -2,9 +2,12 @@
 set -euo pipefail
 export LC_ALL=C
 
-# 1. Load 'sleep' as builtin if available (critical for loop performance)
+# 1. Load 'sleep' and 'stat' as builtins if available (critical for loop performance)
 if [[ -f /usr/lib/bash/sleep ]]; then
     enable -f /usr/lib/bash/sleep sleep 2>/dev/null || true
+fi
+if [[ -f /usr/lib/bash/stat ]]; then
+    enable -f /usr/lib/bash/stat stat 2>/dev/null || true
 fi
 
 # 2. Environment Setup
@@ -21,34 +24,15 @@ printf '%s\n' "$$" > "$PID_FILE"
 trap 'rm -rf "$STATE_DIR"' EXIT
 trap ':' USR1
 
-# 3. HELPER: Get time in microseconds (Pure Bash)
-# handles Bash 5.0+ EPOCHREALTIME or falls back to printf builtin
-if [[ -n "${EPOCHREALTIME+x}" ]]; then
-    get_time_us() {
-        local -n _out=$1
-        local s us
-        IFS=. read -r s us <<< "$EPOCHREALTIME"
-        # Pad microseconds to ensure 6 digits, then strip to 6
-        us="${us}000000"
-        _out=$(( s * 1000000 + 10#${us:0:6} ))
-    }
-else
-    get_time_us() {
-        local -n _out=$1
-        # Fallback: printf %(%s)T is a builtin in bash 4.2+
-        _out=$(( $(printf '%(%s)T' -1) * 1000000 ))
-    }
-fi
-
-# 4. HELPER: Interface Detection (ZERO FORK)
+# 3. HELPER: Interface Detection (ZERO FORK)
 # Strategy: Read /proc/net/route directly.
 # If the default route interface lacks stats (VPN bug), scan for physical fallback.
 find_active_iface() {
     local -n _iface_out=$1
-    local iface dest gateway flags refcnt use metric mask mtu window irtt
+    local iface dest
     
     # Attempt 1: Check Default Route (Destination 00000000)
-    while read -r iface dest gateway flags refcnt use metric mask mtu window irtt; do
+    while read -r iface dest _; do
         if [[ "$dest" == "00000000" ]]; then
             # Verify this interface actually exposes statistics
             if [[ -r "/sys/class/net/$iface/statistics/rx_bytes" ]]; then
@@ -60,22 +44,15 @@ find_active_iface() {
 
     # Attempt 2: Fallback - Find first UP physical interface with stats
     # (Fixes issues where VPN tunnels mask the real interface but offer no stats)
-    for state_file in /sys/class/net/*/operstate; do
-        [[ -r "$state_file" ]] || continue
-        
-        local if_name="${state_file%/operstate}"
-        if_name="${if_name##*/}"
-        
-        # Skip loopback
+    for path in /sys/class/net/*; do
+        local if_name="${path##*/}"
         [[ "$if_name" == "lo" ]] && continue
+        [[ -r "$path/operstate" ]] || continue
+        [[ -r "$path/statistics/rx_bytes" ]] || continue
         
-        # Check if interface is UP
         local state
-        read -r state < "$state_file" 2>/dev/null || state="unknown"
-        [[ "$state" == "up" ]] || continue
-
-        # Check if it has stats
-        if [[ -r "/sys/class/net/$if_name/statistics/rx_bytes" ]]; then
+        read -r state < "$path/operstate" || state="unknown"
+        if [[ "$state" == "up" ]]; then
             _iface_out="$if_name"
             return 0
         fi
@@ -85,42 +62,49 @@ find_active_iface() {
     return 1
 }
 
-# 5. HELPER: Format Speed (Pure Bash Math)
+# 4. HELPER: Format Speed (Pure Bash Math with Precision Rounding & GB/s Support)
 format_speed() {
     local -n _unit=$1 _tx=$2 _rx=$3 _class=$4
     local rx_d=$5 tx_d=$6
-    # Determine max to choose unit
     local max=$(( rx_d > tx_d ? rx_d : tx_d ))
 
-    # 1 MB = 1048576 bytes
-    if (( max >= 1048576 )); then
-        # Calculate with 1 decimal place using integer math
-        local tx_x10=$(( tx_d * 10 / 1048576 ))
-        local rx_x10=$(( rx_d * 10 / 1048576 ))
+    if (( max >= 1073741824 )); then
+        # GB/s: 1 GB = 1073741824 bytes
+        local tx_x10=$(( (tx_d * 10 + 536870912) / 1073741824 ))
+        local rx_x10=$(( (rx_d * 10 + 536870912) / 1073741824 ))
 
-        (( tx_x10 < 100 )) && _tx="$((tx_x10 / 10)).$((tx_x10 % 10))" || _tx="$((tx_x10 / 10))"
-        (( rx_x10 < 100 )) && _rx="$((rx_x10 / 10)).$((rx_x10 % 10))" || _rx="$((rx_x10 / 10))"
+        (( tx_x10 < 100 )) && _tx="$((tx_x10 / 10)).$((tx_x10 % 10))" || _tx="$(( (tx_d + 536870912) / 1073741824 ))"
+        (( rx_x10 < 100 )) && _rx="$((rx_x10 / 10)).$((rx_x10 % 10))" || _rx="$(( (rx_d + 536870912) / 1073741824 ))"
+
+        _unit="GB"
+        _class="network-gb"
+    elif (( max >= 1048576 )); then
+        # MB/s: 1 MB = 1048576 bytes
+        local tx_x10=$(( (tx_d * 10 + 524288) / 1048576 ))
+        local rx_x10=$(( (rx_d * 10 + 524288) / 1048576 ))
+
+        (( tx_x10 < 100 )) && _tx="$((tx_x10 / 10)).$((tx_x10 % 10))" || _tx="$(( (tx_d + 524288) / 1048576 ))"
+        (( rx_x10 < 100 )) && _rx="$((rx_x10 / 10)).$((rx_x10 % 10))" || _rx="$(( (rx_d + 524288) / 1048576 ))"
 
         _unit="MB"
         _class="network-mb"
     else
-        # KB
-        _tx=$(( tx_d / 1024 ))
-        _rx=$(( rx_d / 1024 ))
+        # KB/s: 1 KB = 1024 bytes
+        _tx=$(( (tx_d + 512) / 1024 ))
+        _rx=$(( (rx_d + 512) / 1024 ))
         _unit="KB"
         _class="network-kb"
     fi
 }
 
-# 6. HELPER: Heartbeat Check (Optimization)
-# Use 'stat' sparingly (every 3rd cycle) to avoid excessive IO
+# 5. HELPER: Heartbeat Check (Optimization - Forkless stat builtin)
 check_heartbeat() {
     local -n _hb_time=$1
     local now=$2
     
-    if [[ -f "$HEARTBEAT_FILE" ]]; then
-        # stat is an external binary, but we only run it every ~3 seconds
-        _hb_time=$(stat -c %Y "$HEARTBEAT_FILE" 2>/dev/null) || _hb_time=$now
+    local -A STAT
+    if stat -A STAT "$HEARTBEAT_FILE" 2>/dev/null; then
+        _hb_time="${STAT[mtime]}"
     else
         _hb_time=$now
     fi
@@ -135,9 +119,6 @@ current_iface=""
 iface_counter=0
 hb_counter=2
 hb_time=0
-
-# Pre-calculate constants
-WRAP_LIMIT=4294967296 # 2^32
 
 while :; do
     printf -v now '%(%s)T' -1
@@ -176,7 +157,7 @@ while :; do
     fi
 
     # E. Connected State - Measure
-    get_time_us start_time
+    start_time="${EPOCHREALTIME/./}"
 
     # Reset counters if interface changed
     if [[ "$current_iface" != "$iface" ]]; then
@@ -201,13 +182,9 @@ while :; do
     rx_delta=$(( rx_now - rx_prev ))
     tx_delta=$(( tx_now - tx_prev ))
 
-    # Handle 32-bit integer wrap-around
-    if (( rx_delta < 0 )); then rx_delta=$(( rx_delta + WRAP_LIMIT )); fi
-    if (( tx_delta < 0 )); then tx_delta=$(( tx_delta + WRAP_LIMIT )); fi
-    
-    # Sanity check: if still negative (huge jump/reset), clamp to 0
-    (( rx_delta < 0 )) && rx_delta=0
-    (( tx_delta < 0 )) && tx_delta=0
+    # Handle counter wrap-around or interface resets
+    (( rx_delta < 0 )) && rx_delta=$rx_now
+    (( tx_delta < 0 )) && tx_delta=$tx_now
 
     rx_prev=$rx_now
     tx_prev=$tx_now
@@ -218,7 +195,7 @@ while :; do
     mv -f "$STATE_FILE.tmp" "$STATE_FILE"
 
     # H. Precision Sleep
-    get_time_us end_time
+    end_time="${EPOCHREALTIME/./}"
     sleep_us=$(( 1000000 - (end_time - start_time) ))
 
     if (( sleep_us <= 0 )); then

@@ -58,7 +58,7 @@ declare -a COPY_TASKS=(
     "dusky/.zshrc :: /etc/skel/.zshrc"
 
     # 3. Network Manager Script
-    "dusky/user_scripts/network_manager/dusky_network.sh :: /etc/skel/wifi_connect.sh"
+    "dusky/user_scripts/network_manager/tui_dusky_network.py :: /etc/skel/wifi_connect.sh"
 
     # 4. foot color file
     "/etc/skel/.config/matugen/generated_fresh/foot-colors.ini :: /etc/skel/.config/foot/foot-colors.ini"

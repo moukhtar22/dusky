@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Declares and manages universal ALPM (Pacman) hooks system-wide.
+# Declares and manages universal ALPM (Pacman) hooks system-wide
 
 # --- Strict Execution Pragmas ---
 set -euo pipefail

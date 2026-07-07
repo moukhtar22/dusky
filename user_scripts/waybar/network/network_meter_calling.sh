@@ -15,8 +15,8 @@ UNIT="-" UP="-" DOWN="-" CLASS="network-disconnected"
 [[ -r "$STATE_FILE" ]] && read -r UNIT UP DOWN CLASS < "$STATE_FILE" || true
 
 # Signal daemon via heartbeat
-mkdir -p "$STATE_DIR"
-touch "$HEARTBEAT_FILE"
+[[ -d "$STATE_DIR" ]] || mkdir -p "$STATE_DIR"
+: > "$HEARTBEAT_FILE"
 
 # OPTIMIZATION: Only kill if PID file exists and process is actually running
 if [[ -r "$PID_FILE" ]]; then
@@ -29,30 +29,31 @@ fi
 
 # Formatter for Horizontal Mode (Original Unpadded Behavior)
 fmt_h() {
-    local s="${1:--}"
+    local -n _out=$1
+    local s="${2:--}"
     local len="${#s}"
     
-    if (( len == 1 )); then printf ' %s ' "$s"
-    elif (( len == 2 )); then printf ' %s' "$s"
-    else printf '%.3s' "$s"
+    if (( len == 1 )); then _out=" $s "
+    elif (( len == 2 )); then _out=" $s"
+    else _out="${s:0:3}"
     fi
 }
 
 # Formatter for Vertical Mode (Strict alignment matching update_counter.sh)
 fmt_v() {
-    local s="${1:--}"
-    # CRITICAL FIX: Evaluated on a separate line to prevent Bash expansion zeroing
+    local -n _out=$1
+    local s="${2:--}"
     local len="${#s}" 
     
     if (( len >= 3 )); then
-        printf '%.3s' "$s"
+        _out="${s:0:3}"
     elif (( len == 2 )); then
         # Natively pass literal JSON unicode escape so Waybar parses it perfectly
-        printf '\\u2005%s\\u2005' "$s"
+        _out="\\u2005${s}\\u2005"
     elif (( len == 1 )); then
-        printf ' %s ' "$s"
+        _out=" ${s} "
     else
-        printf '   '
+        _out="   "
     fi
 }
 
@@ -65,16 +66,34 @@ fi
 
 # Output Selection
 case "${1:-}" in
-    --vertical|vertical)     
-        TEXT="$(fmt_v "$UP")\\n$(fmt_v "$UNIT")\\n$(fmt_v "$DOWN")" 
+    --vertical|vertical)
+        fmt_v up_fmt "$UP"
+        fmt_v unit_fmt "$UNIT"
+        fmt_v down_fmt "$DOWN"
+        TEXT="${up_fmt}\\n${unit_fmt}\\n${down_fmt}" 
         ;;
-    --horizontal|horizontal) 
-        TEXT="$(fmt_h "$UP") $(fmt_h "$UNIT") $(fmt_h "$DOWN")" 
+    --horizontal|horizontal)
+        fmt_h up_fmt "$UP"
+        fmt_h unit_fmt "$UNIT"
+        fmt_h down_fmt "$DOWN"
+        TEXT="${up_fmt} ${unit_fmt} ${down_fmt}" 
         ;;
-    unit)                    TEXT="$(fmt_h "$UNIT")" ;;
-    up|upload)               TEXT="$(fmt_h "$UP")" ;;
-    down|download)           TEXT="$(fmt_h "$DOWN")" ;;
-    *)                       printf '{}\n'; exit 0 ;;
+    unit)
+        fmt_h unit_fmt "$UNIT"
+        TEXT="$unit_fmt"
+        ;;
+    up|upload)
+        fmt_h up_fmt "$UP"
+        TEXT="$up_fmt"
+        ;;
+    down|download)
+        fmt_h down_fmt "$DOWN"
+        TEXT="$down_fmt"
+        ;;
+    *)
+        printf '{%s}\n' ""
+        exit 0
+        ;;
 esac
 
 printf '{"text":"%s","class":"%s","tooltip":"%s"}\n' "$TEXT" "$CLASS" "$TT"

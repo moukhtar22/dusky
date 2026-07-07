@@ -220,6 +220,10 @@ def generate_schema() -> tuple[list[str], dict[int, list[ConfigItem]]]:
             group="Power & Performance", extended_help="When true, Hyprland stops sending frames to the GPU while nothing is changing on screen. Saves ~1 W on laptops."
         ),
         ConfigItem(
+            label="Debug Overlay (FPS)", key="overlay", scope="debug", type_="bool", default=False,
+            group="Power & Performance", extended_help="When true, Hyprland draws a debug overlay showing FPS, frame timings, and damage regions in the top-left corner of the screen."
+        ),
+        ConfigItem(
             label="Global VRR Override", key="vrr", scope="misc", type_="cycle", default="0",
             options=["0", "1", "2"], hints=["Off", "Always On", "Fullscreen Only"], group="Power & Performance",
             extended_help="Globally sets the Variable Refresh Rate behavior across all monitors."

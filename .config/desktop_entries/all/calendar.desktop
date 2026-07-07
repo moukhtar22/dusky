@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Calendar
+GenericName=khal
+Comment=Terminal CLI calendar application
+Exec=uwsm-app -- kitty --class ikhal -e ikhal
+Terminal=false
+Categories=Utility;Office;Calendar;
+Keywords=calendar;schedule;appointment;date;dates;day;month;year;event;events;plan;planner;
+Icon=x-office-calendar
+StartupNotify=true

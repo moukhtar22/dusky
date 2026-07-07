@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import sys
+sys.dont_write_bytecode = True
 import os
 import argparse
 import importlib.util
@@ -21,19 +22,24 @@ from pathlib import Path
 # so that the schemas, backups, and presets always point to the actual user's files.
 if os.geteuid() == 0:
     _real_uid = None
+    _real_gid = None
     _sudo_user = os.environ.get("SUDO_USER")
     _pkexec_uid = os.environ.get("PKEXEC_UID")
     
     if _sudo_user and _sudo_user != "root":
         try:
-            _real_uid = pwd.getpwnam(_sudo_user).pw_uid
+            _pw = pwd.getpwnam(_sudo_user)
+            _real_uid = _pw.pw_uid
+            _real_gid = _pw.pw_gid
         except KeyError: pass
     elif _pkexec_uid:
         try:
-            _real_uid = int(_pkexec_uid)
-        except ValueError: pass
+            _pw = pwd.getpwuid(int(_pkexec_uid))
+            _real_uid = _pw.pw_uid
+            _real_gid = _pw.pw_gid
+        except Exception: pass
         
-    if _real_uid:
+    if _real_uid and _real_gid:
         try:
             _pw = pwd.getpwuid(_real_uid)
             os.environ["HOME"] = _pw.pw_dir
@@ -49,6 +55,57 @@ if os.geteuid() == 0:
             ]:
                 if xdg_var not in os.environ or os.environ[xdg_var].startswith("/root"):
                     os.environ[xdg_var] = os.path.join(_pw.pw_dir, default_suffix)
+
+            # Proactively fix permissions of any user folders created by root
+            def _fix_permissions():
+                try:
+                    for suffix_dir in [".config/dusky", ".cache/dusky_tui", "Documents/logs/tui", "Documents/dusky_backups/tui_reset"]:
+                        target_p = Path(_pw.pw_dir) / suffix_dir
+                        if target_p.exists():
+                            for root_dir, dirs, files in os.walk(target_p):
+                                for d in dirs:
+                                    p = Path(root_dir) / d
+                                    if p.stat().st_uid == 0:
+                                        os.chown(p, _real_uid, _real_gid)
+                                for f in files:
+                                    p = Path(root_dir) / f
+                                    if p.stat().st_uid == 0:
+                                        os.chown(p, _real_uid, _real_gid)
+                            if target_p.stat().st_uid == 0:
+                                os.chown(target_p, _real_uid, _real_gid)
+                except Exception:
+                    pass
+
+            # Fix permissions at startup and register it at exit
+            _fix_permissions()
+            import atexit
+            atexit.register(_fix_permissions)
+
+            # Monkey-patch Path.mkdir to enforce correct ownership for newly created directories
+            import pathlib
+            _orig_mkdir = pathlib.Path.mkdir
+            def _safe_mkdir(self, mode=0o777, parents=False, exist_ok=False):
+                _orig_mkdir(self, mode=mode, parents=parents, exist_ok=exist_ok)
+                try:
+                    resolved_p = self.resolve()
+                    home_p = Path(_pw.pw_dir).resolve()
+                    if resolved_p.is_relative_to(home_p):
+                        os.chown(resolved_p, _real_uid, _real_gid)
+                        if parents:
+                            curr = resolved_p.parent
+                            while curr != curr.parent and curr.is_relative_to(home_p):
+                                try:
+                                    curr_stat = curr.stat()
+                                    if curr_stat.st_uid == _real_uid:
+                                        break
+                                    os.chown(curr, _real_uid, _real_gid)
+                                except Exception:
+                                    break
+                                curr = curr.parent
+                except Exception:
+                    pass
+            pathlib.Path.mkdir = _safe_mkdir
+
         except KeyError: pass
 
 # =============================================================================
@@ -253,6 +310,7 @@ EXAMPLES:
         USER_PRESETS_TAB = getattr(schema_module, "USER_PRESETS_TAB", None)
         GLOBAL_POPUP = getattr(schema_module, "GLOBAL_POPUP", None)
         TAB_NOTICES = getattr(schema_module, "TAB_NOTICES", None) 
+        DEFERRED_LOAD = getattr(schema_module, "DEFERRED_LOAD", None)
         
         REQUIRE_ROOT = getattr(schema_module, "REQUIRE_ROOT", False)
         ENGINE_TYPE = schema_module.ENGINE_TYPE.lower()
@@ -374,9 +432,18 @@ EXAMPLES:
         elif e_type == "waybar":
             from python.engines.waybar_engine import WaybarEngine
             engine = WaybarEngine(config_path=config_path)
+        elif e_type == "network":
+            from python.engines.network_manager import NetworkManagerEngine
+            engine = NetworkManagerEngine(config_path=config_path)
+        elif e_type == "pkg_throttle":
+            from python.engines.pkg_throttle import PkgThrottleEngine
+            engine = PkgThrottleEngine(config_path=config_path)
+        elif e_type == "cpu_core":
+            from python.engines.cpu_core import CpuCoreEngine
+            engine = CpuCoreEngine(config_path=config_path)
         else:
             print(f"[-] Fatal: Unknown ENGINE_TYPE '{e_type}' specified in schema '{schema_path.name}'.")
-            print("[i] Supported engines are: 'lua', 'ini', 'bridged_ini', 'systemd', 'hyprlang', 'trackpad', 'monitor', 'cmdline', 'systemd_boot', 'flatdotconfig', 'env', 'waybar'")
+            print("[i] Supported engines are: 'lua', 'ini', 'bridged_ini', 'systemd', 'hyprlang', 'trackpad', 'monitor', 'cmdline', 'systemd_boot', 'flatdotconfig', 'env', 'waybar', 'network', 'pkg_throttle', 'cpu_core'")
             sys.exit(1)
 
         engine_pool[key] = engine
@@ -430,6 +497,10 @@ EXAMPLES:
 
     # --- 4. HEADLESS OPERATIONS ---
     if is_headless:
+        # Complete deferred schema loading before headless processing
+        if DEFERRED_LOAD:
+            DEFERRED_LOAD()
+
         # Pre-load state caches across all active backend targets
         for eng in engine_pool.values():
             eng.load_state()
@@ -585,7 +656,12 @@ EXAMPLES:
         enable_user_presets=ENABLE_USER_PRESETS,
         user_presets_tab=USER_PRESETS_TAB,
         global_popup=GLOBAL_POPUP,
-        tab_notices=TAB_NOTICES
+        tab_notices=TAB_NOTICES,
+        deferred_load=DEFERRED_LOAD
     )
     
+    for engine in engine_pool.values():
+        if hasattr(engine, "set_app"):
+            engine.set_app(app)
+            
     app.run()

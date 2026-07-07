@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# configures pacman.conf for better settings
 # -----------------------------------------------------------------------------
 # Description: True atomic overwrite and rollback of /etc/pacman.conf
 # Target:      /etc/pacman.conf

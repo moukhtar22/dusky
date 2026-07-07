@@ -96,6 +96,8 @@ declare -i EXPECTED_PAGES_TO_SCAN
 declare EXPECTED_ENABLED
 declare EXPECTED_DEFRAG
 declare EXPECTED_SHMEM
+declare EXPECTED_64KB_ENABLED
+declare EXPECTED_128KB_ENABLED
 
 # The 30 GB Demarcation Line
 if [[ "$MODE" == "AGGRESSIVE" ]] || [[ "$MODE" == "AUTO" && SYSTEM_RAM_GB -ge 30 ]]; then
@@ -106,6 +108,8 @@ if [[ "$MODE" == "AGGRESSIVE" ]] || [[ "$MODE" == "AUTO" && SYSTEM_RAM_GB -ge 30
     EXPECTED_ENABLED="madvise"
     EXPECTED_DEFRAG="defer+madvise"
     EXPECTED_SHMEM="within_size"
+    EXPECTED_64KB_ENABLED="madvise"
+    EXPECTED_128KB_ENABLED="madvise"
 else
     EXPECTED_MODE="STRICT_RAM_SAVINGS (<32GB)"
     EXPECTED_MAX_PTES=180          # Lower value results in better ram savings but at the cost of cpu.
@@ -114,6 +118,8 @@ else
     EXPECTED_ENABLED="madvise"     # Only give THP to apps that explicitly ask.
     EXPECTED_DEFRAG="defer+madvise"
     EXPECTED_SHMEM="within_size"
+    EXPECTED_64KB_ENABLED="never"
+    EXPECTED_128KB_ENABLED="never"
 fi
 
 # --- 6. Generation & Verification ---
@@ -138,7 +144,7 @@ cat > "$tmpfile" <<EOF
 # TIER 1: Eradicate Internal Fragmentation (Never 16k/32k, Madvise 64k)
 w /sys/kernel/mm/transparent_hugepage/hugepages-16kB/enabled - - - - never
 w /sys/kernel/mm/transparent_hugepage/hugepages-32kB/enabled - - - - never
-w /sys/kernel/mm/transparent_hugepage/hugepages-64kB/enabled - - - - madvise
+w /sys/kernel/mm/transparent_hugepage/hugepages-64kB/enabled - - - - ${EXPECTED_64KB_ENABLED}
 w /sys/kernel/mm/transparent_hugepage/hugepages-16kB/shmem_enabled - - - - never
 w /sys/kernel/mm/transparent_hugepage/hugepages-32kB/shmem_enabled - - - - never
 w /sys/kernel/mm/transparent_hugepage/hugepages-64kB/shmem_enabled - - - - inherit
@@ -152,7 +158,7 @@ w /sys/kernel/mm/transparent_hugepage/hugepages-512kB/shmem_enabled - - - - neve
 w /sys/kernel/mm/transparent_hugepage/hugepages-1024kB/shmem_enabled - - - - never
 
 # TIER 3: Legacy / Large Mappings (Strict Madvise to Eradicate 2MB Base Bloat)
-w /sys/kernel/mm/transparent_hugepage/hugepages-128kB/enabled - - - - madvise
+w /sys/kernel/mm/transparent_hugepage/hugepages-128kB/enabled - - - - ${EXPECTED_128KB_ENABLED}
 w /sys/kernel/mm/transparent_hugepage/hugepages-2048kB/enabled - - - - madvise
 w /sys/kernel/mm/transparent_hugepage/hugepages-128kB/shmem_enabled - - - - inherit
 w /sys/kernel/mm/transparent_hugepage/hugepages-2048kB/shmem_enabled - - - - inherit
@@ -243,13 +249,13 @@ verify_mthp() {
 # Verify Tier 1
 verify_mthp 16 enabled never
 verify_mthp 32 enabled never
-verify_mthp 64 enabled madvise
+verify_mthp 64 enabled "${EXPECTED_64KB_ENABLED}"
 # Verify Tier 2
 verify_mthp 256 enabled never
 verify_mthp 512 enabled never
 verify_mthp 1024 enabled never
 # Verify Tier 3
-verify_mthp 128 enabled madvise
+verify_mthp 128 enabled "${EXPECTED_128KB_ENABLED}"
 verify_mthp 2048 enabled madvise
 
 for sz in 16 32 256 512 1024; do verify_mthp "$sz" shmem_enabled never; done

@@ -119,23 +119,29 @@ def build_standard_glance(suffix, label_name, group_name="Modules"):
     # Surgical variants directly compiled from the active Mako specification sheet
     width_map = {
         "": 170, "clock": 170, "clock-short": 170, "stopwatch": 170, "timer": 170, "pomodoro": 170,
-        "cpu": 100, "ram": 120, "ram-temp": 160, "zram": 210, "temp": 110, "battery": 190,
+        "cpu": 100, "cpu-power": 130, "ram": 120, "ram-temp": 160, "zram": 210, "temp": 110,
+        "battery": 180, "battery-percent": 100, "battery-watts": 120, "battery-time": 130,
+        "gpu-power": 130, "gpu-usage": 100, "gpu-mem": 160,
         "disk": 240, "disk-read": 190, "disk-write": 190, "disk-temp": 100,
-        "network": 190, "uptime": 170, "workspace": 140
+        "network": 190, "uptime": 170, "workspace": 140, "hud": 180, "world-clock": 140
     }
     
     height_map = {
-        "cpu": 38
+        "cpu": 38,
+        "battery": 72,
+        "hud": 68,
+        "world-clock": 52
     }
     
     border_size_map = {
         "ram-temp": 0,
-        "network": 1
+        "network": 0,
+        "hud": 0
     }
 
     width_val = width_map.get(suffix, 170)
     height_val = height_map.get(suffix, 40)
-    border_size_val = border_size_map.get(suffix, 2)
+    border_size_val = border_size_map.get(suffix, 0)
 
     return [
         ConfigItem(
@@ -155,7 +161,7 @@ def build_standard_glance(suffix, label_name, group_name="Modules"):
             key="anchor",
             scope=scope,
             type_="cycle",
-            default="bottom-right",
+            default="top-left" if suffix == "hud" else "bottom-right",
             options=["top-right", "top-center", "top-left", "bottom-right", "bottom-center", "bottom-left", "center-right", "center-left", "center"],
             parent_ref=uid,
             extended_help="**Dashboard Anchor**\n\nThe exact quadrant of the physical screen where the Glance widget originates. Usually kept at `bottom-right` to stay out of the way of primary workspace tasks."
@@ -165,7 +171,7 @@ def build_standard_glance(suffix, label_name, group_name="Modules"):
             key="layer",
             scope=scope,
             type_="cycle",
-            default="top",
+            default="overlay" if suffix in ("battery", "hud") else "top",
             options=["background", "bottom", "top", "overlay"],
             parent_ref=uid,
             extended_help="**Window Layering**\n\nArranges the widget at the specified layer relative to normal windows. Using `overlay` will cause notifications to be displayed above fullscreen windows."
@@ -175,7 +181,7 @@ def build_standard_glance(suffix, label_name, group_name="Modules"):
             key="text-alignment",
             scope=scope,
             type_="cycle",
-            default="center",
+            default="left" if suffix == "hud" else "center",
             options=["left", "center", "right"],
             parent_ref=uid,
             extended_help="**Text Justification**\n\nAligns the text to visually anchor against the screen edge (e.g. `right` if the widget is anchored `bottom-right`)."
@@ -209,7 +215,7 @@ def build_standard_glance(suffix, label_name, group_name="Modules"):
             key="margin",
             scope=scope,
             type_="string",
-            default="0,8,0,0",
+            default="10,0,0,10" if suffix == "hud" else "0,8,0,0",
             parent_ref=uid,
             extended_help="**Spatiotemporal Margin Offset**\n\nCSS-style margins (Top, Right, Bottom, Left) that push the dashboard away from the edges of the Wayland output screen."
         ),
@@ -218,7 +224,7 @@ def build_standard_glance(suffix, label_name, group_name="Modules"):
             key="padding",
             scope=scope,
             type_="string",
-            default="0",
+            default="8" if suffix == "hud" else "0",
             parent_ref=uid,
             extended_help="**Internal Guard Padding**\n\nSpace inserted between the active metrics text and the bounding box. Left at `0` for true transparent floating widgets."
         ),
@@ -227,7 +233,7 @@ def build_standard_glance(suffix, label_name, group_name="Modules"):
             key="border-radius",
             scope=scope,
             type_="int",
-            default=18,
+            default=10 if suffix == "hud" else 18,
             min_val=0,
             max_val=50,
             step=1,
@@ -294,7 +300,7 @@ def build_standard_glance(suffix, label_name, group_name="Modules"):
             key="font",
             scope=scope,
             type_="string",
-            default="monospace 10",
+            default="monospace 9" if suffix == "hud" else "monospace 10",
             parent_ref=uid,
             extended_help="**Typography & Size**\n\nDefines the font family and size for the Glance widget (e.g., `monospace 10`, `Ubuntu 12`)."
         ),
@@ -318,7 +324,7 @@ def build_standard_glance(suffix, label_name, group_name="Modules"):
             key="background-color",
             scope=scope,
             type_="color",
-            default="{{colors.on_primary.default.hex}}b3",
+            default="#00000033" if suffix == "hud" else "{{colors.on_primary.default.hex}}b3",
             options=COLOR_OPTIONS,
             hints=COLOR_HINTS,
             parent_ref=uid,
@@ -379,7 +385,7 @@ def build_alert_glance():
             key="width",
             scope=scope,
             type_="int",
-            default=300,
+            default=200,
             min_val=100,
             max_val=800,
             step=10,
@@ -391,7 +397,7 @@ def build_alert_glance():
             key="height",
             scope=scope,
             type_="int",
-            default=80,
+            default=40,
             min_val=20,
             max_val=200,
             step=4,
@@ -403,7 +409,7 @@ def build_alert_glance():
             key="margin",
             scope=scope,
             type_="string",
-            default="20,0,0,0",
+            default="25,0,0,0",
             parent_ref=uid,
             extended_help="**Alert Screen Offset**\n\nPushes the alert frame away from the absolute edge of the screen so it floats independently."
         ),
@@ -412,7 +418,7 @@ def build_alert_glance():
             key="padding",
             scope=scope,
             type_="string",
-            default="10",
+            default="0",
             parent_ref=uid,
             extended_help="**Alert Internal Buffer**\n\nSpacing separating the text payload from the warning borders."
         ),
@@ -421,7 +427,7 @@ def build_alert_glance():
             key="border-radius",
             scope=scope,
             type_="int",
-            default=12,
+            default=16,
             min_val=0,
             max_val=50,
             step=1,
@@ -433,7 +439,7 @@ def build_alert_glance():
             key="border-size",
             scope=scope,
             type_="int",
-            default=1,
+            default=2,
             min_val=0,
             max_val=10,
             step=1,
@@ -445,7 +451,7 @@ def build_alert_glance():
             key="border-color",
             scope=scope,
             type_="color",
-            default="{{colors.secondary.default.hex}}",
+            default="{{colors.tertiary.default.hex}}",
             options=COLOR_OPTIONS,
             hints=COLOR_HINTS,
             parent_ref=uid,
@@ -466,7 +472,7 @@ def build_alert_glance():
             key="icons",
             scope=scope,
             type_="bool",
-            default=True,
+            default=False,
             parent_ref=uid,
             extended_help="**Enable Warning Emblems**\n\nAllows the system to attach `.svg` icons (like a red battery symbol or disconnected cable) to visually augment the threat level."
         ),
@@ -494,7 +500,7 @@ def build_alert_glance():
             key="background-color",
             scope=scope,
             type_="color",
-            default="{{colors.secondary_container.default.hex}}ee",
+            default="{{colors.tertiary_container.default.hex}}d9",
             options=COLOR_OPTIONS,
             hints=COLOR_HINTS,
             parent_ref=uid,
@@ -505,7 +511,7 @@ def build_alert_glance():
             key="text-color",
             scope=scope,
             type_="color",
-            default="{{colors.on_secondary_container.default.hex}}",
+            default="{{colors.on_tertiary_container.default.hex}}",
             options=COLOR_OPTIONS,
             hints=COLOR_HINTS,
             parent_ref=uid,
@@ -528,15 +534,24 @@ SCHEMA = {
        build_standard_glance("clock-short", "Clock (Short)", "Time") +
        build_standard_glance("stopwatch", "Stopwatch", "Time") +
        build_standard_glance("timer", "Timer", "Time") +
-       build_standard_glance("pomodoro", "Pomodoro", "Time"),
+       build_standard_glance("pomodoro", "Pomodoro", "Time") +
+       build_standard_glance("world-clock", "World-Clock", "Time"),
 
     # --- TAB 3: Core Hardware ---
     3: build_standard_glance("cpu", "CPU", "Hardware") +
+       build_standard_glance("cpu-power", "CPU-Power", "Hardware") +
        build_standard_glance("ram", "RAM", "Hardware") +
        build_standard_glance("ram-temp", "RAM-Temp", "Hardware") +
        build_standard_glance("zram", "ZRAM", "Hardware") +
        build_standard_glance("temp", "Temperature", "Hardware") +
-       build_standard_glance("battery", "Battery", "Hardware"),
+       build_standard_glance("battery", "Battery", "Hardware") +
+       build_standard_glance("battery-percent", "Battery (Percent)", "Hardware") +
+       build_standard_glance("battery-watts", "Battery (Watts)", "Hardware") +
+       build_standard_glance("battery-time", "Battery (Time)", "Hardware") +
+       build_standard_glance("gpu-power", "GPU-Power", "Hardware") +
+       build_standard_glance("gpu-usage", "GPU-Usage", "Hardware") +
+       build_standard_glance("gpu-mem", "GPU-Memory", "Hardware") +
+       build_standard_glance("hud", "Gaming-HUD", "Hardware"),
 
     # --- TAB 4: Storage Metrics ---
     4: build_standard_glance("disk", "Disk-Space", "Storage") +

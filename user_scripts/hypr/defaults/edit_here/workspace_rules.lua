@@ -53,16 +53,16 @@
 --   decorate        (bool)    -- Enable/disable decorations (shadows, etc.).
 --   animation       (string)  -- Override workspace switch animation style.
 -- ==============================================================================
-hl.workspace_rule({ workspace = "1", layout = "dwindle", persistent = false })
-hl.workspace_rule({ workspace = "2", layout = "dwindle", persistent = false })
-hl.workspace_rule({ workspace = "3", layout = "dwindle", persistent = false })
-hl.workspace_rule({ workspace = "4", layout = "dwindle", persistent = false })
-hl.workspace_rule({ workspace = "5", layout = "dwindle", persistent = false })
-hl.workspace_rule({ workspace = "6", layout = "dwindle", persistent = false })
-hl.workspace_rule({ workspace = "7", layout = "dwindle", persistent = false })
-hl.workspace_rule({ workspace = "8", layout = "dwindle", persistent = false })
-hl.workspace_rule({ workspace = "9", layout = "dwindle", persistent = false })
-hl.workspace_rule({ workspace = "10", layout = "dwindle", persistent = false })
+hl.workspace_rule({ workspace = "1", layout = nil, persistent = false })
+hl.workspace_rule({ workspace = "2", layout = nil, persistent = false })
+hl.workspace_rule({ workspace = "3", layout = nil, persistent = false })
+hl.workspace_rule({ workspace = "4", layout = nil, persistent = false })
+hl.workspace_rule({ workspace = "5", layout = nil, persistent = false })
+hl.workspace_rule({ workspace = "6", layout = nil, persistent = false })
+hl.workspace_rule({ workspace = "7", layout = nil, persistent = false })
+hl.workspace_rule({ workspace = "8", layout = nil, persistent = false })
+hl.workspace_rule({ workspace = "9", layout = nil, persistent = false })
+hl.workspace_rule({ workspace = "10", layout = nil, persistent = false })
 
 
 -- ==============================================================================
@@ -283,15 +283,19 @@ hl.config({
     -- §10e Misc — special workspace & focus behaviour
     misc = {
         -- clean up empty scratchpads
-        close_special_on_empty    = true,
+        close_special_on_empty     = true,
         -- steal focus on activation
-        focus_on_activate         = true,
+        focus_on_activate          = true,
         -- 0 = stay behind | 1 = take over | 2 = swap fs
-        on_focus_under_fullscreen = 2,
+        on_focus_under_fullscreen  = 2,
+        -- Force new windows to spawn on the current workspace
+        initial_workspace_tracking = 1,
     },
 
     -- §10f Binds — workspace navigation behaviour
     binds = {
+        -- allow pinned windows to go fullscreen
+        allow_pin_fullscreen              = true,
         -- toggle back on re-dispatch
         workspace_back_and_forth          = false,
         -- wrap around at ends

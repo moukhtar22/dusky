@@ -58,7 +58,7 @@ declare -a COPY_TASKS=(
     "dusky/.zshrc :: /etc/skel/.zshrc"
 
     # 3. Network Manager Script
-    "dusky/user_scripts/network_manager/dusky_network.sh :: /etc/skel/wifi_connect.sh"
+    "dusky/user_scripts/network_manager/tui_dusky_network.py :: /etc/skel/wifi_connect.sh"
 )
 
 # Files matching these patterns will be forced to be executable (755)

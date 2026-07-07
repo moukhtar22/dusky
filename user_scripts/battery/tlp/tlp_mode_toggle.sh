@@ -21,7 +21,7 @@ readonly -a PROFILES=('power-saver' 'balanced' 'performance')
 declare -rA ICON_NERDFONT=(
     [performance]=$'\U000f04c5'    # 󰓅
     [balanced]=$'\U000f007e'       # 󰖳
-    [power-saver]=$'\U000f0327'    # 󰌧
+    [power-saver]=$'\U000f032a'    # 󰌪
     [unknown]='?'
 )
 
@@ -54,25 +54,45 @@ mkdir -p "$STATE_DIR"
 exec 200>"$LOCK_FILE"
 if ! flock -n 200; then exit 0; fi
 
+# Get actual profile from TLP runtime state or fallback to local state file
+get_actual_profile() {
+    local pwr_file="/run/tlp/last_pwr"
+    if [[ -f "$pwr_file" ]]; then
+        local pp_code ps_code
+        if read -r pp_code ps_code < "$pwr_file" 2>/dev/null; then
+            case "$pp_code" in
+                0) echo "performance"; return 0 ;;
+                1) echo "balanced"; return 0 ;;
+                2) echo "power-saver"; return 0 ;;
+            esac
+        fi
+    fi
+    # Fallback to local state file
+    if [[ -f "$STATE_FILE" ]]; then
+        cat "$STATE_FILE"
+    else
+        echo "balanced"
+    fi
+}
+
 # Initialize state file if missing
 if [[ ! -f "$STATE_FILE" ]]; then
     echo "balanced" > "$STATE_FILE"
 fi
-CURRENT_STATE=$(<"$STATE_FILE")
+CURRENT_STATE=$(get_actual_profile)
 
 # -- Core Functions --
 send_notification() {
     local profile="$1"
     if command -v notify-send >/dev/null 2>&1; then
         local pretty="${LABEL[$profile]:-$profile}"
-        local icon="${ICON_NOTIFY[$profile]:-${ICON_NOTIFY[unknown]}}"
+        local font_icon="${ICON_NERDFONT[$profile]:-}"
         notify-send \
-            --app-name="TLP Manager" \
+            --app-name="dusky-tlp" \
             --urgency="low" \
-            --icon="$icon" \
             --hint=string:x-canonical-private-synchronous:power-profile \
-            "Power Profile" \
-            "Active: ${pretty}" &
+            "TLP ${pretty}" \
+            "${font_icon}  ${pretty}" &
         disown
     fi
 }
@@ -161,6 +181,8 @@ USAGE
     tlp-toggle power-saver         Set power-saver profile
     tlp-toggle status              Print raw text state (for GTK app)
     tlp-toggle status --json       Print Waybar compatible JSON payload
+    tlp-toggle status --probe      Print detailed status (Profile, Power Source, Mode)
+    tlp-toggle status --probe-json Print detailed status in JSON format
     tlp-toggle -h | --help         Show this help
 EOF
 }
@@ -187,11 +209,45 @@ case "$ACTION" in
         ;;
     status)
         if [[ "$SUBFLAG" == "--json" ]]; then
-            local icon="${ICON_NERDFONT[$CURRENT_STATE]:-${ICON_NERDFONT[unknown]}}"
-            local label="${LABEL[$CURRENT_STATE]:-$CURRENT_STATE}"
-            local css="${CSS_CLASS[$CURRENT_STATE]:-unknown}"
+            icon="${ICON_NERDFONT[$CURRENT_STATE]:-${ICON_NERDFONT[unknown]}}"
+            label="${LABEL[$CURRENT_STATE]:-$CURRENT_STATE}"
+            css="${CSS_CLASS[$CURRENT_STATE]:-unknown}"
             printf '{"text":"%s %s","alt":"%s","class":"%s","tooltip":"Power profile: %s"}\n' \
                 "$icon" "$label" "$CURRENT_STATE" "$css" "$label"
+        elif [[ "$SUBFLAG" == "--probe" || "$SUBFLAG" == "-p" ]]; then
+            pp_code=""
+            ps_code=""
+            if [[ -f "/run/tlp/last_pwr" ]]; then
+                read -r pp_code ps_code < "/run/tlp/last_pwr" 2>/dev/null || true
+            fi
+            source="Unknown"
+            case "${ps_code:-}" in
+                0) source="AC" ;;
+                1) source="Battery" ;;
+            esac
+            mode="auto"
+            if [[ -f "/run/tlp/manual_mode" ]]; then
+                mode="manual"
+            fi
+            echo "Active Profile: $CURRENT_STATE"
+            echo "Power Source:   $source"
+            echo "Mode:           $mode"
+        elif [[ "$SUBFLAG" == "--probe-json" || "$SUBFLAG" == "-j" || "$SUBFLAG" == "--json-probe" ]]; then
+            pp_code=""
+            ps_code=""
+            if [[ -f "/run/tlp/last_pwr" ]]; then
+                read -r pp_code ps_code < "/run/tlp/last_pwr" 2>/dev/null || true
+            fi
+            source="Unknown"
+            case "${ps_code:-}" in
+                0) source="AC" ;;
+                1) source="Battery" ;;
+            esac
+            mode="auto"
+            if [[ -f "/run/tlp/manual_mode" ]]; then
+                mode="manual"
+            fi
+            printf '{"profile":"%s","power_source":"%s","mode":"%s"}\n' "$CURRENT_STATE" "$source" "$mode"
         else
             echo "$CURRENT_STATE"
         fi

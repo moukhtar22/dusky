@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# deployes dusky overlay configs
 """
 Initializes or validates the 'edit_here' user configuration overlay for Hyprland.
 Ensures all template files exist, deploying from the defaults directory.

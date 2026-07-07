@@ -364,6 +364,7 @@ hl.config({
         -- is changing on screen.  Saves ~1 W on a laptop; looks identical.
         -- Set to false only if you notice input latency regressions.
         vfr = true,
+        overlay = false,
     },
 
     render = {

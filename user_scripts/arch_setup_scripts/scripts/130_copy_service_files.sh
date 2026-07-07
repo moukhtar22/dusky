@@ -46,6 +46,9 @@ readonly SERVICES_CONFIG=(
 
     # dusky osd
     "$HOME/user_scripts/mako_osd/osd_router/osd_lock.service | disable"
+
+    # dusky RAM monitor
+    "$HOME/user_scripts/performance/swap_and_ram_monitor_service/dusky_ram_monitor.service | enable"
 )
 
 # XDG Standard: ~/.config/systemd/user

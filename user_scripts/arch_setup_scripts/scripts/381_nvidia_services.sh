@@ -53,11 +53,20 @@ enable_service() {
         if systemctl is-enabled --quiet "$service"; then
             log_info "$service is already enabled."
         else
-            # Try to enable and start immediately
-            if systemctl enable --now "$service" &>/dev/null; then
-                log_success "Enabled & Started: $service"
+            # Try to enable. Do NOT start suspend/hibernate/resume services immediately (--now)
+            # to prevent switching active VTs and freezing the graphics pipeline on a running session.
+            if [[ "$service" =~ nvidia-(suspend|hibernate|resume) ]]; then
+                if systemctl enable "$service" &>/dev/null; then
+                    log_success "Enabled: $service (Will trigger on system sleep events)"
+                else
+                    log_err "Failed to enable: $service (Check logs)"
+                fi
             else
-                log_err "Failed to enable: $service (Check logs)"
+                if systemctl enable --now "$service" &>/dev/null; then
+                    log_success "Enabled & Started: $service"
+                else
+                    log_err "Failed to enable: $service (Check logs)"
+                fi
             fi
         fi
     else

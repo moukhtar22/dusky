@@ -114,24 +114,29 @@ if [[ -n "$_TARGET_MODE" ]]; then
         update_config "persistent"
     fi
 else
-    clear
-    printf '%sUWSM Clipboard Persistence Manager%s\n' "$C_BOLD" "$C_RESET"
-    printf 'Target: %s\n\n' "$DB_ENV_FILE"
+    # Since standard output/error are redirected to a pipe by the orchestrator,
+    # we redirect the interactive menu prompt and user input to/from /dev/tty
+    # to bypass the pipe buffering and display the menu directly to the user.
+    {
+        clear
+        printf '%sUWSM Clipboard Persistence Manager%s\n' "$C_BOLD" "$C_RESET"
+        printf 'Target: %s\n\n' "$DB_ENV_FILE"
 
-    printf '%sWhich mode do you prefer?%s\n\n' "$C_BOLD" "$C_RESET"
+        printf '%sWhich mode do you prefer?%s\n\n' "$C_BOLD" "$C_RESET"
 
-    printf '  %s1) Ephemeral (RAM-based)%s\n' "$C_BOLD" "$C_RESET"
-    printf '     - Clipboard history is stored in RAM.\n'
-    printf '     - It %sdisappears%s when you reboot or shutdown.\n' "$C_RED" "$C_RESET"
-    printf '     - Good for privacy and saving disk writes.\n\n'
+        printf '  %s1) Ephemeral (RAM-based)%s\n' "$C_BOLD" "$C_RESET"
+        printf '     - Clipboard history is stored in RAM.\n'
+        printf '     - It %sdisappears%s when you reboot or shutdown.\n' "$C_RED" "$C_RESET"
+        printf '     - Good for privacy and saving disk writes.\n\n'
 
-    printf '  %s2) Persistent (Disk-based)%s\n' "$C_BOLD" "$C_RESET"
-    printf '     - Clipboard history is stored on your hard drive.\n'
-    printf '     - Your history %sstays available%s even after you reboot.\n' "$C_GREEN" "$C_RESET"
-    printf '     - Standard behavior for most users.\n\n'
+        printf '  %s2) Persistent (Disk-based)%s\n' "$C_BOLD" "$C_RESET"
+        printf '     - Clipboard history is stored on your hard drive.\n'
+        printf '     - Your history %sstays available%s even after you reboot.\n' "$C_GREEN" "$C_RESET"
+        printf '     - Standard behavior for most users.\n\n'
 
-    read -rp "Select option [1/2] (default: 1): " choice
-    choice="${choice:-1}"
+        read -rp "Select option [1/2] (default: 1): " choice
+        choice="${choice:-1}"
+    } > /dev/tty 2>&1 < /dev/tty
 
     case "$choice" in
         1) update_config "ephemeral" ;;
@@ -143,45 +148,53 @@ fi
 # =============================================================================
 # Post-Process (Live Daemon Reload)
 # =============================================================================
-if command -v uwsm >/dev/null 2>&1; then
+if command -v uwsm >/dev/null 2>&1 && timeout 2 uwsm check is-active >/dev/null 2>&1; then
     printf '\n'
-    log_info "Changes saved. Live-reloading clipboard daemons..."
+    log_info "Changes saved. Live-reloading clipboard daemons under UWSM session..."
 
-    # 1. Source the new state to dictate daemon paths
+    # 1. Source and propagate the new state to all layers
     if [[ -f "$DB_ENV_FILE" ]]; then
         source "$DB_ENV_FILE"
+        export CLIPHIST_DB_PATH
+        timeout 5 systemctl --user import-environment CLIPHIST_DB_PATH || true
+        timeout 5 dbus-update-activation-environment --systemd CLIPHIST_DB_PATH || true
+
     else
         unset CLIPHIST_DB_PATH
+        timeout 5 systemctl --user unset-environment CLIPHIST_DB_PATH || true
+        timeout 5 dbus-update-activation-environment --systemd --remove CLIPHIST_DB_PATH || true
+
     fi
 
     # 2. Terminate existing watchers securely
     pkill -f "wl-paste.*cliphist" 2>/dev/null || :
 
-    # 3. Respawn the daemons detached from the script's lifecycle
-    uwsm app -- wl-paste --type text --watch cliphist store >/dev/null 2>&1 &
-    uwsm app -- wl-paste --type image --watch cliphist store >/dev/null 2>&1 &
+    # 3. Respawn the daemons in the background (prevent blocking if systemd/dbus is busy)
+    uwsm app -- sh -c '. $HOME/.config/dusky/settings/cliphist_db_env && exec wl-paste --type text --watch cliphist store' >/dev/null 2>&1 &
+    uwsm app -- sh -c '. $HOME/.config/dusky/settings/cliphist_db_env && exec wl-paste --type image --watch cliphist store' >/dev/null 2>&1 &
+
+    log_success "Daemons reloaded. New persistence mode is now active globally without requiring a reboot!"
+else
+    printf '\n'
+    log_info "UWSM session not active. Live-reloading clipboard daemons in background..."
+
+    # 1. Source local shell environment
+    if [[ -f "$DB_ENV_FILE" ]]; then
+        source "$DB_ENV_FILE"
+        export CLIPHIST_DB_PATH
+
+    else
+        unset CLIPHIST_DB_PATH
+
+    fi
+
+    # 2. Terminate existing watchers securely
+    pkill -f "wl-paste.*cliphist" 2>/dev/null || :
+
+    # 3. Respawn the daemons directly in the background
+    sh -c '. $HOME/.config/dusky/settings/cliphist_db_env && exec wl-paste --type text --watch cliphist store' >/dev/null 2>&1 &
+    sh -c '. $HOME/.config/dusky/settings/cliphist_db_env && exec wl-paste --type image --watch cliphist store' >/dev/null 2>&1 &
     disown -a
 
-    log_success "Daemons reloaded. New persistence mode is now active."
-else
-    log_warn "uwsm command not found in PATH. Ensure you are in a UWSM session."
-    log_info "You will need to log out and back in for changes to take effect."
-fi
-
-# =============================================================================
-# CRITICAL REBOOT WARNING
-# =============================================================================
-if [[ "$_QUIET_MODE" != "true" ]]; then
-    printf '\n'
-    printf '\033[1;37;41m%s\033[0m\n' "================================================================================"
-    printf '\033[1;37;41m%s\033[0m\n' "||                                                                            ||"
-    printf '\033[1;37;41m%s\033[0m\n' "||                      !!! SYSTEM REBOOT REQUIRED !!!                        ||"
-    printf '\033[1;37;41m%s\033[0m\n' "||                                                                            ||"
-    printf '\033[1;37;41m%s\033[0m\n' "||  THE CLIPBOARD IS NOW IN A TRANSITIONAL STATE AND WILL NOT                 ||"
-    printf '\033[1;37;41m%s\033[0m\n' "||  FUNCTION CORRECTLY UNTIL A FULL SYSTEM REBOOT IS PERFORMED.               ||"
-    printf '\033[1;37;41m%s\033[0m\n' "||                                                                            ||"
-    printf '\033[1;37;41m%s\033[0m\n' "||  PLEASE SAVE ALL YOUR WORK AND REBOOT YOUR COMPUTER AT THE EARLIEST.       ||"
-    printf '\033[1;37;41m%s\033[0m\n' "||                                                                            ||"
-    printf '\033[1;37;41m%s\033[0m\n' "================================================================================"
-    printf '\n'
+    log_success "Daemons reloaded in background. New persistence mode is now active!"
 fi

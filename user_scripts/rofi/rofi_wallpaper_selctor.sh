@@ -23,7 +23,7 @@ readonly LOCK_FILE="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/rofi-wallpaper-select
 
 readonly WALLPAPER_DIR="$HOME/Pictures/wallpapers"
 readonly SETTINGS_DIR="$HOME/.config/dusky/settings"
-readonly FAVORITES_FILE="$SETTINGS_DIR/dusky_theme/wal_fav_rofi"
+readonly FAVORITES_FILE="$SETTINGS_DIR/dusky_theme/wal_fav_list"
 readonly STATE_FILE="$SETTINGS_DIR/dusky_theme/state.conf"
 readonly FAV_STATE_FILE="$SETTINGS_DIR/dusky_theme/current_fav"
 readonly THEME_CTL="${HOME}/user_scripts/theme_matugen/theme_ctl.sh"
@@ -494,6 +494,7 @@ build_cache() {
 }
 
 collect_favorites() {
+  # shellcheck disable=SC2178
   local -n favorites_ref=$1
   local fav
   local -A seen=()
@@ -516,10 +517,11 @@ collect_favorites() {
 }
 
 write_favorites_file() {
+  # shellcheck disable=SC2178
   local -n favorites_ref=$1
   local tmp fav
 
-  tmp=$(mktemp --tmpdir="$SETTINGS_DIR" wal_fav_rofi.tmp.XXXXXX)
+  tmp=$(mktemp --tmpdir="$SETTINGS_DIR" wal_fav_list.tmp.XXXXXX)
   register_temp "$tmp"
   : >"$tmp"
 

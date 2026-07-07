@@ -61,17 +61,21 @@ hl.on("hyprland.start", function()
     -- hl.exec_cmd("uwsm-app -- nm-applet")
 
     -- --- Slow app launch fix -- set systemd vars
-    -- The subshell evaluating $(env | cut -d'=' -f 1) is passed directly as a string 
-    -- to be evaluated by the shell instance spawned by hl.exec_cmd
-    hl.exec_cmd("systemctl --user import-environment $(env | cut -d'=' -f 1)")
     hl.exec_cmd("dbus-update-activation-environment --systemd --all")
 
     -- EG: dusky glance (uncomment only one at a time)
     -- hl.exec_cmd("~/user_scripts/rofi/dusky_glance.sh --cpu")
+    -- hl.exec_cmd("~/user_scripts/rofi/dusky_glance.sh --cpu-power")
     -- hl.exec_cmd("~/user_scripts/rofi/dusky_glance.sh --ram")
     -- hl.exec_cmd("~/user_scripts/rofi/dusky_glance.sh --ram-temp")
     -- hl.exec_cmd("~/user_scripts/rofi/dusky_glance.sh --temp")
     -- hl.exec_cmd("~/user_scripts/rofi/dusky_glance.sh --battery")
+    -- hl.exec_cmd("~/user_scripts/rofi/dusky_glance.sh --battery-percent")
+    -- hl.exec_cmd("~/user_scripts/rofi/dusky_glance.sh --battery-watts")
+    -- hl.exec_cmd("~/user_scripts/rofi/dusky_glance.sh --battery-time")
+    -- hl.exec_cmd("~/user_scripts/rofi/dusky_glance.sh --gpu-power card1 Intel")
+    -- hl.exec_cmd("~/user_scripts/rofi/dusky_glance.sh --gpu-usage card1 Intel")
+    -- hl.exec_cmd("~/user_scripts/rofi/dusky_glance.sh --gpu-mem card1 Intel")
     -- hl.exec_cmd("~/user_scripts/rofi/dusky_glance.sh --network")
     -- hl.exec_cmd("~/user_scripts/rofi/dusky_glance.sh --uptime")
     -- hl.exec_cmd("~/user_scripts/rofi/dusky_glance.sh --workspace")
@@ -84,8 +88,10 @@ hl.on("hyprland.start", function()
     -- hl.exec_cmd("~/user_scripts/rofi/dusky_glance.sh --zram")
     -- hl.exec_cmd("~/user_scripts/rofi/dusky_glance.sh --stopwatch")
     -- hl.exec_cmd("~/user_scripts/rofi/dusky_glance.sh --timer 15m")
-    -- hl.exec_cmd("~/user_scripts/rofi/dusky_glance.sh --pomodoro")
-    -- hl.exec_cmd("~/user_scripts/rofi/dusky_glance.sh --stop")
+    -- hl.exec_cmd("~/user_scripts/rofi/dusky_glance.sh --hud card1 Intel")
+    -- hl.exec_cmd("~/user_scripts/rofi/dusky_glance.sh --world-clock America/New_York NY")
+    -- hl.exec_cmd("~/user_scripts/rofi/dusky_glance.sh --world-clock Asia/Tokyo Japan")
+    -- hl.exec_cmd("~/user_scripts/rofi/dusky_glance.sh --world-clock Europe/London London")
 
 end)
 

@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Factorio
+Comment=Factorio game
+Exec=/home/new/user_scripts/gaming/factorio/run.sh
+Icon=factorio
+Categories=Game;
+Terminal=false

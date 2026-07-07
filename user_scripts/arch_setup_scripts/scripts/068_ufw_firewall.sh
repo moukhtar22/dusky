@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# configures ufw firewall rules
 # ==============================================================================
 # Script:  060_ufw_setup.sh
 # Purpose: Installs and configures UFW for an Arch Linux workstation.
@@ -227,6 +228,12 @@ for iface in "${TRUSTED_IFACES[@]}"; do
     
     if [[ -n "$WAN_IFACE" ]]; then
         ufw route allow in on "$iface" out on "$WAN_IFACE" comment "Forward: $iface -> WAN" >/dev/null
+    fi
+
+    # Libvirt KVM Bridge requires general route-in and route-out rules for host/guest communication
+    if [[ "$iface" == "virbr0" ]]; then
+        ufw route allow in on "$iface" comment "Route IN: $iface" >/dev/null
+        ufw route allow out on "$iface" comment "Route OUT: $iface" >/dev/null
     fi
 done
 success "Configured strict ingress & route forwarding rules."

@@ -25,6 +25,8 @@ Notes:
 
 from __future__ import annotations
 
+import argparse
+import contextlib
 import os
 import re
 import shutil
@@ -84,8 +86,6 @@ def install_missing_packages() -> None:
     """
     Install only the benchmark commands that are missing.
     """
-    ensure_paru()
-
     missing: list[str] = []
     if not tool_exists(MBW_PKG):
         missing.append(MBW_PKG)
@@ -95,6 +95,7 @@ def install_missing_packages() -> None:
     if not missing:
         return
 
+    ensure_paru()
     print(f"Installing missing package(s): {', '.join(missing)}")
     cmd = ["paru", "-S", "--needed", "--noconfirm", *missing]
     subprocess.run(cmd, check=True)
@@ -149,13 +150,107 @@ def mb_to_gb(mb: float) -> float:
     return mb / 1000.0
 
 
-def run_mbw() -> BenchResult:
+def validate_cores(cores_str: str) -> bool:
+    try:
+        subprocess.run(["taskset", "-c", cores_str, "true"], capture_output=True, check=True)
+        return True
+    except Exception:
+        return False
+
+
+@contextlib.contextmanager
+def optimize_cpu_performance():
+    """
+    Temporarily set CPU scaling governors of online CPUs to performance and enable turbo.
+    Restores original settings on exit.
+    """
+    sudo_pwd = "2345"
+    original_governors = {}
+    original_no_turbo = None
+    no_turbo_path = "/sys/devices/system/cpu/intel_pstate/no_turbo"
+    
+    import glob
+    gov_files = glob.glob("/sys/devices/system/cpu/cpu*/cpufreq/scaling_governor")
+    
+    for f in gov_files:
+        try:
+            with open(f, "r") as fh:
+                original_governors[f] = fh.read().strip()
+        except Exception:
+            pass
+            
+    if os.path.exists(no_turbo_path):
+        try:
+            with open(no_turbo_path, "r") as fh:
+                original_no_turbo = fh.read().strip()
+        except Exception:
+            pass
+
+    def set_values(gov_val, turbo_val):
+        py_cmds = ["import os", "import glob"]
+        if gov_val:
+            py_cmds.append(
+                f"for f in glob.glob('/sys/devices/system/cpu/cpu*/cpufreq/scaling_governor'):\n"
+                f"    try: open(f, 'w').write('{gov_val}')\n"
+                f"    except Exception: pass"
+            )
+        if turbo_val is not None:
+            py_cmds.append(
+                f"if os.path.exists('{no_turbo_path}'):\n"
+                f"    try: open('{no_turbo_path}', 'w').write('{turbo_val}')\n"
+                f"    except Exception: pass"
+            )
+        if not py_cmds:
+            return
+        script = "\n".join(py_cmds)
+        cmd = ["sudo", "-S", "python3", "-c", script]
+        try:
+            subprocess.run(cmd, input=f"{sudo_pwd}\n", text=True, capture_output=True, check=True)
+        except Exception as exc:
+            eprint(f"Warning: Failed to optimize CPU performance: {exc}")
+
+    print("\n[CPU Opt] Setting scaling governors to 'performance' and enabling Turbo Boost...")
+    set_values("performance", "0")
+    
+    try:
+        yield
+    finally:
+        print("[CPU Opt] Restoring original scaling governors and Turbo Boost settings...")
+        py_restore = ["import os"]
+        for f, gov in original_governors.items():
+            py_restore.append(
+                f"try: open({f!r}, 'w').write({gov!r})\n"
+                f"except Exception: pass"
+            )
+        if original_no_turbo is not None:
+            py_restore.append(
+                f"if os.path.exists({no_turbo_path!r}):\n"
+                f"    try: open({no_turbo_path!r}, 'w').write({original_no_turbo!r})\n"
+                f"    except Exception: pass"
+            )
+        if py_restore:
+            script = "\n".join(py_restore)
+            cmd = ["sudo", "-S", "python3", "-c", script]
+            try:
+                subprocess.run(cmd, input=f"{sudo_pwd}\n", text=True, capture_output=True, check=True)
+            except Exception as exc:
+                eprint(f"Warning: Failed to restore CPU settings: {exc}")
+
+
+def run_mbw(size_mib: int | None = None, runs: int | None = None, cores: str | None = None) -> BenchResult:
     print()
     print("mbw: single-thread bandwidth test")
-    size_mib = prompt_int("Array size in MiB", 4096, minimum=1)
-    runs = prompt_int("Runs per test", 10, minimum=1)
+    
+    if size_mib is None:
+        size_mib = prompt_int("Array size in MiB", 4096, minimum=1)
+    if runs is None:
+        runs = prompt_int("Runs per test", 10, minimum=1)
 
-    cmd = ["mbw", "-n", str(runs), str(size_mib)]
+    cmd = []
+    if cores:
+        cmd.extend(["taskset", "-c", cores])
+    cmd.extend(["mbw", "-n", str(runs), str(size_mib)])
+    
     print()
     print("Running:", " ".join(cmd))
     output = run_capture(cmd)
@@ -186,14 +281,21 @@ def run_mbw() -> BenchResult:
     return BenchResult(name="mbw", raw_output=output)
 
 
-def run_stress_ng() -> BenchResult:
+def run_stress_ng(workers: int | None = None, timeout: str | None = None, cores: str | None = None) -> BenchResult:
     print()
     print("stress-ng stream: multi-core STREAM-like bandwidth test")
+    
     default_workers = online_cpus()
-    workers = prompt_int("Workers (defaults to all online CPUs)", default_workers, minimum=1)
-    timeout = prompt_text("Timeout", "10s")
+    if workers is None:
+        workers = prompt_int("Workers (defaults to all online CPUs)", default_workers, minimum=1)
+    if timeout is None:
+        timeout = prompt_text("Timeout", "10s")
 
-    cmd = [
+    cmd = []
+    if cores:
+        cmd.extend(["taskset", "-c", cores])
+        
+    cmd.extend([
         "stress-ng",
         "--stream",
         str(workers),
@@ -201,13 +303,27 @@ def run_stress_ng() -> BenchResult:
         timeout,
         "--metrics-brief",
         "-v",
-    ]
+    ])
 
     print()
     print("Running:", " ".join(cmd))
     output = run_capture(cmd)
 
     print(output, end="" if output.endswith("\n") else "\n")
+
+    # Warn if duration is too short for stress-ng stream
+    # E.g. "timeout 3s" or "timeout 3"
+    timeout_val = 10
+    try:
+        t_clean = timeout.strip().lower()
+        if t_clean.endswith("s"):
+            t_clean = t_clean[:-1]
+        timeout_val = float(t_clean)
+    except Exception:
+        pass
+        
+    if timeout_val < 5.0:
+        print("\n[Tip] stress-ng requires a duration of at least 5 seconds to reliably measure stream memory rate.")
 
     rate_re = re.compile(
         r"memory rate:\s+([0-9]+(?:\.[0-9]+)?)\s+MB read/sec,\s+([0-9]+(?:\.[0-9]+)?)\s+MB write/sec"
@@ -236,6 +352,44 @@ def run_stress_ng() -> BenchResult:
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Measure RAM bandwidth using mbw and stress-ng stream."
+    )
+    parser.add_argument(
+        "--bench",
+        choices=["mbw", "stress-ng", "both"],
+        help="Run specific benchmark non-interactively (if omitted, runs interactively).",
+    )
+    parser.add_argument(
+        "--size",
+        type=int,
+        help="Array size in MiB for mbw (default: 4096).",
+    )
+    parser.add_argument(
+        "--runs",
+        type=int,
+        help="Runs per test for mbw (default: 10).",
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        help="Number of workers for stress-ng (default: all online CPUs).",
+    )
+    parser.add_argument(
+        "--timeout",
+        help="Timeout for stress-ng (default: 10s).",
+    )
+    parser.add_argument(
+        "--cores",
+        help="List of cores to pin the benchmark to (e.g. 0-3 or 0,2).",
+    )
+    parser.add_argument(
+        "--performance",
+        action="store_true",
+        help="Temporarily optimize CPU scaling governors and enable Turbo Boost.",
+    )
+    args = parser.parse_args()
+
     try:
         install_missing_packages()
     except subprocess.CalledProcessError as exc:
@@ -247,28 +401,48 @@ def main() -> int:
         eprint(exc)
         return 1
 
-    while True:
-        choice = prompt_choice()
+    if args.cores and not validate_cores(args.cores):
+        eprint(f"Error: Invalid cores specification: {args.cores}")
+        return 2
 
-        if choice == "q":
-            return 0
+    cpu_opt = optimize_cpu_performance() if args.performance else contextlib.nullcontext()
 
-        try:
-            if choice == "1":
-                run_mbw()
-            elif choice == "2":
-                run_stress_ng()
-            elif choice == "3":
-                run_mbw()
-                print()
-                run_stress_ng()
-        except subprocess.CalledProcessError as exc:
-            eprint(f"Benchmark failed with exit code {exc.returncode}.")
-            if exc.output:
-                print(exc.output)
-            return exc.returncode
+    with cpu_opt:
+        if args.bench:
+            # Non-interactive execution
+            try:
+                if args.bench in {"mbw", "both"}:
+                    run_mbw(size_mib=args.size or 4096, runs=args.runs or 10, cores=args.cores)
+                if args.bench in {"stress-ng", "both"}:
+                    run_stress_ng(workers=args.workers, timeout=args.timeout or "10s", cores=args.cores)
+            except subprocess.CalledProcessError as exc:
+                eprint(f"Benchmark failed with exit code {exc.returncode}.")
+                if exc.output:
+                    print(exc.output)
+                return exc.returncode
+        else:
+            # Interactive execution
+            while True:
+                choice = prompt_choice()
+                if choice == "q":
+                    break
+                try:
+                    if choice == "1":
+                        run_mbw(cores=args.cores)
+                    elif choice == "2":
+                        run_stress_ng(cores=args.cores)
+                    elif choice == "3":
+                        run_mbw(cores=args.cores)
+                        print()
+                        run_stress_ng(cores=args.cores)
+                except subprocess.CalledProcessError as exc:
+                    eprint(f"Benchmark failed with exit code {exc.returncode}.")
+                    if exc.output:
+                        print(exc.output)
+                    return exc.returncode
+                break
 
-        return 0
+    return 0
 
 
 if __name__ == "__main__":

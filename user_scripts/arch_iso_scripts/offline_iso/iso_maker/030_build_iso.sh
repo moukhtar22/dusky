@@ -50,7 +50,7 @@ declare -g INTERACTIVE_MODE=1
 declare -g REPO_MODE=0  # 1 = Standard Arch, 2 = CachyOS
 
 # ==============================================================================
-# SECTION 3 — COLORS & LOGGING
+# SECTION 3 — COLORS & LOGGING & UTILITIES
 # ==============================================================================
 _setup_colors() {
   BOLD='' GREEN='' YELLOW='' RED='' CYAN='' MAGENTA='' DIM='' RESET=''
@@ -74,6 +74,17 @@ log_ok()   { printf '%s[OK]%s %s\n' "${BOLD}${GREEN}" "${RESET}" "$*"; }
 log_warn() { printf '%s[!!]%s %s\n' "${BOLD}${YELLOW}" "${RESET}" "$*" >&2; }
 log_err()  { printf '%s[XX]%s %s\n' "${BOLD}${RED}" "${RESET}" "$*" >&2; }
 die()      { log_err "$*"; exit 1; }
+
+_wait_for_pacman_lock() {
+  local lock_file="/var/lib/pacman/db.lck"
+  if [[ -f "${lock_file}" ]]; then
+    log_warn "Pacman database lock detected. Waiting for the other package manager to finish..."
+    while [[ -f "${lock_file}" ]]; do
+      sleep 2
+    done
+    log_ok "Pacman lock released. Proceeding..."
+  fi
+}
 
 # ==============================================================================
 # SECTION 4 — ARGUMENT PARSING & INTERACTIVE UI
@@ -135,6 +146,8 @@ _install_dependencies() {
 
   log_step "Enforcing required packages: ${deps[*]}..."
   
+  _wait_for_pacman_lock
+  
   # Explicitly sync and install strictly needed dependencies without user interaction
   pacman -S --needed --noconfirm "${deps[@]}" >/dev/null || die "Failed to install required dependencies."
   
@@ -174,6 +187,9 @@ _preflight_checks() {
           
           local keyring_pkg
           keyring_pkg=$(curl -sL https://mirror.cachyos.org/repo/x86_64/cachyos/ | grep -o 'cachyos-keyring-[0-9][^"]*\.pkg\.tar\.zst' | head -n1 || true)
+          
+          _wait_for_pacman_lock
+
           if [[ -n "$keyring_pkg" ]]; then
              pacman -U --noconfirm "https://mirror.cachyos.org/repo/x86_64/cachyos/${keyring_pkg}" || die "Failed to install cachyos-keyring."
           else

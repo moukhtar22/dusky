@@ -1451,6 +1451,125 @@ class WallpaperApp:
         return self.app.run([sys.argv[0]])
 
 
+def load_favorites_list() -> list[str]:
+    if FAVORITES_FILE.exists():
+        try:
+            content = FAVORITES_FILE.read_text(encoding='utf-8')
+            return sorted(filter(None, content.splitlines()), key=natural_keys)
+        except Exception as e:
+            print(f"Error loading favorites: {e}")
+    return []
+
+
+def get_current_fav() -> str:
+    if FAV_STATE_FILE.exists():
+        try:
+            return FAV_STATE_FILE.read_text(encoding='utf-8').strip()
+        except Exception as e:
+            print(f"Error reading current fav state file: {e}")
+    return ""
+
+
+def apply_fav_wallpaper(rel_path: str):
+    full_path = WALLPAPER_DIR / rel_path
+    if not full_path.exists():
+        full_path = Path(rel_path)
+        if not full_path.exists():
+            print(f"Error: Path {full_path} does not exist.")
+            return
+
+    basename = os.path.basename(rel_path)
+    
+    # Parse state.conf
+    state = {}
+    if STATE_FILE.exists():
+        try:
+            content = STATE_FILE.read_text(encoding='utf-8')
+            for line in content.splitlines():
+                line = line.strip()
+                if line and not line.startswith('#') and '=' in line:
+                    k, v = line.split('=', 1)
+                    state[k.strip()] = v.strip().strip("'").strip('"')
+        except Exception as e:
+            print(f"Error reading state file: {e}")
+
+    theme_mode = state.get('THEME_MODE', 'dark')
+    track_file = TRACK_LIGHT if theme_mode == "light" else TRACK_DARK
+    atomic_write(track_file, f"{basename}\n")
+    atomic_write(FAV_STATE_FILE, f"{basename}\n")
+
+    awww_cmd = ["uwsm-app", "--", "awww", "img"]
+    def add_opt(key, flag):
+        val = state.get(key, 'disable')
+        if val and val != 'disable':
+            awww_cmd.extend([flag, val])
+
+    add_opt('AWWW_TRANS_TYPE', '--transition-type')
+    add_opt('AWWW_TRANS_DURATION', '--transition-duration')
+    add_opt('AWWW_TRANS_FPS', '--transition-fps')
+    add_opt('AWWW_TRANS_BEZIER', '--transition-bezier')
+    add_opt('AWWW_TRANS_ANGLE', '--transition-angle')
+    add_opt('AWWW_TRANS_POS', '--transition-pos')
+    awww_cmd.append(str(full_path))
+
+    try:
+        subprocess.run(awww_cmd, check=True, capture_output=True, text=True)
+        subprocess.run(
+            [str(THEME_CTL), "refresh"], check=True, capture_output=True, text=True
+        )
+        subprocess.run([
+            "notify-send", "-a", "dusky-fav-wal", 
+            "-h", "string:x-canonical-private-synchronous:fav-wal",
+            "-i", "/usr/share/icons/Papirus/16x16/symbolic/emblems/emblem-favorite-symbolic.svg",
+            "Favorite", basename,
+            "-u", "low", "-t", "1200"
+        ])
+    except subprocess.CalledProcessError as e:
+        err_msg = e.stderr.strip() if e.stderr else str(e)
+        print(f"Backend execution failed: {err_msg}")
+        subprocess.run([
+            "notify-send", "-a", "dusky-fav-wal", 
+            "-h", "string:x-canonical-private-synchronous:fav-wal",
+            "-i", "/usr/share/icons/Papirus/16x16/symbolic/emblems/emblem-favorite-symbolic.svg",
+            "Error", "Failed to apply wallpaper", 
+            "-u", "critical"
+        ])
+
+
+def cycle_favorites(direction: str = "next"):
+    favs = load_favorites_list()
+    if not favs:
+        subprocess.run([
+            "notify-send", "-a", "dusky-fav-wal", 
+            "-i", "/usr/share/icons/Papirus/16x16/symbolic/emblems/emblem-favorite-symbolic.svg",
+            "No Favorites", "No liked wallpapers yet.", 
+            "-u", "normal", "-t", "2500"
+        ])
+        sys.exit(0)
+    
+    current_fav = get_current_fav()
+    next_fav = favs[0]
+    
+    if current_fav:
+        try:
+            current_index = -1
+            for idx, fav in enumerate(favs):
+                if os.path.basename(fav) == current_fav or fav == current_fav:
+                    current_index = idx
+                    break
+            
+            if current_index != -1:
+                if direction == "next":
+                    next_idx = (current_index + 1) % len(favs)
+                else:
+                    next_idx = (current_index - 1) % len(favs)
+                next_fav = favs[next_idx]
+        except Exception as e:
+            print(f"Error cycling favorites: {e}")
+            
+    apply_fav_wallpaper(next_fav)
+
+
 # ==============================================================================
 # ENTRY POINT & CLI PARSING
 # ==============================================================================
@@ -1465,6 +1584,14 @@ if __name__ == "__main__":
         '--rebuild-cache', action='store_true',
         help="Force: nuke entire cache directory and regenerate all thumbnails, then exit."
     )
+    group.add_argument(
+        '--next-fav', action='store_true',
+        help="Cycle to the next favorite wallpaper and exit."
+    )
+    group.add_argument(
+        '--prev-fav', action='store_true',
+        help="Cycle to the previous favorite wallpaper and exit."
+    )
     group.add_argument('--precache', action='store_true', help=argparse.SUPPRESS)
 
     args, unknown = parser.parse_known_args()
@@ -1474,6 +1601,12 @@ if __name__ == "__main__":
         sys.exit(0)
     elif args.build_cache or args.precache:
         CacheManager.build_cache(force=False)
+        sys.exit(0)
+    elif args.next_fav:
+        cycle_favorites("next")
+        sys.exit(0)
+    elif args.prev_fav:
+        cycle_favorites("prev")
         sys.exit(0)
     else:
         selector = WallpaperApp()

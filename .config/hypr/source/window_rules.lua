@@ -584,6 +584,16 @@ hl.window_rule({
     center = true
 })
 
+--- Clipbard_interface ---
+hl.window_rule({
+    name = "460_switch_clipboard.sh",
+    match = { class = "^(460_switch_clipboard\\.sh)$" },
+    float = true,
+    size = {805, 323},
+    center = true
+})
+
+
 --- Cache_purge ---
 hl.window_rule({
     name = "cache_purge",
@@ -636,7 +646,6 @@ hl.window_rule({
     match = { class = "^(dusky_snapshot_manager.py)$" },
     float = true,
     size = {"(monitor_w*0.95)", "(monitor_h*0.9)"},
-    move = {"(monitor_w*0.05)", "(monitor_h*0.05)"},
     center = true
 })
 
@@ -1025,8 +1034,8 @@ hl.window_rule({
 
 --- nmcli script ---
 hl.window_rule({
-    name = "dusky_network.sh",
-    match = { class = "^(dusky_network.sh)$" },
+    name = "tui_dusky_network.py",
+    match = { class = "^(tui_dusky_network.py)$" },
     float = true,
     size = {780,530},
     center = true
@@ -1261,8 +1270,8 @@ hl.window_rule({
 
 --- System benchmarking script ---
 hl.window_rule({
-    name = "sysbench_benchmark.sh",
-    match = { class = "^(sysbench_benchmark.sh)$" },
+    name = "sysbench_benchmark.py",
+    match = { class = "^(sysbench_benchmark.py)$" },
     float = true,
     size = {567, 658},
     center = true
@@ -1442,8 +1451,8 @@ hl.window_rule({
         class = "^(waybar_tui)$",
     },
     float = true,
-    size = {709, 760},
-    -- size = {"monitor_w * 0.4616", "monitor_h * 0.8796"},
+    size = {720, 690},
+    -- size = {"monitor_w * 0.5523", "monitor_h * 0.9583"},
 })
 
 --- Zathura (PDF Viewer) ---
@@ -1579,9 +1588,8 @@ hl.window_rule({
     float = true,
     pin = true,
 
-    -- 2. Set Size FIRST (approx 360p)
-    -- We set this first so the 'move' command knows how wide the window is.
-    size = {248, 140},
+    -- 2. Preserve native aspect ratio during resizing
+    keep_aspect_ratio = true,
 
     -- 3. Move to Bottom-Right
     -- standard syntax: (screen_width - window_width - margin)
@@ -1839,6 +1847,17 @@ hl.config({
 --     size = {1135, 634},
 --     center = true
 -- })
+
+--- Calendar (ikhal): Float with Default Size ---
+hl.window_rule({
+    name = "float-calendar",
+    match = {
+        class = "^(ikhal)$"
+    },
+    float = true,
+    size = {650, 700},
+    center = true
+})
 
 -- =============================================================================
 -- END OF FILE

@@ -12,7 +12,7 @@ local function is_target_app_active()
     local w = hl.get_active_window()
     if not w then return false end
     local class = w.class or ""
-    return class == "dusky_tui" or class == "wallpaper_selector.py" or class == "terminal_clipboard.sh"
+    return class == "dusky_tui" or class == "wallpaper_selector.py" or class == "factorio" or class == "terminal_clipboard.sh"
 end
 
 local function cond_bind(key, default_dsp, flags)
@@ -140,7 +140,7 @@ hl.bind(
 
 hl.bind(
     "ALT + 1",
-    hl.dsp.exec_cmd("foot --app-id=dusky_network.sh $HOME/user_scripts/network_manager/dusky_network.sh"),
+    hl.dsp.exec_cmd("foot --app-id=dusky_tui python $HOME/user_scripts/dusky_tui/python/main/main.py $HOME/user_scripts/network_manager/tui_dusky_network.py"),
     { description = "Wi-Fi Manager" }
 )
 
@@ -170,7 +170,7 @@ hl.bind(
 
 hl.bind(
     "SUPER + SHIFT + apostrophe",
-    hl.dsp.exec_cmd(dusky_scripts .. "rofi/rofi_wallpaper_selctor.sh --next-fav"),
+    hl.dsp.exec_cmd(dusky_scripts .. "images/wallpaper_selector.py --next-fav"),
     { description = "Cycle Fav Wallpaper" }
 )
 
@@ -436,28 +436,32 @@ hl.bind(
 
 
 -- --- Clipboard & Screenshot ---
--- hl.bind(
---     "SUPER + V",
---     hl.dsp.exec_cmd("pkill rofi; rofi -modi \"clipboard:" .. dusky_scripts .. "rofi/rofi_cliphist.sh\" -show clipboard"),
---     { description = "Clipboard History" }
--- )
+local clipboard_state_file = os.getenv("HOME") .. "/.config/dusky/settings/clipboard_state"
+local use_terminal_clipboard = true
+local f_state = io.open(clipboard_state_file, "r")
+if f_state then
+    local content = f_state:read("*all")
+    f_state:close()
+    if content:match("False") then
+        use_terminal_clipboard = false
+    end
+end
 
-hl.bind("SUPER + V", function()
-    -- Kill any existing clipboard foot instance with SIGTERM (-15).
-    -- The '^foot' anchor is critical: it means only processes whose
-    -- cmdline STARTS with 'foot' are matched. The sh subprocess spawned
-    -- by os.execute starts with 'sh', so it can never self-match.
-    -- This eliminates the self-terminating sh -c wrapper bug.
-    os.execute("pkill -15 -f '^foot.*terminal_clipboard'")
-
-    -- Dispatch the fresh instance. hl.dispatch + exec_cmd spawns
-    -- foot directly without a sh -c wrapper, so there are no shell
-    -- chain issues here. os.getenv() expands $HOME safely in Lua.
-    hl.dispatch(hl.dsp.exec_cmd(
-        "foot --app-id=terminal_clipboard.sh " ..
-        os.getenv("HOME") .. "/user_scripts/clipboard/terminal_clipboard.sh"
-    ))
-end, { description = "Clipboard History" })
+if use_terminal_clipboard then
+    hl.bind("SUPER + V", function()
+        os.execute("pkill -15 -f '^foot.*terminal_clipboard'")
+        hl.dispatch(hl.dsp.exec_cmd(
+            "foot --app-id=terminal_clipboard.sh " ..
+            os.getenv("HOME") .. "/user_scripts/clipboard/terminal_clipboard.sh"
+        ))
+    end, { description = "Clipboard History (Terminal)" })
+else
+    hl.bind(
+        "SUPER + V",
+        hl.dsp.exec_cmd("pkill rofi; rofi -modi \"clipboard:" .. dusky_scripts .. "rofi/rofi_clipboard.sh\" -show clipboard"),
+        { description = "Clipboard History (Rofi)" }
+    )
+end
 
 
 hl.bind(
@@ -618,9 +622,9 @@ hl.bind(
 --
 -- /user_scripts/tools/workspace/close-workspace.sh -- Working Feature but Unsure
 -- hl.bind(
---     "SUPER + SHIFT + C",
---     hl.dsp.exec_cmd(dusky_scripts .. "tools/workspace/close-workspace.sh"),
---     { description = "Close Workspace" }
+--    "CTRL + escape",
+--    hl.dsp.exec_cmd(dusky_scripts .. "tools/workspace/close-workspace.sh"),
+--    { description = "Close Workspace" }
 -- )
 -- ----
 -- /user_scripts/tools/workspace/safety-close.sh -- Working Feature but Unsure
@@ -630,6 +634,14 @@ hl.bind(
 --     { description = "Safety Close Window" }
 -- )
 -- ----
+
+hl.bind(
+    "SUPER + SHIFT + C",
+    hl.dsp.exec_cmd(dusky_scripts .. "hypr/pkill/kill_focused_process.sh"),
+    { description = "Kill Focused Process Completely"}
+)
+
+
 
 hl.bind(
     "SUPER + A",

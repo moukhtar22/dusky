@@ -54,6 +54,26 @@ _EXECUTABLE = sys.executable
 SCHEMA = {
     0: [
         ConfigItem(
+            label="Toggle Waybar Position",
+            key="action_invert_pos",
+            scope="DEFAULT",
+            type_="bool", 
+            default=False,
+            options=["trigger"], 
+            group="Layout",
+            extended_help="**Toggle Position**\n\nInstantly inverts the current screen position (Top becomes Bottom, Left becomes Right). Equivalent to pressing Spacebar in the old bash script."
+        ),
+        ConfigItem(
+            label="Heal Broken Symlinks",
+            key="action_heal_state",
+            scope="DEFAULT",
+            type_="bool",
+            default=False,
+            options=["trigger"], 
+            group="Layout",
+            extended_help="**Heal Broken Configuration**\n\nIf your Waybar symlinks break, this action rebuilds the exact symlink paths needed and restarts Waybar automatically based on your chronologically saved index."
+        ),
+        ConfigItem(
             label="Active Theme Target",
             key="waybar",
             scope="DEFAULT",
@@ -99,32 +119,6 @@ for i, name in enumerate(THEMES):
     )
 
 SCHEMA[0].extend(dynamic_theme_items)
-
-# --- Inject Layout & Healing Actions ---
-# CRITICAL FIX: Utilizing the new `options=["trigger"]` flag allows these to natively
-# render as "Apply" buttons while communicating completely safely with the backend engine.
-SCHEMA[0].extend([
-    ConfigItem(
-        label="Toggle Waybar Position",
-        key="action_invert_pos",
-        scope="DEFAULT",
-        type_="bool", 
-        default=False,
-        options=["trigger"], 
-        group="Layout",
-        extended_help="**Toggle Position**\n\nInstantly inverts the current screen position (Top becomes Bottom, Left becomes Right). Equivalent to pressing Spacebar in the old bash script."
-    ),
-    ConfigItem(
-        label="Heal Broken Symlinks",
-        key="action_heal_state",
-        scope="DEFAULT",
-        type_="bool",
-        default=False,
-        options=["trigger"], 
-        group="Layout",
-        extended_help="**Heal Broken Configuration**\n\nIf your Waybar symlinks break, this action rebuilds the exact symlink paths needed and restarts Waybar automatically based on your chronologically saved index."
-    )
-])
 
 # =============================================================================
 # 3. STANDALONE CLI MODE (Replaces dusky_waybars.sh)

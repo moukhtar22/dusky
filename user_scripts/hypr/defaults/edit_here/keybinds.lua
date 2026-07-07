@@ -20,24 +20,24 @@
 
 hl.bind(
     "SUPER + Q",
-    hl.dsp.exec_cmd(terminal),
+    hl.dsp.exec_cmd("uwsm-app -- " .. terminal),
     { description = "Launch Terminal", submap_universal = true  }
 )
 
 hl.bind(
     "SUPER + W",
-    hl.dsp.exec_cmd(browser),
+    hl.dsp.exec_cmd("uwsm-app -- " .. browser),
     { description = "Launch Browser", submap_universal = true  }
 )
 
 hl.bind(
     "SUPER + E",
-    hl.dsp.exec_cmd(fileManager),
+    hl.dsp.exec_cmd("uwsm-app -- " .. fileManager),
     { description = "File Manager", submap_universal = true  }
 )
 
 hl.bind(
     "SUPER + R",
-    hl.dsp.exec_cmd(textEditor),
+    hl.dsp.exec_cmd("uwsm-app -- " .. textEditor),
     { description = "Open Text Editor", submap_universal = true  }
 )

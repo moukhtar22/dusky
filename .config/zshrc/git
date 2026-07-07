@@ -15,3 +15,38 @@ alias gitdelta='git_dusky_add_list && git_dusky diff HEAD'
 
 # 5. Lazygit Bare Repo Alias
 alias lazygit_dusky='lazygit --git-dir=$HOME/dusky/ --work-tree=$HOME'
+
+# 6. Push a single file to dotfiles bare repo
+function git_dusky_push() {
+    local filepath="${1:-}"
+    if [[ -z "$filepath" ]]; then
+        echo "Usage: git_dusky_push <file_path>"
+        return 1
+    fi
+
+    # Resolve relative path to HOME
+    local rel_path
+    rel_path=$(realpath --relative-to="$HOME" "$filepath" 2>/dev/null)
+    if [[ $? -ne 0 || "$rel_path" == ../* ]]; then
+        echo "Error: File must be within $HOME"
+        return 1
+    fi
+
+    echo -n "Commit message for '$rel_path': "
+    read -r msg
+    if [[ -z "$msg" ]]; then
+        echo "Aborted: Commit message is required."
+        return 1
+    fi
+
+    (
+        cd "$HOME"
+        git_dusky add "$rel_path"
+        git_dusky commit -m "$msg ($rel_path)"
+        git_dusky push
+    )
+}
+
+# 7. Dusky Dotfiles Manager Dashboard Alias
+alias dusky='~/user_scripts/git/git_dusky.py'
+

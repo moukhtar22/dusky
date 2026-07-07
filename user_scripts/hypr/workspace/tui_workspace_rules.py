@@ -58,10 +58,10 @@ for i in range(1, 11):
             key="layout",
             scope=f"workspace_rule/{i}",
             type_="cycle",
-            default="dwindle",
-            options=["dwindle", "master", "scrolling", "monocle"],
+            default="nil",
+            options=["nil", "dwindle", "master", "scrolling", "monocle"],
             parent_ref=f"ws_{i}_menu",
-            extended_help=f"**Workspace {i} Layout**\n\nForces a specific layout for this workspace. Monocle will make windows take up the entire available space."
+            extended_help=f"**Workspace {i} Layout**\n\nForces a specific layout for this workspace. Monocle will make windows take up the entire available space. If set to 'nil', it inherits the Global Default Layout."
         ),
         ConfigItem(
             label="Persistent",

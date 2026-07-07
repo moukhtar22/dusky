@@ -137,7 +137,16 @@ def get_runtime_dir() -> Path:
         except FileExistsError:
             pass
 
-    st = path.stat()
+    try:
+        st = path.lstat()
+    except FileNotFoundError:
+        err(f"Security hazard: Directory {path} disappeared during creation.")
+        sys.exit(1)
+
+    if path.is_symlink():
+        err(f"Security hazard: Directory {path} is a symlink. Possible hijack attempt.")
+        sys.exit(1)
+
     if st.st_uid != uid or (st.st_mode & 0o077) != 0:
         err(f"Security hazard: Directory {path} is improperly permissioned or hijacked.")
         sys.exit(1)
@@ -323,6 +332,31 @@ def run_sudo_cmd(cmd: list[str], stdin_data: str | None = None) -> bool:
         err(f"Command execution failed: {e}")
         return False
 
+def run_cryptsetup_unlock(cmd: list[str], passphrase: str, timeout: int = 180) -> bool:
+    """Runs a cryptsetup open command with a passphrase piped via stdin.
+
+    Shows a real-time spinner during key derivation (Argon2id/PBKDF2) to prevent
+    the user from thinking the script is frozen during the typically 30-60 second
+    key derivation phase.
+    """
+    try:
+        with console.status("[bold blue]  Deriving encryption key — this typically takes 30-60s...", spinner="dots"):
+            res = subprocess.run(
+                cmd, input=passphrase, text=True,
+                capture_output=True, timeout=timeout
+            )
+        if res.returncode != 0:
+            if res.stderr:
+                err(f"Subprocess kernel error: {res.stderr.strip()}")
+            return False
+        return True
+    except subprocess.TimeoutExpired:
+        err(f"Cryptsetup timed out after {timeout} seconds. The system may be under heavy load.")
+        return False
+    except Exception as e:
+        err(f"Command execution failed: {e}")
+        return False
+
 def is_process_alive(pid: str) -> bool:
     """Checks if a process is still alive by sending signal 0 via the kernel."""
     try:
@@ -333,25 +367,37 @@ def is_process_alive(pid: str) -> bool:
 
 def resolve_busy_processes(mountpoint: Path) -> bool:
     """Finds processes keeping the drive busy parsing lsof directly (sudo bypasses hidepid natively)."""
-    res = subprocess.run(["sudo", "lsof", "+f", "--", str(mountpoint)], capture_output=True, text=True)
+    res = subprocess.run(["sudo", "lsof", "-F", "pcu", "+f", "--", str(mountpoint)], capture_output=True, text=True)
     if res.returncode != 0 or not res.stdout.strip():
         return False
 
-    lines = res.stdout.strip().split("\n")
-    if len(lines) <= 1:
-        return False
-
     processes = []
-    for line in lines[1:]:
-        parts = line.split()
-        if len(parts) >= 3:
-            pid = parts[1]
-            if not any(p["pid"] == pid for p in processes):
-                processes.append({
-                    "cmd": parts[0],
-                    "pid": pid,
-                    "user": parts[2]
-                })
+    current_p = {}
+    for line in res.stdout.strip().split("\n"):
+        if not line:
+            continue
+        prefix = line[0]
+        val = line[1:]
+        if prefix == 'p':
+            if current_p and 'pid' in current_p:
+                processes.append(current_p)
+            current_p = {'pid': val, 'cmd': 'Unknown', 'user': 'Unknown'}
+        elif prefix == 'c' and current_p:
+            current_p['cmd'] = val
+        elif prefix == 'u' and current_p:
+            current_p['user'] = val
+
+    if current_p and 'pid' in current_p:
+        processes.append(current_p)
+
+    unique_processes = []
+    seen_pids = set()
+    for p in processes:
+        if p['pid'] not in seen_pids:
+            seen_pids.add(p['pid'])
+            unique_processes.append(p)
+
+    processes = unique_processes
 
     if not processes:
         return False
@@ -422,6 +468,112 @@ def run_cryptsetup_forensics(mapper_name: str):
     else:
         hint_msg("No userspace applications are holding the node. It is likely locked by a kernel subsystem (e.g., LVM, Btrfs async flusher) or udev daemon probing.")
         hint_msg(f"To lock it asynchronously once the kernel is finished, run: `sudo cryptsetup close --deferred {mapper_name}`")
+
+class CPUAccelerator:
+    """Context manager to temporarily enable offline Performance cores on hybrid systems."""
+    def __init__(self):
+        self.enabled_cores = []
+
+    def __enter__(self):
+        try:
+            p_cores, _ = self.get_hybrid_topology()
+            if not p_cores:
+                return self
+
+            offline_p_cores = []
+            for cpu_id in p_cores:
+                online_file = Path(f"/sys/devices/system/cpu/cpu{cpu_id}/online")
+                if online_file.exists():
+                    try:
+                        if online_file.read_text().strip() == "0":
+                            offline_p_cores.append(cpu_id)
+                    except Exception:
+                        pass
+
+            if offline_p_cores:
+                log(f"Offline Performance cores detected (CPUs: {offline_p_cores}).")
+                log("Temporarily enabling Performance cores to accelerate operation...")
+                for cpu_id in offline_p_cores:
+                    cmd = ["sudo", "tee", f"/sys/devices/system/cpu/cpu{cpu_id}/online"]
+                    if run_sudo_cmd(cmd, stdin_data="1"):
+                        self.enabled_cores.append(cpu_id)
+        except Exception as e:
+            err(f"Failed to initiate CPU acceleration: {e}")
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if self.enabled_cores:
+            log("Restoring CPU power-saving state (disabling P-cores)...")
+            for cpu_id in self.enabled_cores:
+                cmd = ["sudo", "tee", f"/sys/devices/system/cpu/cpu{cpu_id}/online"]
+                success = False
+                last_err = ""
+                for attempt in range(5):
+                    try:
+                        res = subprocess.run(cmd, input="0", text=True, capture_output=True)
+                        if res.returncode == 0:
+                            success = True
+                            break
+                        else:
+                            last_err = res.stderr.strip() if res.stderr else f"Non-zero return code ({res.returncode})"
+                    except Exception as e:
+                        last_err = str(e)
+                    time.sleep(0.1 * (attempt + 1))
+                if not success:
+                    err(f"Failed to restore CPU {cpu_id} to offline state: {last_err}")
+
+    def get_hybrid_topology(self) -> tuple[list[int], list[int]]:
+        p_cores: list[int] = []
+        e_cores: list[int] = []
+        cpu_sysfs = Path("/sys/devices/system/cpu")
+        try:
+            cpu_nodes = sorted([node for node in cpu_sysfs.glob("cpu[0-9]*") if node.is_dir()], key=lambda p: int(p.name[3:]))
+            cppc_perf = {}
+            for node in cpu_nodes:
+                cpu_id = int(node.name[3:])
+                perf_file = node / "acpi_cppc" / "highest_perf"
+                if perf_file.is_file():
+                    try:
+                        perf_str = perf_file.read_text().strip()
+                        if perf_str.isdigit():
+                            cppc_perf[cpu_id] = int(perf_str)
+                    except Exception:
+                        pass
+            if cppc_perf:
+                unique_perfs = sorted(list(set(cppc_perf.values())))
+                if len(unique_perfs) > 1:
+                    min_perf = unique_perfs[0]
+                    max_perf = unique_perfs[-1]
+                    
+                    # Only treat as hybrid if the performance gap is significant (e.g. > 15% difference)
+                    # to prevent misclassifying AMD preferred core / binning variations on symmetric CPUs.
+                    if (max_perf - min_perf) / max_perf > 0.15:
+                        midpoint = (min_perf + max_perf) / 2
+                        
+                        first_e_core_id = None
+                        for cpu_id in sorted(cppc_perf.keys()):
+                            if cppc_perf[cpu_id] < midpoint:
+                                first_e_core_id = cpu_id
+                                break
+                                
+                        if first_e_core_id is not None:
+                            for node in cpu_nodes:
+                                cpu_id = int(node.name[3:])
+                                if cpu_id < first_e_core_id:
+                                    p_cores.append(cpu_id)
+                                else:
+                                    e_cores.append(cpu_id)
+                            return p_cores, e_cores
+                    else:
+                        for cpu_id in sorted(cppc_perf.keys()):
+                            if cppc_perf[cpu_id] > midpoint:
+                                p_cores.append(cpu_id)
+                            else:
+                                e_cores.append(cpu_id)
+        except Exception:
+            pass
+        return p_cores, e_cores
+
 
 # ------------------------------------------------------------------------------
 #  PERSISTENT FAILED PASSWORD STORAGE
@@ -666,7 +818,7 @@ def do_unlock(drive: Drive) -> bool:
             if pwd:
                 log("Password found in secure keyring. Supplying to cryptsetup...")
                 cmd = base_cmd + ["--tries", "1", "--key-file", "-"]
-                if not run_sudo_cmd(cmd, stdin_data=pwd):
+                if not run_cryptsetup_unlock(cmd, pwd):
                     err("Decryption failed. Keyring password might be incorrect.")
                     return False
             else:
@@ -709,9 +861,18 @@ def do_unlock(drive: Drive) -> bool:
                     if not pwd_attempt:
                         continue
                         
+                    # Fix: Use rstrip('\r\n') instead of strip() to preserve intentional spaces in passphrases
+                    pwd_attempt = pwd_attempt.rstrip('\r\n')
+                        
+                    try:
+                        subprocess.run(["sudo", "-n", "-v"], check=True, capture_output=True)
+                    except subprocess.CalledProcessError:
+                        log("Sudo credential expired during prompt. Refreshing...")
+                        prime_sudo()
+                        
                     cmd = base_cmd + ["--tries", "1", "--key-file", "-"]
                     
-                    if run_sudo_cmd(cmd, stdin_data=pwd_attempt):
+                    if run_cryptsetup_unlock(cmd, pwd_attempt):
                         clear_temp_attempts(drive.name)
                         if set_keyring_password_with_timeout(KEYRING_SERVICE, drive.name, pwd_attempt):
                             success("Password saved to keyring for future use.")
@@ -742,17 +903,22 @@ def do_unlock(drive: Drive) -> bool:
             if fallback_mapper.exists():
                 mount_source = str(fallback_mapper)
 
+    fstype_to_check = (drive.fstype or detected_fstype or "").lower()
+
     mount_args = ["--mkdir"]
     
-    if drive.fstype:
+    # Under kernel 7.1+, we force the use of the new kernel 'ntfs' driver by bypassing
+    # mount helpers (-i) and explicitly passing the filesystem type 'ntfs' if it is NTFS.
+    if "ntfs" in fstype_to_check:
+        mount_args.extend(["-i", "-t", "ntfs"])
+    elif drive.fstype:
         mount_args.extend(["-t", drive.fstype])
         
     options = []
     if drive.mount_options:
         options.extend(drive.mount_options)
     else:
-        fstype_to_check = (drive.fstype or detected_fstype or "").lower()
-        if fstype_to_check in ["ntfs", "ntfs3", "vfat", "fat32", "exfat", "msdos"]:
+        if fstype_to_check in ["ntfs", "vfat", "fat32", "exfat", "msdos"]:
             uid = os.getuid()
             gid = os.getgid()
             options.append(f"uid={uid},gid={gid},dmask=022,fmask=133")
@@ -771,7 +937,6 @@ def do_unlock(drive: Drive) -> bool:
     if run_sudo_cmd(cmd):
         success(f"'{drive.name}' successfully mounted.")
         
-        fstype_to_check = (drive.fstype or detected_fstype or "").lower()
         if fstype_to_check not in ["btrfs", "zfs"]:
             log("Dispatching asynchronous background TRIM operation to SSD firmware...")
             subprocess.Popen(
@@ -782,23 +947,6 @@ def do_unlock(drive: Drive) -> bool:
                 start_new_session=True
             )
         return True
-    elif drive.fstype and "ntfs3" in drive.fstype.lower():
-        log("Mount with ntfs3 failed. Retrying with ntfs type...")
-        mount_args = ["--mkdir", "-t", "ntfs"]
-        if options:
-            mount_args.extend(["-o", ",".join(options)])
-        cmd = [
-            "sudo", "mount",
-            *mount_args,
-            "--source", mount_source,
-            "--target", str(drive.mountpoint)
-        ]
-        if run_sudo_cmd(cmd):
-            success(f"'{drive.name}' successfully mounted (via ntfs fallback).")
-            return True
-        else:
-            err(f"Failed to mount {mount_source} to {drive.mountpoint}.")
-            return False
     else:
         err(f"Failed to mount {mount_source} to {drive.mountpoint}.")
         return False
@@ -841,6 +989,10 @@ def do_lock(drive: Drive) -> bool:
         
         if physical_present:
             mapper_name = get_crypt_mapper_name(drive.outer_uuid)
+            if not mapper_name:
+                deterministic_name = f"luks-{drive.outer_uuid}"
+                if Path(f"/dev/mapper/{deterministic_name}").exists():
+                    mapper_name = deterministic_name
         else:
             deterministic_name = f"luks-{drive.outer_uuid}"
             if Path(f"/dev/mapper/{deterministic_name}").exists():
@@ -980,27 +1132,29 @@ def main():
                     err(f"Drive '{target}' not found in configuration.")
                     sys.exit(1)
 
+            prime_sudo()
             acquire_lock()
             
             overall_success = True
             
             # Second pass: Process them sequentially and robustly catch failures
-            for idx, target in enumerate(args.targets):
-                if idx > 0:
-                    console.print("\n[dim]" + "-" * 60 + "[/dim]\n")
-                
-                drive = drives[target]
-                if args.action == "unlock":
-                    success_flag = do_unlock(drive)
-                else:
-                    success_flag = do_lock(drive)
+            with CPUAccelerator():
+                for idx, target in enumerate(args.targets):
+                    if idx > 0:
+                        console.print("\n[dim]" + "-" * 60 + "[/dim]\n")
                     
-                if not success_flag:
-                    overall_success = False
-                    if idx < len(args.targets) - 1:
-                        hint_msg(f"Operation on '{target}' failed. Moving to next drive...")
+                    drive = drives[target]
+                    if args.action == "unlock":
+                        success_flag = do_unlock(drive)
                     else:
-                        err(f"Operation on '{target}' failed.")
+                        success_flag = do_lock(drive)
+                        
+                    if not success_flag:
+                        overall_success = False
+                        if idx < len(args.targets) - 1:
+                            hint_msg(f"Operation on '{target}' failed. Moving to next drive...")
+                        else:
+                            err(f"Operation on '{target}' failed.")
             
             # Regression Fix: Hard exit to OS on failure to protect shell chaining
             if not overall_success:
@@ -1012,3 +1166,4 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         console.print("\n[bold red]\\[ERROR][/] Interrupted by user.")
         sys.exit(130)
+

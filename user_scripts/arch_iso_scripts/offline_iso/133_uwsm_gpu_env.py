@@ -93,6 +93,18 @@ def get_pci_name(pci_address: str) -> str:
         pass
     return "Unknown PCI Device"
 
+def find_by_path_link(card_node: Path, pci_address: str) -> Path:
+    by_path_dir = Path("/dev/dri/by-path")
+    if by_path_dir.is_dir():
+        for link in by_path_dir.iterdir():
+            if link.name.startswith(f"pci-{pci_address}") and link.name.endswith("card"):
+                try:
+                    if link.resolve() == card_node:
+                        return link
+                except OSError:
+                    continue
+    return Path(f"/dev/dri/by-path/pci-{pci_address}-card")
+
 def detect_topology() -> list[GPUCard]:
     Log.info("Scanning GPU topology via sysfs...")
     drm_path = Path("/sys/class/drm")
@@ -106,10 +118,6 @@ def detect_topology() -> list[GPUCard]:
         if not re.match(r'^card\d+$', card_dir.name):
             continue
 
-        vendor_file = card_dir / "device" / "vendor"
-        if not vendor_file.is_file():
-            continue
-
         dev_node = Path(f"/dev/dri/{card_dir.name}")
         if not dev_node.exists():
             continue
@@ -120,13 +128,43 @@ def detect_topology() -> list[GPUCard]:
             Log.warn(f"Skipping unreadable DRM device path: {card_dir}")
             continue
 
-        pci_address = sys_device_path.name
-        vendor_id = vendor_file.read_text().strip().lower()
+        # Walk up device path to find a directory containing the PCI 'vendor' file
+        pci_dir: Optional[Path] = None
+        current = sys_device_path
+        while current != current.parent:
+            if (current / "vendor").is_file():
+                pci_dir = current
+                break
+            current = current.parent
 
-        boot_vga_file = card_dir / "device" / "boot_vga"
-        boot_vga = boot_vga_file.read_text().strip() == "1" if boot_vga_file.is_file() else False
+        if pci_dir is None:
+            Log.warn(f"Skipping card with no vendor info: {card_dir}")
+            continue
 
-        by_path = Path(f"/dev/dri/by-path/pci-{pci_address}-card")
+        try:
+            vendor_id = (pci_dir / "vendor").read_text().strip().lower()
+        except OSError:
+            Log.warn(f"Skipping card with unreadable vendor file: {card_dir}")
+            continue
+
+        pci_address = pci_dir.name
+
+        boot_vga = False
+        boot_vga_file = pci_dir / "boot_vga"
+        if boot_vga_file.is_file():
+            try:
+                boot_vga = boot_vga_file.read_text().strip() == "1"
+            except OSError:
+                pass
+        else:
+            boot_vga_file = sys_device_path / "boot_vga"
+            if boot_vga_file.is_file():
+                try:
+                    boot_vga = boot_vga_file.read_text().strip() == "1"
+                except OSError:
+                    pass
+
+        by_path = find_by_path_link(dev_node, pci_address)
         human_name = get_pci_name(pci_address)
         vendor_label = get_vendor_label(vendor_id)
 
@@ -226,12 +264,15 @@ def build_aq_runtime_string(primary: GPUCard, all_cards: list[GPUCard]) -> str:
     parts = []
     
     for card in ordered_cards:
-        if card.by_path.exists():
-            # Generates exact bash equivalent: $(readlink -f -- '/dev/dri/by-path/...') for UWSM evaluation
-            parts.append(f"$(readlink -f -- {shlex.quote(str(card.by_path))})")
-        else:
-            Log.warn(f"Missing by-path symlink for {card.dev_node}; falling back to node name.")
-            parts.append(str(card.dev_node))
+        pci_address = card.pci_address
+        fallback = f"'{card.dev_node}'"
+        # Generates a dynamic shell expansion that resolves the by-path link at runtime
+        # with a fallback to the static node path if no by-path link exists.
+        parts.append(
+            f'$(for dev in /dev/dri/by-path/pci-{pci_address}*card; do '
+            f'[ -e "$dev" ] && readlink -f "$dev" && break; '
+            f'done || echo {fallback})'
+        )
             
     return ":".join(parts)
 

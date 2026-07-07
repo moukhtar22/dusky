@@ -15,7 +15,13 @@ echo "Select your installation target:"
 echo "  1) NVIDIA (CUDA) - Best for GeForce/RTX cards"
 echo "  2) AMD (ROCm)    - Best for Radeon/Instinct cards"
 echo "  3) CPU Only      - Fallback"
-read -rp "Enter choice [1-3]: " HW_CHOICE || true
+echo "  4) Skip          - Skip Parakeet installation entirely"
+read -e -rp "Enter choice [1-4]: " HW_CHOICE || true
+
+if [[ "$HW_CHOICE" == "4" ]]; then
+    echo ":: Skipping Parakeet Setup. Exiting cleanly..."
+    exit 0
+fi
 
 MODE="cpu"
 [[ "$HW_CHOICE" == "1" ]] && MODE="nvidia"

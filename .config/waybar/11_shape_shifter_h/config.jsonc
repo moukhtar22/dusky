@@ -193,7 +193,7 @@
     "tooltip-format": "Theme Controls\n\n LMB  Dark Mode\n RMB  Light Mode\n MMB  Wallpaper",
     "on-click": "uwsm-app -- ~/user_scripts/theme_matugen/theme_ctl.sh set --mode dark",
     "on-click-right": "uwsm-app -- ~/user_scripts/theme_matugen/theme_ctl.sh set --mode light",
-    "on-click-middle": "uwsm-app -- waypaper"
+    "on-click-middle": "uwsm-app -- ~/user_scripts/images/wallpaper_selector.py"
   },
 
   "tray": {
@@ -268,7 +268,7 @@
     "tooltip-format-wifi": "󰤨 {essid}\n󱑽 {signalStrength}%\n󰩟 {ipaddr}",
     "tooltip-format-ethernet": "󰈀 Ethernet\n󰩟 {ipaddr}",
     "tooltip-format-disconnected": "󰤭 Disconnected",
-    "on-click": "foot --app-id=dusky_network.sh $HOME/user_scripts/network_manager/dusky_network.sh"
+    "on-click": "foot --app-id=dusky_tui python $HOME/user_scripts/dusky_tui/python/main/main.py $HOME/user_scripts/network_manager/tui_dusky_network.py"
   },
 
   "bluetooth": {

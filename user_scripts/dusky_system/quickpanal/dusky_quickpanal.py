@@ -11,6 +11,7 @@ import json
 import gc
 import signal
 import tomllib
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Any, override
@@ -46,7 +47,7 @@ from dusky_backend import (
 )
 
 from dusky_ui import (
-    CSS, _add_css_class,
+    CSS, _add_css_class, _remove_css_class,
     QuickIconToggle, MetricPill, CompactSliderRow, NotificationsPanel
 )
 
@@ -79,7 +80,7 @@ id = "wifi"
 icon = "network-wireless-symbolic"
 label = "Wi-Fi"
 tooltip = "Wi-Fi\\nLMB: Network Manager"
-on_left = "kitty --class dusky_network.sh ~/user_scripts/network_manager/dusky_network.sh"
+on_left = "foot --app-id=dusky_tui python ~/user_scripts/dusky_tui/python/main/main.py ~/user_scripts/network_manager/tui_dusky_network.py"
 
 [[toggles]]
 id = "idle"
@@ -91,7 +92,7 @@ on_right = "~/user_scripts/hyprlock/lock.sh"
 
 [[toggles]]
 id = "blur"
-icon = "edit-opacity-symbolic"
+icon = "preferences-desktop-appearance-symbolic"
 label = "Visuals"
 tooltip = "Visuals\\nLMB: Toggle Blur/Shadow"
 on_left = "~/user_scripts/hypr/hypr_blur_opacity_shadow_toggle.sh toggle"
@@ -151,6 +152,10 @@ class QuickPanalWindow(Gtk.ApplicationWindow):
         self._grab_active = False
         self._wifi_pending = False
         self._bt_pending = False
+
+        # Power Profile Revision Tracking
+        self._power_pending_revision = 0
+        self._power_pending_profile: str | None = None
 
         # CRITICAL UI FIX: Exact 15% physical reduction mapped out flawlessly (380 -> 320)
         self.set_default_size(320, -1)
@@ -343,9 +348,9 @@ class QuickPanalWindow(Gtk.ApplicationWindow):
             # Restored TLP Power Logic Exactly as you had it
             self.power_cmds = { "Balanced": "~/user_scripts/battery/tlp/tlp_mode_toggle.sh balanced", "Performance": "~/user_scripts/battery/tlp/tlp_mode_toggle.sh performance", "Power Saver": "~/user_scripts/battery/tlp/tlp_mode_toggle.sh power-saver" }
             self.power_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-            self.btn_save = Gtk.RadioButton(); self.btn_save.set_mode(False); self.btn_save.set_image(Gtk.Image.new_from_icon_name("power-profile-power-saver-symbolic", Gtk.IconSize.BUTTON)); _add_css_class(self.btn_save, "power-ring-btn")
-            self.btn_bal = Gtk.RadioButton.new_from_widget(self.btn_save); self.btn_bal.set_mode(False); self.btn_bal.set_image(Gtk.Image.new_from_icon_name("power-profile-balanced-symbolic", Gtk.IconSize.BUTTON)); _add_css_class(self.btn_bal, "power-ring-btn")
-            self.btn_perf = Gtk.RadioButton.new_from_widget(self.btn_save); self.btn_perf.set_mode(False); self.btn_perf.set_image(Gtk.Image.new_from_icon_name("power-profile-performance-symbolic", Gtk.IconSize.BUTTON)); _add_css_class(self.btn_perf, "power-ring-btn")
+            self.btn_save = Gtk.RadioButton(); self.btn_save.set_mode(False); self.btn_save.set_image(Gtk.Image.new_from_icon_name("power-profile-power-saver-symbolic", Gtk.IconSize.BUTTON)); _add_css_class(self.btn_save, "power-ring-btn"); _add_css_class(self.btn_save, "power-saver")
+            self.btn_bal = Gtk.RadioButton.new_from_widget(self.btn_save); self.btn_bal.set_mode(False); self.btn_bal.set_image(Gtk.Image.new_from_icon_name("power-profile-balanced-symbolic", Gtk.IconSize.BUTTON)); _add_css_class(self.btn_bal, "power-ring-btn"); _add_css_class(self.btn_bal, "balanced")
+            self.btn_perf = Gtk.RadioButton.new_from_widget(self.btn_save); self.btn_perf.set_mode(False); self.btn_perf.set_image(Gtk.Image.new_from_icon_name("power-profile-performance-symbolic", Gtk.IconSize.BUTTON)); _add_css_class(self.btn_perf, "power-ring-btn"); _add_css_class(self.btn_perf, "performance")
             
             self.btn_save.connect("toggled", self._on_power_toggled, "Power Saver")
             self.btn_bal.connect("toggled", self._on_power_toggled, "Balanced")
@@ -459,7 +464,7 @@ class QuickPanalWindow(Gtk.ApplicationWindow):
         tg = self.dynamic_toggles.get("blur")
         if not tg: return
         if is_active: tg.update_state(icon="applications-graphics-symbolic", css_class="active", tooltip="Visuals: Blur & Shadow ON\nLMB: Toggle")
-        else: tg.update_state(icon="edit-opacity-symbolic", css_class="normal", tooltip="Visuals: Performance Mode\nLMB: Toggle")
+        else: tg.update_state(icon="preferences-desktop-appearance-symbolic", css_class="normal", tooltip="Visuals: Performance Mode\nLMB: Toggle")
 
     @staticmethod
     def _is_bt_rfkill_blocked() -> bool:
@@ -534,19 +539,91 @@ class QuickPanalWindow(Gtk.ApplicationWindow):
 
     def _fetch_power_profile(self):
         if not hasattr(self, "power_container"): return
-        try:
-            r = run_command(["cat", "/home/dusk/.config/dusky/settings/tlp_state"], timeout=1.0, capture_stdout=True)
-            if r is not None and r.returncode == 0 and r.stdout:
-                GLib.idle_add(self._apply_power_profile, r.stdout.strip().lower())
-        except Exception: pass
+        
+        # CRITICAL GUARD: Prevent reading old file states while actively processing
+        if getattr(self, "_power_pending_profile", None) is not None: return
 
-    def _apply_power_profile(self, profile: str):
+        try:
+            # Probe actual profile from TLP runtime state
+            pwr_file = Path("/run/tlp/last_pwr")
+            if pwr_file.exists():
+                parts = pwr_file.read_text(encoding="utf-8").strip().split()
+                if parts:
+                    pp_code = parts[0]
+                    mapping = {"0": "performance", "1": "balanced", "2": "power-saver"}
+                    state = mapping.get(pp_code)
+                    if state:
+                        GLib.idle_add(self._apply_power_profile, state)
+                        return
+
+            # Fallback to local state file
+            path = Path(HOME) / ".config" / "dusky" / "settings" / "tlp_state"
+            if path.exists():
+                state = path.read_text(encoding="utf-8").strip().lower()
+                GLib.idle_add(self._apply_power_profile, state)
+            else:
+                LOG.warning(f"Power profile state file does not exist: {path}")
+        except Exception as e:
+            LOG.exception("Failed to fetch power profile")
+
+    def _apply_power_profile(self, profile: str) -> bool:
+        # Double-check pending state in the main thread to be completely bulletproof
+        if getattr(self, "_power_pending_profile", None) is not None: return GLib.SOURCE_REMOVE
+
         mapping = {"balanced": self.btn_bal, "performance": self.btn_perf, "power-saver": self.btn_save}
         target_btn = mapping.get(profile)
         if target_btn and not target_btn.get_active():
+            LOG.info(f"Applying power profile: {profile}")
             self._updating_power = True
             target_btn.set_active(True)
+            for btn in (self.btn_save, self.btn_bal, self.btn_perf):
+                _remove_css_class(btn, "applying") # Clean up stray UI anomalies just in case
             self._updating_power = False
+            
+        return GLib.SOURCE_REMOVE
+
+    def _on_power_toggled(self, button: Gtk.RadioButton, profile_name: str):
+        if not button.get_active() or self._updating_power: return
+        if cmd := self.power_cmds.get(profile_name):
+            # Establish the key expected by UI and Backend
+            profile_key = profile_name.lower().replace(" ", "-")
+
+            # 1. Lock state and increment revision counter
+            self._power_pending_revision += 1
+            current_rev = self._power_pending_revision
+            self._power_pending_profile = profile_key
+
+            # 2. Visually indicate the "applying" state
+            for btn in (self.btn_save, self.btn_bal, self.btn_perf):
+                _remove_css_class(btn, "applying")
+            _add_css_class(button, "applying")
+
+            # 3. Spawn a temporary, on-demand thread that dies when finished
+            threading.Thread(target=self._run_power_cmd_worker, args=(cmd, current_rev), daemon=True).start()
+
+    def _run_power_cmd_worker(self, cmd: str, revision: int):
+        try:
+            # run_command gracefully handles timeouts and blocking natively
+            run_command(["/usr/bin/bash", "-c", cmd], timeout=5.0)
+        except Exception as e:
+            LOG.error(f"Failed to apply power profile: {e}")
+        
+        # Dispatch UI clearing back to the GTK Main Thread
+        GLib.idle_add(self._power_cmd_finished, revision)
+
+    def _power_cmd_finished(self, revision: int) -> bool:
+        # If the user clicked another profile while we were working, ignore this completion entirely!
+        if revision != self._power_pending_revision:
+            return GLib.SOURCE_REMOVE
+        
+        # This was the absolute latest click. Unlock the state machine.
+        self._power_pending_profile = None
+        for btn in (self.btn_save, self.btn_bal, self.btn_perf):
+            _remove_css_class(btn, "applying")
+        
+        # Request an immediate live refresh to fully confirm the new state
+        self.pool.submit(self._fetch_power_profile)
+        return GLib.SOURCE_REMOVE
 
     def _fetch_hardware_metrics(self):
         if not hasattr(self, "metrics_row"): return
@@ -590,10 +667,6 @@ class QuickPanalWindow(Gtk.ApplicationWindow):
             match = _RE_UPDATES_TOTAL.search(data.get('tooltip', ''))
             tg.update_state(icon="folder-download-symbolic", css_class="normal", tooltip=final_tt, badge=match.group(1) if match else "!")
         else: tg.update_state(icon="folder-download-symbolic", css_class="normal", tooltip=final_tt, badge="")
-
-    def _on_power_toggled(self, button: Gtk.RadioButton, profile_name: str):
-        if not button.get_active() or self._updating_power: return
-        if cmd := self.power_cmds.get(profile_name): execute_cmd(cmd)
 
     def _on_map(self, *args):
         if LIBGRAB and self.get_visible() and self._grab_cb and not self._grab_active:

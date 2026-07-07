@@ -76,14 +76,37 @@ mon_info() {
         }
       }
 
-      # 7. States (VRR & Focus)
+      # 7. Rotation
+      rot_str = "0° (Normal)"
+      if (transform == "1") rot_str = "90° (Portrait)"
+      else if (transform == "2") rot_str = "180° (Flipped)"
+      else if (transform == "3") rot_str = "270° (Portrait Flipped)"
+      else if (transform == "4") rot_str = "Normal (Flipped)"
+      else if (transform == "5") rot_str = "90° (Flipped)"
+      else if (transform == "6") rot_str = "180° (Flipped)"
+      else if (transform == "7") rot_str = "270° (Flipped)"
+      printf " %s├─%s %s%-15s%s : %s%s%s\n", c_dim, c_rst, c_key, "Rotation", c_rst, c_val, rot_str, c_rst
+
+      # 8. Workspace
+      ws_str = (act_ws != "") ? act_ws : "None"
+      printf " %s├─%s %s%-15s%s : %s%s%s\n", c_dim, c_rst, c_key, "Workspace", c_rst, c_val, ws_str, c_rst
+
+      # 9. Color Profile Preset
+      cm_str = (cm_preset != "") ? cm_preset : "auto"
+      printf " %s├─%s %s%-15s%s : %s%s%s\n", c_dim, c_rst, c_key, "Color Profile", c_rst, c_val, cm_str, c_rst
+
+      # 10. Mirroring
+      mir_str = (mirror_of != "" && mirror_of != "none") ? mirror_of : "None"
+      printf " %s├─%s %s%-15s%s : %s%s%s\n", c_dim, c_rst, c_key, "Mirroring", c_rst, c_val, mir_str, c_rst
+
+      # 11. States (VRR & Focus)
       if (vrr == "true" || vrr == "1") {
          printf " %s├─%s %s%-15s%s : %sEnabled%s\n", c_dim, c_rst, c_key, "VRR", c_rst, c_pos, c_rst
       } else {
          printf " %s├─%s %s%-15s%s : %sDisabled%s\n", c_dim, c_rst, c_key, "VRR", c_rst, c_dim, c_rst
       }
 
-      # 8. Terminal Branch (Focused)
+      # 12. Terminal Branch (Focused)
       if (focused == "yes" || focused == "1") {
          printf " %s╰─%s %s%-15s%s : %sYes%s\n", c_dim, c_rst, c_key, "Focused", c_rst, c_pos, c_rst
       } else {
@@ -101,6 +124,7 @@ mon_info() {
       sub(/^Monitor /, "", name)
       sub(/ \(ID [0-9]+\):[ \t]*$/, "", name)
       res = phys = refresh = scale = focused = vrr = make = model = ""
+      act_ws = transform = cm_preset = mirror_of = ""
       next
     }
 
@@ -143,9 +167,49 @@ mon_info() {
       next
     }
 
+    /^[ \t]*active workspace:/ {
+      act_ws = $0
+      sub(/^[ \t]*active workspace:[ \t]*/, "", act_ws)
+      next
+    }
+
+    /^[ \t]*transform:/ {
+      transform = $NF
+      next
+    }
+
+    /^[ \t]*colorManagementPreset:/ {
+      cm_preset = $NF
+      next
+    }
+
+    /^[ \t]*mirrorOf:/ {
+      mirror_of = $0
+      sub(/^[ \t]*mirrorOf:[ \t]*/, "", mirror_of)
+      next
+    }
+
     # Trigger flush on End of File
     END { flush() }
   '
+
+  # Print Global VFR status
+  local c_rst="\033[0m"
+  local c_dim="\033[2;37m"
+  local c_hdr="\033[1;36m"
+  local c_key="\033[1;34m"
+  local c_pos="\033[1;32m"
+  local c_err="\033[1;31m"
+
+  local vfr_status
+  if hyprctl getoption debug:vfr 2>/dev/null | grep -q "bool: true"; then
+    vfr_status="${c_pos}Enabled${c_rst}"
+  else
+    vfr_status="${c_err}Disabled${c_rst}"
+  fi
+
+  printf "${c_hdr}Global Settings${c_rst}\n"
+  printf " ${c_dim}╰─${c_rst} ${c_key}%-15s${c_rst} : %b\n\n" "VFR" "$vfr_status"
 }
 
 alias ms='hyprmoninfo'

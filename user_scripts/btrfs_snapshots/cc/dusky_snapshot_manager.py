@@ -307,8 +307,10 @@ def get_all_subvolumes() -> list[SubvolMeta]:
                         sv_id = match.group(1)
                         sv_path = match.group(2).strip()
                         
-                        # UX Optimization: Hide Snapper snapshots from the native Subvolumes tab
+                        # UX Optimization: Hide Snapper snapshots and transient deletion paths from the native Subvolumes tab
                         if "/.snapshots/" in sv_path and sv_path.endswith("/snapshot"):
+                            continue
+                        if "_to_delete_" in sv_path:
                             continue
                         
                         # Existence verification is now deferred precisely until an action is selected.
@@ -578,7 +580,7 @@ After=local-fs.target
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/bash -c "/usr/bin/mkdir -p /run/dusky_mnt && /usr/bin/mount -t btrfs -o subvolid=5 UUID={uuid} /run/dusky_mnt && {{ /usr/bin/btrfs subvolume delete '/run/dusky_mnt/{subvol_name}'; /usr/bin/umount /run/dusky_mnt; }}"
+ExecStart=/usr/bin/bash -c "/usr/bin/mkdir -p /run/dusky_mnt && /usr/bin/mount -t btrfs -o subvolid=5 UUID={uuid} /run/dusky_mnt && if [ ! -e '/run/dusky_mnt/{subvol_name}' ]; then /usr/bin/umount /run/dusky_mnt; exit 0; elif /usr/bin/btrfs subvolume delete '/run/dusky_mnt/{subvol_name}'; then /usr/bin/umount /run/dusky_mnt; else /usr/bin/umount /run/dusky_mnt; exit 1; fi"
 ExecStartPost=/usr/bin/systemctl disable {service_name}
 ExecStartPost=/usr/bin/rm -f /etc/systemd/system/{service_name}
 
@@ -980,13 +982,7 @@ def handle_tui_preview(view: str, line: str, show_diff: bool = False) -> None:
         except ValueError:
             meta = {}
             
-        if meta.get("empty"):
-            print("\033[1;38;5;196m[!] No items available in this view.\033[0m")
-            return
-
         is_subvol = (view == "subvolumes")
-        snap_id = meta.get("id", "N/A")
-        snap_config = meta.get("config", "root" if view in ("root", "coordinated") else "home")
         
         # 1. Unified Shortcuts Panel
         shortcuts = []
@@ -1012,6 +1008,13 @@ def handle_tui_preview(view: str, line: str, show_diff: bool = False) -> None:
                 "\033[1;38;5;141m[ALT-P]\033[0m   \033[38;5;253m󰈈 Toggle Preview Pane\033[0m"
             ])
             draw_tui_panel("\033[1;38;5;220m󰏖 KEYBOARD SHORTCUTS\033[0m", shortcuts, 48)
+            
+        if meta.get("empty"):
+            print("\033[1;38;5;196m[!] No items available in this view.\033[0m")
+            return
+
+        snap_id = meta.get("id", "N/A")
+        snap_config = meta.get("config", "root" if view in ("root", "coordinated") else "home")
 
         # 2. Expanded Metadata View
         if is_subvol:
@@ -1318,6 +1321,7 @@ def launch_tui() -> None:
                     print(f"\n\033[1;38;5;81m[*] Action: COORDINATED RESTORE\033[0m\n[*] Target Pair : Root={r_id} | Home={h_id}")
                     if confirm_prompt("Are you absolutely sure you want to RESTORE your system to this state?"):
                         handle_restore_pair("root", r_id, "home", h_id)
+                        input("\n\033[1;38;5;114mPress Enter to exit...\033[0m")
                         break
             elif key_pressed in ("ctrl-d", "delete"):
                 print(f"\n\033[1;38;5;196m[*] Action: COORDINATED DELETE ({len(pairs_to_process)} pairs)\033[0m")
@@ -1340,6 +1344,7 @@ def launch_tui() -> None:
                     print(f"\n\033[1;38;5;81m[*] Action: RESTORE (Config: {meta['config']} | ID: {meta['id']})\033[0m")
                     if confirm_prompt("Are you absolutely sure you want to RESTORE?"):
                         handle_restore(meta["config"], str(meta["id"]), False)
+                        input("\n\033[1;38;5;114mPress Enter to exit...\033[0m")
                         break
             elif key_pressed in ("ctrl-d", "delete"):
                 print(f"\n\033[1;38;5;196m[*] Action: DELETE ({len(selected_metas)} snapshots)\033[0m")
@@ -1390,7 +1395,11 @@ def launch_tui() -> None:
                 case "ctrl-s":
                     print(f"\n\033[1;38;5;81m[*] ACTION: CREATE NATIVE BTRFS SNAPSHOT\033[0m\n[*] Source: {sv_path}")
                     try:
-                        dest_rel = input("\033[1;38;5;220m[*] Destination path (relative to BTRFS root, e.g. @snapshots/new_snap): \033[0m").strip()
+                        default_snap = f"@snapshots/{sv_path.lstrip('/@').replace('/', '_')}_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}"
+                        dest_rel = input(f"\033[1;38;5;220m[*] Destination path (Relative to BTRFS root. Enter for default: {default_snap}): \033[0m").strip()
+                        if not dest_rel:
+                            dest_rel = default_snap
+                            
                         if dest_rel:
                             is_ro = confirm_prompt("Make snapshot Read-Only?")
                             with mount_top_level(dev) as top_mnt:

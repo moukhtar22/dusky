@@ -215,7 +215,7 @@
         "format": " {usage}%",
         "interval": 2,
         "on-click": "uwsm-app -- kitty --class htop -e htop",
-        "on-click-right": "uwsm-app -- kitty --class sysbench_benchmark.sh -e $HOME/user_scripts/performance/sysbench_benchmark.sh",
+        "on-click-right": "uwsm-app -- kitty --class sysbench_benchmark.py -e $HOME/user_scripts/performance/sysbench_benchmark.py",
         "tooltip-format": "CPU Usage: {usage}%\nAvg Frequency: {avg_frequency} GHz\n\nLMB: htop\nRMB: sysbench",
         "states": {
             "warning": 60,
@@ -245,7 +245,7 @@
             "warning": 75,
             "critical": 90
         },
-        "on-click-right": "uwsm-app -- thunar"
+        "on-click-right": "~/user_scripts/waybar/launch_app.sh file-manager"
     },
 
     "temperature": {
@@ -283,11 +283,11 @@
         "format-disconnected": "󰤭",
         "format-disabled": "󰀝",
         "format-icons": ["󰤯", "󰤟", "󰤢", "󰤥", "󰤨"],
-        "tooltip-format-wifi": " {essid}\n\nSignal: {signalStrength}% ({signaldBm} dBm)\nFrequency: {frequency} MHz\nInterface: {ifname}\nIP: {ipaddr}/{cidr}\n\n󰕒 {bandwidthUpBytes}  󰇚 {bandwidthDownBytes}\n\nLMB: dusky_network.sh\nRMB: WiFi ON\nMMB: WiFi OFF",
+        "tooltip-format-wifi": " {essid}\n\nSignal: {signalStrength}% ({signaldBm} dBm)\nFrequency: {frequency} MHz\nInterface: {ifname}\nIP: {ipaddr}/{cidr}\n\n󰕒 {bandwidthUpBytes}  󰇚 {bandwidthDownBytes}\n\nLMB: Dusky Network\nRMB: WiFi ON\nMMB: WiFi OFF",
         "tooltip-format-ethernet": "󰈀 Wired Connected\n\nInterface: {ifname}\nIP: {ipaddr}/{cidr}\nGateway: {gwaddr}\n\n(Speed shown in center meter)",
         "tooltip-format-disconnected": "No connection\n\nRMB: Turn WiFi ON",
         "interval": 2,
-        "on-click": "foot --app-id=dusky_network.sh $HOME/user_scripts/network_manager/dusky_network.sh",
+        "on-click": "foot --app-id=dusky_tui python $HOME/user_scripts/dusky_tui/python/main/main.py $HOME/user_scripts/network_manager/tui_dusky_network.py",
         "on-click-right": "nmcli radio wifi on && notify-send 'WiFi' 'Turned ON'",
         "on-click-middle": "nmcli radio wifi off && notify-send 'WiFi' 'Turned OFF'"
     },
@@ -356,10 +356,10 @@
     // ===================================================================
     "custom/theme": {
         "format": "",
-        "tooltip-format": "Theme Switcher\n\nSwitch wallpapers with waypaper\nor Super + ' after toggling\nfor theme uniformity.\n\nLMB: Dark Mode\nRMB: Light Mode\nMMB: Waypaper",
+        "tooltip-format": "Theme Switcher\n\nSwitch wallpapers with Wallpaper Selector\nor Super + ' after toggling\nfor theme uniformity.\n\nLMB: Dark Mode\nRMB: Light Mode\nMMB: Wallpaper Selector",
         "on-click": "uwsm-app -- ~/user_scripts/theme_matugen/theme_ctl.sh set --mode dark",
         "on-click-right": "uwsm-app -- ~/user_scripts/theme_matugen/theme_ctl.sh set --mode light",
-        "on-click-middle": "uwsm-app -- waypaper"
+        "on-click-middle": "uwsm-app -- ~/user_scripts/images/wallpaper_selector.py"
     },
 
     "custom/inhibit-suspend": {

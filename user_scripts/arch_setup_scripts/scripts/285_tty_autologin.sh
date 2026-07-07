@@ -65,6 +65,11 @@ sddm_is_installed() {
     [[ -f "/usr/lib/systemd/system/sddm.service" ]]
 }
 
+# Check if greetd is installed by inspecting the unit file on disk.
+greetd_is_installed() {
+    [[ -f "/usr/lib/systemd/system/greetd.service" ]]
+}
+
 # Determine if systemd is the active init system for THIS root namespace.
 is_systemd_active() {
     local pid1_comm pid1_root_inode our_root_inode
@@ -136,6 +141,12 @@ do_setup() {
         log_success "SDDM disabled."
     fi
 
+    if greetd_is_installed && systemctl is-enabled --quiet greetd.service 2>/dev/null; then
+        log_info "Disabling greetd..."
+        systemctl disable greetd.service --quiet 2>/dev/null || true
+        log_success "greetd disabled."
+    fi
+
     local expected_exec="ExecStart=-/usr/bin/agetty --autologin ${user} --noclear --noissue %I \$TERM"
     if [[ -f "${OVERRIDE_FILE}" ]] && grep -qF -- "${expected_exec}" "${OVERRIDE_FILE}"; then
         sync_state_file "${user}" "true"
@@ -180,7 +191,12 @@ do_revert() {
         log_success "Removed autologin drop-in override for ${SYSTEMD_UNIT}."
     fi
 
-    if sddm_is_installed && ! systemctl is-enabled --quiet sddm.service 2>/dev/null; then
+    if greetd_is_installed && ! systemctl is-enabled --quiet greetd.service 2>/dev/null; then
+        log_info "Re-enabling greetd..."
+        systemctl enable greetd.service --quiet 2>/dev/null || true
+        changed=true
+        log_success "greetd enabled."
+    elif sddm_is_installed && ! systemctl is-enabled --quiet sddm.service 2>/dev/null; then
         log_info "Re-enabling SDDM..."
         systemctl enable sddm.service --quiet 2>/dev/null || true
         changed=true

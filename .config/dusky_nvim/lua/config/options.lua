@@ -4,6 +4,7 @@
 -- ================================================================================================
 
 -- Basic Settings
+vim.opt.background = "dark" -- Force dark background to bypass terminal DSR query delay
 vim.opt.number = true -- Line numbers
 vim.opt.relativenumber = true -- Relative line numbers
 -- vim.opt.cursorline = true -- Highlight current line
@@ -38,6 +39,8 @@ vim.opt.showmatch = true -- Highlight matching brackets
 vim.opt.matchtime = 2 -- How long to show matching bracket
 vim.opt.completeopt = "menuone,noinsert,noselect" -- Completion options
 vim.opt.showmode = false -- Don't show mode in command line
+vim.opt.laststatus = 0 -- Hide default statusline on boot to prevent lazy load flicker
+vim.opt.ruler = false -- Hide default ruler on boot to prevent lazy load flicker
 vim.opt.pumheight = 10 -- Popup menu height
 vim.opt.pumblend = 10 -- Popup menu transparency
 vim.opt.winblend = 0 -- Floating window transparency
@@ -80,7 +83,6 @@ vim.opt.selection = "inclusive" -- Use inclusive selection
 vim.opt.mouse = "a" -- Enable mouse support
 vim.opt.clipboard:append("unnamedplus") -- Use system clipboard
 vim.opt.modifiable = true -- Allow editing buffers
-vim.opt.encoding = "UTF-8" -- Use UTF-8 encoding
 vim.opt.wildmenu = true -- Enable command-line completion menu
 vim.opt.wildmode = "longest:full,full" -- Completion mode for command-line
 vim.opt.wildignorecase = true -- Case-insensitive tab completion in commands

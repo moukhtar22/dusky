@@ -265,19 +265,19 @@ switch_text_editor() {
     if [[ "$t_type" == "1" ]]; then
         local term_lower="${CURRENT_TERMINAL,,}"
         if [[ "$term_lower" == *"kitty"* ]]; then
-            exec_cmd='terminal .. " --class " .. textEditor .. " " .. textEditor'
+            exec_cmd='"uwsm-app -- " .. terminal .. " --class " .. textEditor .. " " .. textEditor'
         elif [[ "$term_lower" == *"foot"* ]]; then
-            exec_cmd='terminal .. " --app-id=" .. textEditor .. " " .. textEditor'
+            exec_cmd='"uwsm-app -- " .. terminal .. " --app-id=" .. textEditor .. " " .. textEditor'
         elif [[ "$term_lower" == *"alacritty"* ]]; then
-            exec_cmd='terminal .. " --class " .. textEditor .. " -e " .. textEditor'
+            exec_cmd='"uwsm-app -- " .. terminal .. " --class " .. textEditor .. " -e " .. textEditor'
         elif [[ "$term_lower" == *"wezterm"* ]]; then
-            exec_cmd='terminal .. " start --class " .. textEditor .. " -- " .. textEditor'
+            exec_cmd='"uwsm-app -- " .. terminal .. " start --class " .. textEditor .. " -- " .. textEditor'
         else
             # Fallback for unknown terminals
-            exec_cmd='terminal .. " " .. textEditor'
+            exec_cmd='"uwsm-app -- " .. terminal .. " " .. textEditor'
         fi
     else 
-        exec_cmd='textEditor'
+        exec_cmd='"uwsm-app -- " .. textEditor'
     fi
 
     new_binds=$(awk -v new_cmd="$exec_cmd" '
@@ -316,7 +316,35 @@ switch_text_editor() {
 
     # 5. Handle Mime and State
     if command -v xdg-mime &>/dev/null; then
-        xdg-mime default "$t_desktop" text/plain 2>/dev/null || :
+        local mime
+        for mime in \
+            "text/plain" \
+            "text/markdown" \
+            "text/x-shellscript" \
+            "application/x-shellscript" \
+            "text/x-python" \
+            "text/x-script.python" \
+            "text/x-go" \
+            "text/x-rust" \
+            "text/x-c" \
+            "text/x-c++" \
+            "text/x-lua" \
+            "text/x-java" \
+            "text/x-makefile" \
+            "application/json" \
+            "application/toml" \
+            "application/x-yaml" \
+            "text/yaml" \
+            "application/x-config" \
+            "application/x-conf" \
+            "text/css" \
+            "text/javascript" \
+            "application/javascript" \
+            "text/xml" \
+            "application/xml" \
+            "application/x-zerosize"; do
+            xdg-mime default "$t_desktop" "$mime" 2>/dev/null || :
+        done
     fi
 
     [[ "$t_type" == "1" ]] && legacy_state="true" || legacy_state="false"

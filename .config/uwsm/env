@@ -46,14 +46,13 @@ export QT_QPA_PLATFORMTHEME=qt6ct
 
 # Qt Visual Tweaks
 export QT_WAYLAND_DISABLE_WINDOWDECORATION=1
-export QT_AUTO_SCREEN_SCALE_FACTOR=1
 
 # if you want to override the qt theme with another theme.
 # export QT_STYLE_OVERRIDE=
 
 # --- GTK Configuration ---
 # Prioritize Wayland, fall back to X11.
-export GDK_BACKEND="wayland,x11"
+export GDK_BACKEND="wayland,x11,*"
 export QT_QUICK_CONTROLS_STYLE=Fusion
 
 # Force GTK4 to use the OpenGL (ngl) renderer instead of Vulkan.
@@ -64,7 +63,7 @@ export QT_QUICK_CONTROLS_STYLE=Fusion
 # corruption (amdvlk 2024.Q4.2+), and VK_ERROR_DEVICE_LOST crashes. The GL
 # renderer avoids all of these issues with no perceptible cost for toolkit apps.
 # Users who want Vulkan for specific workloads can unset this per-application.
-export GSK_RENDERER=gl
+export GSK_RENDERER=ngl
 
 # Required for systemd user services that check ConditionEnvironment=XDG_SESSION_CLASS.
 # Without this, localsearch-3 (tracker3) fails to activate, causing D-Bus
@@ -89,6 +88,8 @@ export VISUAL=nvim
 # -----------------------------------------------------------------------------
 # 4. APP SPECIFIC FLAGS
 # -----------------------------------------------------------------------------
+# For modern SDL3 and legacy SDL2 applications:
+export SDL_VIDEO_DRIVER="wayland,x11"
 export SDL_VIDEODRIVER="wayland,x11"
 export CLUTTER_BACKEND=wayland
 
@@ -118,5 +119,3 @@ export LIBVIRT_DEFAULT_URI='qemu:///system'
 # Enables PRIME Render Offload, allowing you to run specific applications
 # on the NVIDIA GPU while the desktop session runs on the Intel iGPU.
 #export __NV_PRIME_RENDER_OFFLOAD=1
-
-

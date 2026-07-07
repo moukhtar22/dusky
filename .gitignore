@@ -6,6 +6,13 @@ user_scripts/dusky_system/click_away_to_dismiss/hyprland-focus-grab-v1-client-pr
 user_scripts/dusky_system/click_away_to_dismiss/hyprland-focus-grab-v1-client-protocol.c
 user_scripts/dusky_system/click_away_to_dismiss/libwaylandgrab.so
 user_scripts/theme_matugen/firefox/config.json
-.config/uwsm/env.d/gpu
+.config/uwsm/env.d/
 .config/zellij/themes/matugen.kdl
 .config/foot/foot-colors.ini
+
+# Python compilation cache files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/

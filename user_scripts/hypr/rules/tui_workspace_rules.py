@@ -38,24 +38,6 @@ SCHEMA = {
     # -------------------------------------------------------------------------
     0: [
         ConfigItem(
-            label="Enable Smart Gaps",
-            key="enable_smart_gaps",
-            scope="DEFAULT",        # Root-level Lua variable
-            type_="bool",
-            default=False,
-            group="Global Workspace Rules",
-            extended_help="**Smart Gaps**\n\nRemoves gaps and borders when exactly one tiled window is on screen, or when a window is in fullscreen/maximized state. Replicates the popular 'smartgaps' feature."
-        ),
-        ConfigItem(
-            label="Persistent Workspaces (1-10)",
-            key="enforce_persistent_1_to_10",
-            scope="DEFAULT",        # Root-level Lua variable
-            type_="bool",
-            default=False,
-            group="Global Workspace Rules",
-            extended_help="**Persistent Workspaces**\n\nKeep workspaces 1-10 always alive, even when all their windows are closed. Useful for status bars that display a fixed set of workspace indicators."
-        ),
-        ConfigItem(
             label="Global Default Layout",
             key="layout",
             scope="general",
@@ -256,6 +238,16 @@ SCHEMA = {
             parent_ref="misc_menu_id",
             extended_help="**Focus Under Fullscreen**\n\nBehaviour when a window is focused while another is fullscreen.\n0 = Do nothing (new window stays behind)\n1 = New window takes over (unfullscreens current)\n2 = Swap (unfullscreen current, fullscreen the new one)"
         ),
+        ConfigItem(
+            label="Initial Workspace Tracking",
+            key="initial_workspace_tracking",
+            scope="misc",
+            type_="int",
+            default=1,
+            options=[0, 1, 2],
+            parent_ref="misc_menu_id",
+            extended_help="**Workspace Tracking**\n\nRequired to force new windows to spawn on the *current* workspace. Without this set to `1`, background tasks might fail to trigger the unfullscreen event properly."
+        ),
 
         ConfigItem(
             label="Navigation & Binds",
@@ -324,6 +316,42 @@ SCHEMA = {
         ),
         
         # Factory Reset
+        ConfigItem(
+            label="Strict Focus Profile",
+            key="preset_strict_focus",
+            scope="DEFAULT",
+            type_="preset",
+            default=None,
+            group="Profiles & Actions",
+            preset_payload={
+                "misc.on_focus_under_fullscreen": 2,
+                "misc.initial_workspace_tracking": 1,
+                "misc.focus_on_activate": True
+            },
+            extended_help="**Strict Focus**\n\nApplies the default recommended behavior where popups immediately drop fullscreen apps to reveal the newly focused window."
+        ),
+        ConfigItem(
+            label="Immersive/Do Not Disturb Profile",
+            key="preset_immersive_focus",
+            scope="DEFAULT",
+            type_="preset",
+            default=None,
+            group="Profiles & Actions",
+            preset_payload={
+                "misc.on_focus_under_fullscreen": 0,
+                "misc.focus_on_activate": False
+            },
+            extended_help="**Immersive Profile**\n\nPrevents any background application from stealing focus or dropping your current fullscreen application."
+        ),
+        ConfigItem(
+            label="Reload Window Rules",
+            key="action_reload_hypr",
+            scope="DEFAULT",
+            type_="action",
+            default="hyprctl reload",
+            group="Profiles & Actions",
+            extended_help="**Reload Environment**\n\nForces Hyprland to re-read all window rules and configuration files without terminating the session."
+        ),
         ConfigItem(
             label="Factory Reset Everything",
             key="preset_factory_reset",

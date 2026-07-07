@@ -23,7 +23,8 @@ SCRIPT_SEARCH_DIRS=(
     "${HOME}/user_scripts/images"
     "${HOME}/user_scripts/theme_matugen"
     "${HOME}/user_scripts/theme_matugen/config"
-    "${HOME}/user_scripts/theme_matugen/firefox"
+    "${HOME}/user_scripts/firefox/theme_matugen"
+    "${HOME}/user_scripts/firefox"
     "${HOME}/user_scripts/tts_stt/dusky_kokoro"
     "${HOME}/user_scripts/tts_stt/dusky_parakeet"
     "${HOME}/user_scripts/nvim"
@@ -52,11 +53,12 @@ INSTALL_SEQUENCE=(
 
 # ------ CUSTOM PATH SCRIPTS -------
 
-#    "U | deploy_dotfiles.sh"
+    "U | deploy_dotfiles.sh"
 
 # ------ Setup SCRIPTS -------
 
     "U | 005_hypr_custom_config_setup.py"
+    "U | 007_main_hyprland_lua.py"
     "U | 006_animation_default.sh"
     "U | 010_package_removal.sh"
     "U | 013_matugen_state_file_placment.py"
@@ -86,6 +88,7 @@ INSTALL_SEQUENCE=(
     "S | 127_pam_keyring_greetd.sh --mode auto"
     "U | 130_copy_service_files.sh"
     "U | 131_dbus_copy_service_files.sh"
+    "U | 132_copy_system_services.sh"
     "U | 135_battery_notify_service.sh"
     "U | 137_snapper_isolation_subvolume.sh --auto"
 
@@ -95,7 +98,7 @@ INSTALL_SEQUENCE=(
     "U | 145_matugen_directories.py"
     "U | 150_wallpapers_download.sh"
     "U | 155_blur_shadow_opacity.sh"
-    "U | 160_theme_ctl.sh"
+    "U | 160_theme_ctl.py"
     "U | 165_qtct_config.sh"
     "S | 180_udev_usb_notify.sh"
     "U | 185_terminal_default.py -t foot"
@@ -104,12 +107,15 @@ INSTALL_SEQUENCE=(
     "S | 200_tlp_config.sh"
     "S | 205_zram_configuration.sh"
     "S | 206_zram_tmpfs_mounts.py --zram"
-    "S | 207_systemd_service_for_both_zram0_zram1.py"
     "S | 210_zram_optimize_swappiness.sh"
     "S | 211_systemd_oomd_zram.sh"
     "S | 212_thp_sysfs_optimizer.sh"
     "S | 213_systemd_journaling_optimizer.sh"
+    "S | 214_damon_reclaim_optimizer.py"
+    "S | 216_systemd_accounting_optimizer.py"
+    "S | 217_boot_memory_reclaimer.py"
     "S | 215_powerkey_lid_close_behaviour.sh"
+
     "S | 220_logrotate_optimization.sh"
     "S | 225_faillock_timeout.sh"
 #    "U | 230_asus_tuf_tweaks.sh"
@@ -149,6 +155,7 @@ INSTALL_SEQUENCE=(
     "U | 390_clipboard_persistance.sh"
     "S | 395_intel_media_sdk_check.sh"
     "U | 400_firefox_matugen_pywalfox.sh"
+    "U | optimize_firefox.py"
     "U | 405_spicetify_matugen_setup.sh"
     "U | 410_waybar_swap_config.py --set waybar=15"
     "U | 415_mpv_setup.sh"
@@ -1057,6 +1064,7 @@ main() {
 
     EXECUTION_PHASE=1
     export PYTHONUNBUFFERED=1 # Unbuffer Python outputs explicitly ensuring real-time log piping.
+    trap 'true' INT
 
     for entry in "${INSTALL_SEQUENCE[@]}"; do
         [[ -n "${entry//[[:space:]]/}" ]] || continue
@@ -1186,6 +1194,11 @@ main() {
 
             log "ERROR" "Failed $display_name (Exit Code: $result)."
 
+            # Bypass auto-retry if interrupted manually by user (Exit Code 130/131)
+            if [[ $result -eq 130 || $result -eq 131 ]]; then
+                auto_retry_limit=0
+            fi
+
             if (( auto_retry_limit > 0 && auto_retry_count < auto_retry_limit )); then
                 log "WARN" "Autonomous mode: retrying $display_name automatically (next attempt $((auto_retry_count + 1))/${auto_retry_limit})..."
                 sleep 1
@@ -1197,7 +1210,7 @@ main() {
             echo -e "${YELLOW}Action Required:${RESET} Script execution failed."
             
             # --- STDIN SAFETY FIX: Fallback if 'read' abruptly closes (e.g. TTY detached) ---
-            if ! read -r -p "Do you want to [S]kip to next, [R]etry, or [Q]uit? (s/r/q): " _fail_choice; then
+            if ! read -e -r -p "Do you want to [S]kip to next, [R]etry, or [Q]uit? (s/r/q): " _fail_choice; then
                 _fail_choice="q"
             fi
 

@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Dusky Power Limiter
+GenericName=CPU Power Limit Configurator
+Comment=Configure CPU RAPL PL1/PL2 power limits and time windows
+Exec=uwsm-app -- foot --app-id=dusky_tui python /home/dusk/user_scripts/dusky_tui/python/main/main.py /home/dusk/user_scripts/performance/cpu/tui_dusky_power_throttle.py
+Terminal=false
+Categories=Settings;System;Utility;
+Keywords=dusky;power;rapl;throttle;limit;cpu;tui;
+Icon=cpu
+StartupNotify=true
+StartupWMClass=dusky_tui

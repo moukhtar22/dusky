@@ -973,6 +973,19 @@ class DuskyTUI(App):
     CSS = """
     Screen { background: $background; }
 
+    #telemetry-banner {
+        width: 100%; height: 1;
+        background: transparent;
+        color: $primary;
+        text-style: bold;
+        text-align: center;
+        content-align: center middle;
+        text-wrap: nowrap;
+        margin-top: 1;
+        margin-bottom: 2;
+        display: none;
+    }
+
     #main-box {
         width: 100%; height: 100%;
         border: solid $primary 50%;
@@ -1155,8 +1168,9 @@ class DuskyTUI(App):
 
     auto_save = reactive(True)
 
-    def __init__(self, engine_pool: dict[tuple[str, str], BaseEngine], default_engine_key: tuple[str, str], schema: dict[int, list[ConfigItem]], tabs: list[str], title="Dusky Editor", theme_path: str | None = None, default_mode: str = "auto", schema_name: str = "default", enable_user_presets: bool = True, user_presets_tab: str | None = None, global_popup: Any | None = None, tab_notices: dict[int, dict | list[dict]] | None = None, **kwargs):
+    def __init__(self, engine_pool: dict[tuple[str, str], BaseEngine], default_engine_key: tuple[str, str], schema: dict[int, list[ConfigItem]], tabs: list[str], title="Dusky Editor", theme_path: str | None = None, default_mode: str = "auto", schema_name: str = "default", enable_user_presets: bool = True, user_presets_tab: str | None = None, global_popup: Any | None = None, tab_notices: dict[int, dict | list[dict]] | None = None, deferred_load=None, **kwargs):
         super().__init__(**kwargs)
+        self.deferred_load = deferred_load
         self.engine_pool = engine_pool
         self.default_engine_key = default_engine_key
         self.global_popup = global_popup
@@ -1235,25 +1249,36 @@ class DuskyTUI(App):
                     yield tabs_widget
                 yield Label(" ▶ ", id="tab-right", classes="tab-arrow")
 
+            yield Label("", id="telemetry-banner")
+
             with Horizontal(id="content-area"):
                 with ContentSwitcher(initial="tab-0", id="content-switcher"):
                     for i, name in enumerate(self.tabs):
                         with Vertical(id=f"tab-{i}"):
-                            
-                            # Render Schema-Driven Tab Structural Notices
+
+                            # Render top-positioned tab notices (default)
                             tab_notices = self.tab_notices.get(i)
                             if tab_notices:
                                 if isinstance(tab_notices, dict):
                                     tab_notices = [tab_notices]
                                 for n_idx, tab_notice in enumerate(tab_notices):
-                                    level = tab_notice.get("level", "info")
-                                    message = tab_notice.get("message", "")
-                                    yield NoticeBox(message, level=level, id=f"notice-{i}-{n_idx}")
+                                    if tab_notice.get("position", "top") != "bottom":
+                                        level = tab_notice.get("level", "info")
+                                        message = tab_notice.get("message", "")
+                                        yield NoticeBox(message, level=level, id=f"notice-{i}-{n_idx}")
 
                             with Horizontal(classes="list-wrapper"):
                                 yield ConfigOptionList(id=f"list-{i}")
                                 with Vertical(classes="indicator-column"):
                                     yield ScrollIndicator("", id=f"indicator-{i}")
+
+                            # Render bottom-positioned tab notices
+                            if tab_notices:
+                                for n_idx, tab_notice in enumerate(tab_notices):
+                                    if tab_notice.get("position", "top") == "bottom":
+                                        level = tab_notice.get("level", "info")
+                                        message = tab_notice.get("message", "")
+                                        yield NoticeBox(message, level=level, id=f"notice-{i}-{n_idx}-bot")
 
                 with Vertical(id="help-panel"):
                     yield Markdown("Select an item to view documentation.", id="help-markdown")
@@ -1412,12 +1437,30 @@ class DuskyTUI(App):
 
             match item.type_:
                 case "bool":
-                    is_trigger = item.options and isinstance(item.options, list) and len(item.options) > 0 and str(item.options[0]).lower() == "trigger"
+                    _opt0 = str(item.options[0]) if (item.options and isinstance(item.options, list) and len(item.options) > 0) else ""
+                    _opt0_lower = _opt0.lower()
+                    
+                    is_trigger = False
+                    _btn_label = ""
+                    
+                    if _opt0_lower.startswith("trigger:"):
+                        is_trigger = True
+                        _btn_label = f" {_opt0[8:]} "
+                    elif _opt0_lower.startswith("copy:"):
+                        is_trigger = True
+                        _btn_label = f" {_opt0[5:]} "
+                    elif _opt0_lower == "trigger":
+                        is_trigger = True
+                        _btn_label = " Apply "
+                    elif _opt0_lower == "copy":
+                        is_trigger = True
+                        _btn_label = " Copy "
+
                     if is_trigger:
                         if not exists:
-                            txt.append(" Apply ", style=f"{self.theme_colors['muted']} italic")
+                            txt.append(_btn_label, style=f"{self.theme_colors['muted']} italic")
                         else:
-                            txt.append(" Apply ", style=f"bold {self.theme_colors['bg']} on {self.theme_colors['accent']}" if item.value else f"bold {self.theme_colors['accent']}")
+                            txt.append(_btn_label, style=f"bold {self.theme_colors['bg']} on {self.theme_colors['accent']}" if item.value else f"bold {self.theme_colors['accent']}")
                     elif not exists:
                         txt.append(f" {'◉ ON' if item.value else '◯ OFF'} ", style=f"{self.theme_colors['muted']} italic")
                     elif item.value:
@@ -1632,7 +1675,26 @@ class DuskyTUI(App):
         except Exception: pass
 
         # Load states securely across all registered backend target configurations
-        states = {ekey: eng.load_state() for ekey, eng in self.engine_pool.items()}
+        if self.deferred_load:
+            # Fast path: use targeted state loading for only the currently populated items
+            user_units = []
+            sys_units = []
+            for tab_items in self.schema.values():
+                for item in tab_items:
+                    if item.type_ in ("action", "preset", "menu"): continue
+                    if item.scope == "user":
+                        user_units.append(item.key)
+                    elif item.scope == "system":
+                        sys_units.append(item.key)
+
+            states = {}
+            for ekey, eng in self.engine_pool.items():
+                if hasattr(eng, 'load_state_for_units'):
+                    states[ekey] = eng.load_state_for_units(user_units, sys_units)
+                else:
+                    states[ekey] = eng.load_state()
+        else:
+            states = {ekey: eng.load_state() for ekey, eng in self.engine_pool.items()}
 
         self._load_user_presets()
         self._rebuild_key_map()
@@ -1650,7 +1712,7 @@ class DuskyTUI(App):
                     item.exists_in_target = True
                     item.value = item.deserialize(state[cache_key])
                 else:
-                    item.exists_in_target = False
+                    item.exists_in_target = (item.default == "nil")
 
                 if not item._initial_loaded:
                     item.initial_value = item.value
@@ -1671,9 +1733,37 @@ class DuskyTUI(App):
         self.set_interval(1.0, self.watch_target_file)
         self.set_interval(2.0, self.watch_presets_dir)
 
+        # Check if any engine in the pool supports telemetry
+        self.telemetry_engine = None
+        for engine in self.engine_pool.values():
+            if hasattr(engine, "get_telemetry"):
+                self.telemetry_engine = engine
+                break
+
+        if self.telemetry_engine:
+            self.query_one("#telemetry-banner").display = True
+            self.set_interval(1.0, self.update_telemetry)
+
         self.call_after_refresh(self.check_tab_overflow)
         self.call_after_refresh(self._update_scroll_indicators)
         self._update_footer_legend()
+
+        # Kick off deferred loading in a background thread after the initial render is complete
+        if self.deferred_load:
+            import threading
+            def _deferred_worker():
+                try:
+                    updated_tabs = self.deferred_load()
+                    # Load full states for the newly populated items (still in background thread)
+                    deferred_states = {}
+                    for ekey, eng in self.engine_pool.items():
+                        deferred_states[ekey] = eng.load_state()
+                    # Schedule UI update on the main Textual thread
+                    self.call_from_thread(self._apply_deferred_tabs, updated_tabs, deferred_states)
+                except Exception as e:
+                    import sys
+                    print(f"[DuskyTUI] Deferred load error: {e}", file=sys.stderr)
+            threading.Thread(target=_deferred_worker, daemon=True).start()
 
         # Trigger Global Notice Hook if defined in the schema
         if self.global_popup:
@@ -1782,6 +1872,44 @@ class DuskyTUI(App):
         ol.scroll_y = scroll_y
         self.call_after_refresh(self._update_scroll_indicators)
 
+    def _apply_deferred_tabs(self, tab_indices: list[int], states: dict) -> None:
+        """
+        Hot-reloads deferred tabs after background data fetch completes.
+        Called on the main Textual thread via call_from_thread.
+        """
+        for tab_idx in tab_indices:
+            for idx, item in enumerate(self.schema.get(tab_idx, [])):
+                engine_key = self._get_item_engine_info(item)
+                state = states.get(engine_key, {})
+                cache_key = f"{item.scope}/{item.key}" if item.scope else item.key
+
+                if item.type_ in ("action", "preset", "menu"):
+                    item.exists_in_target = True
+                elif cache_key in state:
+                    item.exists_in_target = True
+                    item.value = item.deserialize(state[cache_key])
+                else:
+                    item.exists_in_target = (item.default == "nil")
+
+                if not item._initial_loaded:
+                    item.initial_value = item.value
+                    item._initial_loaded = True
+
+            self._populate_option_list(tab_idx)
+
+        self._rebuild_key_map()
+
+        # Update pagination if user is currently viewing one of the hot-reloaded tabs
+        try:
+            switcher = self.query_one(ContentSwitcher)
+            if switcher.current:
+                current_idx = int(switcher.current.split("-")[1])
+                if current_idx in tab_indices:
+                    if ol := self.current_option_list:
+                        self._update_pagination(ol)
+        except Exception:
+            pass
+
     @on(events.Resize)
     def handle_resize(self, event: events.Resize) -> None:
         self.check_tab_overflow()
@@ -1882,8 +2010,12 @@ class DuskyTUI(App):
                                     item.exists_in_target = True
                                     changed_any = True
                             else:
-                                if item.exists_in_target:
-                                    item.exists_in_target = False
+                                expected_exists = (item.default == "nil")
+                                expected_val = item.default if expected_exists else item.value
+                                if item.exists_in_target != expected_exists or str(item.value) != str(expected_val):
+                                    item.exists_in_target = expected_exists
+                                    if expected_exists:
+                                        item.value = expected_val
                                     changed_any = True
             except OSError: 
                 pass
@@ -1895,6 +2027,15 @@ class DuskyTUI(App):
         if changed_any:
             self._refresh_all_ui()
             self.notify_status("Config modified externally. Refreshed UI.")
+
+    async def update_telemetry(self) -> None:
+        if self.telemetry_engine:
+            try:
+                msg = await asyncio.to_thread(self.telemetry_engine.get_telemetry)
+                banner = self.query_one("#telemetry-banner", Label)
+                banner.update(msg)
+            except Exception:
+                pass
 
     async def watch_presets_dir(self) -> None:
         if not self.enable_user_presets or not hasattr(self, 'user_presets_dir') or not self.user_presets_dir.exists(): return
@@ -2187,6 +2328,15 @@ class DuskyTUI(App):
 
         item.value = new_val
         item.exists_in_target = True
+        
+        # Sync duplicate items across tabs to fix state desync for multi-view schemas
+        item_uid = self._get_item_uid(item)
+        for t_idx, items in self.schema.items():
+            for i_idx, other_item in enumerate(items):
+                if other_item is not item and self._get_item_uid(other_item) == item_uid:
+                    other_item.value = new_val
+                    other_item.exists_in_target = True
+                    self._refresh_single_ui(t_idx, i_idx, other_item)
 
         val_str = item.serialize(new_val)
 
@@ -2225,6 +2375,15 @@ class DuskyTUI(App):
                 ekey = self._get_item_engine_info(item)
                 self.last_target_mtimes[ekey] = Path(engine.target_path).expanduser().resolve().stat().st_mtime
             except OSError: pass
+            
+            # For trigger bools, auto-revert the state so the highlight doesn't stick
+            _opt0_lower = str(item.options[0]).lower() if item.options and isinstance(item.options, list) and len(item.options) > 0 else ""
+            if item.type_ == "bool" and (_opt0_lower in ("trigger", "copy") or _opt0_lower.startswith("trigger:") or _opt0_lower.startswith("copy:")):
+                def reset_trigger():
+                    item.value = old_val
+                    self._refresh_single_ui(tab_idx, item_idx, item)
+                self.set_timer(0.15, reset_trigger)
+                
             self.notify_status(f"Updated {item.label}")
         elif msg == "AUTH_REQUIRED" or "AUTH_REQUIRED" in msg:
             async def on_pwd(pwd: str | None) -> None:
@@ -2771,7 +2930,8 @@ class DuskyTUI(App):
         if item.is_parent and (prefix_len <= click_x <= prefix_len + 9):
             instant_action = True
             
-        is_trigger_bool = item.type_ == "bool" and item.options and str(item.options[0]).lower() == "trigger"
+        _opt0_lower = str(item.options[0]).lower() if item.options and isinstance(item.options, list) and len(item.options) > 0 else ""
+        is_trigger_bool = item.type_ == "bool" and (_opt0_lower in ("trigger", "copy") or _opt0_lower.startswith("trigger:") or _opt0_lower.startswith("copy:"))
         if (item.type_ in ("preset", "action") or is_trigger_bool) and click_x >= 44:
             instant_action = True
             

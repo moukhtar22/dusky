@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# auto detects gpu layout and configures the environment variables
 # -----------------------------------------------------------------------------
 # Arch / Hyprland / UWSM GPU Configurator (v2026.08-Golden)
 # -----------------------------------------------------------------------------
@@ -182,7 +183,7 @@ sort_cards_by_pci() {
 }
 
 detect_topology() {
-    local -a card_paths=(/sys/class/drm/card+([0-9]))
+    local -a card_paths=(/sys/class/drm/card[0-9]*)
     local card_path=''
     local vendor_file=''
     local vendor_id=''
@@ -203,32 +204,63 @@ detect_topology() {
     fi
 
     for card_path in "${card_paths[@]}"; do
-        vendor_file="$card_path/device/vendor"
-        [[ -r $vendor_file ]] || continue
+        [[ "${card_path##*/}" =~ ^card[0-9]+$ ]] || continue
 
         dev_node="/dev/dri/${card_path##*/}"
         [[ -e $dev_node ]] || continue
 
-        if ! sys_device_path=$(readlink -f -- "$card_path/device"); then
+        # Resolve the sysfs device path (follows symlink to handle platform/simpledrm nodes)
+        if ! sys_device_path=$(readlink -f -- "$card_path/device" 2>/dev/null); then
             log_warn "Skipping unreadable DRM device path: $card_path"
             continue
         fi
 
-        pci_address="${sys_device_path##*/}"
-        vendor_id=$(<"$vendor_file")
+        # Walk up from sys_device_path to find a directory containing the PCI 'vendor' file
+        local pci_dir=""
+        local temp_path="$sys_device_path"
+        while [[ "$temp_path" != "/" && "$temp_path" != "." ]]; do
+            if [[ -r "$temp_path/vendor" ]]; then
+                pci_dir="$temp_path"
+                break
+            fi
+            temp_path=$(dirname "$temp_path")
+        done
+
+        if [[ -z "$pci_dir" ]]; then
+            log_warn "Skipping card with no vendor info: $card_path"
+            continue
+        fi
+
+        vendor_id=$(<"$pci_dir/vendor")
         vendor_id=${vendor_id,,}
+        pci_address="${pci_dir##*/}"
 
         boot_vga=0
-        [[ -r "$card_path/device/boot_vga" ]] && boot_vga=$(<"$card_path/device/boot_vga")
+        if [[ -r "$pci_dir/boot_vga" ]]; then
+            boot_vga=$(<"$pci_dir/boot_vga")
+        elif [[ -r "$sys_device_path/boot_vga" ]]; then
+            boot_vga=$(<"$sys_device_path/boot_vga")
+        fi
 
         kernel_driver='unknown'
-        if [[ -e "$card_path/device/driver" ]]; then
-            # Bulletproof readlink execution ensuring inherit_errexit is never tripped
-            driver_symlink=$(readlink -f -- "$card_path/device/driver" 2>/dev/null || true)
+        if [[ -e "$pci_dir/driver" ]]; then
+            driver_symlink=$(readlink -f -- "$pci_dir/driver" 2>/dev/null || true)
+            [[ -n $driver_symlink ]] && kernel_driver="${driver_symlink##*/}"
+        elif [[ -e "$sys_device_path/driver" ]]; then
+            driver_symlink=$(readlink -f -- "$sys_device_path/driver" 2>/dev/null || true)
             [[ -n $driver_symlink ]] && kernel_driver="${driver_symlink##*/}"
         fi
 
-        by_path_link="/dev/dri/by-path/pci-${pci_address}-card"
+        # Find the active by-path symlink ending in *card matching this PCI address
+        by_path_link="unavailable"
+        local link=''
+        for link in /dev/dri/by-path/pci-"${pci_address}"*card; do
+            if [[ -e "$link" ]]; then
+                by_path_link="$link"
+                break
+            fi
+        done
+
         human_name=$(get_pci_name "$pci_address")
 
         ALL_CARDS+=("$dev_node")
@@ -389,18 +421,16 @@ build_aq_runtime_string() {
     local -n cards=$src_name
     local -a parts=()
     local card=''
-    local by_path=''
+    local pci_address=''
+    local fallback=''
 
     for card in "${cards[@]}"; do
-        by_path=${CARD_BY_PATH[$card]}
+        pci_address=${CARD_PCI_ADDRESS[$card]}
+        fallback="$card"
 
-        if [[ -e $by_path ]]; then
-            # Generates: $(readlink -f -- '/dev/dri/by-path/...')
-            parts+=("\$(readlink -f -- ${by_path@Q})")
-        else
-            log_warn "Missing by-path symlink for $card; falling back to current node name."
-            parts+=("$card")
-        fi
+        # Generates a dynamic shell expansion that resolves the by-path link at runtime
+        # with a fallback to the static node path if no by-path link exists.
+        parts+=("\$(for dev in /dev/dri/by-path/pci-${pci_address}*card; do [ -e \"\$dev\" ] && readlink -f \"\$dev\" && break; done || echo ${fallback@Q})")
     done
 
     local IFS=:
@@ -456,7 +486,18 @@ generate_config() {
                 fi
                 ;;
             0x10de)
-                case "${kernel_driver}" in
+                # If running inside a chroot or during install phase where the kernel module 
+                # is not loaded yet, check if the proprietary nvidia-utils package files exist.
+                local target_driver="${kernel_driver}"
+                if [[ "${target_driver}" != "nvidia" && "${target_driver}" != "nouveau" ]]; then
+                    if [[ -e /usr/lib/gbm/nvidia-drm_gbm.so ]]; then
+                        target_driver="nvidia"
+                    elif [[ -e /usr/lib/libGLX_mesa.so ]]; then
+                        target_driver="nouveau"
+                    fi
+                fi
+
+                case "${target_driver}" in
                     nvidia)
                         printf '# NVIDIA Primary Session (Proprietary)\n'
                         printf 'export GBM_BACKEND=nvidia-drm\n'
@@ -473,7 +514,7 @@ generate_config() {
                         fi
                         ;;
                     *)
-                        printf '# NVIDIA Primary Session (Unknown Kernel Driver: %s)\n' "$kernel_driver"
+                        printf '# NVIDIA Primary Session (Unknown Driver: %s)\n' "$target_driver"
                         ;;
                 esac
                 ;;

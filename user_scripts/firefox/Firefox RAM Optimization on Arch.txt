@@ -1,0 +1,268 @@
+﻿Advanced Firefox 152 Performance Optimization on Arch Linux and Hyprland: Maximizing Volatile Memory Utilization
+Introduction to Modern Browser Optimization on High-Performance Architectures
+In the contemporary landscape of high-performance computing, the traditional bottlenecks of web browsing—network latency and graphical rendering throughput—have been largely superseded by local resource mismanagement. On a bleeding-edge system running Arch Linux (specifically Kernel 7.1.0), the Hyprland Wayland compositor, and Mozilla Firefox 152.0.2, paired with 64 Gigabytes of DDR5 RAM, the default configuration of any web browser represents a severe underutilization of available hardware. Standard browser architectures are conservatively engineered to operate within the constrained parameters of 8GB to 16GB memory footprints1. Consequently, they aggressively page out memory to disk, artificially limit concurrent processing, and rely on legacy disk-caching mechanisms that waste the immense bandwidth provided by DDR5 volatile memory2.
+The optimization of Firefox 152 on such an architecture requires a fundamental paradigm shift: moving from a disk-bound input/output (I/O) model to a fully memory-bound execution environment. By leveraging Linux kernel features such as tmpfs, fuse-overlayfs, and direct hardware integration via the Video Acceleration API (VA-API) and Direct Media Access Buffer (DMA-BUF), it is possible to entirely eliminate solid-state drive (SSD) latency from the browser's critical path4. Furthermore, the immense 64GB RAM capacity allows for the unthrottling of Firefox’s Electrolysis (e10s) and Fission (Site Isolation) architectures, dedicating discrete operating system-level processes to every individual web origin6.
+This comprehensive report provides an exhaustive, critical analysis of the absolute latest methodologies to force Firefox 152 to consume as much volatile memory as necessary to achieve instantaneous responsiveness. The analysis is tailored exclusively for a pure Wayland environment on Arch Linux, ensuring that no legacy X11 or deprecated methodologies are utilized.
+Re-architecting Cache Topologies: Eliminating Disk I/O
+Every object loaded by Firefox—HTML payloads, JavaScript bundles, WebAssembly modules, and media assets—is cached to prevent redundant network requests. By default, Firefox maintains a dual-cache hierarchy: a high-speed memory cache and a persistent disk cache2. On a system equipped with 64GB of DDR5 RAM, writing temporary web assets to an NVMe SSD is an architectural inefficiency that introduces micro-stutters during concurrent heavy workloads (e.g., rendering dozens of Document Object Models simultaneously)1.
+To force Firefox to utilize RAM for all caching operations, two distinct methodologies can be deployed. The first relies on Firefox's native internal memory allocator, while the second leverages the Linux kernel's tmpfs virtual filesystem.
+Native Memory Cache Override
+The most direct approach to stopping disk I/O is to disable Firefox's disk cache entirely and force all caching into the application's allocated memory space. Through the about:config interface, the native disk cache must be disabled, and the memory cache must be confirmed as active2.
+However, a critical scaling issue exists within Firefox's internal logic. By default, the memory cache capacity is determined dynamically. The internal formula used by Firefox to calculate this dynamic limit is:
+  
+
+This calculation is based on an archaic table designed for systems with 8GB of system memory or less2. On a 64GB system, this formula asymptotes prematurely, allocating a trivially small amount of RAM (often less than 50MB) to the cache. Therefore, relying on the automatic size selection will starve the browser of cache space.
+To resolve this, the capacity must be manually defined. For a 64GB system, allocating 4GB of RAM specifically for internal web caching is optimal.
+
+
+Preference Name
+	Data Type
+	Target Value
+	Mechanism of Action
+	browser.cache.disk.enable
+	Boolean
+	false
+	Disables disk-based caching, halting SSD write wear for web assets and preventing I/O latency2.
+	browser.cache.memory.enable
+	Boolean
+	true
+	Forces the browser to retain cached objects entirely in volatile memory2.
+	browser.cache.memory.capacity
+	Integer
+	4194304
+	Allocates exactly 4,194,304 KB (4 GB) of RAM to the internal cache, bypassing the deprecated legacy dynamic scaling algorithm2.
+	browser.cache.disk.smart_size.enabled
+	Boolean
+	false
+	Prevents the browser from attempting to dynamically resize the disabled disk cache10.
+	browser.cache.disk_cache_ssl
+	Boolean
+	false
+	Ensures encrypted HTTPS payloads are not forced to the disk cache independently of the primary cache directive10.
+	browser.cache.offline.enable
+	Boolean
+	false
+	Disables offline caching mechanics which default to disk writing10.
+	The primary drawback of the native memory cache is that it is entirely ephemeral. In the event of a browser crash or a system reboot, the cache is destroyed, necessitating the re-download of all assets upon subsequent visits2.
+Kernel-Level Volatile Caching (tmpfs)
+An alternative to the native memory override—and one that offers superior integration with the Linux kernel's page cache and survives browser restarts—is to leave the disk cache enabled within Firefox, but forcefully redirect the read/write operations to a RAM-backed filesystem (tmpfs).
+In modern Arch Linux environments managed by systemd, a user-specific tmpfs is automatically mounted at /run/user/<UID> (typically /run/user/1000)5. This directory exists entirely in RAM. The size of this tmpfs is governed by the RuntimeDirectorySize directive in /etc/systemd/logind.conf5. By default, systemd caps this directory at 10% of physical memory (6.4GB on a 64GB system), which provides an ideal, pre-configured volatile storage block5. If additional space is required, an administrator can override this by editing /etc/systemd/logind.conf or providing a drop-in snippet in /etc/systemd/logind.conf.d/ to increase the percentage5.
+To utilize this mechanism, the browser's cache parent directory is remapped to the volatile runtime directory.
+
+
+Configuration Step
+	Execution Location
+	Target Value / Command
+	Outcome
+	Identify User ID
+	Terminal Emulator
+	id -u
+	Retrieves the numerical user identifier (e.g., 1000) required for the path2.
+	Remap Cache Directory
+	about:config
+	browser.cache.disk.parent_directory = /run/user/1000/firefox
+	Instructs Firefox to build its cache2 directory inside the system's volatile RAM block2.
+	Verify Execution
+	Firefox URL Bar
+	about:cache
+	Confirms that the active cache location reflects the tmpfs mount path2.
+	When Firefox initializes, it will construct its cache2 directory within this RAM-disk12. Controlled benchmarks across modern architectures indicate that migrating cache read operations from an NVMe SSD to a RAM disk reduces median cache read latency from approximately 217 µs down to 14 µs, yielding 63–85% faster page resource loading under high-tab-load conditions1.
+Complete Profile Virtualization: Profile-Sync-Daemon (PSD)
+While caching web assets in RAM significantly improves page load times, Firefox's entire user profile—which encompasses SQLite databases containing history, bookmarks, DOM storage, and extension states—is continually subjected to disk I/O5. Relocating the entire profile to RAM guarantees that all browser operations occur at the speed of the DDR5 bus, vastly improving the responsiveness of the user interface, search bar queries, and tab switching5.
+For Arch Linux running kernel 7.1, the definitive tool for this operation is profile-sync-daemon (psd). Available in the Arch official repositories, psd is a specialized pseudo-daemon that manages browser profiles in tmpfs and continuously synchronizes them with the physical disk using rsync5.
+Architectural Mechanics of PSD and fuse-overlayfs
+Legacy implementations of RAM-disks required copying the entire profile into memory at boot, and copying the entirety of it back upon shutdown. With large profiles, this induced unacceptable latency during login and logout sequences, and risked data loss during ungraceful shutdowns5.
+Starting with version 7, psd leverages fuse-overlayfs (requiring a Linux kernel version of 4.18 or greater)5. OverlayFS is a union filesystem that fundamentally alters how the RAM disk operates. When psd initializes, it mounts a read-only base copy (the "lower directory") of the Firefox profile directly from the physical drive. It then creates a writable "upper directory" entirely within the /run/user/1000/psd tmpfs RAM allocation17.
+All read operations seamlessly pass through to the underlying data, but crucially, all write operations (new history entries, updated cookies, extension state changes) are captured instantly in the volatile RAM layer18. During the synchronization interval, psd only needs to flush the highly localized changed data (the delta) back to the physical disk via rsync, rather than moving the entire profile5. This drastically reduces the memory footprint required in tmpfs and maximizes synchronization speed, making the user experience entirely transparent5.
+Deployment and Systemd Configuration
+To deploy psd optimally on a 64GB Arch system, the package is installed via pacman -S profile-sync-daemon16. Executing psd once in the terminal generates the initial configuration file at $XDG_CONFIG_HOME/psd/psd.conf16.
+The configuration file must be modified to enforce overlayfs and target the specific browser.
+
+
+psd.conf Directive
+	Target Value
+	Architectural Impact
+	USE_OVERLAYFS
+	"yes"
+	Mandates the use of the union filesystem, preventing full-profile copying and lowering sync latency5.
+	BROWSERS
+	"firefox"
+	Explicitly defines the target application, bypassing auto-detection overhead16.
+	USE_BACKUPS
+	"yes"
+	Enables automatic date-time-stamped crash recovery snapshots, protecting against unclean shutdowns5.
+	BACKUP_LIMIT
+	"5"
+	Retains the last five known-good profile states on the physical disk5.
+	Once configured, the daemon is activated via the systemd user service: systemctl --user enable --now psd.service5.
+Systemd Timer Granularity Optimization
+By default, the psd-resync.timer triggers a sync operation back to the physical disk every hour5. In a high-performance environment, leaving data purely volatile for an hour presents an unnecessary data-loss risk, especially when syncing deltas takes milliseconds due to fuse-overlayfs. The synchronization interval must be aggressively shortened.
+This is achieved by extending the systemd user timer with a drop-in configuration file5. A directory is created at ~/.config/systemd/user/psd-resync.timer.d/, and a file named frequency.conf is populated with the following parameters:
+
+
+
+
+
+
+Ini, TOML
+[Unit]
+Description=Timer for Profile-sync-daemon - 10min
+
+[Timer]
+OnUnitActiveSec=
+OnUnitActiveSec=10min
+
+Following a daemon reload (systemctl --user daemon-reload), the profile will exist natively in DDR5 RAM, writing changes back to the SSD every 10 minutes in the background without blocking the Firefox main execution thread5.
+Unthrottling the Fission Architecture: Process Expansion
+Modern Firefox utilizes a multi-process architecture known as Electrolysis (e10s), heavily augmented by Project Fission (Site Isolation)6. Fission is a fundamental security and performance paradigm that ensures that web pages and web frames from different origins are sandboxed into completely isolated OS-level processes7.
+By default, to prevent users with limited RAM from encountering Out-Of-Memory (OOM) fatal errors, Firefox artificially caps the number of content processes it spawns. For shared web content, the default cap is 8 (dom.ipc.processCount). For isolated web content under Fission, the default cap per-site is 1, scaling up dynamically but with hard limits3.
+When a user opens more tabs than the allocated process limits allow, Firefox is forced to bundle disparate pages into the same shared content processes21. This creates severe CPU thread contention, increases garbage collection (GC) latency, and renders the browser sluggish. Furthermore, sharing processes leads to "ghost window" memory leaks, where memory from a closed tab cannot be freed because the underlying OS process is being kept alive by an active tab sharing the same sandbox3.
+With 64GB of DDR5 RAM, memory starvation is an impossibility under normal workloads. Therefore, the browser must be configured to prioritize maximum parallelism, dedicating a unique CPU thread and a unique block of memory to every single web asset.
+Forcing Maximum Process Allocation
+To unthrottle the multi-process limits, parameters in about:config must be adjusted to bypass standard memory-saving constraints.
+
+
+Preference Name
+	Data Type
+	Target Value
+	Mechanism of Action
+	dom.ipc.processCount
+	Integer
+	32 (or higher)
+	Defines the maximum number of shared web content processes. Increasing this ensures that legacy or non-isolated pages never have to share an execution thread9.
+	dom.ipc.processCount.webIsolated
+	Integer
+	99
+	Determines the number of processes allocated per site under Fission. Setting this to an arbitrarily high number guarantees strict 1:1 mapping of origins to OS processes, preventing ghost windows19.
+	dom.ipc.processCount.extension
+	Integer
+	4
+	Allows WebExtensions to run across multiple processes rather than a single shared sandbox, preventing heavy background scripts from locking the UI thread3.
+	fission.autostart
+	Boolean
+	true
+	Enforces Site Isolation architecture globally, ensuring that every origin is granted its own memory space6.
+	Increasing the webIsolated limit will cause the active process count in system monitors to scale linearly with the number of open tabs. Each process incurs roughly 30MB to 65MB of baseline overhead23. On a 64GB system, opening hundreds of tabs mapped strictly to distinct processes will efficiently utilize the hardware, transforming idle RAM into tangible responsiveness without triggering OS paging limits22.
+Disabling Premature Memory Reclamation
+Firefox features an internal daemon that monitors system memory and aggressively unloads background tabs if it perceives a low-memory state (browser.tabs.unloadOnLowMemory)9. While useful on restricted hardware, this daemon can miscalculate thresholds on massive RAM pools and artificially suspend background tabs, causing a delay when the user switches back to them14.
+To prevent Firefox from unnecessarily dumping data out of RAM, this feature must be explicitly managed. The variable browser.tabs.unloadOnLowMemory can be set to false, entirely forbidding Firefox from suspending tabs based on memory pressure14. Alternatively, if an administrator wishes to retain it as an extreme fail-safe, the threshold must be remapped. By setting the integer browser.tabs.unloadOnLowMemory.thresholdMB to a high value (e.g., 2048), the browser will only discard tabs if less than 2GB of physical RAM remains completely free20.
+Rendering Pipeline and Hardware Acceleration on Wayland
+Migrating cache and profile operations into RAM resolves I/O latency, but visual stuttering and high CPU utilization are dictated by the graphics pipeline. Firefox 152 must be forced to utilize the GPU for all compositing and video decoding tasks, circumventing the CPU entirely.
+Forcing WebRender
+Firefox is powered by WebRender, a high-performance 2D rendering engine written in Rust2. On Linux, Mozilla occasionally employs a blocklist that forces a fallback to "Software WebRender" (which utilizes the CPU) if it detects certain graphics drivers, even on capable hardware2.
+To confirm WebRender is active, users can navigate to about:support and locate the "Compositing" field. If it reads "Software WebRender" or "Basic," the hardware blocklist must be manually overridden in about:config2.
+Setting gfx.webrender.all to true and layers.acceleration.force-enabled to true forces the browser to upload rendering tasks to the GPU24. This dramatically smooths out scrolling on high-refresh-rate monitors and frees up CPU cycles for script execution.
+Hardware Video Acceleration (VA-API and DMA-BUF)
+Without hardware acceleration, playing high-resolution video streams (e.g., AV1 or VP9 at 4K60FPS) forces the CPU to decode the frames algorithmically. This results in massive heat generation, CPU spikes up to 50%, and dropped frames4. Linux utilizes the Video Acceleration API (VA-API) to pass this workload directly to the GPU's dedicated hardware decoding silicon4.
+To ensure Firefox taps directly into the hardware decoder under Wayland, specific directives must be enabled.
+
+
+Preference Name
+	Data Type
+	Target Value
+	Mechanism of Action
+	media.ffmpeg.vaapi.enabled
+	Boolean
+	true
+	Enables the integration between Firefox's media framework and the system's VA-API libraries25.
+	media.hardware-video-decoding.force-enabled
+	Boolean
+	true
+	Overrides any internal blocklists that may prevent hardware video decoding on specific Linux drivers14.
+	widget.wayland-dmabuf-vaapi.enabled
+	Boolean
+	true
+	Enables zero-copy video decoding using Direct Memory Access Buffers under Wayland25.
+	The DMA-BUF implementation is critical for optimal performance. It allows the GPU to decode the video frame and pass the memory pointer directly to the Wayland compositor. This bypasses the need to copy the uncompressed frame through the CPU or system RAM, achieving a zero-copy pipeline that maximizes efficiency14.
+Wayland Native Execution: Hyprland Environmental Configuration
+Hyprland is a dynamic, wlroots-based Wayland compositor (currently transitioning to an independent backend)28. Firefox is capable of running natively under Wayland. However, if the system environment variables are misconfigured, Firefox will fall back to Xwayland—an X11 compatibility layer30. Xwayland introduces scaling artifacts (especially on HiDPI displays), lacks Wayland's security isolation, and breaks pixel-perfect trackpad kinetic scrolling29.
+To strictly enforce native Wayland operation, the variable MOZ_ENABLE_WAYLAND=1 must be passed to the browser26.
+Hyprland 0.55+ Configuration Architecture
+As of June 2026, relying on legacy files such as /etc/environment to set Wayland variables is heavily discouraged, as it pollutes Xorg sessions and conflicts with modern session management paradigms32.
+In Hyprland versions 0.55 and above, configuration has shifted to Lua syntax, and environments are increasingly managed by the Universal Wayland Session Manager (uwsm)32. Environment variables must be injected directly into the compositor's initialization phase.
+If running standard Hyprland without uwsm, the variables are declared in the Lua configuration script:
+
+
+
+
+
+
+Lua
+hl.env("MOZ_ENABLE_WAYLAND", "1")
+hl.env("XDG_CURRENT_DESKTOP", "Hyprland")
+hl.env("XDG_SESSION_TYPE", "wayland")
+
+If the system leverages uwsm, environment variables must instead be exported via ~/.config/uwsm/env or ~/.config/uwsm/env-hyprland, using standard export syntax (e.g., export MOZ_ENABLE_WAYLAND=1)32.
+Wayland-Specific Renderer Tuning
+Wayland compositors handle window surfaces differently than X11. A common rendering glitch when maximizing hardware-accelerated video in Firefox under Hyprland is a brief flicker or blanking of the screen. This occurs as the compositor negotiates the opaque region of the window surface with the browser14.
+This artifact can be entirely eliminated by instructing Firefox to ignore opaque region declarations to the compositor, by setting widget.wayland.opaque-region.enabled to false in about:config14.
+Furthermore, to enable physics-based kinetic scrolling that matches system UI frameworks, and to ensure high-resolution input events from trackpads are captured seamlessly via XInput2 APIs, the variable apz.gtk.kinetic_scroll.enabled must be set to true, and MOZ_USE_XINPUT2=1 must be exported alongside the Wayland environment variables14.
+Advanced Database Vacuuming, Telemetry Purging, and Network Optimization
+Even with the profile residing completely in a tmpfs RAM disk, the internal structure of the SQLite databases (which store History, Bookmarks, and DOM data) becomes heavily fragmented over time14. When a user adds and removes bookmarks or generates thousands of history entries, the SQLite files develop empty, unused pages known as slack space. Firefox must parse over this dead space during queries, causing localized CPU spikes.
+Vacuuming via Profile-Cleaner
+To mathematically optimize the databases, an Arch package known as profile-cleaner can be utilized34. profile-cleaner iterates through the active Firefox profile and executes the VACUUM and REINDEX SQLite commands35. The VACUUM command rebuilds the database file from scratch, discarding all fragmented slack space, while REINDEX rebuilds the search indices, ensuring that queries (such as typing in the URL bar) are resolved instantly36.
+Because the entire profile is actively hosted in tmpfs (RAM) via psd, executing profile-cleaner takes fractions of a second and incurs zero disk writes, optimizing the internal data structures purely in memory35. Automating this process via a systemd timer to execute weekly guarantees that database latency remains absolute zero.
+Telemetry Elimination
+Firefox includes extensive telemetry daemons that monitor performance and upload data to Mozilla. These background services consume CPU cycles, generate network interrupts, and produce unnecessary memory allocations9. On a system tuned for absolute maximum performance, these must be disabled.
+
+
+Preference Name
+	Target Value
+	Architectural Impact
+	toolkit.telemetry.enabled
+	false
+	Completely disables the primary telemetry engine, freeing background threads9.
+	datareporting.healthreport.uploadEnabled
+	false
+	Halts the generation and upload of browser health metrics9.
+	app.normandy.enabled
+	false
+	Disables the Normandy remote-configuration engine, preventing background studies and unexpected configuration shifts9.
+	For extreme optimization, the crash-reporting binaries (crashreporter, minidump-analyzer, and pingsender) located in /usr/lib/firefox/ can be physically removed, and their paths added to the NoExtract parameter in /etc/pacman.conf to prevent reinstallation during package upgrades14.
+Network Pipelining and Connection Ceilings
+Finally, to guarantee that Firefox is actively utilizing the system's underlying network throughput to match the speed of the DDR5 RAM, the internal networking daemon must be permitted to open maximum parallel connections.
+In about:config, the connection ceilings must be raised:
+* network.http.max-connections = 1800 (Drastically increasing simultaneous TCP/UDP connection ceilings)9
+* network.http.max-persistent-connections-per-server = 10
+[cite: 9]
+Additionally, enabling DNS over HTTPS (DoH) utilizing a fast provider (e.g., Cloudflare via network.trr.mode = 2 and network.trr.uri = https://mozilla.cloudflare-dns.com/dns-query) prevents legacy local DNS resolver latency from bottlenecking the initial connection handshake9.
+Conclusion
+The deployment of Mozilla Firefox 152 on an Arch Linux system running kernel 7.1 and the Hyprland Wayland compositor presents a unique opportunity for optimization. By actively disregarding legacy configuration logic meant to coddle resource-starved machines, the massive 64GB DDR5 hardware allocation can be fully exploited to create an essentially zero-latency browsing experience.
+Through the strategic deployment of fuse-overlayfs via the profile-sync-daemon, the browser profile is completely decoupled from NVMe SSD latencies, achieving instantaneous read and write speeds within a tmpfs RAM disk. By overriding the internal cache calculators, redirecting cache directories to volatile memory, and forcing the Fission architecture to dedicate independent OS-level processes to every single origin, Firefox is transformed into a heavily parallelized application that safely absorbs available hardware resources. Coupled with native Wayland environment declarations, zero-copy DMA-BUF video decoding, enforced GPU WebRendering, and aggressive SQLite database vacuuming, this holistic configuration completely eliminates traditional browser bottlenecks, achieving the absolute apex of performance metrics.
+Works cited
+   1. Move Firefox and Chrome Cache to RAM Disk for Faster Browsing - LifeTips - Alibaba.com, https://lifetips.alibaba.com/tech-efficiency/move-firefox-and-chromes-cache-to-a-ram-disk-for-faster
+   2. Firefox/Tweaks - ArchWiki, https://wiki.archlinux.org/title/Firefox/Tweaks
+   3. Can somebody help me fix this? See comment. : r/firefox - Reddit, https://www.reddit.com/r/firefox/comments/1iqemqi/can_somebody_help_me_fix_this_see_comment/
+   4. Hardware video acceleration - ArchWiki, https://wiki.archlinux.org/title/Hardware_video_acceleration
+   5. Profile-sync-daemon - ArchWiki, https://wiki.archlinux.org/title/Profile-sync-daemon
+   6. How to Optimize Firefox for Performance: Evidence-Based Steps - LifeTips, https://lifetips.alibaba.com/tech-efficiency/optimize-firefox-for-performance
+   7. Project Fission - MozillaWiki, https://wiki.mozilla.org/Project_Fission
+   8. Speed Up Firefox by Moving Your Cache to RAM, No RAM Disk Required - Lifehacker, https://lifehacker.com/speed-up-firefox-by-moving-your-cache-to-ram-no-ram-di-5687850
+   9. Firefox Optimization Tweaks for 2025: Speed, Efficiency, and Privacy Perfected, https://eagleeyet.net/blog/web-browser/mozilla-firefox/firefox-optimization-tweaks-for-2025-speed-efficiency-and-privacy-perfected/
+   10. Disable browser cache in Firefox so you don't cause unnecessary writes to your SSD when watching Youtube videos/live streams - Reddit, https://www.reddit.com/r/firefox/comments/ufozuh/disable_browser_cache_in_firefox_so_you_dont/
+   11. Switched browser cache from disk (SSD) to RAM, about:cache still displaying in disk too | Firefox Support Forum, https://support.mozilla.org/en-US/questions/1313570
+   12. How to locate and change Firefox Cache storage location - Mozilla Support, https://support.mozilla.org/en-US/questions/1317032
+   13. Keep Your Browser Profiles In tmpfs (RAM) For Reduced Disk Writes And Increased Performance With Profile Sync Daemon - WebUpd8, http://www.webupd8.org/2013/02/keep-your-browser-profiles-in-tmpfs-ram.html
+   14. Firefox - ArchWiki, https://wiki.archlinux.org/title/Firefox
+   15. GitHub - graysky2/profile-sync-daemon: Symlinks and syncs browser profile dirs to RAM thus reducing HDD/SDD calls and speeding-up browsers., https://github.com/graysky2/profile-sync-daemon
+   16. How To Sync Browser Profile Into Tmpfs (RAM) In Linux - OSTechNix, https://ostechnix.com/how-to-sync-browser-profile-into-tmpfs-ram-in-linux/
+   17. psd(1) — Arch manual pages, https://man.archlinux.org/man/psd.1
+   18. profile-sync-daemon(1) - Debian Manpages, https://manpages.debian.org/stretch/profile-sync-daemon/profile-sync-daemon.1.en.html
+   19. Process Model — Firefox Source Docs documentation - Mozilla, https://firefox-source-docs.mozilla.org/dom/ipc/process_model.html
+   20. Dealing with Firefox Memory Issues: Evidence-Based Fixes That Work - LifeTips, https://lifetips.alibaba.com/tech-efficiency/dealing-with-firefox-memory-issues
+   21. Firefox content process limit is gone - Reddit, https://www.reddit.com/r/firefox/comments/r69j52/firefox_content_process_limit_is_gone/
+   22. 1742892 - Add UI for Fission-specific dom.ipc.processCount.webIsolated to replace "Content process limit" option in the preferences/settings - Bugzilla@Mozilla, https://bugzilla.mozilla.org/show_bug.cgi?id=1742892
+   23. 1470280 - Increase process count to 8 on Nightly - Bugzilla@Mozilla, https://bugzilla.mozilla.org/show_bug.cgi?id=1470280
+   24. Optimize_Firefox.md - GitHub, https://gist.github.com/kRHYME7/84ef0f69872eb9b92deb2a0aa4b869bf
+   25. High CPU Usage in All Firefox-Based Browsers : r/hyprland - Reddit, https://www.reddit.com/r/hyprland/comments/1ntizop/high_cpu_usage_in_all_firefoxbased_browsers/
+   26. [How to] Wayland Firefox and Thunderbird under KDE or GNOME - Manjaro Linux Forum, https://forum.manjaro.org/t/how-to-wayland-firefox-and-thunderbird-under-kde-or-gnome/139120
+   27. Firefox 80 EGL and WebRender does not work - Linux - NVIDIA Developer Forums, https://forums.developer.nvidia.com/t/firefox-80-egl-and-webrender-does-not-work/140383
+   28. Hyprland, https://hypr.land/
+   29. Hyprland Setup Guide: Install and Configure (2026) - Petronella Technology Group, https://petronellatech.com/blog/hyprland-setup-guide-install-configure-2026/
+   30. Wayland - ArchWiki, https://wiki.archlinux.org/title/Wayland
+   31. Most likely ruined my Arch installation by changing Environment variable to use Firefox on Wayland. Please help me save it. - Reddit, https://www.reddit.com/r/linux4noobs/comments/18nz135/most_likely_ruined_my_arch_installation_by/
+   32. Environment variables - Hyprland Wiki, https://wiki.hypr.land/Configuring/Advanced-and-Cool/Environment-variables/
+   33. Environment Variables - Hyprland Wiki, https://wiki.hypr.land/0.18.0beta/Configuring/Environment-variables/
+   34. profile-cleaner 2.46-1 (any) - Arch Linux, https://archlinux.org/packages/extra/any/profile-cleaner/
+   35. profile-cleaner reduces browser profile size by cleaning/reindexing - Arch Linux Forums, https://bbs.archlinux.org/viewtopic.php?id=148062
+   36. graysky2/profile-cleaner: Simple script to vacuum and reindex sqlite databases used by Firefox and by Chrome/Chromium. - GitHub, https://github.com/graysky2/profile-cleaner

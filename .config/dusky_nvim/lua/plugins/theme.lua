@@ -44,6 +44,9 @@ return {
         -- UI FIX: Remove background from NvimTree to make it blend with the terminal/transparency
         vim.api.nvim_set_hl(0, "NvimTreeNormal", { bg = "NONE", ctermbg = "NONE" })
 
+        -- UI FIX: Make command line area blend seamlessly with normal background
+        vim.api.nvim_set_hl(0, "MsgArea", { bg = "NONE" })
+
         -- Reset cursor shape (Hyprland optimization)
         vim.opt.guicursor = "n-v-c:hor20-Cursor,i-ci-ve:ver25-Cursor,r-cr-o:hor20-Cursor"
       end

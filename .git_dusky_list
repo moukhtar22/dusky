@@ -19,7 +19,6 @@
 .config/hypr/source/
 .config/hypr/hypridle.conf
 .config/hypr/hyprland.lua
-.config/hypr/hyprland.conf
 .config/hypr/hyprlock.conf
 .config/hypr/hyprsunset.conf
 .config/hypr/xdph.conf

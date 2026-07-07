@@ -97,6 +97,12 @@ run_with_spinner() {
     local msg="$1"
     shift
 
+    if [[ ! -t 1 ]]; then
+        log_info "$msg"
+        "$@"
+        return $?
+    fi
+
     local tmp_log pid rc
     tmp_log="$(mktemp)"
     CURRENT_BG_LOG=$tmp_log
@@ -108,19 +114,30 @@ run_with_spinner() {
     local delay=0.1
     local frames=( '⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏' )
 
-    if [[ -t 1 ]]; then
-        printf '\033[?25l'
+    printf '\033[?25l'
 
-        while kill -0 "$pid" 2>/dev/null; do
-            for frame in "${frames[@]}"; do
-                kill -0 "$pid" 2>/dev/null || break
-                printf '\r%s::%s %s %s' "$B" "$NC" "$frame" "$msg"
-                sleep "$delay"
-            done
+    while kill -0 "$pid" 2>/dev/null; do
+        for frame in "${frames[@]}"; do
+            kill -0 "$pid" 2>/dev/null || break
+            
+            local status_line=""
+            if [[ -s "$tmp_log" ]]; then
+                status_line=$(tail -n 10 "$tmp_log" 2>/dev/null | grep -v '^[[:space:]]*$' | tail -n 1 2>/dev/null || true)
+                status_line="${status_line##*$'\r'}"
+                status_line=$(echo "$status_line" | tr -d '\n\r' | tr -s ' ' | xargs 2>/dev/null || true)
+                status_line=$(echo "$status_line" | cut -c1-75)
+            fi
+
+            if [[ -n "$status_line" ]]; then
+                printf '\r%s::%s %s %s \033[90m(%s)\033[0m\033[K' "$B" "$NC" "$frame" "$msg" "$status_line"
+            else
+                printf '\r%s::%s %s %s\033[K' "$B" "$NC" "$frame" "$msg"
+            fi
+            sleep "$delay"
         done
+    done
 
-        printf '\033[?25h\r\033[K'
-    fi
+    printf '\033[?25h\r\033[K'
 
     if wait "$pid"; then
         CURRENT_BG_PID=''
@@ -396,10 +413,37 @@ sync_cachyos() {
         for (( attempt = 1; attempt <= max_attempts; attempt++ )); do
             manage_pacman_lock
 
-            if run_with_spinner "Benchmarking CachyOS mirrors..." cachyos-rate-mirrors; then
+            local tmp_wrapper
+            tmp_wrapper="$(mktemp "${TMPDIR:-/tmp}/cachyos_wrapper.XXXXXX")"
+            cat > "$tmp_wrapper" << 'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+tmp_bin_dir="$(mktemp -d)"
+cat > "${tmp_bin_dir}/curl" << 'CURL_MOCK'
+#!/usr/bin/env bash
+if [[ "$*" == *"geoip.kde.org"* ]]; then
+    /usr/bin/curl --connect-timeout 2 -m 3 "$@" 2>/dev/null || echo "<CountryCode>US</CountryCode>"
+else
+    exec /usr/bin/curl "$@"
+fi
+CURL_MOCK
+chmod +x "${tmp_bin_dir}/curl"
+
+rc=0
+PATH="${tmp_bin_dir}:$PATH" cachyos-rate-mirrors || rc=$?
+
+rm -rf -- "$tmp_bin_dir"
+exit "$rc"
+EOF
+            chmod +x "$tmp_wrapper"
+
+            if run_with_spinner "Benchmarking CachyOS mirrors..." "$tmp_wrapper"; then
                 success=1
+                rm -f -- "$tmp_wrapper"
                 break
             fi
+
+            rm -f -- "$tmp_wrapper"
 
             if (( attempt < max_attempts )); then
                 log_warn "Network latency detected. Retrying in 5 seconds (Attempt $(( attempt + 1 ))/${max_attempts})..."
@@ -462,6 +506,7 @@ sync_arch() {
                       --download-timeout 2 \
                       --fastest 10 \
                       --sort rate \
+                      --info \
                       --save "$reflector_tmp"; then
             if {
                 chmod 0644 "$reflector_tmp"

@@ -107,7 +107,7 @@ class MetricPill(Gtk.EventBox):
         self._val_lbl = Gtk.Label(label="--")
         _add_css_class(self._val_lbl, "metric-value-small" if small_text else "metric-value")
         self._val_lbl.set_ellipsize(Pango.EllipsizeMode.END)
-        self._val_lbl.set_max_width_chars(10)
+        self._val_lbl.set_max_width_chars(16)
         self._val_lbl.set_width_chars(1)
 
         self._inner.pack_start(self._val_lbl, False, False, 0)
@@ -238,16 +238,16 @@ class CompactSliderRow(Gtk.Box):
 # NOTIFICATIONS UI COMPONENT
 # ==============================================================================
 class NotificationRow(Gtk.ListBoxRow):
-    def __init__(self, notif: NotificationData, on_close: Callable[[NotificationRow], None]):
+    def __init__(self, notif: NotificationData, on_close: Callable[['NotificationRow'], None], show_app_name: bool = True, time_str: str = ""):
         super().__init__()
         self.notif = notif
         _add_css_class(self, "notif-row")
 
         main_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        text_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
+        text_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
         
         # App Name Header
-        if notif.app_name and notif.app_name != "notify-send":
+        if show_app_name and notif.app_name and notif.app_name != "notify-send":
             app_lbl = Gtk.Label(label=notif.app_name.upper())
             app_lbl.set_halign(Gtk.Align.START)
             # CRITICAL UI FIX: Lock all notification text layout logic to 1 char minimum.
@@ -281,23 +281,91 @@ class NotificationRow(Gtk.ListBoxRow):
 
         main_box.pack_start(text_box, True, True, 0)
 
-        # Close Button (The 'X' cross)
+        # Right side: Time and Close Button stacked
+        right_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        right_box.set_valign(Gtk.Align.START)
+        
+        if time_str:
+            time_lbl = Gtk.Label(label=time_str)
+            time_lbl.set_halign(Gtk.Align.END)
+            _add_css_class(time_lbl, "notif-time")
+            right_box.pack_start(time_lbl, False, False, 0)
+
         close_btn = Gtk.Button()
         close_btn.set_image(Gtk.Image.new_from_icon_name("window-close-symbolic", Gtk.IconSize.MENU))
         _add_css_class(close_btn, "notif-close-btn")
-        close_btn.set_valign(Gtk.Align.START)
+        close_btn.set_halign(Gtk.Align.END)
         close_btn.set_relief(Gtk.ReliefStyle.NONE)
         close_btn.set_can_focus(False)  # Prevents grabbing row focus
         close_btn.connect("clicked", lambda _: on_close(self))
-        main_box.pack_end(close_btn, False, False, 0)
+        right_box.pack_start(close_btn, False, False, 0)
+        
+        main_box.pack_end(right_box, False, False, 0)
 
         self.add(main_box)
+
+class NotificationStackHeader(Gtk.ListBoxRow):
+    def __init__(self, app_name: str, count: int, toggle_cb, on_close_stack: Callable[[str], None]):
+        super().__init__()
+        self.app_name = app_name
+        self.expanded = False
+        self.toggle_cb = toggle_cb
+        _add_css_class(self, "notif-stack-header")
+        
+        main_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        text_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        
+        app_lbl = Gtk.Label(label=app_name.upper())
+        app_lbl.set_halign(Gtk.Align.START)
+        app_lbl.set_ellipsize(Pango.EllipsizeMode.END)
+        app_lbl.set_width_chars(1)
+        _add_css_class(app_lbl, "notif-stack-title")
+        text_box.pack_start(app_lbl, False, False, 0)
+        
+        count_lbl = Gtk.Label(label=f"{count} notifications")
+        count_lbl.set_halign(Gtk.Align.START)
+        count_lbl.set_ellipsize(Pango.EllipsizeMode.END)
+        count_lbl.set_width_chars(1)
+        _add_css_class(count_lbl, "notif-body")
+        text_box.pack_start(count_lbl, False, False, 0)
+        
+        main_box.pack_start(text_box, True, True, 0)
+        
+        right_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        right_box.set_valign(Gtk.Align.CENTER)
+        
+        close_btn = Gtk.Button()
+        close_btn.set_image(Gtk.Image.new_from_icon_name("window-close-symbolic", Gtk.IconSize.MENU))
+        _add_css_class(close_btn, "notif-close-btn")
+        close_btn.set_relief(Gtk.ReliefStyle.NONE)
+        close_btn.set_can_focus(False)
+        close_btn.connect("clicked", lambda _: on_close_stack(self.app_name))
+        right_box.pack_start(close_btn, False, False, 0)
+        
+        self.icon = Gtk.Image.new_from_icon_name("pan-end-symbolic", Gtk.IconSize.MENU)
+        right_box.pack_start(self.icon, False, False, 0)
+        
+        main_box.pack_end(right_box, False, False, 0)
+        
+        self.add(main_box)
+        
+    def set_expanded(self, expanded: bool):
+        self.expanded = expanded
+        icon_name = "pan-down-symbolic" if self.expanded else "pan-end-symbolic"
+        self.icon.set_from_icon_name(icon_name, Gtk.IconSize.MENU)
+        
+    def toggle(self):
+        self.expanded = not self.expanded
+        self.set_expanded(self.expanded)
+        self.toggle_cb(self.app_name, self.expanded)
 
 class NotificationsPanel(Gtk.Box):
     def __init__(self, pool: RefreshPool):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         self._pool = pool
         self._refresh_token = 0
+        self.expanded_apps = set()
+        self.notif_times = {}
         _add_css_class(self, "notifications-panel")
 
         header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
@@ -348,8 +416,84 @@ class NotificationsPanel(Gtk.Box):
             self.hide()
         else:
             self.set_no_show_all(False)
-            for n in initial_notifs[:50]:
-                self.listbox.add(NotificationRow(n, self._on_row_closed))
+            self._render_notifs_list(initial_notifs)
+
+    def _render_notifs_list(self, notifs: list[NotificationData]):
+        import datetime, json, os
+        cache_file = "/tmp/dusky_notif_times.json"
+        
+        if not hasattr(self, "_notif_times_loaded"):
+            self._notif_times_loaded = True
+            if os.path.exists(cache_file):
+                try:
+                    with open(cache_file, "r") as f:
+                        self.notif_times = json.load(f)
+                except Exception:
+                    pass
+
+        now_str = datetime.datetime.now().strftime("%H:%M")
+        changed = False
+        
+        for n in notifs:
+            str_id = str(n.id)
+            if str_id not in self.notif_times:
+                self.notif_times[str_id] = now_str
+                changed = True
+                
+        # Limit cache size to 1000 to prevent indefinite growth while avoiding transient deletion bugs
+        if len(self.notif_times) > 1000:
+            excess = len(self.notif_times) - 1000
+            keys_to_remove = list(self.notif_times.keys())[:excess]
+            for k in keys_to_remove:
+                del self.notif_times[k]
+            changed = True
+            
+        if changed:
+            try:
+                with open(cache_file, "w") as f:
+                    json.dump(self.notif_times, f)
+            except Exception:
+                pass
+                
+        groups = {}
+        for n in notifs[:50]:
+            app = n.app_name if n.app_name else "Unknown"
+            if app not in groups:
+                groups[app] = []
+            groups[app].append(n)
+
+        for app, group_notifs in groups.items():
+            if len(group_notifs) > 1:
+                is_expanded = app in self.expanded_apps
+                header = NotificationStackHeader(app, len(group_notifs), self._on_stack_toggled, self._on_stack_closed)
+                header.set_expanded(is_expanded)
+                self.listbox.add(header)
+                
+                for n in group_notifs:
+                    row = NotificationRow(n, self._on_row_closed, show_app_name=False, time_str=self.notif_times.get(str(n.id), ""))
+                    if not is_expanded:
+                        row.set_no_show_all(True)
+                        row.hide()
+                    self.listbox.add(row)
+            else:
+                self.listbox.add(NotificationRow(group_notifs[0], self._on_row_closed, show_app_name=True, time_str=self.notif_times.get(str(group_notifs[0].id), "")))
+
+    def _on_stack_toggled(self, app_name: str, expanded: bool):
+        if expanded:
+            self.expanded_apps.add(app_name)
+        else:
+            self.expanded_apps.discard(app_name)
+            
+        for child in self.listbox.get_children():
+            if isinstance(child, NotificationRow):
+                n_app = child.notif.app_name if child.notif.app_name else "Unknown"
+                if n_app == app_name:
+                    if expanded:
+                        child.set_no_show_all(False)
+                        child.show_all()
+                    else:
+                        child.set_no_show_all(True)
+                        child.hide()
 
     def refresh_async(self):
         self._refresh_token += 1
@@ -392,8 +536,8 @@ class NotificationsPanel(Gtk.Box):
             self.hide() # Instantly collapse the entire module and shield from parent show_all
         else:
             self.set_no_show_all(False) # Guarantee GTK propagates visibility down to rows
-            for n in notifs[:50]: # Increased cap to 50 since we have global scrolling
-                self.listbox.add(NotificationRow(n, self._on_row_closed))
+            self._render_notifs_list(notifs)
+
             
             self.show_all()
             
@@ -416,8 +560,35 @@ class NotificationsPanel(Gtk.Box):
         else:
             self.refresh_async()
 
+    def _on_stack_closed(self, app_name: str):
+        """Triggered by the 'X' button on a stack header. Dismisses all notifications in the group."""
+        bl_path = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / "mako_rofi_blacklist"
+        for child in self.listbox.get_children():
+            if isinstance(child, NotificationRow):
+                n = child.notif
+                n_app = n.app_name if n.app_name else "Unknown"
+                if n_app == app_name:
+                    try:
+                        with open(bl_path, "a") as f: f.write(f"{n.id}\n")
+                    except Exception: pass
+                    execute_cmd(f"makoctl dismiss -n {n.id}")
+                    self.listbox.remove(child)
+            elif isinstance(child, NotificationStackHeader) and child.app_name == app_name:
+                self.listbox.remove(child)
+
+        self.expanded_apps.discard(app_name)
+        if not self.listbox.get_children():
+            self.set_no_show_all(True)
+            self.hide()
+        else:
+            self.refresh_async()
+
     def _on_row_activated(self, listbox: Gtk.ListBox, row: Gtk.ListBoxRow):
         """Triggered by clicking the row body. Blacklists and launches app/action."""
+        if isinstance(row, NotificationStackHeader):
+            row.toggle()
+            return
+            
         if not isinstance(row, NotificationRow): return
         n = row.notif
 
@@ -497,7 +668,7 @@ scrolledwindow undershoot.bottom {
 button { transition: background-color 200ms ease, opacity 200ms ease, box-shadow 200ms ease; }
 
 .header-time { font-size: 38px; font-weight: 800; letter-spacing: -2px; color: @theme_fg_color; }
-.header-date { font-size: 12px; font-weight: 600; color: alpha(@theme_fg_color, 0.7); }
+.header-date { font-size: 12px; font-weight: 600; color: @theme_selected_bg_color; }
 
 box.weather-pill { padding: 4px 4px; }
 .weather-text { font-size: 12px; font-weight: 700; color: alpha(@theme_fg_color, 0.9); }
@@ -535,9 +706,19 @@ eventbox.clickable-pill:hover box.metric-pill { background-color: rgba(255, 255,
 .power-label { font-size: 14px; font-weight: 600; color: @theme_fg_color; }
 .accent-icon { color: @theme_selected_bg_color; }
 
-button.power-ring-btn { border: 2px solid transparent; border-radius: 15px; min-width: 30px; min-height: 30px; padding: 0; margin: 0; background-color: transparent; color: alpha(@theme_fg_color, 0.7); }
+button.power-ring-btn { border: 2px solid transparent; border-radius: 999px; min-width: 30px; min-height: 30px; padding: 0; margin: 0; background-color: transparent; color: alpha(@theme_fg_color, 0.7); }
 button.power-ring-btn:hover { background-color: rgba(255, 255, 255, 0.08); }
-button.power-ring-btn:checked { background-color: alpha(@theme_selected_bg_color, 0.15); border-color: @theme_selected_bg_color; color: @theme_selected_bg_color; }
+button.power-ring-btn:checked { background-color: alpha(@theme_selected_bg_color, 0.15); border-color: @theme_selected_bg_color; color: @theme_selected_bg_color; box-shadow: 0 0 8px alpha(@theme_selected_bg_color, 0.25); }
+button.power-ring-btn.power-saver:checked { background-color: alpha(#a6e3a1, 0.15); border-color: #a6e3a1; color: #a6e3a1; box-shadow: 0 0 8px alpha(#a6e3a1, 0.25); }
+button.power-ring-btn.balanced:checked { background-color: alpha(#89b4fa, 0.15); border-color: #89b4fa; color: #89b4fa; box-shadow: 0 0 8px alpha(#89b4fa, 0.25); }
+button.power-ring-btn.performance:checked { background-color: alpha(#f38ba8, 0.15); border-color: #f38ba8; color: #f38ba8; box-shadow: 0 0 8px alpha(#f38ba8, 0.25); }
+
+/* The applying sub-state override for when the script is actively running */
+button.power-ring-btn.applying:checked {
+    background-color: alpha(@theme_fg_color, 0.05); 
+    border-color: alpha(@theme_fg_color, 0.3); 
+    color: alpha(@theme_fg_color, 0.5); 
+}
 
 .sliders-container { background-color: rgba(255, 255, 255, 0.06); border: 1px solid rgba(255, 255, 255, 0.05); border-radius: 16px; padding: 6px; }
 .slider-row { background-color: transparent; padding: 6px 8px; }
@@ -545,28 +726,32 @@ button.power-ring-btn:checked { background-color: alpha(@theme_selected_bg_color
 scale.pill-scale trough, scale.pill-scale highlight { min-height: 12px; border-radius: 6px; }
 scale.pill-scale trough { background-color: rgba(255, 255, 255, 0.08); }
 scale.pill-scale slider { min-width: 0px; min-height: 0px; margin: 0px; background: transparent; border: none; box-shadow: none; }
-scale.volume highlight { background-color: #89b4fa; } scale.brightness highlight { background-color: #f9e2af; } scale.sunset highlight { background-color: #fab387; }
-.icon-volume { color: #89b4fa; } .icon-brightness { color: #f9e2af; } .icon-sunset { color: #fab387; }
+scale.volume highlight, scale.brightness highlight, scale.sunset highlight { background-color: @theme_selected_bg_color; }
+.icon-volume, .icon-brightness, .icon-sunset { color: @theme_selected_bg_color; }
 .icon-label { font-size: 18px; font-family: "Symbols Nerd Font", "JetBrainsMono Nerd Font", monospace; }
-.value-label { font-size: 14px; font-weight: 700; opacity: 0.8; font-family: "JetBrainsMono Nerd Font", monospace; font-feature-settings: "tnum"; }
+.value-label { font-size: 14px; font-weight: 700; opacity: 0.8; color: @theme_selected_bg_color; font-family: "JetBrainsMono Nerd Font", monospace; font-feature-settings: "tnum"; }
 
 /* Notifications Section */
 box.notifications-panel { background: transparent; border: none; padding: 8px 4px 0px 4px; }
+row.notif-stack-header { background-color: rgba(255, 255, 255, 0.05); border-radius: 8px; padding: 12px 14px; margin-bottom: 4px; border: 1px solid rgba(255, 255, 255, 0.02); }
+row.notif-stack-header:hover { background-color: rgba(255, 255, 255, 0.08); border-color: rgba(255, 255, 255, 0.1); }
+.notif-stack-title { font-weight: bold; font-size: 12px; color: @theme_selected_bg_color; letter-spacing: 0.5px; }
 .notif-header-title { font-size: 14px; font-weight: bold; color: @theme_fg_color; }
 button.flat-icon-btn { background: transparent; border: none; box-shadow: none; border-radius: 8px; padding: 6px; color: @theme_fg_color; }
 button.flat-icon-btn:hover { background-color: rgba(255, 255, 255, 0.1); }
 button.dnd-active-btn { color: #ff453a; background-color: alpha(#ff453a, 0.15); }
 listbox.notif-list { background: transparent; }
 
-row.notif-row { background-color: rgba(255, 255, 255, 0.03); border-radius: 12px; margin-bottom: 6px; padding: 8px; border: 1px solid rgba(255, 255, 255, 0.02); }
+row.notif-row { background-color: rgba(255, 255, 255, 0.03); border-radius: 8px; margin-bottom: 4px; padding: 6px; border: 1px solid rgba(255, 255, 255, 0.02); }
 row.notif-row:hover { background-color: rgba(255, 255, 255, 0.08); border-color: rgba(255, 255, 255, 0.1); }
 .notif-app-name { font-size: 9px; font-weight: bold; color: @theme_selected_bg_color; opacity: 0.9; letter-spacing: 0.5px; }
-.notif-summary { font-size: 12px; font-weight: bold; color: @theme_fg_color; margin-top: 2px;}
-.notif-body { font-size: 11px; color: @theme_fg_color; opacity: 0.7; margin-top: 2px;}
+.notif-summary { font-size: 12px; font-weight: bold; color: @theme_fg_color; }
+.notif-body { font-size: 11px; color: @theme_fg_color; opacity: 0.7; }
+.notif-time { font-size: 10px; font-weight: bold; color: @theme_fg_color; opacity: 0.4; margin-top: 0px; margin-right: -2px; }
 
 button.notif-close-btn { 
-    background: transparent; border: none; box-shadow: none; border-radius: 6px; padding: 4px; 
-    min-width: 24px; min-height: 24px; color: alpha(@theme_fg_color, 0.3); margin-top: -4px; margin-right: -4px;
+    background: transparent; border: none; box-shadow: none; border-radius: 4px; padding: 2px; 
+    min-width: 16px; min-height: 16px; color: alpha(@theme_fg_color, 0.3); margin-right: -4px;
 }
 button.notif-close-btn:hover { background-color: alpha(#ff453a, 0.2); color: #ff453a; }
 

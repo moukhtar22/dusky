@@ -11,6 +11,8 @@ return {
           background_colour = vim.g.base16_gui00,
           render = "wrapped-compact",
           stages = "slide",
+          top_down = false,
+          timeout = 5000,
         }
       end,
     },

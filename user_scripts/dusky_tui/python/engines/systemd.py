@@ -31,7 +31,8 @@ class SystemdEngine(BaseEngine):
             
         try:
             # stdin=DEVNULL ensures background commands NEVER hang the parser waiting for TTY auth
-            res = subprocess.run(cmd, capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=5)
+            # No timeout — systemctl is a local deterministic command that always terminates.
+            res = subprocess.run(cmd, capture_output=True, text=True, stdin=subprocess.DEVNULL)
             return {line.split()[0] for line in res.stdout.splitlines() if line}
         except Exception:
             return set()
@@ -43,6 +44,28 @@ class SystemdEngine(BaseEngine):
             active = self._fetch_units(scope, "list-units", "active")
             for unit in installed:
                 state[f"{scope}/{unit}"] = "true" if unit in active else "false"
+        return state
+
+    def load_state_for_units(self, user_units: list[str], sys_units: list[str]) -> dict[str, Any]:
+        """
+        Fast targeted state check for specific units using batch is-active queries.
+        Uses 2 subprocess calls total (one per scope) instead of scanning all installed units.
+        """
+        state = {}
+        for scope, units in [("user", user_units), ("system", sys_units)]:
+            if not units:
+                continue
+            cmd = ["systemctl", "is-active"] + units
+            if scope == "user":
+                cmd.insert(1, "--user")
+            try:
+                res = subprocess.run(cmd, capture_output=True, text=True, stdin=subprocess.DEVNULL)
+                lines = res.stdout.strip().splitlines()
+                for unit, status in zip(units, lines):
+                    state[f"{scope}/{unit}"] = "true" if status.strip() == "active" else "false"
+            except Exception:
+                for unit in units:
+                    state[f"{scope}/{unit}"] = "false"
         return state
 
     def write_value(self, target_key: str, target_scope: str, new_value: str, item_type: str = "bool") -> tuple[bool, str, str]:

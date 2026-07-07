@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# copies dbus/system servcies to required locations
 # -----------------------------------------------------------------------------
 # Script: link_service_files.sh
 # Description: Robustly manages symbolic links for system services (DBus/Systemd).
@@ -30,7 +31,7 @@ fi
 readonly SYMLINK_MAP=(
     # [DBus] Dusky Control Center Activation
     "$HOME/user_scripts/dusky_system/control_center/service/com.github.dusky.controlcenter.service | $HOME/.local/share/dbus-1/services/com.github.dusky.controlcenter.service"
-    "$HOME/user_scripts/dusky_system/quickpanal/service/org.dusky.quickpanal.service | $HOME/.local/share/dbus-1/services/org.dusky.quickspanal.service"
+    "$HOME/user_scripts/dusky_system/quickpanal/service/org.dusky.quickpanal.service | $HOME/.local/share/dbus-1/services/org.dusky.quickpanal.service"
 )
 
 # ==============================================================================

@@ -103,6 +103,14 @@ set undofile
 > Press **`<Esc>`** to return to **Normal mode** from most modes.  
 > The main exception is **Terminal mode**, where the escape sequence is **`<C-\><C-n>`**.
 
+> [!note]
+> In your configuration, the **`<Leader>`** key is defined as **`<Space>`**.
+> 
+> To list, fuzzy-search, or preview your keymaps interactively:
+> - Press **`<leader>fk`** (FZF Keymaps) to open a searchable menu of all mappings.
+> - Press **`<leader>?`** to show local buffer mappings.
+> - Pause after pressing a prefix key (like `<leader>` or `<C-w>`) to let **Which-Key** list valid follow-up mappings.
+
 ---
 
 ## 3. Start, open, save, quit
@@ -144,6 +152,19 @@ nvim -d file1 file2        # diff mode
 > [!warning]
 > `:x` and `ZZ` are **not** the same as `:wq` in a subtle but important way:  
 > they write only when the buffer is modified.
+
+---
+
+## 3.1 Fuzzy File & Buffer Navigation (Fzf-Lua)
+
+Instead of typing exact filenames with `:edit`, use **Fzf-Lua** to fuzzy find and open files instantly:
+
+| Shortcut | Action | Description |
+| :--- | :--- | :--- |
+| `<leader>ff` | `fzf-lua.files()` | Fuzzy search and open files in your project directory |
+| `<leader>fb` | `fzf-lua.buffers()` | List and switch between open buffers (files) |
+| `<leader>fg` | `fzf-lua.live_grep()` | Search for text inside all files in the project in real time |
+| `<leader>fh` | `fzf-lua.help_tags()` | Fuzzy search through Neovim help documentation |
 
 ---
 
@@ -205,7 +226,18 @@ Example:
 - `dt,` → delete until just before the next comma
 - `cf)` → change up to and including the next `)`
 
-## 4.4 Move through file structure
+## 4.4 Fast navigation & jumps (Flash.nvim)
+
+For jumping quickly to any word or character visible on the screen:
+
+| Shortcut | Action | Description |
+| :--- | :--- | :--- |
+| `s` | `require("flash").jump()` | Start jumping: type characters to search, then type the highlighted label to jump there instantly |
+| `S` | `require("flash").treesitter()` | Select structural treesitter nodes visually |
+| `r` | `require("flash").remote()` | Remote flash: jump and operate on a range (e.g. `yr` to yank a remote word) |
+| `<C-s>` | Toggle search | Toggle flash search inside normal command-line `/` or `?` searches |
+
+## 4.5 Move through file structure
 
 | Command | Meaning |
 |---|---|
@@ -216,14 +248,16 @@ Example:
 | `%` | Jump to matching delimiter/item under cursor |
 | `(` `)` | Previous / next sentence |
 | `{` `}` | Previous / next paragraph |
-| `H` `M` `L` | Top / middle / bottom of window |
+| `H` | Top of window |
+| `M` | Middle of window |
+| `L` | Bottom of window |
 
 > [!warning]
 > `%` jumps between matching items such as `()`, `{}`, `[]`.  
 > `d%` deletes **from the cursor to the match, inclusive**.  
 > It does **not** mean “delete inside brackets”. For “inside”, use text objects like `di(`, `di{`, `di[`.
 
-## 4.5 Scroll and recenter
+## 4.6 Scroll and recenter
 
 | Command | Meaning |
 |---|---|
@@ -745,6 +779,17 @@ cgnNEW<Esc>
 | `dgn` | Delete next search match |
 | `ygn` | Yank next search match |
 
+### Visual Project Search & Replace (Grug-far.nvim)
+
+Your configuration includes **grug-far.nvim** for an intuitive, highly visual search and replace experience across one file or the entire workspace:
+
+| Shortcut | Scope | Description |
+| :--- | :--- | :--- |
+| `<leader>sr` | Current File | Open search and replace panel restricted to the current active file |
+| `<leader>sg` | Workspace | Open search and replace panel across your entire workspace/folder |
+
+Inside the Grug-far visual pane, you can simply type your search query and replacement text, preview matches in real time, and press **`<leader>w`** to apply the changes to all files simultaneously.
+
 ## 10.4 Restrict substitution to the Visual area only
 
 A plain `:'<,'>s/.../.../g` works on the **selected lines**, not necessarily only the selected columns/chars.
@@ -987,23 +1032,51 @@ This is extremely useful for revisiting recent edit locations.
 
 ## 14.1 Buffers
 
-| Command | Meaning |
-|---|---|
-| `:buffers` or `:ls` | List buffers |
-| `:buffer N` or `:b N` | Switch to buffer number N |
-| `:bnext` or `:bn` | Next buffer |
-| `:bprevious` or `:bp` | Previous buffer |
-| `:bfirst` | First buffer |
-| `:blast` | Last buffer |
-| `:b#` | Alternate buffer |
-| `<C-^>` | Switch to alternate buffer |
-| `:bdelete` or `:bd` | Delete current buffer |
-| `:bwipeout` | Wipe buffer completely |
+> [!tip]
+> Think of a **buffer** as a file loaded in memory. You can have many buffers open at once without having splits or tabs visible. 
 
-### High-value buffer shortcuts
+### Stock Neovim Buffer Commands (Command-Line)
 
-- `:ls` → list buffers
-- `:b#` or `<C-^>` → toggle between current and previous buffer
+| Command | Action |
+| :--- | :--- |
+| `:ls` or `:buffers` | List all open buffers (number, status, filename) |
+| `:enew` | Open a new empty buffer |
+| `:b <number>` or `:buffer <number>` | Switch directly to buffer by its number |
+| `:b <name>` or `:buffer <name>` | Switch directly to buffer by typing part of the filename (supports `<Tab>` autocomplete) |
+| `:bn` or `:bnext` | Go to the next buffer |
+| `:bp` or `:bprevious` | Go to the previous buffer |
+| `:bfirst` | Go to the first buffer |
+| `:blast` | Go to the last buffer |
+| `:bd` or `:bdelete` | Unload the current buffer (closes the file) |
+| `:bd <number>` | Close buffer number `<number>` |
+| `:bd!` or `:bdelete!` | Close the current buffer, discarding unsaved changes |
+| `:file <new_name>` | Rename the active buffer name (requires `:w` to write to disk) |
+| `:saveas <new_path>` | Save current buffer as a new file and switch editing to it |
+| `:bw` or `:bwipeout` | Wipe out the buffer completely (removes history/marks) |
+
+### Your Custom Buffer Shortcuts (Bufferline.nvim & Mappings)
+
+Your active configuration installs **Bufferline.nvim** to show open files as visual tabs at the top of the editor. Note that the tab bar is configured to **hide automatically** when only a single buffer is open, and only appears once you have 2 or more files open.
+
+| Shortcut | Action | Description |
+| :--- | :--- | :--- |
+| `<Tab>` | `BufferLineCycleNext` | Cycle forward to the next buffer |
+| `<S-Tab>` | `BufferLineCyclePrev` | Cycle backward to the previous buffer |
+| `<C-^>` | Toggle Alternate | Instantly toggle between the current and last-active buffer |
+| `<leader>fn` | `enew` | Open a new empty buffer (File New) |
+| `<leader>bd` | `bdelete` | Delete/close the current active buffer |
+| `<leader>bp` | `BufferLineTogglePin` | Pin the current buffer tab so it stays at the front |
+| `<leader>bc` | `BufferLinePickClose` | Enter "Pick Close" mode; press the letter shown on a tab to close it |
+
+> [!note]
+> - `<C-^>` is one of the most powerful built-in navigation shortcuts in Neovim. It performs a rapid toggle between your current file and your previous file.
+> - When using `<Tab>` or `<S-Tab>` with Bufferline, the tabs correspond directly to open buffers in memory.
+
+> [!tip]
+> **How to Rename a Buffer or File:**
+> 1. **Rename buffer name:** Type `:file new_name.txt` and then `:w` to save the new file to disk. (Note: this does not delete the old file from disk, it just renames the active buffer and writes a new file).
+> 2. **Save under a new name:** Type `:saveas new_path.txt`. This writes the file to the new path and switches your active editor window to it.
+> 3. **Rename the file on disk:** The easiest way in your environment is to open your sidebar file explorer with **`<leader>e`**, highlight the file, and press **`r`** to rename it cleanly.
 
 ## 14.2 Windows (splits)
 

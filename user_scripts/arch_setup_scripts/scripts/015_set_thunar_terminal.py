@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# set kitty as thunar's default terminal when right clicking
 """
 Advanced Thunar UCA (Custom Actions) Terminal Configurator.
 Optimized for Python 3.14 (requires 3.11+).

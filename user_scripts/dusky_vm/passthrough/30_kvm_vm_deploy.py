@@ -95,6 +95,7 @@ def build_baseline_xml(vm_name: str, os_choice: str, gpu_choice: str, ram_mib: i
         "--disk", f"path={disk_path},format=qcow2,bus=virtio,cache=none,discard=unmap",
         "--disk", "device=cdrom,bus=sata",
         "--network", f"network={network},model=virtio",
+        "--channel", "spicevmc,target.type=virtio,target.name=com.redhat.spice.0",
         "--print-xml"
     ]
     
@@ -150,7 +151,7 @@ def inject_kvmfr_payload(xml_str: str, kvmfr_mib: int) -> str:
     ET.SubElement(qemu_cmd, f"{{{qemu_ns}}}arg", value="-device")
     ET.SubElement(qemu_cmd, f"{{{qemu_ns}}}arg", value="{'driver':'ivshmem-plain','id':'shmem0','memdev':'looking-glass'}")
     ET.SubElement(qemu_cmd, f"{{{qemu_ns}}}arg", value="-object")
-    ET.SubElement(qemu_cmd, f"{{{qemu_ns}}}arg", value=f"{{'qom-type':'memory-backend-file','id':'looking-glass','mem-path':'/dev/kvmfr0','size':{kvmfr_bytes},'share':true}}")
+    ET.SubElement(qemu_cmd, f"{{{qemu_ns}}}arg", value=f"{{'qom-type':'memory-backend-file','id':'looking-glass','mem-path':'/dev/shm/looking-glass','size':{kvmfr_bytes},'share':true}}")
     
     root.append(qemu_cmd)
     console.print(f"[bold green]  ✓ KVMFR payload ({kvmfr_mib} MiB) injected successfully.[/bold green]")
@@ -163,6 +164,10 @@ def inject_kvmfr_payload(xml_str: str, kvmfr_mib: int) -> str:
 def main() -> None:
     console.clear()
     console.print(Panel("[bold green]Phase 6: Automated VM Deployment[/bold green]\nTarget: Arch Linux | Kernel 7.1.0+", expand=False))
+
+    if not Confirm.ask("\nDo you want to deploy a new virtual machine?", default=False):
+        console.print("[yellow]Skipping VM deployment phase.[/yellow]")
+        return
 
     target_dir = get_storage_target()
     active_network = discover_active_network()

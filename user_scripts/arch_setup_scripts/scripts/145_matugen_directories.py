@@ -40,6 +40,7 @@ TARGET_DIRS: tuple[str, ...] = (
     "~/.config/BeeperTexts",
     "~/.config/AdwSteamGtk",
     "~/.config/cava/themes",
+    "~/.config/khal",
 )
 
 # 3. Utility Functions (Forced flush for real-time reporting)

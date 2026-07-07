@@ -49,11 +49,13 @@ Internet    | networkmanager-openvpn| NetworkManager VPN plugin for OpenVPN (wit
 Internet    | network-manager-applet| NetworkManager applet, GUI, System Tray
 Internet    | vesktop               | Custom Discord client (Vencord + Electron)
 Internet    | beeper-v4-bin         | Universal chat app (Matrix bridge)
+Internet    | webapp-manager        | Run websites as if they were apps
 Productivity| pinta                 | Simple drawing/editing tool (Paint.NET clone)
 Productivity| gimp                  | Photoshop alternative for Linux
 Productivity| libreoffice-still     | Microsoft Office alternative (Stable)
 # Productivity| libreoffice-fresh     | Microsoft Office alternative (latest)
 Productivity| calcurse              | Text-based calendar and scheduling application
+Productivity| gnome-calendar        | Simple and beautiful calendar (GNOME)
 Productivity| blanket               | Ambient noise player for focus and productivity
 Productivity| errands               | Simple to-do list application
 Productivity| obsidian              | Markdown-based knowledge base and note taking
@@ -96,6 +98,7 @@ Games       | vitetris              | Classic Tetris clone for the terminal
 Games       | ttyper                | Terminal-based typing test and practice
 Security    | wdpass                | Unlock Western Digital MyPassport drives
 Security    | dislocker             | FUSE driver to read BitLocker partitions
+Security    | clamav                | Open source antivirus engine for detecting malware
 Drivers     | b43-firmware          | Legacy Broadcom B43 wireless firmware
 Drivers     | usbmuxd               | Socket daemon to multiplex connections to iOS devices
 Drivers     | cuda                  | NVIDIA's parallel computing architecture toolkit
@@ -181,6 +184,9 @@ cleanup() {
     printf '%s%s%s' "$MOUSE_OFF" "$CURSOR_SHOW" "$C_RESET" 2>/dev/null || :
     if [[ -n "${ORIGINAL_STTY:-}" ]]; then
         stty "$ORIGINAL_STTY" 2>/dev/null || :
+    fi
+    if [[ -n "${SUDO_KEEP_ALIVE_PID:-}" ]]; then
+        kill "$SUDO_KEEP_ALIVE_PID" 2>/dev/null || :
     fi
     printf '\n' 2>/dev/null || :
 }
@@ -714,6 +720,25 @@ run_installer() {
         log_info "All selected packages are already installed."
         return 0
     fi
+
+    # Keep sudo credentials alive in the background
+    log_info "Sudo privileges may be required to install packages. Authenticating..."
+    if ! sudo -v; then
+        log_err "Sudo authentication failed."
+        return 1
+    fi
+
+    (
+        exec 9>&-
+        set +e
+        trap 'exit 0' TERM
+        while kill -0 "$$" 2>/dev/null; do
+            sleep 40 &
+            wait $! 2>/dev/null || true
+            sudo -n -v 2>/dev/null || exit 0
+        done
+    ) &
+    SUDO_KEEP_ALIVE_PID=$!
 
     log_info "Attempting Batch Installation..."
     if run_pkg_cmd "$helper" -S --needed --noconfirm "${to_install[@]}"; then

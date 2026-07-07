@@ -265,8 +265,8 @@ switch_browser() {
         release_lock "$lock_fd"; return 1
     fi
 
-    if [[ "$t_type" == "1" ]]; then exec_cmd='terminal .. " " .. browser'
-    else exec_cmd='browser'; fi
+    if [[ "$t_type" == "1" ]]; then exec_cmd='"uwsm-app -- " .. terminal .. " " .. browser'
+    else exec_cmd='"uwsm-app -- " .. browser'; fi
 
     new_binds=$(awk -v new_cmd="$exec_cmd" '
         { lines[NR] = $0 }
@@ -304,11 +304,22 @@ switch_browser() {
 
     # 5. Handle Mime and State
     if command -v xdg-mime &>/dev/null; then
-        xdg-mime default "$t_desktop" x-scheme-handler/http 2>/dev/null || true
-        xdg-mime default "$t_desktop" x-scheme-handler/https 2>/dev/null || true
-        xdg-mime default "$t_desktop" x-scheme-handler/about 2>/dev/null || true
-        xdg-mime default "$t_desktop" x-scheme-handler/unknown 2>/dev/null || true
-        xdg-mime default "$t_desktop" text/html 2>/dev/null || true
+        local mime
+        for mime in \
+            "x-scheme-handler/http" \
+            "x-scheme-handler/https" \
+            "x-scheme-handler/about" \
+            "x-scheme-handler/unknown" \
+            "x-scheme-handler/chrome" \
+            "text/html" \
+            "application/x-extension-htm" \
+            "application/x-extension-html" \
+            "application/x-extension-shtml" \
+            "application/xhtml+xml" \
+            "application/x-extension-xhtml" \
+            "application/x-extension-xht"; do
+            xdg-mime default "$t_desktop" "$mime" 2>/dev/null || true
+        done
     fi
     
     if command -v xdg-settings &>/dev/null; then

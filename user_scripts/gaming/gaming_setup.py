@@ -272,8 +272,8 @@ def main():
             )
 
         run_command(
-            "sudo pacman -S --needed --noconfirm steam lutris wine flatpak gamemode lib32-gamemode mangohud lib32-mangohud gamescope desktop-file-utils",
-            "Install Steam, Lutris, System Wine, Flatpak daemon, Gamescope, GameMode, MangoHud, and Utils."
+            "sudo pacman -S --needed --noconfirm steam lutris wine flatpak gamemode lib32-gamemode mangohud lib32-mangohud gamescope desktop-file-utils fuse-overlayfs bubblewrap",
+            "Install Steam, Lutris, System Wine, Flatpak daemon, Gamescope, GameMode, MangoHud, fuse-overlayfs, bubblewrap, and Utils."
         )
 
         run_command(

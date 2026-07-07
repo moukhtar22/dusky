@@ -109,6 +109,8 @@ declare -i EXPECTED_VFS_PRESSURE
 declare -i EXPECTED_SCALE_FACTOR
 declare -i EXPECTED_DIRTY_BYTES
 declare -i EXPECTED_DIRTY_BG_BYTES
+declare -i EXPECTED_DIRTY_WRITEBACK
+declare -i EXPECTED_DIRTY_EXPIRE
 declare -i EXPECTED_MGLRU_TTL
 
 # The 30 GB Demarcation Line
@@ -119,15 +121,19 @@ if [[ "$MODE" == "AGGRESSIVE" ]] || [[ "$MODE" == "AUTO" && SYSTEM_RAM_GB -ge 30
     EXPECTED_SCALE_FACTOR=100
     EXPECTED_DIRTY_BYTES=1073741824
     EXPECTED_DIRTY_BG_BYTES=268435456
-    EXPECTED_MGLRU_TTL=3000
+    EXPECTED_DIRTY_WRITEBACK=500
+    EXPECTED_DIRTY_EXPIRE=3000
+    EXPECTED_MGLRU_TTL=1000
 else
     EXPECTED_MODE="STRICT_RAM_SAVINGS (<32GB)"
     EXPECTED_SWAPPINESS=190        # Force immediate compression of inactive RAM (User Override)
     EXPECTED_VFS_PRESSURE=200      # Aggressively reclaim inode/dentry VFS caches to lower idle RAM
-    EXPECTED_SCALE_FACTOR=50       # 0.5% Emergency Buffer (40MB on 8GB RAM). Prevents UI direct reclaim stall.
+    EXPECTED_SCALE_FACTOR=15       # 0.15% Emergency Buffer (12MB on 8GB RAM). Prevents UI direct reclaim stall.
     EXPECTED_DIRTY_BYTES=134217728 # 128MB max. Prevents massive file transfers from bloating RAM.
     EXPECTED_DIRTY_BG_BYTES=33554432 # 32MB bg threshold. Flushes data to disk sooner to free memory.
-    EXPECTED_MGLRU_TTL=2000         # Perfect CPU/ZRAM thrash shield balance.
+    EXPECTED_DIRTY_WRITEBACK=1000   # 10s dirty background page writeback interval
+    EXPECTED_DIRTY_EXPIRE=500       # 5s dirty page expiry limit (flushes cache aggressively)
+    EXPECTED_MGLRU_TTL=100          # Set to 100 to align with CachyOS. Speeds up idle page reclamation.
 fi
 
 # Static Constants
@@ -179,6 +185,8 @@ vm.page-cluster = ${EXPECTED_PAGE_CLUSTER}
 vm.vfs_cache_pressure = ${EXPECTED_VFS_PRESSURE}
 vm.dirty_bytes = ${EXPECTED_DIRTY_BYTES}
 vm.dirty_background_bytes = ${EXPECTED_DIRTY_BG_BYTES}
+vm.dirty_writeback_centisecs = ${EXPECTED_DIRTY_WRITEBACK}
+vm.dirty_expire_centisecs = ${EXPECTED_DIRTY_EXPIRE}
 
 # --- MEMORY ALLOCATION & COMPACTION ---
 vm.watermark_scale_factor = ${EXPECTED_SCALE_FACTOR}
@@ -244,6 +252,62 @@ else
     log_warn "MGLRU is not enabled in this kernel. Skipping min_ttl_ms protection."
 fi
 
+# --- Configure Security & Systemd NOFILE limits ---
+log_info "Optimizing open file limits (LimitNOFILE) for systemd and PAM..."
+
+tmpfile_limits="$(umask 077 && mktemp)"
+tmpfile_sysd="$(umask 077 && mktemp)"
+trap 'rm -f "$tmpfile" "$tmpfile_mglru" "$tmpfile_limits" "$tmpfile_sysd"' EXIT
+
+# PAM limits
+cat > "$tmpfile_limits" <<EOF
+# Managed by ${SCRIPT_NAME}
+# Increase open file limits for heavy parallel applications
+* soft nofile 65536
+* hard nofile 524288
+EOF
+
+if [[ -f "/etc/security/limits.d/99-nofile-limits.conf" ]] && cmp -s "$tmpfile_limits" "/etc/security/limits.d/99-nofile-limits.conf"; then
+    log_info "PAM limits configuration already matches desired state."
+else
+    install -Dm0644 "$tmpfile_limits" "/etc/security/limits.d/99-nofile-limits.conf"
+    log_success "PAM limits written to /etc/security/limits.d/99-nofile-limits.conf"
+fi
+
+# Systemd limits
+cat > "$tmpfile_sysd" <<EOF
+# Managed by ${SCRIPT_NAME}
+[Manager]
+DefaultLimitNOFILE=65536:524288
+EOF
+
+# Write to system.conf.d
+if [[ -f "/etc/systemd/system.conf.d/99-nofile-limits.conf" ]] && cmp -s "$tmpfile_sysd" "/etc/systemd/system.conf.d/99-nofile-limits.conf"; then
+    log_info "Systemd system limits configuration already matches desired state."
+else
+    install -Dm0644 "$tmpfile_sysd" "/etc/systemd/system.conf.d/99-nofile-limits.conf"
+    log_success "Systemd system limits written to /etc/systemd/system.conf.d/99-nofile-limits.conf"
+    systemctl daemon-reexec || true
+fi
+
+# Write to user.conf.d
+if [[ -f "/etc/systemd/user.conf.d/99-nofile-limits.conf" ]] && cmp -s "$tmpfile_sysd" "/etc/systemd/user.conf.d/99-nofile-limits.conf"; then
+    log_info "Systemd user limits configuration already matches desired state."
+else
+    install -Dm0644 "$tmpfile_sysd" "/etc/systemd/user.conf.d/99-nofile-limits.conf"
+    log_success "Systemd user limits written to /etc/systemd/user.conf.d/99-nofile-limits.conf"
+    systemctl daemon-reexec || true
+    # Re-exec user manager instance for active desktop sessions
+    while read -r uid; do
+        if [[ "$uid" =~ ^[0-9]+$ ]]; then
+            user="$(id -un "$uid" 2>/dev/null || true)"
+            if [[ -n "$user" ]]; then
+                systemctl --user -M "${user}@" daemon-reexec >/dev/null 2>&1 || true
+            fi
+        fi
+    done < <(pgrep -u root -f "systemd --user" | xargs -r -I {} sh -c 'cat /proc/{}/loginuid' 2>/dev/null || true)
+fi
+
 # --- Hardened Live Verification ---
 actual_swappiness="$(< /proc/sys/vm/swappiness)"
 actual_vfs="$(< /proc/sys/vm/vfs_cache_pressure)"
@@ -274,7 +338,7 @@ fi
 log_success "Verified live kernel values:"
 log_success "  vm.swappiness = ${actual_swappiness} (Ideal ZRAM Reclaim)"
 log_success "  vm.vfs_cache_pressure = ${actual_vfs} (Slab Reclaim Active)"
-log_success "  vm.watermark_scale_factor = ${actual_scale} (0.5% Safe Direct Reclaim Buffer)"
+log_success "  vm.watermark_scale_factor = ${actual_scale} (Safe Direct Reclaim Buffer)"
 log_success "  vm.compaction_proactiveness = ${actual_compaction}"
 log_success "  net.core.bpf_jit_harden = ${actual_bpf} (Security Disabled / RAM Recovered)"
 

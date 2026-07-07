@@ -103,7 +103,7 @@ type = "selection"
 [pages.layout.items.properties]
 title = "Active Profile"
 description = "Select performance mode"
-key = "tlp_state"
+value_command = "~/user_scripts/battery/tlp/tlp_mode_toggle.sh status"
 icon = "power-profile-balanced-symbolic"
 interval = 2
 options = ["Balanced", "Performance", "Power Saver"]
@@ -208,7 +208,7 @@ title = "Benchmark"
 icon = "utilities-system-monitor-symbolic"
 [pages.layout.items.on_press]
 type = "exec"
-command = "kitty --class sysbench_benchmark.sh --title \"System Benchmark\" --hold sh -c \"$HOME/user_scripts/performance/sysbench_benchmark.sh\""
+command = "kitty --class sysbench_benchmark.py --title \"System Benchmark\" --hold sh -c \"$HOME/user_scripts/performance/sysbench_benchmark.py\""
 terminal = false
 
 [[pages.layout.items]]
@@ -893,7 +893,7 @@ type = "selection"
 [pages.layout.items.properties]
 title = "Active Profile"
 description = "Select performance mode"
-key = "tlp_state"
+value_command = "~/user_scripts/battery/tlp/tlp_mode_toggle.sh status"
 icon = "power-profile-balanced-symbolic"
 interval = 2
 options = ["Balanced", "Performance", "Power Saver"]
@@ -1110,6 +1110,22 @@ terminal = false
 [pages.layout.items.on_toggle.disabled]
 type = "exec"
 command = "$HOME/user_scripts/wayclick/dusky_wayclick.sh"
+terminal = false
+
+[[pages.layout.items]]
+type = "toggle_card"
+[pages.layout.items.properties]
+title = "USB Sound"
+icon = "drive-removable-media-usb-symbolic"
+state_command = "test -f \"$HOME/.config/dusky/settings/usb_udev_toggle\" && echo yes || echo no"
+interval = 5
+[pages.layout.items.on_toggle.enabled]
+type = "exec"
+command = "$HOME/user_scripts/external/usb_sound_toggle.py --on"
+terminal = false
+[pages.layout.items.on_toggle.disabled]
+type = "exec"
+command = "$HOME/user_scripts/external/usb_sound_toggle.py --off"
 terminal = false
 
 [[pages.layout]]
@@ -1376,7 +1392,7 @@ icon = "emblem-system-symbolic"
 [[pages.layout]]
 type = "section"
 [pages.layout.properties]
-title = "Clipboard"
+title = "GTK Configuration"
 icon = ""
 description = ""
 
@@ -1403,6 +1419,13 @@ type = "exec"
 command = "kitty --class dusky_gsettings.sh --hold sh -c \"$HOME/user_scripts/gtk/dusky_gsettings.sh\""
 terminal = false
 
+[[pages.layout]]
+type = "section"
+[pages.layout.properties]
+title = "Clipboard"
+icon = ""
+description = ""
+
 [[pages.layout.items]]
 type = "selection"
 [pages.layout.items.properties]
@@ -1419,6 +1442,24 @@ terminal = false
 [pages.layout.items.on_change.Disk]
 type = "exec"
 command = "kitty --class 390_clipboard_persistance.sh --hold sh -c \"$HOME/user_scripts/arch_setup_scripts/scripts/390_clipboard_persistance.sh --disk\""
+terminal = false
+
+[[pages.layout.items]]
+type = "selection"
+[pages.layout.items.properties]
+title = "Clipboard Interface"
+description = "Toggle between Rofi and Terminal clipboards"
+icon = "edit-paste-symbolic"
+key = "clipboard_state"
+options = ["Rofi", "Terminal"]
+options_map = { "false" = "Rofi", "true" = "Terminal" }
+[pages.layout.items.on_change.Rofi]
+type = "exec"
+command = "kitty --class 460_switch_clipboard.sh --hold sh -c \"$HOME/user_scripts/arch_setup_scripts/scripts/460_switch_clipboard.sh --rofi\""
+terminal = false
+[pages.layout.items.on_change.Terminal]
+type = "exec"
+command = "kitty --class 460_switch_clipboard.sh --hold sh -c \"$HOME/user_scripts/arch_setup_scripts/scripts/460_switch_clipboard.sh --terminal\""
 terminal = false
 
 [[pages.layout]]
@@ -3177,7 +3218,7 @@ icon = "web-browser-symbolic"
 button_text = "Fix"
 [pages.layout.items.on_press]
 type = "exec"
-command = "kitty --class 400_firefox_matugen_pywalfox.sh --hold sh -c \"$HOME/user_scripts/arch_setup_scripts/scripts/400_firefox_matugen_pywalfox.sh\""
+command = "kitty --class 400_firefox_matugen_pywalfox.sh --hold sh -c \"$HOME/user_scripts/firefox/400_firefox_matugen_pywalfox.sh\""
 terminal = false
 
 [[pages.layout.items]]

@@ -37,6 +37,13 @@ return {
 			end,
 			desc = "FZF Help Tags",
 		},
+		{
+			"<leader>fk",
+			function()
+				require("fzf-lua").keymaps()
+			end,
+			desc = "FZF Keymaps (Search Bindings)",
+		},
         -- Removed LSP-related keymaps (diagnostics, symbols)
 	},
 

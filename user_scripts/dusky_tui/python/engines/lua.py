@@ -435,7 +435,8 @@ class HyprlandLuaEngine(BaseEngine):
 
             local function classify_raw(raw)
                 local t = raw:gsub("^%s+", ""):gsub("%s+$", "")
-                if t == "true" or t == "false" or t == "nil" then return "bool" end
+                if t == "nil" then return "nil" end
+                if t == "true" or t == "false" then return "bool" end
                 if t:find("^%[=*%[") or t:find("^['\"]") then return "string" end
                 if tonumber(t) ~= nil then return "number" end
                 if t:match("^[A-Za-z_][A-Za-z0-9_]*$") then return "ident" end
@@ -445,7 +446,9 @@ class HyprlandLuaEngine(BaseEngine):
             local function format_replacement(old_raw, new_value)
                 if new_value == "__DELETE__" then return "nil" end
                 local kind = classify_raw(old_raw)
-                if kind == "ident" then
+                if kind == "nil" then
+                    return new_value
+                elseif kind == "ident" then
                     return new_value
                 elseif kind == "bool" then
                     if new_value == "true" or new_value == "false" or new_value == "nil" then return new_value end

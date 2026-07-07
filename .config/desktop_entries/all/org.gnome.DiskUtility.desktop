@@ -1,0 +1,11 @@
+[Desktop Entry]
+Version=1.0
+Name=GNOME Disk Utility
+Comment=Manage Drives and Media
+Exec=gnome-disks
+Icon=org.gnome.DiskUtility
+Terminal=false
+Type=Application
+Categories=GNOME;GTK;Utility;X-GNOME-Utilities;
+StartupNotify=true
+DBusActivatable=true

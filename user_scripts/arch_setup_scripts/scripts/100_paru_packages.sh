@@ -62,6 +62,9 @@ disable_prompt_capability() {
 
 cleanup() {
   disable_prompt_capability
+  if [[ -n "${SUDO_KEEP_ALIVE_PID:-}" ]]; then
+    kill "$SUDO_KEEP_ALIVE_PID" 2>/dev/null || :
+  fi
   [[ -n "${C_RESET}" ]] && printf '%s' "${C_RESET}" >&2
 }
 
@@ -336,6 +339,25 @@ main() {
     log_success "All packages are already installed."
     return 0
   fi
+
+  # Keep sudo credentials alive in the background
+  log_info "Sudo privileges may be required to install packages. Authenticating..."
+  if ! sudo -v; then
+    log_err "Sudo authentication failed."
+    return 1
+  fi
+
+  (
+    exec 9>&-
+    set +e
+    trap 'exit 0' TERM
+    while kill -0 "$$" 2>/dev/null; do
+      sleep 40 &
+      wait $! 2>/dev/null || true
+      sudo -n -v 2>/dev/null || exit 0
+    done
+  ) &
+  SUDO_KEEP_ALIVE_PID=$!
 
   local -i total_requested=${#to_install[@]}
   log_info "Packages to install: ${total_requested}"

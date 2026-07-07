@@ -70,6 +70,7 @@ post_hook   = '''
 [templates.hyprland]
 input_path  = '~/.config/matugen/templates/hyprland-colors.lua'
 output_path = '~/.config/matugen/generated/hyprland-colors.lua'
+post_hook   = 'hyprctl reload config-only || :'
 
 [templates.hyprlock]
 input_path  = '~/.config/matugen/templates/hyprlock-colors.conf'
@@ -121,6 +122,11 @@ post_hook   = '''
   ln -nfs "$HOME/.config/matugen/generated/foot-colors.ini" "$HOME/.config/foot/foot-colors.ini"
   touch "$HOME/.config/foot/foot.ini" || :
 '''
+
+[templates.khal]
+input_path  = '~/.config/matugen/templates/khal.conf'
+output_path = '~/.config/matugen/generated/khal-config'
+post_hook   = 'ln -nfs "$HOME/.config/matugen/generated/khal-config" "$HOME/.config/khal/config"'
 
 [templates.zellij]
 input_path  = '~/.config/matugen/templates/zellij.kdl'
@@ -286,13 +292,13 @@ post_hook   = '''
 # input_path = '~/.config/matugen/templates/firefox_websites.css'
 # output_path = '~/.config/matugen/generated/firefox_websites.css'
 # post_hook = '''
-#     ln -nfs "$HOME/.config/matugen/generated/firefox_websites.css" "$HOME/.config/mozilla/firefox/rxop6adq.default-release/chrome/colors.css" || :
-#     ln -nfs "$HOME/.config/matugen/generated/firefox_websites.css" "$HOME/.config/mozilla/firefox/ct81hcgy.default/chrome/colors.css" || :
+#     ln -nfs "$HOME/.config/matugen/generated/firefox_websites.css" "$HOME/.config/mozilla/firefox/sw8xyz71.default/chrome/colors.css" || :
+#     ln -nfs "$HOME/.config/matugen/generated/firefox_websites.css" "$HOME/.config/mozilla/firefox/fq2df6j4.default-release/chrome/colors.css" || :
 # '''
 
-# =============================================================================
-# 4. System Services & Daemons (Triggered on theme change)
-# =============================================================================
+#=============================================================================
+# 4. System Services & Daemons (Triggered on theme change )
+#=============================================================================
 
 # [templates.dusky_control_center]
 # input_path  = '/dev/null'
@@ -335,10 +341,9 @@ post_hook   = '''
   # bash $HOME/scripts/some_other_theme_script.sh
 '''
 
-[templates.conclude_notify]
-input_path  = '/dev/null'
-output_path = '/dev/null'
+[templates.theme_notify]
+input_path  = '~/.config/matugen/templates/theme-notify.sh'
+output_path = '~/.config/matugen/generated/theme-notify.sh'
 post_hook   = '''
-  hyprctl reload config-only || :
-  notify-send -a "matugen-theme" -i applications-graphics-symbolic "Theme Updated" "Theme applied successfully" || :
+  bash ~/.config/matugen/generated/theme-notify.sh || :
 '''

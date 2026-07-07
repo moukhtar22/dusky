@@ -22,8 +22,6 @@ export HYPRCURSOR_SIZE=18
 # Organized to prevent duplicates.
 # Priority: Local Bin -> Cargo Bin -> System Path
 export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
-
-export PATH="$HOME/.local/bin:$PATH"
 # -----------------------------------------------------------------------------
 # 5. TERMINAL OVERRIDE
 # -----------------------------------------------------------------------------

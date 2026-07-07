@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# desktop entries deployer with sergical edits for the hardcoded username
 """
 ==============================================================================
  DUSKY DESKTOP ENTRY SYNCHRONIZER (Enterprise Atomic Edition)

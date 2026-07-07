@@ -1,19 +1,21 @@
 #!/usr/bin/env python3
 """
-Phase 5: Looking Glass KVMFR Host Configuration
-Target: Arch Linux (Kernel 7.1.0+), Python 3.14.5+, systemd 260
-Scope: KVMFR Modprobe, udev rules, cgroup whitelisting, dynamic IVSHMEM calculation.
-Philosophy: Zero-Clutter Idempotency, Atomic Writes, Strict Cgroup Regex Parsing, Ring 0 Safety.
+Phase 5: Looking Glass Shared Memory Host & VM Configuration
+Target: Arch Linux, Python 3.14.5+
+Scope: systemd-tmpfiles staging, shared memory size initialization, VM XML optimization.
+Philosophy: Zero-Clutter Idempotency, Atomic Writes, Clean RAM-based Frame Transport.
 """
 
 import os
 import sys
-import re
 import pwd
 import stat
 import shutil
 import tempfile
+import grp
+import time
 import subprocess
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Never, Tuple
 
@@ -57,7 +59,6 @@ def atomic_write(target_path: Path, new_content: str) -> bool:
     """
     Safely writes data using a temporary file and an atomic swap.
     Inherits exact file permissions (st_mode) to prevent security regressions.
-    Zero-clutter: NO .bak files are ever created.
     """
     if target_path.exists():
         if target_path.read_text(encoding="utf-8") == new_content:
@@ -82,10 +83,7 @@ def atomic_write(target_path: Path, new_content: str) -> bool:
         bail(f"Atomic write failed on {target_path}: {e}")
 
 def run_cmd(cmd: list, check: bool = True) -> int:
-    """
-    Execute shell commands silently. 
-    Raises fatal error if check=True and command fails. Returns the exit code.
-    """
+    """Execute shell commands silently. Raises fatal error if check=True and command fails."""
     result = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     if check and result.returncode != 0:
         bail(f"Command execution failed: {' '.join(cmd)}\nExit Code: {result.returncode}")
@@ -116,34 +114,54 @@ def resolve_target_user() -> str:
     return user
 
 def install_looking_glass_packages(user: str) -> None:
-    """Install required packages via AUR using the standard user."""
-    packages = ["looking-glass-module-dkms-git", "looking-glass-git", "freerdp", "dkms"]
+    """Install required client packages via AUR using the standard user."""
+    # We do not need the legacy KVMFR kernel module, saving DKMS compile overhead
+    packages = ["looking-glass-git", "freerdp"]
     console.print("\n[bold blue]==>[/bold blue] [bold]Synchronizing Looking Glass packages...[/bold]")
     
+    missing_packages = []
+    for pkg in packages:
+        res = subprocess.run(["pacman", "-Qq", pkg], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if res.returncode != 0:
+            missing_packages.append(pkg)
+            
+    if not missing_packages:
+        reinstall = Prompt.ask(
+            "[bold cyan]Looking Glass packages are already installed. Reinstall them?[/bold cyan]",
+            choices=["y", "n"],
+            default="n"
+        ).strip().lower()
+        if reinstall != "y":
+            console.print("[bold green]  ✓ Packages already installed. Skipping installation.[/bold green]")
+            return
+        packages_to_install = packages
+    else:
+        packages_to_install = missing_packages
+
     if not shutil.which("paru"):
         bail("'paru' not found in PATH. Cannot install AUR packages.")
         
-    # Drop privileges to standard user to run paru; bypass pagers with --noconfirm
-    cmd = ["sudo", "-u", user, "paru", "-S", "--needed", "--noconfirm"] + packages
+    # Drop privileges to standard user to run paru
+    cmd = ["sudo", "-u", user, "paru", "-S", "--needed", "--noconfirm", "--skipreview"] + packages_to_install
     
     try:
         subprocess.run(cmd, check=True)
-        console.print("[bold green]  ✓ Looking Glass & DKMS packages staged successfully.[/bold green]")
+        console.print("[bold green]  ✓ Looking Glass packages staged successfully.[/bold green]")
     except subprocess.CalledProcessError as e:
         bail(f"Package installation failed with code {e.returncode}.")
 
 # ==============================================================================
-# DYNAMIC IVSHMEM CALCULATION
+# DYNAMIC SHARED MEMORY CALCULATION
 # ==============================================================================
-def calculate_kvmfr_size() -> Tuple[int, int]:
-    """Interactively map SDR resolution targets to strict KVMFR sizing."""
-    console.print("\n[bold blue]==>[/bold blue] [bold]SDR Resolution & IVSHMEM Memory Calculation[/bold]")
+def calculate_shm_size() -> Tuple[int, int]:
+    """Interactively map SDR resolution targets to strict shared memory sizing."""
+    console.print("\n[bold blue]==>[/bold blue] [bold]SDR Resolution & Shared Memory Calculation[/bold]")
     
     table = Table(show_header=True, header_style="bold magenta")
     table.add_column("Option", style="cyan", justify="center")
     table.add_column("SDR Resolution Target", style="green")
     table.add_column("Base Calculation", style="dim")
-    table.add_column("Required KVMFR (MiB)", style="bold yellow")
+    table.add_column("Required Shared Memory (MiB)", style="bold yellow")
 
     table.add_row("1", "1080p / 1200p", "16-18 MB + 10 MB Overhead", "32 MiB")
     table.add_row("2", "1440p (Recommended)", "29 MB + 10 MB Overhead", "64 MiB")
@@ -161,157 +179,361 @@ def calculate_kvmfr_size() -> Tuple[int, int]:
     mib_size = size_map[choice]
     byte_size = mib_size * 1024 * 1024
     
-    console.print(f"[bold green]  ✓ Locked KVMFR size to {mib_size} MiB ({byte_size} bytes).[/bold green]")
+    console.print(f"[bold green]  ✓ Locked shared memory size to {mib_size} MiB ({byte_size} bytes).[/bold green]")
     return mib_size, byte_size
 
 # ==============================================================================
-# HOST CONFIGURATION & RACE CONDITION PREVENTION
+# HOST CONFIGURATION & PERSISTENT BOOT PERMISSIONS
 # ==============================================================================
-def configure_host_modules(mib_size: int) -> None:
-    """Idempotently configure modprobe, modules-load, and udev rules."""
-    console.print("\n[bold blue]==>[/bold blue] [bold]Staging KVMFR Kernel Module & Udev Permissions...[/bold]")
-
-    # 1. Modprobe configuration
-    modprobe_path = Path("/etc/modprobe.d/kvmfr.conf")
-    modprobe_content = f"# KVMFR Looking Glass — static IVSHMEM device size\noptions kvmfr static_size_mb={mib_size}\n"
-    if atomic_write(modprobe_path, modprobe_content):
-        console.print(f"[bold green]  ✓ Modprobe options enforced: {modprobe_path}[/bold green]")
-    else:
-        console.print(f"[bold green]  ✓ Modprobe options already optimal: {modprobe_path}[/bold green]")
-
-    # 2. Modules-load configuration
-    load_path = Path("/etc/modules-load.d/kvmfr.conf")
-    load_content = "# Load KVMFR before any VM that uses it\nkvmfr\n"
-    if atomic_write(load_path, load_content):
-        console.print(f"[bold green]  ✓ Systemd module load enforced: {load_path}[/bold green]")
-    else:
-        console.print(f"[bold green]  ✓ Systemd module load already optimal: {load_path}[/bold green]")
-
-    # 3. Udev Rules (Must sort before 73-seat-late.rules per systemd 260 spec)
-    udev_path = Path("/etc/udev/rules.d/70-kvmfr.rules")
-    udev_content = 'SUBSYSTEM=="kvmfr", GROUP="kvm", MODE="0660", TAG+="uaccess"\n'
-    if atomic_write(udev_path, udev_content):
-        console.print(f"[bold green]  ✓ Udev access controls enforced: {udev_path}[/bold green]")
-    else:
-        console.print(f"[bold green]  ✓ Udev access controls already optimal: {udev_path}[/bold green]")
-
-    with console.status("[cyan]Triggering surgical udev rule reload...", spinner="dots"):
-        run_cmd(["udevadm", "control", "--reload"])
-        # Surgical trigger: only target the kvmfr subsystem to prevent micro-stutters
-        run_cmd(["udevadm", "trigger", "--action=add", "--subsystem-match=kvmfr"])
-
-def enforce_device_integrity() -> None:
-    """Detects and mitigates the QEMU regular file creation race condition."""
-    dev_path = Path("/dev/kvmfr0")
-    console.print("\n[bold blue]==>[/bold blue] [bold]Verifying KVMFR DMA Integrity...[/bold]")
+def configure_tmpfiles(user: str) -> None:
+    """Idempotently configure systemd-tmpfiles to create and secure the shared memory file at boot."""
+    console.print("\n[bold blue]==>[/bold blue] [bold]Staging systemd-tmpfiles Configuration...[/bold]")
+    tmpfiles_path = Path("/etc/tmpfiles.d/10-looking-glass.conf")
     
-    if dev_path.exists():
-        mode = dev_path.stat().st_mode
-        if not stat.S_ISCHR(mode):
-            console.print("[bold yellow]  ⚠ FATAL RACE DETECTED: /dev/kvmfr0 is a regular file, not a char device![/bold yellow]")
-            console.print("[cyan]    Purging corrupted file...[/cyan]")
-            dev_path.unlink()
-    
-    with console.status("[cyan]Injecting KVMFR into Ring 0...", spinner="dots"):
-        # We pass check=False here to bypass the strict gatekeeper check in run_cmd.
-        # This allows us to catch the missing module without assassinating the script.
-        if run_cmd(["modprobe", "kvmfr"], check=False) == 0:
-            console.print("[bold green]  ✓ KVMFR char device dynamically loaded and secured.[/bold green]")
-        else:
-            console.print("[bold yellow]  ⚠ KVMFR module failed to load. (DKMS build might be pending or requires a reboot).[/bold yellow]")
-
-# ==============================================================================
-# LIBVIRT CGROUP INJECTION
-# ==============================================================================
-def configure_qemu_cgroups() -> None:
-    """
-    Bulletproof Regex parsing to cleanly uncomment and inject /dev/kvmfr0.
-    Utilizes [^\\\\]* to prevent multiline runaway regex crashes.
-    """
-    conf_path = Path("/etc/libvirt/qemu.conf")
-    console.print("\n[bold blue]==>[/bold blue] [bold]Securing QEMU Cgroup Device ACLs...[/bold]")
-
-    if not conf_path.exists():
-        bail(f"Configuration file {conf_path} does not exist. Ensure libvirt is installed.")
-
-    content = conf_path.read_text(encoding="utf-8")
-    target_device = '"/dev/kvmfr0"'
-
-    # Regex constraints explicitly bound inside the array braces
-    pattern_active = re.compile(r'^\s*cgroup_device_acl\s*=\s*\[([^\]]*)\]', re.MULTILINE)
-    pattern_commented = re.compile(r'^\s*#\s*cgroup_device_acl\s*=\s*\[([^\]]*)\]', re.MULTILINE)
-
-    if match := pattern_active.search(content):
-        inner = match.group(1)
-        if target_device not in inner:
-            clean_inner = inner.rstrip(" \n\r\t,")
-            new_block = f"cgroup_device_acl = [{clean_inner},\n    {target_device}\n]"
-            content = content[:match.start()] + new_block + content[match.end():]
-            
-    elif match := pattern_commented.search(content):
-        inner = match.group(1)
-        # Strip comments line-by-line to preserve structure perfectly
-        uncommented_inner = "\n".join([line.lstrip(' \t#') for line in inner.splitlines()])
-        clean_inner = uncommented_inner.rstrip(" \n\r\t,")
-        new_block = f"cgroup_device_acl = [{clean_inner},\n    {target_device}\n]"
-        content = content[:match.start()] + new_block + content[match.end():]
-        
+    # Configure it to be owned by target user and group 'kvm' with 0660 permissions
+    tmpfiles_content = f"# Looking Glass shared memory file\nf /dev/shm/looking-glass 0660 {user} kvm - -\n"
+    if atomic_write(tmpfiles_path, tmpfiles_content):
+        console.print(f"[bold green]  ✓ Systemd tmpfiles rule enforced: {tmpfiles_path}[/bold green]")
     else:
-        # Failsafe fallback appended to EOF
-        fallback_block = (
-            '\ncgroup_device_acl = [\n'
-            '    "/dev/null", "/dev/full", "/dev/zero",\n'
-            '    "/dev/random", "/dev/urandom",\n'
-            '    "/dev/ptmx", "/dev/kvm", "/dev/kqemu",\n'
-            '    "/dev/rtc","/dev/hpet", "/dev/sev",\n'
-            f'    {target_device}\n]\n'
+        console.print(f"[bold green]  ✓ Systemd tmpfiles rule already optimal: {tmpfiles_path}[/bold green]")
+
+    with console.status("[cyan]Applying systemd-tmpfiles configuration...", spinner="dots"):
+        run_cmd(["systemd-tmpfiles", "--create", str(tmpfiles_path)])
+    console.print("[bold green]  ✓ Shared memory file permissions applied successfully.[/bold green]")
+
+def enforce_shm_integrity(user: str, byte_size: int) -> None:
+    """Ensures the /dev/shm/looking-glass file exists, is truly allocated, and has optimal permissions."""
+    shm_path = Path("/dev/shm/looking-glass")
+    console.print("\n[bold blue]==>[/bold blue] [bold]Verifying /dev/shm/looking-glass Integrity...[/bold]")
+    
+    # Pre-emptively purge the existing file or directory to bypass fs.protected_regular write blocks
+    if shm_path.exists():
+        console.print("[cyan]  - Recreating shared memory file to ensure correct ownership and size...[/cyan]")
+        try:
+            if shm_path.is_dir():
+                shutil.rmtree(shm_path)
+            else:
+                shm_path.unlink()
+        except Exception as e:
+            bail(f"Failed to remove existing shared memory file: {e}")
+
+    try:
+        # Create, size, and physically allocate the shared memory file
+        fd = os.open(shm_path, os.O_CREAT | os.O_RDWR, 0o660)
+        try:
+            # Force OS to allocate physical RAM pages immediately (prevents OOM & latency)
+            os.posix_fallocate(fd, 0, byte_size)
+        except (AttributeError, OSError):
+            # Fallback to sparse allocation if fallocate is unsupported on the tmpfs
+            os.ftruncate(fd, byte_size)
+        finally:
+            os.close(fd)
+        console.print(f"[bold green]  ✓ Shared memory file physically allocated to {byte_size} bytes.[/bold green]")
+    except Exception as e:
+        bail(f"Failed to size/allocate shared memory file: {e}")
+
+    try:
+        kvm_gid = grp.getgrnam("kvm").gr_gid
+        user_uid = pwd.getpwnam(user).pw_uid
+        os.chown(shm_path, user_uid, kvm_gid)
+        os.chmod(shm_path, 0o660)
+        console.print(f"[bold green]  ✓ Permissions (0660) and ownership ({user}:kvm) enforced on /dev/shm/looking-glass.[/bold green]")
+    except Exception as e:
+        bail(f"Failed to set ownership on /dev/shm/looking-glass. QEMU will crash without this. Error: {e}")
+
+# ==============================================================================
+# VM XML AUTOMATION
+# ==============================================================================
+def get_all_vms() -> list[Tuple[str, str]]:
+    """Query libvirt for all defined virtual machines and their states."""
+    try:
+        res = subprocess.run(
+            ["virsh", "-c", "qemu:///system", "list", "--all"],
+            capture_output=True, text=True, check=True
         )
-        content += fallback_block
+        vms = []
+        for line in res.stdout.strip().splitlines()[2:]:
+            parts = line.split()
+            if len(parts) >= 3:
+                name = parts[1]
+                state = " ".join(parts[2:])
+                vms.append((name, state))
+            elif len(parts) == 2:
+                name = parts[0]
+                state = parts[1]
+                vms.append((name, state))
+        return vms
+    except Exception as e:
+        console.print(f"[yellow]⚠ Failed to query libvirt VMs: {e}[/yellow]")
+        return []
 
-    if atomic_write(conf_path, content):
-        console.print("[bold green]  ✓ qemu.conf strictly parsed and injected with KVMFR ACL.[/bold green]")
-        with console.status("[cyan]Restarting Libvirt modular daemons...", spinner="dots"):
-            # Target modular daemons dynamically based on Phase 2 architecture
-            run_cmd(["systemctl", "restart", "virtqemud.socket", "virtqemud.service"])
-        console.print("[bold green]  ✓ virtqemud service/socket restarted successfully.[/bold green]")
+def inject_lg_into_xml(xml_str: str, byte_size: int) -> str:
+    """Safely injects Looking Glass parameters and CPU optimizations into VM XML."""
+    qemu_ns = "http://libvirt.org/schemas/domain/qemu/1.0"
+    ET.register_namespace('qemu', qemu_ns)
+    root = ET.fromstring(xml_str)
+    
+    # 1. Optimize CPU topology to resolve hyperthreading warning & socket limits
+    vcpu_elem = root.find('vcpu')
+    vcpu_count = 1
+    if vcpu_elem is not None and vcpu_elem.text:
+        try:
+            vcpu_count = int(vcpu_elem.text.strip())
+        except ValueError:
+            pass
+            
+    if vcpu_count % 2 == 0:
+        sockets = 1
+        cores = vcpu_count // 2
+        threads = 2
     else:
-        console.print("[bold green]  ✓ qemu.conf already whitelists /dev/kvmfr0 perfectly. No changes made.[/bold green]")
+        sockets = 1
+        cores = vcpu_count
+        threads = 1
+        
+    cpu_elem = root.find('cpu')
+    if cpu_elem is None:
+        cpu_elem = ET.SubElement(root, 'cpu', mode='host-passthrough', check='none', migratable='on')
+        
+    topology = cpu_elem.find('topology')
+    if topology is None:
+        topology = ET.SubElement(cpu_elem, 'topology')
+        
+    topology.set('sockets', str(sockets))
+    topology.set('dies', '1')
+    topology.set('cores', str(cores))
+    topology.set('threads', str(threads))
+    console.print(f"[bold green]  ✓ CPU Topology optimized: {sockets} socket(s), {cores} core(s), {threads} thread(s) (matches {vcpu_count} vCPUs).[/bold green]")
+    
+    # 2. Nullify memballoon to guarantee zero DMA latency
+    devices = root.find('devices')
+    if devices is not None:
+        balloon = devices.find('memballoon')
+        if balloon is not None:
+            balloon.set('model', 'none')
+            console.print("[bold green]  ✓ Latency-inducing memballoon nullified.[/bold green]")
+        else:
+            balloon = ET.SubElement(devices, 'memballoon', model='none')
+            console.print("[bold green]  ✓ Latency-inducing memballoon nullified (created none).[/bold green]")
+
+        # Check and inject SPICE agent channel for clipboard sharing
+        has_spice_channel = False
+        for channel in devices.findall('channel'):
+            if channel.get('type') == 'spicevmc':
+                target = channel.find('target')
+                if target is not None and target.get('name') == 'com.redhat.spice.0':
+                    has_spice_channel = True
+                    break
+        if not has_spice_channel:
+            spice_channel = ET.SubElement(devices, 'channel', type='spicevmc')
+            ET.SubElement(spice_channel, 'target', type='virtio', name='com.redhat.spice.0')
+            console.print("[bold green]  ✓ SPICE guest agent channel injected for clipboard synchronization.[/bold green]")
+
+    # 3. Add or update <qemu:commandline> using /dev/shm/looking-glass
+    qemu_cmd = root.find(f"{{{qemu_ns}}}commandline")
+    target_args = [
+        ("-device", "{'driver':'ivshmem-plain','id':'shmem0','memdev':'looking-glass'}"),
+        ("-object", f"{{'qom-type':'memory-backend-file','id':'looking-glass','mem-path':'/dev/shm/looking-glass','size':{byte_size},'share':true}}")
+    ]
+    
+    if qemu_cmd is None:
+        qemu_cmd = ET.Element(f"{{{qemu_ns}}}commandline")
+        root.append(qemu_cmd)
+        
+    args = qemu_cmd.findall(f"{{{qemu_ns}}}arg")
+    new_args = []
+    skip_next = False
+    for i, arg in enumerate(args):
+        if skip_next:
+            skip_next = False
+            continue
+        val = arg.get('value', '')
+        if val in ('-device', '-object'):
+            if i + 1 < len(args):
+                next_val = args[i+1].get('value', '')
+                if 'looking-glass' in next_val or 'kvmfr' in next_val:
+                    skip_next = True
+                    continue
+        if 'looking-glass' in val or 'kvmfr' in val:
+            continue
+        new_args.append(arg)
+        
+    # Clear old args
+    for arg in list(qemu_cmd):
+        qemu_cmd.remove(arg)
+        
+    # Put back filtered args
+    for arg in new_args:
+        qemu_cmd.append(arg)
+        
+    # Append the new looking-glass args
+    for arg_type, arg_val in target_args:
+        ET.SubElement(qemu_cmd, f"{{{qemu_ns}}}arg", value=arg_type)
+        ET.SubElement(qemu_cmd, f"{{{qemu_ns}}}arg", value=arg_val)
+        
+    console.print(f"[bold green]  ✓ Looking Glass shm payload injected/updated successfully.[/bold green]")
+    
+    if hasattr(ET, 'indent'):
+        ET.indent(root, space="  ", level=0)
+    return ET.tostring(root, encoding='unicode')
+
+def configure_vm_xml(vm_name: str, byte_size: int) -> bool:
+    """Retrieve VM XML, apply edits, and redefine VM in libvirt."""
+    console.print(f"\n[bold blue]==>[/bold blue] [bold]Configuring VM '{vm_name}' XML...[/bold]")
+    try:
+        res = subprocess.run(
+            ["virsh", "-c", "qemu:///system", "dumpxml", "--inactive", vm_name],
+            capture_output=True, text=True, check=True
+        )
+        xml_old = res.stdout
+        xml_new = inject_lg_into_xml(xml_old, byte_size)
+        
+        fd, tmp_path_str = tempfile.mkstemp(prefix=f"kvm-{vm_name}-", suffix=".xml")
+        tmp_path = Path(tmp_path_str)
+        try:
+            with os.fdopen(fd, 'w', encoding='utf-8') as f:
+                f.write(xml_new)
+            
+            subprocess.run(
+                ["virsh", "-c", "qemu:///system", "define", str(tmp_path)],
+                check=True, stdout=subprocess.DEVNULL
+            )
+            console.print(f"[bold green]  ✓ VM '{vm_name}' configuration updated in libvirt.[/bold green]")
+            return True
+        finally:
+            if tmp_path.exists():
+                tmp_path.unlink()
+    except Exception as e:
+        console.print(f"[bold red]  ✖ Failed to edit/redefine VM XML: {e}[/bold red]")
+        return False
+
+def wait_for_vm_shutdown(vm_name: str) -> None:
+    """Poll the VM power state until it transitions to 'shut off'."""
+    with console.status(f"[cyan]Monitoring '{vm_name}' power state...", spinner="dots") as status:
+        while True:
+            try:
+                res = subprocess.run(
+                    ["virsh", "-c", "qemu:///system", "domstate", vm_name],
+                    capture_output=True, text=True, check=True
+                )
+                state = res.stdout.strip().lower()
+                if "shut off" in state:
+                    break
+                status.update(f"[cyan]Monitoring '{vm_name}' power state... Current state: [bold yellow]{state}[/bold yellow] (Please turn off VM)")
+            except Exception:
+                break
+            time.sleep(1.5)
+    console.print(f"[bold green]  ✓ VM '{vm_name}' has successfully shutdown.[/bold green]")
+
+def prompt_vm_start(vm_name: str) -> None:
+    """Prompt the user to turn the VM back on to apply settings."""
+    choice = Prompt.ask(f"\n[bold cyan]Would you like to turn the VM '{vm_name}' back on now?[/bold cyan]", choices=["y", "n"], default="y").strip().lower()
+    if choice == "y":
+        console.print(f"[cyan]Powering on VM '{vm_name}'...[/cyan]")
+        if run_cmd(["virsh", "-c", "qemu:///system", "start", vm_name], check=False) == 0:
+            console.print(f"[bold green]  ✓ VM '{vm_name}' started successfully with new Looking Glass settings.[/bold green]")
+        else:
+            console.print(f"[bold red]  ✖ Failed to start VM '{vm_name}'.[/bold red]")
+
+def interactively_configure_vm(byte_size: int) -> None:
+    """Detect VMs, prompt user, and apply XML edits."""
+    vms = get_all_vms()
+    if not vms:
+        console.print("\n[yellow]⚠ No existing KVM VMs detected on the system.[/yellow]")
+        return
+        
+    console.print("\n[bold cyan]Select an existing VM to automatically inject Looking Glass settings:[/bold cyan]")
+    
+    choices = []
+    for idx, (name, state) in enumerate(vms):
+        opt = str(idx + 1)
+        console.print(f"  [{opt}] {name} [dim]({state})[/dim]")
+        choices.append(opt)
+        
+    skip_opt = str(len(vms) + 1)
+    console.print(f"  [{skip_opt}] Skip automatic XML editing (Show manual instructions instead)")
+    choices.append(skip_opt)
+    
+    custom_opt = str(len(vms) + 2)
+    console.print(f"  [{custom_opt}] Enter a custom VM name manually")
+    choices.append(custom_opt)
+    
+    choice = Prompt.ask("\nChoice", choices=choices, default="1")
+    
+    if choice == skip_opt:
+        console.print("[yellow]Skipping automatic VM editing.[/yellow]")
+        return
+    elif choice == custom_opt:
+        vm_name = Prompt.ask("Enter custom VM name").strip()
+        if not vm_name:
+            console.print("[red]Invalid name. Skipping VM editing.[/red]")
+            return
+        state = "unknown"
+    else:
+        idx = int(choice) - 1
+        vm_name, state = vms[idx]
+        
+    success = configure_vm_xml(vm_name, byte_size)
+    if success and state == "running":
+        console.print(Panel(
+            f"[bold yellow]WARNING:[/bold yellow] VM '{vm_name}' is currently running.\n"
+            "The Looking Glass configuration has been successfully saved to the persistent XML,\n"
+            "but changes will NOT take effect in QEMU until the VM is completely powered off and booted again.",
+            border_style="yellow"
+        ))
+        
+        console.print("\n[bold cyan]How would you like to handle the VM power cycle?[/bold cyan]")
+        console.print("  [[bold green]1[/bold green]] Gracefully shutdown the VM now and wait for it to stop")
+        console.print("  [[bold green]2[/bold green]] Wait and poll for you to manually turn off the VM")
+        console.print("  [[bold green]3[/bold green]] Exit now and I will restart the VM later manually (Default)")
+        
+        cycle_choice = Prompt.ask("Choice", choices=["1", "2", "3"], default="3").strip()
+        
+        if cycle_choice == "1":
+            console.print(f"\n[cyan]Sending graceful shutdown signal to '{vm_name}'...[/cyan]")
+            run_cmd(["virsh", "-c", "qemu:///system", "shutdown", vm_name], check=False)
+            wait_for_vm_shutdown(vm_name)
+            prompt_vm_start(vm_name)
+        elif cycle_choice == "2":
+            console.print(f"\n[cyan]Waiting for you to manually turn off VM '{vm_name}'...[/cyan]")
+            wait_for_vm_shutdown(vm_name)
+            prompt_vm_start(vm_name)
 
 # ==============================================================================
-# MAIN EXECUTION & XML OUTPUT
+# MAIN EXECUTION
 # ==============================================================================
 def main() -> None:
     console.clear()
-    console.print(Panel("[bold green]Phase 5: KVMFR Host Configuration[/bold green]\nTarget: Arch Linux | Kernel 7.1.0+ | systemd 260", expand=False))
+    console.print(Panel("[bold green]Phase 5: Looking Glass Host Shared Memory Configuration[/bold green]\nTarget: Arch Linux | RAM Shared Memory Backend", expand=False))
     
     try:
         target_user = resolve_target_user()
         install_looking_glass_packages(target_user)
         
-        mib_size, byte_size = calculate_kvmfr_size()
-        configure_host_modules(mib_size)
-        enforce_device_integrity()
-        configure_qemu_cgroups()
+        mib_size, byte_size = calculate_shm_size()
+        configure_tmpfiles(target_user)
+        enforce_shm_integrity(target_user, byte_size)
         
-        # Absolute correct QOM JSON formatting for QEMU commandline mapping
+        # Interactively configure VM XML
+        interactively_configure_vm(byte_size)
+        
         xml_payload = f"""  <qemu:commandline>
     <qemu:arg value="-device"/>
     <qemu:arg value="{{'driver':'ivshmem-plain','id':'shmem0','memdev':'looking-glass'}}"/>
     <qemu:arg value="-object"/>
-    <qemu:arg value="{{'qom-type':'memory-backend-file','id':'looking-glass','mem-path':'/dev/kvmfr0','size':{byte_size},'share':true}}"/>
+    <qemu:arg value="{{'qom-type':'memory-backend-file','id':'looking-glass','mem-path':'/dev/shm/looking-glass','size':{byte_size},'share':true}}"/>
   </qemu:commandline>"""
 
+    # Note: No need for cgroups /dev/kvmfr0 whitelisting or qemu.conf edits!
+
         console.print("\n[bold green]=== PHASE 5 COMPLETE ===[/bold green]")
-        console.print("The host kernel environment, udev rules, and QEMU cgroups are fully staged.")
+        console.print("The host shared memory file and persistent systemd-tmpfiles rules are fully staged.")
         
-        console.print("\n[bold yellow]CRITICAL ACTION REQUIRED IN XML (sudo virsh edit <vm_name>):[/bold yellow]")
-        console.print("  [cyan]1.[/cyan] Change the first line to: [bold]<domain type='kvm' xmlns:qemu='http://libvirt.org/schemas/domain/qemu/1.0'>[/bold]")
+        console.print("\n[bold yellow]MANUAL XML FALLBACK REFERENCE (if needed):[/bold yellow]")
+        console.print("  [cyan]1.[/cyan] Change the first line of VM XML (virsh edit <vm>) to: [bold]<domain type='kvm' xmlns:qemu='http://libvirt.org/schemas/domain/qemu/1.0'>[/bold]")
         console.print("  [cyan]2.[/cyan] Find your memory balloon and disable it to prevent DMA latency: [bold]<memballoon model='none'/>[/bold]")
         console.print("  [cyan]3.[/cyan] Paste the following block at the absolute bottom of the file, just before [bold]</domain>[/bold]:\n")
         
-        # SURGICAL FIX: Bypass 'rich' entirely for the payload.
-        # Printing directly to standard output prevents the library from injecting
-        # artificial line breaks or box-drawing characters that complicate copy-pasting.
         console.print("[cyan]━━━━━━━━━━━━━━━━━━━━━━━━━ libvirt QOM JSON Payload ━━━━━━━━━━━━━━━━━━━━━━━━━[/cyan]")
         print(xml_payload)
         console.print("[cyan]━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[/cyan]\n")

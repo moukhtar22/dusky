@@ -1,9 +1,9 @@
 -- lua/plugins/lualine.lua
 return {
   "nvim-lualine/lualine.nvim",
+  event = "VeryLazy",
   dependencies = { "nvim-tree/nvim-web-devicons" },
   config = function()
-    local noice = require("noice")
 
     -- 1. LOGIC: Track Last Saved Time
     local augroup = vim.api.nvim_create_augroup("LualineDate", { clear = true })
@@ -35,9 +35,37 @@ return {
     })
 
     -- 2. SETUP LUALINE
+    local custom_theme = {
+      normal = {
+        a = { fg = vim.g.base16_gui01, bg = vim.g.base16_gui0D, gui = "bold" },
+        b = { fg = vim.g.base16_gui05, bg = vim.g.base16_gui0E },
+        c = { fg = vim.g.base16_gui05, bg = vim.g.base16_gui02 },
+      },
+      insert = {
+        a = { fg = vim.g.base16_gui01, bg = vim.g.base16_gui0B, gui = "bold" },
+        b = { fg = vim.g.base16_gui05, bg = vim.g.base16_gui0E },
+        c = { fg = vim.g.base16_gui05, bg = vim.g.base16_gui02 },
+      },
+      visual = {
+        a = { fg = vim.g.base16_gui01, bg = vim.g.base16_gui09, gui = "bold" },
+        b = { fg = vim.g.base16_gui05, bg = vim.g.base16_gui0E },
+        c = { fg = vim.g.base16_gui05, bg = vim.g.base16_gui02 },
+      },
+      replace = {
+        a = { fg = vim.g.base16_gui01, bg = vim.g.base16_gui08, gui = "bold" },
+        b = { fg = vim.g.base16_gui05, bg = vim.g.base16_gui0E },
+        c = { fg = vim.g.base16_gui05, bg = vim.g.base16_gui02 },
+      },
+      inactive = {
+        a = { fg = vim.g.base16_gui04, bg = vim.g.base16_gui01 },
+        b = { fg = vim.g.base16_gui04, bg = vim.g.base16_gui01 },
+        c = { fg = vim.g.base16_gui04, bg = vim.g.base16_gui01 },
+      },
+    }
+
     require("lualine").setup({
       options = {
-        theme = "auto",
+        theme = custom_theme,
         globalstatus = true,
         component_separators = "|",
         section_separators = { left = "", right = "" },
@@ -48,8 +76,8 @@ return {
         lualine_c = { 
           "filename", 
           {
-            noice.api.status.mode.get,
-            cond = noice.api.status.mode.has,
+            function() return require("noice").api.status.mode.get() end,
+            cond = function() return package.loaded["noice"] and require("noice").api.status.mode.has() end,
             color = { fg = vim.g.base16_gui09 }, 
           }
         }, 

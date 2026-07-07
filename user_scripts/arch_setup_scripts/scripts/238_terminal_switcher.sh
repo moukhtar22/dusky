@@ -203,7 +203,7 @@ switch_terminal() {
         return 1
     fi
 
-    local exec_cmd='terminal'
+    local exec_cmd='"uwsm-app -- " .. terminal'
     local new_binds
     new_binds=$(awk -v new_cmd="$exec_cmd" '
         { lines[NR] = $0 }
