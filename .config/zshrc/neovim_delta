@@ -103,6 +103,8 @@ di() {
         --border=none \
         --list-border=rounded \
         --input-border=rounded \
+        --highlight-line \
+        --ghost="Filter diff history..." \
         --list-label=" 󰋚 NeoDiff History " \
         --list-label-pos=center \
         --input-label=" 󰍉 Search / Filter " \
@@ -110,15 +112,15 @@ di() {
         --padding=1,2 \
         --margin=1 \
         --prompt="   " \
-        --pointer=" " \
-        --marker=" ✓" \
+        --pointer="❯ " \
+        --marker="✔ " \
         --info=inline-right \
         --header="Select a previous diff target to re-run (Enter to run, Esc to abort)" \
         --header-first \
         --scheme=history \
         --wrap \
         --tac \
-        --color="bg:-1,bg+:#1e1e2e,spinner:#f5e0dc,fg:#cdd6f4,fg+:#cdd6f4,header:#89b4fa,info:#cba6f7,pointer:#a6e3a1,marker:#f5e0dc,prompt:#cba6f7,hl:#f38ba8,hl+:#f38ba8,border:#585b70,label:#a6e3a1,list-border:#585b70,input-border:#585b70,list-label:#a6e3a1,input-label:#a6e3a1" \
+        --color="${DUSKY_FZF_COLORS:-bg:-1,bg+:#1e1e2e,fg:#cdd6f4}" \
         < "$DUSKY_DIFF_HISTORY"
     )
 

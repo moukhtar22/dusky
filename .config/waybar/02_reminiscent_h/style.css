@@ -61,10 +61,29 @@ window#waybar {
     color: @on_surface;      
 }
 
-tooltip {
-     border-radius: 12px;
-     background-color: @surface_container;
-     border: 1px solid @tertiary;
+tooltip decoration {
+    background-color: transparent;
+    border: none;
+    box-shadow: none;
+}
+
+tooltip,
+tooltip.background,
+.tooltip {
+    border-radius: 12px;
+    background-color: alpha(@surface_container, 0.57);
+    background: linear-gradient(135deg, alpha(@surface_container, 0.57), alpha(@surface_container_high, 0.57));
+    border: 1px solid alpha(@primary, 0.5);
+    box-shadow: none;
+}
+
+tooltip label,
+.tooltip label {
+    color: @on_surface;
+    padding: 8px 12px;
+    font-family: "JetBrainsMono Nerd Font Propo", "JetBrainsMono Nerd Font", monospace;
+    font-size: 12px;
+    font-weight: 600;
 }
 
 /* =========================================================

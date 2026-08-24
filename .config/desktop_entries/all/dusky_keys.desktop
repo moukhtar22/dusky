@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Dusky Keys
+GenericName=Keys OSD Configurator
+Comment=On-screen display keypress visualizer configuration manager
+Exec=foot --app-id=dusky_tui python3 /home/dusk/user_scripts/mako_osd/dusky_keys/tui_dusky_keys.py
+Terminal=false
+Categories=Settings;DesktopSettings;System;Utility;
+Keywords=dusky;keys;osd;keybinds;chording;visualizer;tui;config;settings;
+Icon=input-keyboard-symbolic
+StartupNotify=true
+StartupWMClass=dusky_tui

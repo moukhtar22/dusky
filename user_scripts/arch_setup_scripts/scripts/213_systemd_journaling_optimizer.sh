@@ -1,14 +1,8 @@
 #!/usr/bin/env bash
-# memory optimizations
-# =============================================================================
-# Elite Arch Linux systemd-journald Optimizer
-# Target: Arch Linux Cutting-Edge (systemd 260+, Bash 5.3+)
-# Scope: Platinum Grade. Hard-caps logging memory to prevent silent RAM bloat.
-# Priority: Caps tmpfs RAM waste, mitigates CVE-2026-40228, and utilizes 
-#           systemd.service(5) cgroup v2 limits to chain the daemon's RSS.
-# =============================================================================
+#d: Cap systemd journal size and limits
 
 set -euo pipefail
+shopt -s inherit_errexit 2>/dev/null || true
 
 readonly SCRIPT_NAME="${0##*/}"
 readonly SELF_PATH="$(realpath -e -- "${BASH_SOURCE[0]}")"
@@ -16,9 +10,7 @@ readonly SELF_PATH="$(realpath -e -- "${BASH_SOURCE[0]}")"
 # --- Target Configurations ---
 readonly CONF_DIR="/etc/systemd/journald.conf.d"
 readonly CONF_FILE="${CONF_DIR}/99-ram-optimization.conf"
-
-readonly SVC_DIR="/etc/systemd/system/systemd-journald.service.d"
-readonly SVC_FILE="${SVC_DIR}/99-cgroup-memory-limit.conf"
+readonly LEGACY_SVC="/etc/systemd/system/systemd-journald.service.d/99-cgroup-memory-limit.conf"
 
 # --- Formatting ---
 if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
@@ -42,12 +34,10 @@ print_help() {
     cat <<EOF
 ${C_BOLD}Usage:${C_RESET} ${SCRIPT_NAME} [OPTIONS]
 
-  --dry-run, -n        Print the generated systemd drop-ins and exit
+  --dry-run, -n        Print the generated configuration and exit
   --help, -h           Show this help menu
 EOF
 }
-
-usage_error() { log_error "$1"; print_help >&2; exit 2; }
 
 # --- 1. CLI Parsing ---
 declare -i DRY_RUN=0
@@ -67,90 +57,78 @@ if [[ $EUID -ne 0 && $DRY_RUN -eq 0 ]]; then
     exec sudo -- /usr/bin/bash "$SELF_PATH" "$@"
 fi
 
-log_info "Initializing Platinum systemd-journald Optimizer..."
+log_info "Initializing systemd-journald optimizer..."
 
 # --- 3. Temp File Generation ---
 tmp_conf="$(umask 077 && mktemp)"
-tmp_svc="$(umask 077 && mktemp)"
-trap 'rm -f "$tmp_conf" "$tmp_svc"' EXIT
+trap 'rm -f "$tmp_conf"' EXIT
 
 # -----------------------------------------------------------------------------
-# LAYER 1: The Payload Limits (journald.conf)
+# Layer 1: journald.conf - the correct way to cap RAM and disk
 # -----------------------------------------------------------------------------
 cat > "$tmp_conf" <<EOF
 # Managed by ${SCRIPT_NAME}
-# Scope: Prevent systemd-journald log payloads from consuming RAM and Disk.
+# Scope: Cap volatile RAM journal and persistent disk journal sizes.
 
 [Journal]
-# Volatile Storage (RAM in /run/log/journal): Hard cap at 16MB.
-RuntimeMaxUse=16M
-
-# Persistent Storage (Disk in /var/log/journal): Hard cap at 100MB.
-SystemMaxUse=100M
-
-# Rotate files frequently to keep read times instantaneous.
-SystemMaxFileSize=16M
-
-# Housekeeping: Discard logs older than 1 week to shrink VFS slab (inode) cache.
-MaxRetentionSec=1week
-
-# Compression: Force zstd compression on log payloads before writing.
+Storage=persistent
 Compress=yes
 
-# SSD Wear & Latency Shield: Batch disk writes every 5 minutes.
+# Persistent disk caps: max 100M total disk space, rotated at 16M
+SystemMaxUse=100M
+SystemMaxFileSize=16M
+SystemMaxFiles=7
+SystemKeepFree=500M
+
+# Volatile tmpfs caps (/run/log/journal - real RAM use): max 32M total, rotated at 8M
+RuntimeMaxUse=32M
+RuntimeMaxFileSize=8M
+RuntimeMaxFiles=4
+RuntimeKeepFree=64M
+
+# Rotation and retention: rotate at 1 week, expire after 1 week
+MaxRetentionSec=1week
+MaxFileSec=1week
+
+# Flush configuration - default 5m is optimal for SSD / I-O performance
 SyncIntervalSec=5m
 
-# CPU/IO Shield: Disable kernel audit logging. Bypasses rate limits and spikes CPU.
-Audit=no
+# Rate limiting - prevents runaway log loops from wasting CPU/disk/RAM
+RateLimitIntervalSec=30s
+RateLimitBurst=1000
 
-# Verbosity Cap: Drop debug-level spam before it consumes RAM.
+# Verbosity: ignore debug logs to reduce active log storage
 MaxLevelStore=info
 
-# Anti-Crash Loop Spam: Drop logs if a crashing app writes >100 lines in 10s.
-RateLimitIntervalSec=10s
-RateLimitBurst=100
+# Audit - disable reading audit messages from the kernel
+Audit=no
 
-# IPC & CVE-2026-40228 MITIGATION: Disable legacy broadcast logging.
-# ForwardToWall=no nullifies IPC overhead and closes terminal escape sequence vectors.
+# Forwarding - disable duplicate log forwarding to save IPC and CPU overhead.
+# Disabling ForwardToWall also mitigates CVE-2026-40228 (terminal escape sequences).
 ForwardToSyslog=no
-ForwardToWall=no
 ForwardToKMsg=no
 ForwardToConsole=no
-EOF
-
-# -----------------------------------------------------------------------------
-# LAYER 2: The Process Limits (systemd.service cgroups)
-# -----------------------------------------------------------------------------
-cat > "$tmp_svc" <<EOF
-# Managed by ${SCRIPT_NAME}
-# Scope: Hard cgroup v2 RAM limits for the systemd-journald daemon process itself.
-# Prevents mmap cache bloat regardless of journal file size.
-
-[Service]
-# Aggressively throttle the daemon if its RSS exceeds 64MB
-MemoryHigh=64M
-
-# Absolute hard-kill boundary. If the daemon leaks >128MB, execute OOM kill.
-MemoryMax=128M
-
-# systemd.service(5): Ensures clean termination and flush on OOM pressure.
-# Daemon will automatically respawn via Restart=always and empty its RAM buffers.
-OOMPolicy=kill
+ForwardToWall=no
 EOF
 
 # --- 4. Dry Run Check ---
 if (( DRY_RUN == 1 )); then
-    log_info "DRY RUN EXECUTED. Would generate the following configurations:"
-    echo -e "\n${C_BOLD}[ ${CONF_FILE} (Payload Limits) ]${C_RESET}"
+    log_info "DRY RUN EXECUTED. Would generate the following configuration:"
+    echo -e "\n${C_BOLD}[ ${CONF_FILE} ]${C_RESET}"
     cat "$tmp_conf"
-    echo -e "\n${C_BOLD}[ ${SVC_FILE} (Process Limits) ]${C_RESET}"
-    cat "$tmp_svc"
     exit 0
 fi
 
-# --- 5. Atomic Installation ---
+# --- 5. Installation ---
 declare -i CHANGED=0
 
+# Ensure /var/log/journal exists with correct permissions
+if [[ ! -d /var/log/journal ]]; then
+    install -d -m 2755 -g systemd-journal /var/log/journal
+    systemd-tmpfiles --create --prefix /var/log/journal >/dev/null 2>&1 || true
+fi
+
+# Install drop-in configuration
 install -d -m 0755 "$CONF_DIR"
 if [[ -f "$CONF_FILE" ]] && cmp -s "$tmp_conf" "$CONF_FILE"; then
     log_info "${CONF_FILE} is already up to date."
@@ -160,34 +138,36 @@ else
     CHANGED=1
 fi
 
-install -d -m 0755 "$SVC_DIR"
-if [[ -f "$SVC_FILE" ]] && cmp -s "$tmp_svc" "$SVC_FILE"; then
-    log_info "${SVC_FILE} is already up to date."
-else
-    install -Dm0644 "$tmp_svc" "$SVC_FILE"
-    log_success "Updated ${SVC_FILE}"
+# Clean up legacy dangerous cgroup limit if it exists from previous versions
+if [[ -f "$LEGACY_SVC" ]]; then
+    log_warn "Removing legacy dangerous cgroup limit ${LEGACY_SVC}"
+    rm -f -- "$LEGACY_SVC"
+    rmdir --ignore-fail-on-non-empty /etc/systemd/system/systemd-journald.service.d 2>/dev/null || true
+    # Force systemd daemon-reload to clear the cgroup limit
+    systemctl daemon-reload
     CHANGED=1
 fi
 
+# Reload configuration
 if (( CHANGED == 1 )); then
-    log_info "Reloading systemd daemon to ingest new cgroup boundaries..."
-    systemctl daemon-reload
-
-    log_info "Restarting systemd-journald to apply dual-layer memory caps..."
-    if systemctl restart systemd-journald.service; then
-        log_success "systemd-journald successfully restarted. Dual RAM limits active."
-    else
-        log_warn "Failed to seamlessly restart systemd-journald. Changes will apply on next reboot."
+    log_info "Reloading journald configuration..."
+    # systemd >=258 supports SIGHUP reload, fallback to restart
+    if ! systemctl kill --signal=HUP systemd-journald 2>/dev/null; then
+        systemctl restart systemd-journald.service
     fi
+    log_success "journald reloaded"
 else
-    log_success "No changes required. systemd-journald is already strictly chained."
+    log_success "No changes required. systemd-journald is already optimized."
 fi
 
 # --- 6. Live Vacuuming ---
-log_info "Vacuuming current journals to enforce payload limits immediately..."
-journalctl --vacuum-size=100M >/dev/null 2>&1 || true
-journalctl --vacuum-time=1weeks >/dev/null 2>&1 || true
+log_info "Rotating and vacuuming journals to enforce limits immediately..."
+# --rotate is required - vacuum only operates on archived files
+journalctl --rotate >/dev/null 2>&1 || true
+journalctl --vacuum-size=100M --vacuum-time=1week >/dev/null 2>&1 || true
 
-log_success "Logging topology is fully optimized for absolute maximum RAM efficiency."
+# Show status
+journalctl --disk-usage 2>/dev/null || true
 
+log_success "Logging topology is fully optimized for performance and RAM efficiency (safe)."
 exit 0

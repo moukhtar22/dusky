@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # ==============================================================================
 #  ARCH ORCHESTRATOR - INLINE CREDENTIAL INGESTION (010)
+#  DUSKY_INTERACTIVE=true
 #  Context: Collects credentials and stages them for Phase 2 chroot extraction.
 # ==============================================================================
 set -Eeuo pipefail
@@ -13,8 +14,10 @@ if (( EUID != 0 )); then
 fi
 
 if [[ ! -t 0 ]]; then
-    printf "\e[1;31m[ERROR]\e[0m Interactive TTY required to securely collect credentials.\n" >&2
-    exit 1
+    if [[ -z "${TARGET_USER:-}" || -z "${USER_PASS:-}" ]]; then
+        printf "\e[1;31m[ERROR]\e[0m Interactive TTY required to securely collect credentials, or pass TARGET_USER and USER_PASS via environment.\n" >&2
+        exit 1
+    fi
 fi
 
 # ── 2. Term & Basic ANSI Colors (TTY Safe) ────────────────────────────────────
@@ -58,6 +61,20 @@ while [[ "$#" -gt 0 ]]; do
             ;;
     esac
 done
+
+if [[ -n "${TARGET_USER:-}" && -n "${USER_PASS:-}" ]]; then
+    readonly CREDS_FILE="$(pwd)/.arch_credentials"
+    install -m 600 /dev/null "$CREDS_FILE"
+    cat <<EOF > "$CREDS_FILE"
+export TARGET_USER=$(printf '%q' "$TARGET_USER")
+export USER_PASS=$(printf '%q' "$USER_PASS")
+export ROOT_PASS=$(printf '%q' "${ROOT_PASS:-$USER_PASS}")
+export ENCRYPT_ROOT=$(printf '%q' "${PRESET_ENCRYPT:-0}")
+export AUTO_MODE=1
+EOF
+    printf "\e[1;32m[OK]\e[0m Pre-seeded credentials staged to .arch_credentials\n"
+    exit 0
+fi
 
 # ── 4. Credential Ingestion (Wizard UI) ───────────────────────────────────────
 declare INGESTED_USER=""

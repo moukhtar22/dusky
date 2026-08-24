@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# shellcheck disable=SC2154
 export LC_ALL=C
 
 # 1. Load 'sleep' and 'stat' as builtins if available (critical for loop performance)
@@ -191,6 +192,7 @@ while :; do
 
     # G. Format and Write
     format_speed unit tx_fmt rx_fmt class "$rx_delta" "$tx_delta"
+    # shellcheck disable=SC2154
     printf '%s %s %s %s\n' "$unit" "$tx_fmt" "$rx_fmt" "$class" > "$STATE_FILE.tmp"
     mv -f "$STATE_FILE.tmp" "$STATE_FILE"
 

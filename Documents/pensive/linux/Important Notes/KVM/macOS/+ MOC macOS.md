@@ -1,111 +1,74 @@
-```bash
-sudo pacman -S --needed qemu libvirt virt-manager virt-viewer git wget guestfs-tools p7zip make tesseract tesseract-data-eng cdrkit vim net-tools screen cdrtools
-```
+---
+title: "MOC — macOS on KVM (OSX-KVM, Arch)"
+tags:
+  - kvm
+  - macos
+  - arch
+  - qemu
+---
+
+# MOC — macOS on KVM (OSX-KVM, Arch)
+
+> [!info] Upstream
+> **OSX-KVM** <https://github.com/kholia/OSX-KVM> — QEMU `x86_64-softmmu` + OpenCore. Arch-specific tweaks below (Arch = `mkinitcpio`/`systemd-boot`, not `apt`/`update-grub`).
+
+## Host deps (Arch)
 
 ```bash
-paru -S dmg2img uml_utilities
+sudo pacman -S --needed qemu-desktop libvirt virt-manager virt-viewer git wget guestfs-tools p7zip make tesseract tesseract-data-eng cdrkit vim net-tools screen cdrtools
+paru -S --needed dmg2img uml_utilities
 ```
+
+## Checkout
 
 ```bash
 cd ~
-
 git clone --depth 1 --recursive https://github.com/kholia/OSX-KVM.git
-
 cd OSX-KVM
 ```
 
+## KVM tunables + groups
+
 ```bash
 sudo modprobe kvm; echo 1 | sudo tee /sys/module/kvm/parameters/ignore_msrs
-```
-
-to make it perfminant 
-
-check your cpu if unsure `lscpu`
-
-```bash
-sudo cp kvm.conf /etc/modprobe.d/kvm.conf
-```
-
-```bash
-sudo usermod -aG kvm $(whoami)
-sudo usermod -aG libvirt $(whoami)
-sudo usermod -aG input $(whoami)
-```
-
-reboot
-```bash
+lscpu | grep -E 'VT-x|AMD-V'   # confirm
+sudo cp kvm.conf /etc/modprobe.d/kvm.conf   # if repo ships one (e.g. kvm.ignore_msrs=1)
+sudo usermod -aG kvm,libvirt,input "$(whoami)"   # re-login
 systemctl reboot
 ```
 
-fetch macos installer
+## Fetch macOS
 
 ```bash
-./fetch-macOS-v2.py
-```
-
-You can choose your desired macOS version here. After executing this step, you should have the BaseSystem.dmg file in the current folder.
-
-> [!NOTE] IT MIGHT FREEZE FOR A WHILE AND THAT'S OKAY 
-> ATTENTION: Let >= Big Sur setup sit at the Country Selection screen, and other similar places for a while if things are being slow. The initial macOS setup wizard will eventually succeed.
-
-Convert the downloaded BaseSystem.dmg file into the BaseSystem.img file.
-
-```bash
+./fetch-macOS-v2.py   # pick version → BaseSystem.dmg
+# note: Big Sur+ stalls at Country screen — wait, it recovers
 dmg2img -i BaseSystem.dmg BaseSystem.img
+qemu-img create -f qcow2 mac_hdd_ng.img 256G   # put on fast SSD/NVMe (host FS with ACLs, ext4/xfs/btrfs)
 ```
 
-Create a virtual HDD image where macOS will be installed. If you change the name of the disk image from mac_hdd_ng.img to something else, the boot scripts will need to be updated to point to the new image name.
+## Install (CLI)
 
 ```bash
-qemu-img create -f qcow2 mac_hdd_ng.img 256G
+./OpenCore-Boot.sh   # same script for all modern macOS
+# inside installer: Disk Utility → partition + APFS → Install macOS
 ```
 
-NOTE: Create this HDD image file on a fast SSD/NVMe disk for best results.
-
-Now you are ready to install macOS 🚀
-
-Installation
-
-CLI method (primary). Just run the OpenCore-Boot.sh script to start the installation process.
-
-```bash
-./OpenCore-Boot.sh
-```
-
-Note: This same script works for all recent macOS versions.
-
-Use the Disk Utility tool within the macOS installer to partition, and format the virtual disk attached to the macOS VM. Use APFS (the default) for modern macOS versions.
-
-Go ahead, and install macOS 🙌
-
-(OPTIONAL) Use this macOS VM disk with libvirt (virt-manager / virsh stuff).
-
-Edit macOS-libvirt-Catalina.xml file and change the various file paths (search for CHANGEME strings in that file). The following command should do the trick usually.
+## Optional libvirt import
 
 ```bash
 sed "s/CHANGEME/$USER/g" macOS-libvirt-Catalina.xml > macOS.xml
 virt-xml-validate macOS.xml
-```
-
-Create a VM by running the following command.
-
-```bash
 virsh --connect qemu:///system define macOS.xml
-```
-
-If needed, grant necessary permissions to libvirt-qemu user,
-
-```bash
+# perms:
 sudo setfacl -m u:libvirt-qemu:rx /home/$USER
 sudo setfacl -R -m u:libvirt-qemu:rx /home/$USER/OSX-KVM
+# start: virt-manager --connect qemu:///system → macOS
 ```
 
-Launch virt-manager and start the macOS virtual machine.
+## Post-install
 
-[[setting up networking macos]]
+- **Networking:** [[setting up networking macos]]
+- **Resolution:** [[all notes macos]] → `vmware-svga`, `displayplacer`, OpenCore `config.plist:Resolution`, OVMF menu
+- **iMessage:** [[all notes macos]] + <https://dortania.github.io/OpenCore-Post-Install/universal/iservices.html>
 
-change resolution: 
-[[all notes macos]]
-
-fix imessages
-[[all notes macos]]
+See also: [[all notes macos]] (GPU/USB passthrough Arch adaptations).

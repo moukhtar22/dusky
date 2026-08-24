@@ -5,6 +5,20 @@ DUSKY TUI: TRACKPAD GESTURES CONFIGURATION SCHEMA
 ===============================================================================
 """
 
+import sys
+from pathlib import Path
+
+_dusky_root = Path.home() / "user_scripts" / "dusky_tui"
+if str(_dusky_root) not in sys.path:
+    sys.path.insert(0, str(_dusky_root))
+
+import sys
+from pathlib import Path
+
+_DUSKY_TUI_ROOT = Path.home() / "user_scripts" / "dusky_tui"
+if str(_DUSKY_TUI_ROOT) not in sys.path:
+    sys.path.insert(0, str(_DUSKY_TUI_ROOT))
+
 from python.frontend.core_types import ConfigItem
 
 # =============================================================================
@@ -344,17 +358,21 @@ SCHEMA = {
             },
             extended_help="**Firm & Intentional**\n\nRequires long, deliberate swipes to trigger a workspace change. Highly resistant to accidental triggers."
         ),
-        ConfigItem(
-            label="Factory Reset Everything",
-            key="preset_factory_reset",
-            scope="DEFAULT",
-            type_="preset",
-            default=None,
-            group="Reset",
-            preset_payload={
-                "__ALL_DEFAULTS__": True
-            },
-            extended_help="**Factory Reset**\n\nReverts all settings across all tabs back to their default values."
-        ),
     ]
 }
+
+# =============================================================================
+# DIRECT EXECUTION HANDLER
+# =============================================================================
+if __name__ == "__main__":
+    import sys, subprocess
+    from pathlib import Path
+
+    script_path = Path(__file__).resolve()
+    main_router = Path.home() / "user_scripts" / "dusky_tui" / "python" / "main" / "main.py"
+
+    if main_router.exists():
+        sys.exit(subprocess.run([sys.executable, str(main_router), str(script_path)] + sys.argv[1:]).returncode)
+    else:
+        print(f"[-] Error: Main Dusky TUI router not found at {main_router}", file=sys.stderr)
+        sys.exit(1)

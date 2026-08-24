@@ -7,12 +7,14 @@ return {
     {
       "rcarriga/nvim-notify",
       opts = function()
+        -- FIX: fallback to #19120c if matugen not yet loaded (prevents nil background_colour crash)
         return {
-          background_colour = vim.g.base16_gui00,
+          background_colour = vim.g.base16_gui00 or "#19120c",
           render = "wrapped-compact",
           stages = "slide",
           top_down = false,
-          timeout = 5000,
+          timeout = 3000, -- reduced from 5000 for less clutter
+          fps = 60,
         }
       end,
     },

@@ -1,15 +1,6 @@
 #!/usr/bin/env bash
-# Install AUR helper - Paru or YAY
-# -----------------------------------------------------------------------------
-# Script: 009_aur_helper_final_v4.sh
-# Description: The "Nuclear Option" AUR Helper Installer.
-#              1. Asks user for preference (Paru vs Yay) OR accepts flags.
-#              2. DEFAULT: Attempts to build Paru (Rust).
-#              3. FAIL-SAFE: If Paru fails (or user chooses Yay), installs Yay.
-# Author: Arch Linux Systems Architect
-# -----------------------------------------------------------------------------
+#d: Install the Paru (or Yay) AUR helper
 
-# --- Strict Mode ---
 set -euo pipefail
 shopt -s nullglob 
 

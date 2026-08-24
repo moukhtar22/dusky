@@ -1,43 +1,25 @@
-# Starting Virtual Machine Manager
+---
+title: "Virt-Manager — Enable XML Editing & New VM (Redirect)"
+tags:
+  - kvm
+  - virt-manager
+  - windows
+aliases:
+  - Virt-Manager XML Stub
+---
 
-## 1. Launch the Application
+# Virt-Manager — Enable XML Editing & New VM
 
-Open your application launcher (menu) and search for **Virtual Machine Manager** (often labeled as `virt-manager`).
+> [!tip] Merged — canonical source
+> **Shared prereq lives in [[KVM Setup/VM Creation/01 Wizard — Create VM#Prerequisites]].** Follow that note + [[KVM Setup/VM Creation/00 Index — VM Creation (Unified)]]. This stub keeps filename for `[[wikilink]]` stability.
 
-> [!TIP] Pro Tip
-> 
-> If you cannot find the icon, you can launch it directly from your terminal by typing:
-> 
-> ```
-> virt-manager
-> ```
+## Steps retained (both OSes)
 
-## 2. Enable XML Editing
+1. Launch: `virt-manager --connect qemu:///system` (ensure **system**, not `qemu:///session`)
+2. **Edit → Preferences → General → ✅ Enable XML editing** ← mandatory for Hyper-V/TPM/pinning/`<shmem>` edits later
+3. Toolbar → **Create a new virtual machine** (computer icon) → proceed to [[KVM Setup/VM Creation/01 Wizard — Create VM]]
 
-**Critical Step:** Before creating a Windows 11 guest, we must enable advanced configuration options. This allows us to manually edit the virtual machine's configuration files (XML) to add specific Hyper-V enlightenments later on.
+> [!important] Skip = blocked
+> Without XML editing you cannot apply [[Enable Hyper-V Enlightenments]], [[KVM Setup/VM Creation/05 CPU — Host-Passthrough & Topology|05 CPU]] topology, or [[Looking Glass]] `<shmem>`.
 
-1. In the Virtual Machine Manager window, click on **Edit** in the top menu bar.
-    
-2. Select **Preferences**.
-    
-3. In the **General** tab, check the box labeled **Enable XML editing**.
-    
-4. Click **Close**.
-    
-
-> [!IMPORTANT]
-> 
-> If you skip this step, you will not be able to apply the specific optimizations required for this guide later in the process.
-
-## 3. Start the Creation Wizard
-
-Now that the environment is prepared, you can begin the setup process.
-
-- Locate the **computer icon** in the upper-left corner of the toolbar.
-    
-- Hovering over this icon will display the tooltip: `Create a new virtual machine`.
-    
-- Click the icon to launch the **New VM Wizard**.
-    
-
-This wizard will guide you through the hardware allocation steps outlined in the next note.
+See: [[KVM Setup/VM Creation/01 Wizard — Create VM]], [[KVM Setup/VM Creation/00 Index — VM Creation (Unified)]], [[+ MOC Windows Installation Through Virt Manager]].

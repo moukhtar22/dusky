@@ -341,7 +341,6 @@ def write_time_state(last_attempt: float, last_success: float) -> None:
             temp_path = Path(temp_file.name)
             temp_file.write(json_dumps(data))
             temp_file.flush()
-            os.fsync(temp_file.fileno())
         temp_path.replace(TIME_STATE_FILE)
     except OSError:
         with suppress(OSError):
@@ -445,20 +444,11 @@ def write_state(record: StateRecord) -> None:
             prefix=f".{STATE_FILE.name}.",
             suffix=".tmp",
         ) as temp_file:
-            # Assign immediately before risky I/O operations
             temp_path = Path(temp_file.name)
             temp_file.write(data)
             temp_file.flush()
-            os.fsync(temp_file.fileno())
 
         temp_path.replace(STATE_FILE)
-
-        with suppress(OSError):
-            dir_fd = os.open(STATE_FILE.parent, os.O_RDONLY)
-            try:
-                os.fsync(dir_fd)
-            finally:
-                os.close(dir_fd)
 
     except OSError:
         with suppress(OSError):

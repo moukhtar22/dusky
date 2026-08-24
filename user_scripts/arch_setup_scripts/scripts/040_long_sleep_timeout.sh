@@ -1,11 +1,6 @@
 #!/bin/bash
-# To set longer screen timeout during the setup process to prevent the device from going into sleep.
-#===============================================================================
-# HYPRIDLE CONFIGURATION APPLICATOR
-# specific for Arch/Hyprland/UWSM ecosystem
-#===============================================================================
+#d: Extend the screen timeout during setup to avoid sleep
 
-# Strict mode - catch errors early
 set -o errexit
 set -o nounset
 set -o pipefail

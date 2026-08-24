@@ -1,12 +1,5 @@
 #!/usr/bin/env bash
-# =============================================================================
-# ELITE HYPRLAND TERMINAL SWITCHER - PLATINUM EDITION (v6.7.1)
-# =============================================================================
-#
-# BASED ON: Dusky TUI Engine v5.9 (Template Aligned)
-# TARGET:   Arch Linux / Hyprland / UWSM / Wayland
-#
-# =============================================================================
+#d: Switch the default terminal
 
 set -euo pipefail
 shopt -s extglob
@@ -203,7 +196,7 @@ switch_terminal() {
         return 1
     fi
 
-    local exec_cmd='"uwsm-app -- " .. terminal'
+    local exec_cmd='"dusky-run " .. terminal'
     local new_binds
     new_binds=$(awk -v new_cmd="$exec_cmd" '
         { lines[NR] = $0 }

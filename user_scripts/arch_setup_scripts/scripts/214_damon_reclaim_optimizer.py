@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Master DAMON Reclaim optimizer for Arch Linux (kernel 7.0+, systemd 260+, Python 3.14+)."""
+#d: Configure DAMON memory reclamation
 
 from __future__ import annotations
 
@@ -7,46 +7,53 @@ import argparse
 import os
 import re
 import sys
+import time
+import tempfile
 from pathlib import Path
-from typing import NoReturn
+from typing import NoReturn, Dict
 
-# Config targets
 TMPFILES_FILE = Path("/etc/tmpfiles.d/99-damon-reclaim.conf")
 DAMON_PARAMS_DIR = Path("/sys/module/damon_reclaim/parameters")
 
-# =============================================================================
-# USER CONFIGURATION AREA (Modify these parameters to tune behavior)
-# =============================================================================
-
-# Threshold in GB to switch between low-RAM and high-RAM profiles
 RAM_DEMARCATION_GB = 30.0
 
-# --- Profile 1: Low-RAM Configuration (< 30GB) ---
-# Clean production defaults for low-RAM systems.
-LOW_RAM_CONFIG = {
-    "sample_interval": 500000,    # 500ms: How often the monitor checks what memory is used (wakes up 2 times/sec)
-    "aggr_interval": 5000000,     # 5s: How often the monitor aggregates statistics to find cold memory
-    "min_age": 20000000,          # 20s (Fast 20-second threshold): Minimum time memory must sit untouched to be considered "cold"
-    "wmarks_high": 800,           # 80%: Sleep the monitor if free RAM is above this percentage (800 parts per thousand)
-    "wmarks_mid": 700,            # 70%: Activate the monitor if free RAM drops below this percentage (700 parts per thousand)
-    "wmarks_low": 50,             # 5%: Pause the monitor if free RAM drops below this (to protect latency, 50 parts per thousand)
-    "quota_ms": 100,              # 100ms: Limit CPU overhead to a maximum of 100ms per second (10% CPU)
-    "quota_sz": 1073741824,       # 1GB: Limit pageout throughput to 1 GB per second
+LOW_RAM_CONFIG: Dict[str, int | str] = {
+    "sample_interval": 500000,
+    "aggr_interval": 5000000,
+    "min_age": 20000000,
+    "wmarks_high": 800,
+    "wmarks_mid": 700,
+    "wmarks_low": 50,
+    "wmarks_interval": 5000000,
+    "quota_ms": 100,
+    "quota_sz": 1073741824,
+    "quota_reset_interval_ms": 1000,
+    "min_nr_regions": 10,
+    "max_nr_regions": 1000,
+    "skip_anon": "N",
+    "addr_unit": 1,
+    "quota_mem_pressure_us": 0,
+    "quota_autotune_feedback": 0,
 }
 
-# --- Profile 2: High-RAM Configuration (>= 30GB) ---
-# Used for the host system (62 GB RAM) - Default production settings.
-HIGH_RAM_CONFIG = {
-    "sample_interval": 1000000,   # 1s: How often the monitor checks what memory is used
-    "aggr_interval": 5000000,     # 5s: How often the monitor aggregates statistics
-    "min_age": 60000000,          # 60s: Minimum time memory must sit untouched to be considered "cold"
-    "wmarks_high": 400,           # 40%: Sleep the monitor if free RAM is above this percentage (400 parts per thousand)
-    "wmarks_mid": 300,            # 30%: Activate the monitor if free RAM drops below this percentage (300 parts per thousand)
-    "wmarks_low": 50,             # 5%: Pause the monitor if free RAM drops below this (to protect latency, 50 parts per thousand)
-    "quota_ms": 100,              # 100ms: Limit CPU overhead to a maximum of 100ms per second (10% CPU)
-    "quota_sz": 1073741824,       # 1GB: Limit pageout throughput to 1 GB per second
+HIGH_RAM_CONFIG: Dict[str, int | str] = {
+    "sample_interval": 1000000,
+    "aggr_interval": 5000000,
+    "min_age": 60000000,
+    "wmarks_high": 400,
+    "wmarks_mid": 300,
+    "wmarks_low": 50,
+    "wmarks_interval": 5000000,
+    "quota_ms": 100,
+    "quota_sz": 1073741824,
+    "quota_reset_interval_ms": 1000,
+    "min_nr_regions": 10,
+    "max_nr_regions": 1000,
+    "skip_anon": "N",
+    "addr_unit": 1,
+    "quota_mem_pressure_us": 0,
+    "quota_autotune_feedback": 0,
 }
-
 
 class C:
     BOLD = "\033[1m"
@@ -56,175 +63,158 @@ class C:
     YLW = "\033[1;33m"
     BLU = "\033[1;34m"
     RST = "\033[0m"
-
     @classmethod
     def strip(cls) -> None:
         for name in ("BOLD", "DIM", "RED", "GRN", "YLW", "BLU", "RST"):
             setattr(cls, name, "")
 
-
 QUIET = False
-
-
-def info(msg: str) -> None:
-    if not QUIET:
-        print(f"{C.BLU}[INFO]{C.RST} {msg}")
-
-
-def ok(msg: str) -> None:
-    if not QUIET:
-        print(f"{C.GRN}[ OK ]{C.RST} {msg}")
-
-
-def warn(msg: str) -> None:
-    print(f"{C.YLW}[WARN]{C.RST} {msg}")
-
-
-def err(msg: str) -> None:
-    print(f"{C.RED}[FAIL]{C.RST} {msg}", file=sys.stderr)
-
-
-def die(msg: str, code: int = 1) -> NoReturn:
-    err(msg)
-    sys.exit(code)
-
+def info(m):
+    if not QUIET: print(f"{C.BLU}[INFO]{C.RST} {m}")
+def ok(m):
+    if not QUIET: print(f"{C.GRN}[ OK ]{C.RST} {m}")
+def warn(m): print(f"{C.YLW}[WARN]{C.RST} {m}")
+def err(m): print(f"{C.RED}[FAIL]{C.RST} {m}", file=sys.stderr)
+def die(m, code=1) -> NoReturn:
+    err(m); sys.exit(code)
 
 def detect_ram_gb() -> float:
     try:
-        meminfo = Path("/proc/meminfo").read_text()
-        m = re.search(r"^MemTotal:\s+(\d+)\s+kB", meminfo, re.M)
-        if not m:
-            die("Could not parse MemTotal from /proc/meminfo")
+        text = Path("/proc/meminfo").read_text(encoding="utf-8")
+        m = re.search(r"^MemTotal:\s+(\d+)\s+kB", text, re.M)
+        if not m: die("Could not parse MemTotal from /proc/meminfo")
         return int(m.group(1)) / 1_048_576
+    except FileNotFoundError:
+        die("/proc/meminfo not found - not running on Linux?")
     except Exception as e:
         die(f"Failed to read RAM capacity: {e}")
 
+def validate_profile(cfg, label):
+    si=int(cfg["sample_interval"]); ai=int(cfg["aggr_interval"])
+    if ai < si: die(f"{label}: aggr_interval ({ai}) must be >= sample_interval ({si})")
+    if ai % si!= 0: warn(f"{label}: aggr {ai} not multiple of sample {si} - may be rejected")
+    wh,wm,wl=int(cfg["wmarks_high"]),int(cfg["wmarks_mid"]),int(cfg["wmarks_low"])
+    for n,v in (("wmarks_high",wh),("wmarks_mid",wm),("wmarks_low",wl)):
+        if not 0 <= v <= 1000: die(f"{label}: {n}={v} out of 0-1000")
+    if not (wh >= wm >= wl): die(f"{label}: watermark ordering high>=mid>=low violated {wh}>={wm}>={wl}")
+    if int(cfg["min_nr_regions"]) < 3: die(f"{label}: min_nr_regions must be >=3")
+    if int(cfg["max_nr_regions"]) < int(cfg["min_nr_regions"]): die("max_nr_regions < min_nr_regions")
 
-def main(argv: list[str]) -> int:
-    ap = argparse.ArgumentParser(
-        prog="damon_reclaim_optimizer",
-        description="Configure and enable DAMON Reclaim based on total memory capacity.",
-    )
-    ap.add_argument("-n", "--dry-run", action="store_true", help="Preview configurations without writing")
-    ap.add_argument("--no-color", action="store_true", help="Disable colored output")
-    args = ap.parse_args(argv)
+def atomic_write_text(target: Path, content: str, mode: int = 0o644):
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(target.parent), prefix=f".{target.name}.tmp.")
+    try:
+        os.fchmod(fd, mode)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(content); f.flush(); os.fsync(f.fileno())
+        if os.geteuid()==0:
+            try: os.chown(tmp,0,0)
+            except: pass
+        os.rename(tmp, target)
+    finally:
+        try:
+            if Path(tmp).exists(): Path(tmp).unlink()
+        except: pass
 
-    if args.no_color or not sys.stdout.isatty() or "NO_COLOR" in os.environ:
-        C.strip()
+def sysfs_write(p: Path, v: str):
+    try: p.write_text(v, encoding="utf-8")
+    except Exception as e: die(f"Failed to write {p}={v!r}: {e}")
+def sysfs_read(p: Path) -> str:
+    try: return p.read_text(encoding="utf-8").strip()
+    except Exception as e: die(f"Failed to read {p}: {e}")
+def wait_for(pred, timeout=5.0, interval=0.1, desc=""):
+    dl=time.monotonic()+timeout
+    while time.monotonic()<dl:
+        if pred(): return True
+        time.sleep(interval)
+    if desc: warn(f"Timeout waiting for {desc}")
+    return False
 
-    # 1. Root check
-    if os.geteuid() != 0 and not args.dry_run:
-        info("root privileges required — escalating via sudo")
-        os.execvp("sudo", ["sudo", "--", sys.executable, str(Path(__file__).resolve()), *argv])
-
-    # 2. Compatibility check
-    if not DAMON_PARAMS_DIR.is_dir():
-        info("DAMON Reclaim is not supported or compiled in the current kernel. Skipping.")
-        return 0
-
-    # 3. RAM Detection and Profile Selection
-    ram_gb = detect_ram_gb()
-    info(f"Detected System RAM: {C.BOLD}{ram_gb:.2f} GB{C.RST}")
-
-    if ram_gb < RAM_DEMARCATION_GB:
-        label = "STRICT_RAM_SAVINGS (<30 GB)"
-        blurb = "Aggressive low-power reclamation window, 2-minute page age threshold."
-        cfg = LOW_RAM_CONFIG
+def apply_live_params(cfg):
+    required=["sample_interval","aggr_interval","min_age","wmarks_high","wmarks_mid","wmarks_low"]
+    for n in required:
+        if not (DAMON_PARAMS_DIR/n).is_file(): die(f"Missing {DAMON_PARAMS_DIR/n}")
+    has_commit=(DAMON_PARAMS_DIR/"commit_inputs").is_file()
+    has_enabled=(DAMON_PARAMS_DIR/"enabled").is_file()
+    has_pid=(DAMON_PARAMS_DIR/"kdamond_pid").is_file()
+    enabled_path=DAMON_PARAMS_DIR/"enabled"; commit_path=DAMON_PARAMS_DIR/"commit_inputs"
+    cur=sysfs_read(enabled_path) if has_enabled else "N"
+    info(f"Current enabled state: {cur}")
+    order=["sample_interval","aggr_interval","min_age","wmarks_high","wmarks_mid","wmarks_low","wmarks_interval","quota_ms","quota_sz","quota_reset_interval_ms","min_nr_regions","max_nr_regions","addr_unit","skip_anon","quota_mem_pressure_us","quota_autotune_feedback"]
+    def write_all():
+        for k in order:
+            if k in cfg:
+                p=DAMON_PARAMS_DIR/k
+                if p.is_file(): sysfs_write(p,str(cfg[k])); ok(f" {k} = {cfg[k]}")
+                else: warn(f" {k} not present, skipping")
+    if cur=="Y" and has_commit:
+        info("DAMON_RECLAIM running - using online tuning via commit_inputs")
+        write_all(); sysfs_write(commit_path,"Y")
+        info("Waiting for commit_inputs to return to N...")
+        if not wait_for(lambda: sysfs_read(commit_path)=="N", timeout=15.0, desc="commit_inputs==N"): die("commit_inputs did not return to N - check dmesg")
+        ok("Online commit completed")
     else:
-        label = "PERFORMANCE_LEAN (≥30 GB)"
-        blurb = "Emergency net: ultra-low overhead window, 5-minute page age, sleeps unless memory pressure occurs."
-        cfg = HIGH_RAM_CONFIG
+        if has_enabled:
+            info("Disabling for clean reconfiguration...")
+            sysfs_write(enabled_path,"N")
+            if has_pid: wait_for(lambda: sysfs_read(DAMON_PARAMS_DIR/"kdamond_pid")=="-1", timeout=3.0, desc="kdamond_pid==-1")
+        write_all()
+        if has_enabled:
+            sysfs_write(enabled_path,"Y"); ok("Enabled DAMON_RECLAIM")
+            if has_pid and not wait_for(lambda: sysfs_read(DAMON_PARAMS_DIR/"kdamond_pid") not in ("-1",""), timeout=3.0, desc="kdamond_pid active"):
+                warn("kdamond_pid still -1 after enable - may be watermark inactive")
 
-    sample_interval = cfg["sample_interval"]
-    aggr_interval = cfg["aggr_interval"]
-    min_age = cfg["min_age"]
-    wmarks_high = cfg["wmarks_high"]
-    wmarks_mid = cfg["wmarks_mid"]
-    wmarks_low = cfg["wmarks_low"]
-    quota_ms = cfg.get("quota_ms", 10)
-    quota_sz = cfg.get("quota_sz", 134217728)
+def verify_live(cfg):
+    errs=[]
+    for k in ["sample_interval","aggr_interval","min_age","wmarks_high","wmarks_mid","wmarks_low","wmarks_interval","quota_ms","quota_sz","quota_reset_interval_ms","min_nr_regions","max_nr_regions"]:
+        if k in cfg:
+            p=DAMON_PARAMS_DIR/k
+            if p.is_file():
+                a=sysfs_read(p); e=str(cfg[k])
+                if a!=e: errs.append(f"{k}: expected {e}, got {a}")
+    en=sysfs_read(DAMON_PARAMS_DIR/"enabled")
+    pid=sysfs_read(DAMON_PARAMS_DIR/"kdamond_pid") if (DAMON_PARAMS_DIR/"kdamond_pid").is_file() else "unknown"
+    if en!="Y": errs.append(f"enabled expected Y got {en}")
+    if pid=="-1": warn("kdamond_pid is -1 even though enabled=Y - may be watermark inactive")
+    if errs:
+        for e in errs: err(e)
+        die("Verification failed")
+    ok(f"Verified: enabled={en}, kdamond_pid={pid}")
+    for k in ["sample_interval","aggr_interval","min_age","wmarks_high","wmarks_mid","wmarks_low","quota_ms","quota_sz"]:
+        if k in cfg: ok(f" {k} = {sysfs_read(DAMON_PARAMS_DIR/k)}")
 
-    info(f"Selected Profile: {C.BOLD}{label}{C.RST} — {C.DIM}{blurb}{C.RST}")
-
-    # 4. Generate tmpfiles config
-    config_content = f"""# Managed by 214_damon_reclaim_optimizer.py
-# Scope: Enable DAMON Reclaim for {label} profile
-
-# Polling and aggregation rates to protect battery life
-w /sys/module/damon_reclaim/parameters/sample_interval - - - - {sample_interval}
-w /sys/module/damon_reclaim/parameters/aggr_interval - - - - {aggr_interval}
-
-# Minimum age for a memory page to be considered cold (seconds converted to microseconds)
-w /sys/module/damon_reclaim/parameters/min_age - - - - {min_age}
-
-# Watermarks (free memory rate per thousand): high, mid, low
-w /sys/module/damon_reclaim/parameters/wmarks_high - - - - {wmarks_high}
-w /sys/module/damon_reclaim/parameters/wmarks_mid - - - - {wmarks_mid}
-w /sys/module/damon_reclaim/parameters/wmarks_low - - - - {wmarks_low}
-
-# Quotas
-w /sys/module/damon_reclaim/parameters/quota_ms - - - - {quota_ms}
-w /sys/module/damon_reclaim/parameters/quota_sz - - - - {quota_sz}
-
-# Start the daemon
-w /sys/module/damon_reclaim/parameters/enabled - - - - Y
-"""
-
+def main(argv):
+    ap=argparse.ArgumentParser(prog="damon_reclaim_optimizer", description="Configure DAMON Reclaim (kernel 7.1+, systemd 261+, Python 3.14+)")
+    ap.add_argument("-n","--dry-run",action="store_true"); ap.add_argument("--no-color",action="store_true"); ap.add_argument("--force",action="store_true")
+    args=ap.parse_args(argv)
+    if args.no_color or not sys.stdout.isatty() or "NO_COLOR" in os.environ: C.strip()
+    if os.geteuid()!=0 and not args.dry_run:
+        info("root required — escalating via sudo")
+        sudo="/usr/bin/sudo" if Path("/usr/bin/sudo").is_file() else "sudo"
+        py=sys.executable
+        if not py or not Path(py).is_absolute(): die("sys.executable not absolute")
+        os.execvp(sudo,[sudo,"--",py,str(Path(__file__).resolve()),*argv])
+    if not DAMON_PARAMS_DIR.is_dir():
+        info("DAMON Reclaim not found at /sys/module/damon_reclaim/parameters. Skipping."); return 0
+    ram=detect_ram_gb(); info(f"Detected RAM: {C.BOLD}{ram:.2f} GiB{C.RST}")
+    if ram < RAM_DEMARCATION_GB:
+        label="STRICT_RAM_SAVINGS (<30 GiB)"; blurb="Aggressive: 500ms sample, 5s aggr, 20s cold age, reclaim when free <70% down to 5%"; cfg=LOW_RAM_CONFIG
+    else:
+        label="PERFORMANCE_LEAN (>=30 GiB)"; blurb="Conservative: 1s sample, 5s aggr, 60s cold age, reclaim when free <30% down to 5%"; cfg=HIGH_RAM_CONFIG
+    validate_profile(cfg,label); info(f"Selected: {C.BOLD}{label}{C.RST} — {C.DIM}{blurb}{C.RST}")
+    lines=[f"# Managed by {Path(__file__).name} - {label}",f"# Static configuration tuned for {ram:.2f} GiB system RAM","#","# DAMON_RECLAIM is static built-in when CONFIG_DAMON_RECLAIM=y","", "# Monitoring intervals (us)", f"w /sys/module/damon_reclaim/parameters/sample_interval - - - - {cfg['sample_interval']}", f"w /sys/module/damon_reclaim/parameters/aggr_interval - - - - {cfg['aggr_interval']}", f"w /sys/module/damon_reclaim/parameters/min_age - - - - {cfg['min_age']}", f"w /sys/module/damon_reclaim/parameters/wmarks_interval - - - - {cfg['wmarks_interval']}", "", "# Watermarks per-thousand", f"w /sys/module/damon_reclaim/parameters/wmarks_high - - - - {cfg['wmarks_high']}", f"w /sys/module/damon_reclaim/parameters/wmarks_mid - - - - {cfg['wmarks_mid']}", f"w /sys/module/damon_reclaim/parameters/wmarks_low - - - - {cfg['wmarks_low']}", "", "# Quotas", f"w /sys/module/damon_reclaim/parameters/quota_ms - - - - {cfg['quota_ms']}", f"w /sys/module/damon_reclaim/parameters/quota_sz - - - - {cfg['quota_sz']}", f"w /sys/module/damon_reclaim/parameters/quota_reset_interval_ms - - - - {cfg['quota_reset_interval_ms']}", f"w /sys/module/damon_reclaim/parameters/quota_mem_pressure_us - - - - {cfg['quota_mem_pressure_us']}", f"w /sys/module/damon_reclaim/parameters/quota_autotune_feedback - - - - {cfg['quota_autotune_feedback']}", "", "# Regions and behavior", f"w /sys/module/damon_reclaim/parameters/min_nr_regions - - - - {cfg['min_nr_regions']}", f"w /sys/module/damon_reclaim/parameters/max_nr_regions - - - - {cfg['max_nr_regions']}", f"w /sys/module/damon_reclaim/parameters/addr_unit - - - - {cfg['addr_unit']}", f"w /sys/module/damon_reclaim/parameters/skip_anon - - - - {cfg['skip_anon']}", "", "# Must be last", f"w /sys/module/damon_reclaim/parameters/enabled - - - - Y",""]
+    content="\n".join(lines)+"\n"
     if args.dry_run:
-        print(f"\n{C.BOLD}[ DRY RUN: Would write to {TMPFILES_FILE} ]{C.RST}")
-        print(config_content)
-        return 0
+        print(f"\n{C.BOLD}[ DRY RUN: Would write to {TMPFILES_FILE} ]{C.RST}"); print(content); return 0
+    if TMPFILES_FILE.is_file() and not args.force:
+        if TMPFILES_FILE.read_text(encoding="utf-8")==content: info("Existing config matches, skipping write")
+        else: atomic_write_text(TMPFILES_FILE,content); ok(f"Wrote {TMPFILES_FILE}")
+    else:
+        atomic_write_text(TMPFILES_FILE,content); ok(f"Wrote {TMPFILES_FILE}")
+    info("Applying live..."); apply_live_params(cfg); verify_live(cfg)
+    ok("Completed successfully"); return 0
 
-    # Write persistent config
-    try:
-        TMPFILES_FILE.parent.mkdir(parents=True, exist_ok=True)
-        TMPFILES_FILE.write_text(config_content)
-        os.chmod(TMPFILES_FILE, 0o644)
-        ok(f"Wrote configuration to {TMPFILES_FILE}")
-    except Exception as e:
-        die(f"Failed to write configuration: {e}")
-
-    # 5. Apply live parameters in sysfs
-    info("Applying parameters to live kernel...")
-    try:
-        (DAMON_PARAMS_DIR / "enabled").write_text("N")
-        (DAMON_PARAMS_DIR / "sample_interval").write_text(str(sample_interval))
-        (DAMON_PARAMS_DIR / "aggr_interval").write_text(str(aggr_interval))
-        (DAMON_PARAMS_DIR / "min_age").write_text(str(min_age))
-        (DAMON_PARAMS_DIR / "wmarks_high").write_text(str(wmarks_high))
-        (DAMON_PARAMS_DIR / "wmarks_mid").write_text(str(wmarks_mid))
-        (DAMON_PARAMS_DIR / "wmarks_low").write_text(str(wmarks_low))
-        (DAMON_PARAMS_DIR / "quota_ms").write_text(str(quota_ms))
-        (DAMON_PARAMS_DIR / "quota_sz").write_text(str(quota_sz))
-        (DAMON_PARAMS_DIR / "enabled").write_text("Y")
-        ok("Live parameters written successfully")
-    except Exception as e:
-        die(f"Failed to write live parameters: {e}")
-
-    # 6. Verify live settings
-    try:
-        actual_enabled = (DAMON_PARAMS_DIR / "enabled").read_text().strip()
-        actual_sample = (DAMON_PARAMS_DIR / "sample_interval").read_text().strip()
-        actual_aggr = (DAMON_PARAMS_DIR / "aggr_interval").read_text().strip()
-        actual_pid = (DAMON_PARAMS_DIR / "kdamond_pid").read_text().strip()
-
-        if actual_enabled != "Y" or actual_sample != str(sample_interval) or actual_aggr != str(aggr_interval):
-            die("Verification failed: values in sysfs do not match configured profile.")
-
-        ok("Verified live kernel values:")
-        ok(f"  enabled = {actual_enabled}")
-        ok(f"  sample_interval = {actual_sample} µs")
-        ok(f"  aggr_interval = {actual_aggr} µs")
-        ok(f"  kdamond_pid = {actual_pid} (Active)")
-    except Exception as e:
-        die(f"Failed to verify running state: {e}")
-
-    return 0
-
-
-if __name__ == "__main__":
-    try:
-        sys.exit(main(sys.argv[1:]))
+if __name__=="__main__":
+    try: sys.exit(main(sys.argv[1:]))
     except KeyboardInterrupt:
-        print(f"\n{C.YLW}aborted — nothing further was written.{C.RST}")
-        sys.exit(130)
+        print(f"\n{C.YLW}aborted — nothing written.{C.RST}"); sys.exit(130)

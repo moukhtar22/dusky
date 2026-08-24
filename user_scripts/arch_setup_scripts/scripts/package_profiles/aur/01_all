@@ -1,0 +1,9 @@
+# Default AUR Packages
+# installing manually with script because this is a massive package that includes every cursor theme
+# bibata-cursor-theme-bin
+wlogout
+adwsteamgtk
+hyprshade
+peaclock
+tray-tui
+xdg-terminal-exec

@@ -1,13 +1,6 @@
 #!/usr/bin/env bash
-# Changes shell to ZSH from bash
-# ==============================================================================
-# Script: switch_to_zsh.sh
-# Description: Safely switches the user's shell to Zsh (Sudo-aware).
-# Author: Elite DevOps Engineer
-# Compatibility: Bash 5+ | Arch Linux
-# ==============================================================================
+#d: Switch the default shell to Zsh
 
-# 1. Strict Mode
 set -euo pipefail
 
 # Cleanup on exit

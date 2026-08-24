@@ -5,67 +5,132 @@
 
 set -euo pipefail
 
-SYNC_ID="dusky-glance-sync"
-PID_FILE="${XDG_RUNTIME_DIR:-/run/user/$UID}/dusky_glance.pid"
-
+RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$UID}"
 MODE="${1:-}"
 
-# --- DYNAMIC APP NAME RESOLUTION ---
-# Separate app names based on mode so mako can style them individually
-if [[ -n "$MODE" && "$MODE" != "--stop" ]]; then
-    CURRENT_APP="dusky-glance-${MODE#--}"
-else
-    CURRENT_APP="dusky-glance"
+if [[ -z "$MODE" ]]; then
+    echo "Usage: $0 --mode [args]"
+    exit 1
 fi
+
+# Generate a clean mode slug for per-mode PID files and D-Bus sync channels
+get_mode_slug() {
+    local str="$*"
+    str="${str#--}"
+    echo "$str" | tr '/ ' '--'
+}
+
+MODE_SLUG=$(get_mode_slug "$@")
+MODE_BASE="${MODE#--}"
+
+# APP matches mako.ini rules (e.g. dusky-glance-cpu, dusky-glance-ram, dusky-glance-hud)
+CURRENT_APP="dusky-glance-${MODE_BASE%% *}"
+SYNC_ID="dusky-glance-sync-${MODE_SLUG}"
+PID_FILE="${RUNTIME_DIR}/dusky_glance_${MODE_SLUG}.pid"
 
 # --- CORE LIFECYCLE ---
 clear_osd() {
-    notify-send -a "$CURRENT_APP" -h string:x-canonical-private-synchronous:"$SYNC_ID" -t 10 " " " " 2>/dev/null || true
-}
-
-if [[ -f "$PID_FILE" ]]; then
-    old_pid=$(<"$PID_FILE")
-    if [[ -n "$old_pid" ]] && kill -0 "$old_pid" 2>/dev/null && [[ "$old_pid" != "$$" ]]; then
-        kill -15 "$old_pid" 2>/dev/null || true
-        for ((i=0; i<20; i++)); do
-            kill -0 "$old_pid" 2>/dev/null || break
-            sleep 0.05
+    local app="${1:-$CURRENT_APP}"
+    local sync="${2:-$SYNC_ID}"
+    if command -v makoctl >/dev/null 2>&1; then
+        local ids
+        ids=$(makoctl list -j 2>/dev/null | awk -v target="$app" '
+            /"id":/ { id=$2; gsub(/[^0-9]/, "", id) }
+            /"app_name":/ {
+                a=$2; gsub(/["\t,]/, "", a)
+                if (a == target) print id
+            }
+        ')
+        for id in $ids; do
+            makoctl dismiss -n "$id" -h 2>/dev/null || true
         done
     fi
-fi
+    notify-send -a "$app" -h string:x-canonical-private-synchronous:"$sync" -t 10 " " " " 2>/dev/null || true
+}
 
-if [[ "$MODE" == "--stop" ]]; then
-    clear_osd
+stop_all_daemons() {
+    for pf in "${RUNTIME_DIR}"/dusky_glance_*.pid; do
+        [[ -f "$pf" ]] || continue
+        local old_pid
+        old_pid=$(<"$pf")
+        if [[ -n "$old_pid" ]] && kill -0 "$old_pid" 2>/dev/null; then
+            kill -15 "$old_pid" 2>/dev/null || true
+            pkill -P "$old_pid" 2>/dev/null || true
+        fi
+        rm -f "$pf"
+    done
+    if command -v makoctl >/dev/null 2>&1; then
+        local ids
+        ids=$(makoctl list -j 2>/dev/null | awk '
+            /"id":/ { id=$2; gsub(/[^0-9]/, "", id) }
+            /"app_name":/ {
+                a=$2; gsub(/["\t,]/, "", a)
+                if (a ~ /^dusky-glance/) print id
+            }
+        ')
+        for id in $ids; do
+            makoctl dismiss -n "$id" -h 2>/dev/null || true
+        done
+    fi
+}
+
+# Global Stop
+if [[ "$MODE" == "--stop" || "$MODE" == "--stop-all" ]]; then
+    stop_all_daemons
     exit 0
 fi
 
-echo "$$" > "$PID_FILE"
+IS_DAEMON_OWNER=false
+MY_PID=$BASHPID
+
+# Atomic Lock Creation: set -C (noclobber) fails atomically if file exists (no TOCTOU race)
+if ! ( set -C; echo "$MY_PID" > "$PID_FILE" ) 2>/dev/null; then
+    old_pid=$(tr -d '[:space:]' < "$PID_FILE" 2>/dev/null || echo "")
+    if [[ -n "$old_pid" ]] && kill -0 "$old_pid" 2>/dev/null && [[ "$old_pid" != "$MY_PID" ]]; then
+        rm -f "$PID_FILE" 2>/dev/null || true
+        kill -9 "$old_pid" 2>/dev/null || true
+        pkill -9 -P "$old_pid" 2>/dev/null || true
+        clear_osd
+        exit 0
+    else
+        # Stale lockfile recovery
+        rm -f "$PID_FILE" 2>/dev/null || true
+        echo "$MY_PID" > "$PID_FILE"
+        IS_DAEMON_OWNER=true
+    fi
+else
+    IS_DAEMON_OWNER=true
+fi
 
 cleanup() {
-    # 1. Kill grandchildren (the pipeline commands like socat inside the subshell)
-    for child in $(pgrep -P "$$" 2>/dev/null || true); do
-        pkill -P "$child" 2>/dev/null || true
-    done
-    
-    # 2. Kill direct children (the background subshells)
-    pkill -P "$$" 2>/dev/null || true
-
-    # 3. Release the lock file
-    if [[ -f "$PID_FILE" ]] && [[ "$(<"$PID_FILE")" == "$$" ]]; then
-        rm -f "$PID_FILE"
+    if [[ "$IS_DAEMON_OWNER" == true ]]; then
+        local pf_content=""
+        [[ -f "$PID_FILE" ]] && pf_content=$(cat "$PID_FILE" 2>/dev/null || echo "")
+        if [[ "$pf_content" == "$MY_PID" ]]; then
+            rm -f "$PID_FILE" 2>/dev/null || true
+        fi
+        for child in $(pgrep -P "$MY_PID" 2>/dev/null || true); do
+            kill -9 "$child" 2>/dev/null || true
+        done
+        clear_osd
     fi
-    
-    # 4. Clear the display
-    clear_osd
 }
 trap 'cleanup' EXIT
 trap 'exit 0' INT TERM
 
 # --- HELPER ROUTINES ---
 send_osd() {
+    [[ -f "$PID_FILE" ]] || exit 0
     local text="$1"
     local body="<span font='monospace 20' weight='bold'>${text}</span>"
-    notify-send -a "$CURRENT_APP" -h string:x-canonical-private-synchronous:"$SYNC_ID" -t 2000 " " "$body"
+    notify-send -a "$CURRENT_APP" -h string:x-canonical-private-synchronous:"$SYNC_ID" -t 2000 " " "$body" 2>/dev/null || true
+}
+
+send_hud_osd() {
+    [[ -f "$PID_FILE" ]] || exit 0
+    local text="$1"
+    local body="<span font='monospace 9' weight='bold'>${text}</span>"
+    notify-send -a "$CURRENT_APP" -h string:x-canonical-private-synchronous:"$SYNC_ID" -t 0 " " "$body" 2>/dev/null || true
 }
 
 format_time() {
@@ -167,7 +232,7 @@ case "$MODE" in
             [[ "$diff_lbl" == "same" ]] && diff_lbl="same time"
             
             body="<span font='monospace 11' weight='bold'>${time_str}</span>\n<span font='monospace 9'>${diff_lbl}</span>"
-            notify-send -a "$CURRENT_APP" -h string:x-canonical-private-synchronous:"$SYNC_ID" -t 2000 " " "$body"
+            notify-send -a "$CURRENT_APP" -h string:x-canonical-private-synchronous:"$SYNC_ID" -t 2000 " " "$body" 2>/dev/null || true
             sleep 1
         done
         ;;
@@ -190,7 +255,7 @@ case "$MODE" in
             left=$((TARGET_SEC - SECONDS))
             if (( left <= 0 )); then
                 # Leaving 'dusky-glance-alert' intact as requested via config overrides
-                notify-send -u critical -a "dusky-glance-alert" -h string:x-canonical-private-synchronous:dusky-timer-alert "󰔛  Time's Up!"
+                notify-send -u critical -a "dusky-glance-alert" -h string:x-canonical-private-synchronous:dusky-timer-alert "󰔛  Time's Up!" 2>/dev/null || true
                 play_sound "/usr/share/sounds/freedesktop/stereo/alarm-clock-elapsed.oga"
                 
                 for _ in {1..5}; do
@@ -225,7 +290,7 @@ case "$MODE" in
             
             if (( left <= 0 )); then
                 if [[ "$PHASE" == "WORK" ]] && (( BREAK_SEC > 0 )); then
-                    notify-send -u critical -a "dusky-glance-alert" -h string:x-canonical-private-synchronous:dusky-timer-alert "󰦖  Break Time!"
+                    notify-send -u critical -a "dusky-glance-alert" -h string:x-canonical-private-synchronous:dusky-timer-alert "󰦖  Break Time!" 2>/dev/null || true
                     play_sound "/usr/share/sounds/gnome/default/alarms/glass-bell.oga"
                     
                     PHASE="BREAK"
@@ -235,7 +300,7 @@ case "$MODE" in
                     msg="Session Finished"
                     (( BREAK_SEC > 0 )) && msg="Back to Work!"
                     
-                    notify-send -u critical -a "dusky-glance-alert" -h string:x-canonical-private-synchronous:dusky-timer-alert "󰔚  $msg"
+                    notify-send -u critical -a "dusky-glance-alert" -h string:x-canonical-private-synchronous:dusky-timer-alert "󰔚  $msg" 2>/dev/null || true
                     play_sound "/usr/share/sounds/freedesktop/stereo/alarm-clock-elapsed.oga"
                     
                     PHASE="WORK"
@@ -274,8 +339,10 @@ case "$MODE" in
                 
                 if (( delta_time_us > 0 )); then
                     if (( delta_energy < 0 )); then
-                        # 32-bit counter rollover compensation
-                        delta_energy=$(( delta_energy + 4294967296 ))
+                        # Dynamic counter rollover compensation via kernel max_energy_range_uj
+                        max_range=4294967296
+                        read -r max_range < "${path%/*}/max_energy_range_uj" 2>/dev/null || true
+                        delta_energy=$(( delta_energy + max_range ))
                     fi
                     watts_x10=$(( (delta_energy * 10) / delta_time_us ))
                     watts_int=$(( watts_x10 / 10 ))
@@ -721,8 +788,10 @@ case "$MODE" in
                 done
                 
                 if [[ -z "$path" || ! -r "$path" ]]; then
-                    send_osd "N/A"
-                    exit 1
+                    while true; do
+                        send_osd "N/A"
+                        sleep 5
+                    done
                 fi
                 
                 read -r last_energy < "$path"
@@ -737,7 +806,9 @@ case "$MODE" in
                         delta_time_us=$((curr_time_str - last_time_str))
                         if (( delta_time_us > 0 )); then
                             if (( delta_energy < 0 )); then
-                                delta_energy=$(( delta_energy + 4294967296 ))
+                                max_range=4294967296
+                                read -r max_range < "${path%/*}/max_energy_range_uj" 2>/dev/null || true
+                                delta_energy=$(( delta_energy + max_range ))
                             fi
                             watts_x10=$(( (delta_energy * 10) / delta_time_us ))
                             watts_int=$(( watts_x10 / 10 ))
@@ -761,8 +832,10 @@ case "$MODE" in
                 done
                 
                 if [[ -z "$path" || ! -r "$path" ]]; then
-                    send_osd "N/A"
-                    exit 1
+                    while true; do
+                        send_osd "N/A"
+                        sleep 5
+                    done
                 fi
                 
                 while true; do
@@ -820,8 +893,10 @@ case "$MODE" in
             intel)
                 path="/sys/class/drm/$card/device/drm/$card/power/rc6_residency_ms"
                 if [[ ! -r "$path" ]]; then
-                    send_osd "N/A"
-                    exit 1
+                    while true; do
+                        send_osd "N/A"
+                        sleep 5
+                    done
                 fi
                 
                 read -r last_rc6 < "$path"
@@ -852,8 +927,10 @@ case "$MODE" in
             amd)
                 path="/sys/class/drm/$card/device/gpu_busy_percent"
                 if [[ ! -r "$path" ]]; then
-                    send_osd "N/A"
-                    exit 1
+                    while true; do
+                        send_osd "N/A"
+                        sleep 5
+                    done
                 fi
                 
                 while true; do
@@ -905,14 +982,16 @@ case "$MODE" in
                 while true; do
                     # Pure Bash proc fdinfo scanner for user DRM memory (no subprocesses)
                     declare -A client_mem=()
-                    for f in /proc/[0-9]*/fdinfo/[0-9]*; do
+                    while read -r f; do
                         [[ -r "$f" ]] || continue
                         driver=""
                         client_id=""
                         total_sys=0
                         total_vram=0
                         
-                        while read -r name val unit; do
+                        # || [[ -n "$name" ]] handles EOF without trailing newline
+                        # || true prevents set -e crash if process exits mid-read
+                        while read -r name val unit || [[ -n "$name" ]]; do
                             case "$name" in
                                 drm-driver:) driver="$val" ;;
                                 drm-client-id:) client_id="$val" ;;
@@ -925,7 +1004,7 @@ case "$MODE" in
                                     [[ "$unit" == "KiB" ]] && total_vram=$((val * 1024))
                                     ;;
                             esac
-                        done < "$f" 2>/dev/null
+                        done < "$f" 2>/dev/null || true
                         
                         if [[ -n "$driver" && -n "$client_id" ]]; then
                             total=$((total_sys + total_vram))
@@ -934,7 +1013,7 @@ case "$MODE" in
                                 client_mem["$key"]=$total
                             fi
                         fi
-                    done
+                    done < <(grep -l "drm-driver" /proc/[0-9]*/fdinfo/* 2>/dev/null || true)
                     
                     sum=0
                     for key in "${!client_mem[@]}"; do
@@ -1000,7 +1079,7 @@ case "$MODE" in
         cpu_zone_file=""
         for hwmon in /sys/class/hwmon/hwmon*/name; do
             [[ -r "$hwmon" ]] || continue
-            read -r name < "$hwmon"
+            read -r name < "$hwmon" 2>/dev/null || continue
             if [[ "$name" == "coretemp" || "$name" == "k10temp" || "$name" == "zenpower" || "$name" == "cpu_thermal" ]]; then
                 dir="${hwmon%/*}"
                 if [[ -r "$dir/temp1_input" ]]; then
@@ -1012,7 +1091,7 @@ case "$MODE" in
         if [[ -z "$cpu_zone_file" ]]; then
             for tz in /sys/class/thermal/thermal_zone*/type; do
                 [[ -r "$tz" ]] || continue
-                read -r type < "$tz"
+                read -r type < "$tz" 2>/dev/null || continue
                 if [[ "$type" == *"x86_pkg_temp"* || "$type" == *"cpu"* ]]; then
                     dir="${tz%/*}"
                     if [[ -r "$dir/temp" ]]; then
@@ -1047,9 +1126,12 @@ case "$MODE" in
         intel_pwr_path=""
         if [[ "${vendor,,}" == "intel" ]]; then
             for name_file in /sys/devices/virtual/powercap/intel-rapl/intel-rapl:0/*/name; do
-                if [[ -f "$name_file" ]] && [[ "$(cat "$name_file")" == "uncore" ]]; then
-                    intel_pwr_path="${name_file%/*}/energy_uj"
-                    break
+                if [[ -f "$name_file" ]]; then
+                    name_val=$(cat "$name_file" 2>/dev/null || echo "")
+                    if [[ "$name_val" == "uncore" ]]; then
+                        intel_pwr_path="${name_file%/*}/energy_uj"
+                        break
+                    fi
                 fi
             done
         fi
@@ -1121,7 +1203,9 @@ case "$MODE" in
                     delta_time_us=$((curr_cpu_time - last_cpu_time))
                     if (( delta_time_us > 0 )); then
                         if (( delta_energy < 0 )); then
-                            delta_energy=$(( delta_energy + 4294967296 ))
+                            max_range=4294967296
+                            read -r max_range < "${cpu_energy_path%/*}/max_energy_range_uj" 2>/dev/null || true
+                            delta_energy=$(( delta_energy + max_range ))
                         fi
                         watts_x10=$(( (delta_energy * 10) / delta_time_us ))
                         cpu_watts="$(( watts_x10 / 10 )).$(( watts_x10 % 10 ))W"
@@ -1199,13 +1283,12 @@ case "$MODE" in
                     fi
                     
                     declare -A client_mem=()
-                    for f in /proc/[0-9]*/fdinfo/[0-9]*; do
+                    while read -r f; do
                         [[ -r "$f" ]] || continue
                         driver=""
                         client_id=""
                         total_sys=0
                         total_vram=0
-                        # || true guards against set -e killing us when read hits EOF (exit 1)
                         while read -r name val unit || [[ -n "$name" ]]; do
                             case "$name" in
                                 drm-driver:) driver="$val" ;;
@@ -1227,7 +1310,7 @@ case "$MODE" in
                                 client_mem["$key"]=$total
                             fi
                         fi
-                    done || true
+                    done < <(grep -l "drm-driver" /proc/[0-9]*/fdinfo/* 2>/dev/null || true)
                     sum=0
                     for key in "${!client_mem[@]}"; do
                         sum=$((sum + client_mem[$key]))
@@ -1299,8 +1382,7 @@ case "$MODE" in
             esac
             
             hud_body="  ${cpu_usage}% • ${cpu_watts} • ${cpu_temp}\n󰢮  ${gpu_usage} • ${gpu_watts} • ${gpu_temp}\n󰘚  ${ram_str} | VRAM ${gpu_vram}"
-            body="<span font='monospace 9' weight='bold'>${hud_body}</span>"
-            notify-send -a "$CURRENT_APP" -h string:x-canonical-private-synchronous:"$SYNC_ID" -t 2000 " " "$body"
+            send_hud_osd "$hud_body"
             
             sleep 1
         done

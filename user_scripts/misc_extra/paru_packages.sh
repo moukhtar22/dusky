@@ -87,6 +87,7 @@ trap 'abort_with_signal SIGTERM 143' TERM
 # "bibata-cursor-theme-bin"
 
 declare -ar PACKAGES=(
+    #"waybar-git"
 )
 
 # Delay before auto-retrying

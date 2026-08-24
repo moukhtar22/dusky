@@ -1,13 +1,5 @@
 #!/usr/bin/env python3
-"""
-File Manager Bookmark Configurator
-----------------------------------
-Automatically sets up bookmarks (side pane directories) for popular Linux file
-managers such as Nautilus, Thunar, and Dolphin.
-
-Includes beautiful output, atomic file writing to prevent corruption,
-strict validation of directory targets, and pretty-printing of XML.
-"""
+#d: Set up bookmarks for the file manager side pane
 
 import os
 import sys

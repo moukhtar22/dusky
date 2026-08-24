@@ -1,27 +1,31 @@
 #!/usr/bin/env bash
-# Resets all cache for Neovim
-
-# 1. Safety & Modern Bash settings
+# Resets all cache for Neovim — XDG-aware, safe-rm guarded
 set -euo pipefail
 
-# 2. Colors for Orchestra Consistency
 RED=$'\033[0;31m'
 GREEN=$'\033[0;32m'
 BLUE=$'\033[0;34m'
-NC=$'\033[0m' # No Color
+NC=$'\033[0m'
 
-log_info() { printf "${BLUE}[INFO]${NC} %s\n" "$1"; }
-log_success() { printf "${GREEN}[SUCCESS]${NC} %s\n" "$1"; }
+log_info() { printf '%s[INFO]%s %s\n' "$BLUE" "$NC" "$*"; }
+log_success() { printf '%s[SUCCESS]%s %s\n' "$GREEN" "$NC" "$*"; }
+log_error() { printf '%s[ERROR]%s %s\n' "$RED" "$NC" "$*"; }
 
-# 3. Root Check (Failsafe)
-# This script must manipulate User Home files, not Root.
 if [[ $EUID -eq 0 ]]; then
-    printf "${RED}[ERROR] This script must be run as User, not Root.${NC}\n"
+    printf '%s[ERROR] This script must be run as User, not Root.%s\n' "$RED" "$NC"
     exit 1
 fi
 
-# 4. Target Definition (Associative Array)
-# Added "Cache Directory" per user request
+is_safe_nvim_path() {
+    local p="$1"
+    [[ -n "$p" ]] || return 1
+    [[ "$p" != "/" ]] || return 1
+    [[ "$p" != "$HOME" ]] || return 1
+    [[ "$p" == "$HOME"/* || "$p" == "${XDG_CONFIG_HOME:-$HOME/.config}"/* || "$p" == "${XDG_DATA_HOME:-$HOME/.local/share}"/* || "$p" == "${XDG_STATE_HOME:-$HOME/.local/state}"/* || "$p" == "${XDG_CACHE_HOME:-$HOME/.cache}"/* ]] || return 1
+    [[ "$p" == *nvim* ]] || return 1
+    return 0
+}
+
 declare -A TARGETS=(
     ["Lazy Lockfile"]="${HOME}/.config/nvim/lazy-lock.json"
     ["Data Directory"]="${HOME}/.local/share/nvim"
@@ -29,24 +33,25 @@ declare -A TARGETS=(
     ["Cache Directory"]="${HOME}/.cache/nvim"
 )
 
-# 5. Execution Loop
 main() {
     log_info "Starting Neovim state cleanup..."
-
+    local name path
     for name in "${!TARGETS[@]}"; do
-        local path="${TARGETS[$name]}"
-
-        # Check existence first for better logging context
+        path="${TARGETS[$name]}"
         if [[ -e "$path" ]]; then
-            # rm -rf is safe here; it handles both files and directories
-            rm -rf "$path"
+            if ! is_safe_nvim_path "$path"; then
+                log_error "Refusing to remove unsafe path: $path"
+                continue
+            fi
+            rm -rf -- "$path"
             log_success "Removed $name: $path"
         else
             log_info "$name not found (Clean): $path"
         fi
     done
-
     log_success "Neovim state reset complete."
 }
 
-main
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main "$@"
+fi

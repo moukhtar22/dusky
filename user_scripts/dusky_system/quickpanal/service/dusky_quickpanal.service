@@ -32,6 +32,7 @@ RestartMode=direct
 RestartSec=250ms
 RestartSteps=5
 RestartMaxDelaySec=4s
+RestartPreventExitStatus=5
 
 # --- Anti-Hang & Freeze Protection ---
 TimeoutStopSec=2s
@@ -43,15 +44,15 @@ TimeoutStopFailureMode=kill
 MemoryAccounting=yes
 # (Systemd 243+) Cleanly kills the whole cgroup if the system runs completely out of memory.
 OOMPolicy=kill
+OOMScoreAdjust=400
 
 # [ZSTD COMPRESSION TRIGGER] 
 # GTK3 utilizes Cairo drawing surfaces which can bloat the heap over time.
 # By setting a soft limit (MemoryHigh), we instruct the Arch Linux kernel: 
-# "If this panel uses more than 50MB of RAM, aggressively swap its idle pages into ZRAM (ZSTD compression)."
-# This drastically shrinks its active footprint.
-MemoryHigh=40M
+# "If this panel uses more than 150MB of RAM, aggressively swap its idle pages into ZRAM (ZSTD compression)."
+MemoryHigh=150M
 # Hard limit to prevent memory leaks from crashing the compositor.
-MemoryMax=200M
+MemoryMax=300M
 
 SyslogIdentifier=dusky-quickpanal
 

@@ -1,26 +1,47 @@
 #!/usr/bin/env python3
-# matugen color config after fresh install
-"""
-Initializes or overwrites the 'state.conf' user configuration for Dusky Theme.
-Designed for Arch Linux environments using Python 3.
-
-Usage: python 006_dusky_state_setup.py
-"""
+#d: Create or reset the Matugen state config
 
 import sys
+import subprocess
+import importlib
+import textwrap
+import shutil
 from pathlib import Path
 
-# --- Dependency Check ---
+# --- Dependency Check & Auto-Install ---
 try:
     from rich.console import Console
     from rich.theme import Theme
 except ImportError:
-    print("[ERR]  The 'rich' library is required but not found.")
-    print("       Please install it via: pacman -S python-rich (or pip install rich)")
-    sys.exit(1)
+    print("[WARN] The 'rich' library is not found. Attempting auto-installation...")
+    
+    # Bulletproof check: Ensure we are actually on an Arch-based system with pacman
+    if not shutil.which("pacman"):
+        print("[ERR]  'pacman' package manager not found. This script requires an Arch Linux environment.")
+        sys.exit(1)
+        
+    try:
+        # Surgically call pacman to install the required package non-interactively
+        subprocess.check_call(["sudo", "pacman", "-S", "--noconfirm", "--needed", "python-rich"])
+        
+        # Invalidate Python's internal import caches to detect the new package at runtime
+        importlib.invalidate_caches()
+        
+        # Retry the imports globally
+        from rich.console import Console
+        from rich.theme import Theme
+        print("[OK]   'python-rich' auto-installed and imported successfully.")
+    except subprocess.CalledProcessError as e:
+        print(f"[ERR]  Pacman failed to auto-install 'python-rich'. (Exit Code: {e.returncode})")
+        print("       Please check your network or sudo privileges and install manually: sudo pacman -S python-rich")
+        sys.exit(1)
+    except ImportError:
+        print("[ERR]  'python-rich' was installed via pacman but failed to import in the current context.")
+        print("       Please re-run the script.")
+        sys.exit(1)
 
 # --- Strict Mode & Configuration ---
-# Set up a custom theme to exactly mirror the Bash script's ANSI color codes
+# Custom theme mirroring the Orchestrator's ANSI color codes
 custom_theme = Theme({
     "info": "bold blue",
     "success": "bold green",
@@ -29,7 +50,7 @@ custom_theme = Theme({
 })
 console = Console(theme=custom_theme)
 
-# --- Helper Functions (Mimicking Bash Setup) ---
+# --- Helper Functions ---
 def log_info(msg: str) -> None:
     console.print(f"[info][INFO][/info] {msg}")
 
@@ -44,34 +65,36 @@ def log_error(msg: str) -> None:
 
 def main() -> None:
     # ------------------------------------------------------------------------------
-    # 1. Paths & Content Definition
+    # 1. Paths Definition
     # ------------------------------------------------------------------------------
-    # Expand the tilde (~) to the user's actual home directory
     target_path = Path("~/.config/dusky/settings/dusky_theme/state.conf").expanduser()
     target_dir = target_path.parent
 
-    # The exact configuration text requested (formatted explicitly to prevent indentation errors)
-    state_content = (
-        "# Dusky Theme State File\n"
-        "THEME_MODE=\"dark\"\n"
-        "MATUGEN_TYPE=\"scheme-vibrant\"\n"
-        "MATUGEN_CONTRAST=\"0\"\n"
-        "SOURCE_COLOR_INDEX=\"1\"\n"
-        "BASE16_BACKEND=\"disable\"\n"
-        "AWWW_TRANS_TYPE=\"random\"\n"
-        "AWWW_TRANS_DURATION=\"2\"\n"
-        "AWWW_TRANS_FPS=\"60\"\n"
-        "AWWW_TRANS_BEZIER=\".54,0,.34,.99\"\n"
-        "AWWW_TRANS_ANGLE=\"45\"\n"
-        "AWWW_TRANS_POS=\"center\"\n"
-    )
+    # ------------------------------------------------------------------------------
+    # 2. Configuration Block (Easily Editable)
+    # ------------------------------------------------------------------------------
+    # textwrap.dedent strips leading whitespace, allowing natural indentation in code
+    state_content = textwrap.dedent("""\
+# Dusky Theme State File
+THEME_MODE="dark"
+MATUGEN_TYPE="scheme-tonal-spot"
+MATUGEN_CONTRAST="0"
+SOURCE_COLOR_INDEX="0"
+BASE16_BACKEND="disable"
+AWWW_TRANS_TYPE="random"
+AWWW_TRANS_DURATION="2"
+AWWW_TRANS_FPS="60"
+AWWW_TRANS_BEZIER=".54,0,.34,.99"
+AWWW_TRANS_ANGLE="30"
+AWWW_TRANS_POS="center"
+LAST_APPLIED_HEX=#FF0000
+    """)
 
     # ------------------------------------------------------------------------------
-    # 2. Main Logic: Create Directory & Overwrite File
+    # 3. Main Logic: Idempotent Directory & File Creation
     # ------------------------------------------------------------------------------
     log_info("Initializing Dusky Theme state configuration...")
 
-    # Ensure base directory structure exists FIRST
     if not target_dir.exists():
         log_info(f"Creating config directory: {target_dir}")
         try:
@@ -86,27 +109,28 @@ def main() -> None:
     else:
         log_info(f"Directory exists: {target_dir} (verifying contents...)")
 
-    # Check existence and inform the user of the overwrite action (No backup per instructions)
     if target_path.exists():
-        log_warn(f"Target file already exists at '{target_path.name}'. Overwriting without backup...")
+        log_warn(f"Target file already exists at '{target_path.name}'. Overwriting to ensure exact state...")
     else:
         log_info(f"Writing new file: {target_path.name}...")
 
-    # Write the content
     try:
-        # Using mode='w' automatically handles the overwrite
+        # write_text implicitly handles opening, truncating (overwriting), writing, and closing
         target_path.write_text(state_content, encoding="utf-8")
-        log_success(f"Created: {target_path.name}")
+        log_success(f"Successfully wrote exact state to: {target_path.name}")
+    except PermissionError:
+        log_error(f"Permission denied when writing to {target_path}. Ensure you have write access.")
+        sys.exit(1)
     except Exception as e:
         log_error(f"Failed to write file: {e}")
         sys.exit(1)
 
     # ------------------------------------------------------------------------------
-    # 3. Completion
+    # 4. Completion
     # ------------------------------------------------------------------------------
     print()
     log_success("Setup complete!")
-    log_info(f"Your configuration is located in: {target_dir}")
+    log_info(f"Your configuration is securely placed in: {target_dir}")
 
 if __name__ == "__main__":
     main()

@@ -31,8 +31,10 @@
     min-height: 0;
     border: none;
     border-radius: 0;
-    margin: 2px;
+    margin: 0;
     box-shadow: none;
+    text-shadow: none;
+    -gtk-icon-shadow: none;
     background-image: none;
 }
 
@@ -42,16 +44,29 @@ window#waybar {
 }
 
 /* --- TOOLTIP STYLING --- */
-tooltip {
-    background-color: @glass_tooltip;
-    border: 1px solid alpha(@outline_variant, 0.5);
-    border-radius: 10px;
+tooltip decoration {
+    background-color: transparent;
+    border: none;
+    box-shadow: none;
 }
 
-tooltip label {
+tooltip,
+tooltip.background,
+.tooltip {
+    background-color: alpha(@surface_container, 0.57);
+    background: linear-gradient(135deg, alpha(@surface_container, 0.57), alpha(@surface_container_high, 0.57));
+    border: 1px solid alpha(@primary, 0.5);
+    border-radius: 12px;
+    box-shadow: none;
+}
+
+tooltip label,
+.tooltip label {
     color: @on_surface;
-    padding: 6px 10px;
+    padding: 8px 12px;
+    font-family: "JetBrainsMono Nerd Font Propo", "JetBrainsMono Nerd Font", monospace;
     font-size: 12px;
+    font-weight: 600;
 }
 
 /* UNIFIED CAPSULE STYLE */
@@ -106,7 +121,6 @@ tooltip label {
     font-size: 10px;
     color: @on_surface_variant;
     min-width: 22px;
-    text-shadow: 1px 1px 2px rgba(0, 0, 0, 1.0);
 }
 
 #cpu.critical, 
@@ -162,9 +176,9 @@ tooltip label {
     background-color: transparent;
     color: @error;
     font-size: 16px;
-    margin-top: 6px;
-    margin-bottom: 2px;
-    padding: 0;
+    margin: 6px 0;
+    padding: 3px 2px 3px 9px;
+    transition: all 0.2s ease;
 }
 
 #custom-power:hover {
@@ -172,5 +186,7 @@ tooltip label {
 }
 
 #custom-inhibit-suspend {
-    font-size: 10px;
+    font-size: 12px;
+    padding: 6px 2px 6px 9px;
+    margin: 2px 0;
 }

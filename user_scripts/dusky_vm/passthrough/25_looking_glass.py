@@ -1,546 +1,654 @@
 #!/usr/bin/env python3
 """
-Phase 5: Looking Glass Shared Memory Host & VM Configuration
-Target: Arch Linux, Python 3.14.5+
-Scope: systemd-tmpfiles staging, shared memory size initialization, VM XML optimization.
-Philosophy: Zero-Clutter Idempotency, Atomic Writes, Clean RAM-based Frame Transport.
+Arsonix KVM/VFIO Pipeline -- Phase 5 (25_looking_glass.py)
+Looking Glass shared-memory relay: host staging + native libvirt <shmem> device.
+
+Target : Arch Linux rolling (Aug 2026) / libvirt 12.6+ / Looking Glass B7+
+Policy : Use the libvirt-native <shmem> device. The <qemu:commandline> ivshmem
+         hack is DELETED, not carried forward: raw QOM args bypass libvirt's
+         device model, block migration/validation, force the xmlns:qemu escape
+         hatch, and silently desynchronise from <memballoon>/NUMA handling.
+         libvirt emits the identical -device ivshmem-plain + memory-backend-file
+         pair from <shmem>, and additionally creates/labels /dev/shm/<name>.
 """
 
-import os
-import sys
-import pwd
-import stat
-import shutil
-import tempfile
+import argparse
 import grp
-import time
+import json
+import math
+import os
+import pwd
+import shutil
+import stat
 import subprocess
+import sys
+import tempfile
+import time
 import xml.etree.ElementTree as ET
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Never, Tuple
+from typing import Never
 
-# ==============================================================================
-# BOOTSTRAP: Strict Privilege & Auto-Elevation
-# ==============================================================================
-def require_root() -> None:
-    """Enforce eUID 0. Auto-elevate via sudo if executed as a standard user."""
-    if os.geteuid() != 0:
-        print("\n[INFO] Administrative privileges required. Elevating via sudo...")
-        try:
-            # Replace the current process with a sudo call, preserving exact binary and args
-            os.execvp("sudo", ["sudo", sys.executable] + sys.argv)
-        except OSError as e:
-            print(f"\n[FATAL] Failed to elevate privileges dynamically: {e}")
-            sys.exit(1)
+MIN_PY: tuple[int, int, int] = (3, 14, 7)
+STATE_DIR = Path("/var/lib/arsonix")
+STATE_FILE = STATE_DIR / "state.json"
+STATE_SCHEMA = 2
+QEMU_NS = "http://libvirt.org/schemas/domain/qemu/1.0"
+SHM_NAME = "looking-glass"
+SHM_PATH = Path("/dev/shm") / SHM_NAME
+TMPFILES = Path("/etc/tmpfiles.d/10-looking-glass.conf")
 
-require_root()
+
+def _hard_exit(msg: str) -> Never:
+    sys.stderr.write(f"\n[FATAL] {msg}\n\n")
+    raise SystemExit(1)
+
+
+def elevate() -> None:
+    if os.geteuid() == 0:
+        return
+    if os.environ.get("ARSONIX_ELEVATED") == "1":
+        _hard_exit("Re-exec loop detected: sudo did not yield uid 0.")
+    sudo = shutil.which("sudo")
+    if sudo is None:
+        _hard_exit("'sudo' is not in PATH. Re-run this script as root.")
+    try:
+        script = Path(sys.argv[0]).resolve(strict=True)
+    except OSError as exc:
+        _hard_exit(f"Cannot resolve own script path: {exc}")
+    sys.stderr.write("\n[INFO] Elevating via sudo (single re-exec)...\n")
+    os.environ["ARSONIX_ELEVATED"] = "1"
+    os.execv(
+        sudo,
+        [sudo, "--preserve-env=ARSONIX_ELEVATED", "--", sys.executable, str(script), *sys.argv[1:]],
+    )
+
+
+if sys.version_info[:3] < MIN_PY:
+    _hard_exit("Python 3.14.7+ required.")
+elevate()
 
 try:
     from rich.console import Console
     from rich.panel import Panel
-    from rich.prompt import Prompt
+    from rich.prompt import Confirm, IntPrompt, Prompt
     from rich.table import Table
-except ImportError:
-    print("\n[FATAL] 'python-rich' is missing. Please run: sudo pacman -S python-rich")
-    sys.exit(1)
+except ModuleNotFoundError:
+    _hard_exit("python-rich is missing. Run Phase 1 (05_virtio_iso.py) first.")
 
-# Force terminal characteristics for orchestrator tee compatibility 
 console = Console(force_terminal=True, force_interactive=True)
 
+
 # ==============================================================================
-# CORE UTILITIES
+# SHARED PRIMITIVES
 # ==============================================================================
+@dataclass(frozen=True, slots=True)
+class Cmd:
+    argv: list[str]
+    code: int
+    out: str
+    err: str
+
+    @property
+    def ok(self) -> bool:
+        return self.code == 0
+
+
+def run(argv: list[str], *, check: bool = False, timeout: float = 120.0) -> Cmd:
+    try:
+        proc = subprocess.run(
+            argv, check=False, timeout=timeout, text=True,
+            capture_output=True, stdin=subprocess.DEVNULL,
+        )
+        res = Cmd(argv, proc.returncode, (proc.stdout or "").strip(), (proc.stderr or "").strip())
+    except subprocess.TimeoutExpired:
+        res = Cmd(argv, 124, "", f"timeout after {timeout}s")
+    except FileNotFoundError:
+        res = Cmd(argv, 127, "", f"executable not found: {argv[0]}")
+    if check and not res.ok:
+        bail(f"Command failed (rc={res.code}): {' '.join(argv)}\n{res.err or res.out}")
+    return res
+
+
 def bail(msg: str) -> Never:
-    """Exit gracefully with a clear error panel."""
-    console.print(Panel(f"[bold red]FATAL ERROR:[/bold red] {msg}", border_style="red"))
-    sys.exit(1)
+    console.print(Panel(f"[bold red]FATAL[/bold red]\n{msg}", border_style="red"))
+    raise SystemExit(1)
 
-def atomic_write(target_path: Path, new_content: str) -> bool:
-    """
-    Safely writes data using a temporary file and an atomic swap.
-    Inherits exact file permissions (st_mode) to prevent security regressions.
-    """
-    if target_path.exists():
-        if target_path.read_text(encoding="utf-8") == new_content:
-            return False
-        mode = target_path.stat().st_mode
-    else:
-        mode = 0o644 # Default standard file permissions
-        
-    target_path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_path_str = tempfile.mkstemp(dir=target_path.parent, prefix=f".{target_path.name}.tmp.")
-    tmp_path = Path(tmp_path_str)
-    
-    try:
-        with os.fdopen(fd, 'w', encoding="utf-8") as f:
-            f.write(new_content)
-        os.chmod(tmp_path, stat.S_IMODE(mode))
-        shutil.move(tmp_path, target_path)
-        return True
-    except Exception as e:
-        if tmp_path.exists():
-            tmp_path.unlink()
-        bail(f"Atomic write failed on {target_path}: {e}")
 
-def run_cmd(cmd: list, check: bool = True) -> int:
-    """Execute shell commands silently. Raises fatal error if check=True and command fails."""
-    result = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    if check and result.returncode != 0:
-        bail(f"Command execution failed: {' '.join(cmd)}\nExit Code: {result.returncode}")
-    return result.returncode
-
-# ==============================================================================
-# USER RESOLUTION & PACKAGE INSTALLATION
-# ==============================================================================
-def resolve_target_user() -> str:
-    """Forensically determine the real human user interacting with the system."""
-    user = os.environ.get("SUDO_USER") or os.environ.get("DOAS_USER")
-    
-    if not user or user == "root":
+def atomic_write(path: Path, content: str, *, mode: int | None = None) -> bool:
+    keep_mode = 0o644 if mode is None else mode
+    uid, gid = 0, 0
+    if path.exists():
         try:
-            user = os.getlogin()
-        except OSError:
-            pass # TTY might not be attached properly
-            
-    if not user or user == "root":
-        console.print("[yellow]⚠ Could not automatically determine standard user from environment.[/yellow]")
-        user = Prompt.ask("[bold cyan]Enter your non-root Arch username[/bold cyan]").strip()
-    
+            if path.read_text(encoding="utf-8") == content:
+                return False
+        except (UnicodeDecodeError, OSError):
+            pass
+        st = path.stat()
+        keep_mode = stat.S_IMODE(st.st_mode) if mode is None else mode
+        uid, gid = st.st_uid, st.st_gid
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".arsonix")
+    tmp = Path(tmp_name)
     try:
-        pwd.getpwnam(user)
-    except KeyError:
-        bail(f"The user '{user}' does not exist in the local passwd database.")
-        
-    return user
-
-def install_looking_glass_packages(user: str) -> None:
-    """Install required client packages via AUR using the standard user."""
-    # We do not need the legacy KVMFR kernel module, saving DKMS compile overhead
-    packages = ["looking-glass-git", "freerdp"]
-    console.print("\n[bold blue]==>[/bold blue] [bold]Synchronizing Looking Glass packages...[/bold]")
-    
-    missing_packages = []
-    for pkg in packages:
-        res = subprocess.run(["pacman", "-Qq", pkg], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        if res.returncode != 0:
-            missing_packages.append(pkg)
-            
-    if not missing_packages:
-        reinstall = Prompt.ask(
-            "[bold cyan]Looking Glass packages are already installed. Reinstall them?[/bold cyan]",
-            choices=["y", "n"],
-            default="n"
-        ).strip().lower()
-        if reinstall != "y":
-            console.print("[bold green]  ✓ Packages already installed. Skipping installation.[/bold green]")
-            return
-        packages_to_install = packages
-    else:
-        packages_to_install = missing_packages
-
-    if not shutil.which("paru"):
-        bail("'paru' not found in PATH. Cannot install AUR packages.")
-        
-    # Drop privileges to standard user to run paru
-    cmd = ["sudo", "-u", user, "paru", "-S", "--needed", "--noconfirm", "--skipreview"] + packages_to_install
-    
-    try:
-        subprocess.run(cmd, check=True)
-        console.print("[bold green]  ✓ Looking Glass packages staged successfully.[/bold green]")
-    except subprocess.CalledProcessError as e:
-        bail(f"Package installation failed with code {e.returncode}.")
-
-# ==============================================================================
-# DYNAMIC SHARED MEMORY CALCULATION
-# ==============================================================================
-def calculate_shm_size() -> Tuple[int, int]:
-    """Interactively map SDR resolution targets to strict shared memory sizing."""
-    console.print("\n[bold blue]==>[/bold blue] [bold]SDR Resolution & Shared Memory Calculation[/bold]")
-    
-    table = Table(show_header=True, header_style="bold magenta")
-    table.add_column("Option", style="cyan", justify="center")
-    table.add_column("SDR Resolution Target", style="green")
-    table.add_column("Base Calculation", style="dim")
-    table.add_column("Required Shared Memory (MiB)", style="bold yellow")
-
-    table.add_row("1", "1080p / 1200p", "16-18 MB + 10 MB Overhead", "32 MiB")
-    table.add_row("2", "1440p (Recommended)", "29 MB + 10 MB Overhead", "64 MiB")
-    table.add_row("3", "4K", "66 MB + 10 MB Overhead", "128 MiB")
-    
-    console.print(table)
-    
-    choice = Prompt.ask(
-        "[bold cyan]Select your target SDR resolution[/bold cyan]", 
-        choices=["1", "2", "3"], 
-        default="2"
-    )
-
-    size_map = {"1": 32, "2": 64, "3": 128}
-    mib_size = size_map[choice]
-    byte_size = mib_size * 1024 * 1024
-    
-    console.print(f"[bold green]  ✓ Locked shared memory size to {mib_size} MiB ({byte_size} bytes).[/bold green]")
-    return mib_size, byte_size
-
-# ==============================================================================
-# HOST CONFIGURATION & PERSISTENT BOOT PERMISSIONS
-# ==============================================================================
-def configure_tmpfiles(user: str) -> None:
-    """Idempotently configure systemd-tmpfiles to create and secure the shared memory file at boot."""
-    console.print("\n[bold blue]==>[/bold blue] [bold]Staging systemd-tmpfiles Configuration...[/bold]")
-    tmpfiles_path = Path("/etc/tmpfiles.d/10-looking-glass.conf")
-    
-    # Configure it to be owned by target user and group 'kvm' with 0660 permissions
-    tmpfiles_content = f"# Looking Glass shared memory file\nf /dev/shm/looking-glass 0660 {user} kvm - -\n"
-    if atomic_write(tmpfiles_path, tmpfiles_content):
-        console.print(f"[bold green]  ✓ Systemd tmpfiles rule enforced: {tmpfiles_path}[/bold green]")
-    else:
-        console.print(f"[bold green]  ✓ Systemd tmpfiles rule already optimal: {tmpfiles_path}[/bold green]")
-
-    with console.status("[cyan]Applying systemd-tmpfiles configuration...", spinner="dots"):
-        run_cmd(["systemd-tmpfiles", "--create", str(tmpfiles_path)])
-    console.print("[bold green]  ✓ Shared memory file permissions applied successfully.[/bold green]")
-
-def enforce_shm_integrity(user: str, byte_size: int) -> None:
-    """Ensures the /dev/shm/looking-glass file exists, is truly allocated, and has optimal permissions."""
-    shm_path = Path("/dev/shm/looking-glass")
-    console.print("\n[bold blue]==>[/bold blue] [bold]Verifying /dev/shm/looking-glass Integrity...[/bold]")
-    
-    # Pre-emptively purge the existing file or directory to bypass fs.protected_regular write blocks
-    if shm_path.exists():
-        console.print("[cyan]  - Recreating shared memory file to ensure correct ownership and size...[/cyan]")
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(tmp, keep_mode)
+        os.chown(tmp, uid, gid)
+        os.replace(tmp, path)
+        dir_fd = os.open(path.parent, os.O_DIRECTORY)
         try:
-            if shm_path.is_dir():
-                shutil.rmtree(shm_path)
-            else:
-                shm_path.unlink()
-        except Exception as e:
-            bail(f"Failed to remove existing shared memory file: {e}")
-
-    try:
-        # Create, size, and physically allocate the shared memory file
-        fd = os.open(shm_path, os.O_CREAT | os.O_RDWR, 0o660)
-        try:
-            # Force OS to allocate physical RAM pages immediately (prevents OOM & latency)
-            os.posix_fallocate(fd, 0, byte_size)
-        except (AttributeError, OSError):
-            # Fallback to sparse allocation if fallocate is unsupported on the tmpfs
-            os.ftruncate(fd, byte_size)
+            os.fsync(dir_fd)
         finally:
-            os.close(fd)
-        console.print(f"[bold green]  ✓ Shared memory file physically allocated to {byte_size} bytes.[/bold green]")
-    except Exception as e:
-        bail(f"Failed to size/allocate shared memory file: {e}")
+            os.close(dir_fd)
+        return True
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
+
+def state_load() -> dict:
+    try:
+        data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {"schema": STATE_SCHEMA}
+    return data if isinstance(data, dict) else {"schema": STATE_SCHEMA}
+
+
+def state_merge(**kv: object) -> None:
+    data = state_load()
+    data.update(kv)
+    data["schema"] = STATE_SCHEMA
+    data["updated"] = datetime.now(UTC).isoformat(timespec="seconds")
+    STATE_DIR.mkdir(parents=True, exist_ok=True, mode=0o755)
+    atomic_write(STATE_FILE, json.dumps(data, indent=2, sort_keys=True) + "\n", mode=0o644)
+
+
+def resolve_operator() -> pwd.struct_passwd:
+    cached = state_load().get("human_user")
+    candidates = [str(cached)] if cached else []
+    for key in ("SUDO_USER", "DOAS_USER"):
+        val = os.environ.get(key, "").strip()
+        if val:
+            candidates.append(val)
+    try:
+        candidates.append(os.getlogin())
+    except OSError:
+        pass
+    for name in candidates:
+        if not name or name == "root":
+            continue
+        try:
+            entry = pwd.getpwnam(name)
+        except KeyError:
+            continue
+        if entry.pw_uid >= 1000:
+            return entry
+    while True:
+        name = Prompt.ask("[bold cyan]Non-root Arch username[/bold cyan]").strip()
+        try:
+            return pwd.getpwnam(name)
+        except KeyError:
+            console.print(f"[red]  x '{name}' is not in the passwd database.[/red]")
+
+
+def virsh(args: list[str], *, timeout: float = 60.0) -> Cmd:
+    return run(["virsh", "-c", "qemu:///system", *args], timeout=timeout)
+
+
+# ==============================================================================
+# PACKAGES
+# ==============================================================================
+def installed(pkg: str) -> bool:
+    return run(["pacman", "-Qq", pkg], timeout=20).ok
+
+
+def in_repos(pkg: str) -> bool:
+    return run(["pacman", "-Si", pkg], timeout=30).ok
+
+
+def install_packages(pkgs: list[str], operator: pwd.struct_passwd) -> None:
+    console.print("\n[bold blue]==>[/bold blue] [bold]Looking Glass client toolchain[/bold]")
+    missing = [p for p in pkgs if not installed(p)]
+    if not missing:
+        console.print("[bold green]  ok[/bold green] All packages already installed.")
+        return
+    repo = [p for p in missing if in_repos(p)]
+    aur = [p for p in missing if p not in repo]
+    if repo:
+        proc = subprocess.run(["pacman", "-S", "--needed", "--noconfirm", *repo],
+                              check=False, stdin=subprocess.DEVNULL)
+        if proc.returncode != 0:
+            bail(f"pacman failed for: {' '.join(repo)}")
+        console.print(f"[bold green]  ok[/bold green] repo: {' '.join(repo)}")
+    if aur:
+        paru = shutil.which("paru")
+        if paru is None:
+            bail(f"'paru' is required for AUR packages: {' '.join(aur)}")
+        proc = subprocess.run(
+            ["sudo", "-u", operator.pw_name, "--", paru, "-S", "--needed", "--noconfirm",
+             "--skipreview", "--removemake", *aur],
+            check=False,
+        )
+        if proc.returncode != 0:
+            bail(f"paru failed for: {' '.join(aur)}")
+        console.print(f"[bold green]  ok[/bold green] aur: {' '.join(aur)}")
+
+
+# ==============================================================================
+# SHARED MEMORY SIZING
+# ==============================================================================
+def shm_bytes_for(width: int, height: int) -> int:
+    """
+    Looking Glass sizing rule: width * height * 4 (BGRA) * 2 (double buffer)
+    + 10 MiB of ring/cursor overhead, rounded UP to a power of two.
+    ivshmem-plain requires a power-of-two region, so the rounding is mandatory.
+    """
+    raw = width * height * 4 * 2 + (10 << 20)
+    return 1 << math.ceil(math.log2(raw))
+
+
+def choose_shm(explicit_mib: int | None) -> tuple[int, int]:
+    if explicit_mib:
+        size = explicit_mib << 20
+        if size & (size - 1):
+            bail(f"--shm-mib must be a power of two, got {explicit_mib}.")
+        return explicit_mib, size
+
+    presets = [("1", "1920x1080", 1920, 1080), ("2", "2560x1440", 2560, 1440),
+               ("3", "3840x2160", 3840, 2160)]
+    table = Table(title="Shared-memory sizing (SDR, double-buffered)", header_style="bold magenta")
+    table.add_column("Opt", style="cyan", justify="center")
+    table.add_column("Guest resolution", style="green")
+    table.add_column("Frame pair", style="dim")
+    table.add_column("Region (power of two)", style="bold yellow")
+    for opt, label, width, height in presets:
+        total = shm_bytes_for(width, height)
+        table.add_row(opt, label, f"{width * height * 4 * 2 / (1 << 20):.1f} MiB + 10 MiB",
+                      f"{total >> 20} MiB")
+    table.add_row("4", "custom", "-", "computed")
+    console.print(table)
+
+    choice = Prompt.ask("[bold cyan]Target[/bold cyan]", choices=["1", "2", "3", "4"], default="2")
+    if choice == "4":
+        width = IntPrompt.ask("Width", default=3440)
+        height = IntPrompt.ask("Height", default=1440)
+    else:
+        _, _, width, height = presets[int(choice) - 1]
+    size = shm_bytes_for(width, height)
+    console.print(f"[bold green]  ok[/bold green] {width}x{height} -> {size >> 20} MiB ({size} B)")
+    return size >> 20, size
+
+
+# ==============================================================================
+# HOST SHM STAGING
+# ==============================================================================
+def configure_tmpfiles(operator: pwd.struct_passwd) -> None:
+    console.print("\n[bold blue]==>[/bold blue] [bold]systemd-tmpfiles staging[/bold]")
+    payload = (
+        "# Managed by Arsonix (Phase 5).\n"
+        "# 'f' creates the file if absent and never truncates an existing one, so a\n"
+        "# running guest keeps its mapping across a tmpfiles --create.\n"
+        f"f /dev/shm/{SHM_NAME} 0660 {operator.pw_name} kvm - -\n"
+    )
+    if atomic_write(TMPFILES, payload, mode=0o644):
+        console.print(f"[green]  ~[/green] {TMPFILES}")
+    else:
+        console.print(f"[bold green]  ok[/bold green] {TMPFILES} already convergent.")
+    res = run(["systemd-tmpfiles", "--create", str(TMPFILES)], timeout=60)
+    if not res.ok:
+        console.print(f"[yellow]  ! systemd-tmpfiles: {res.err or res.out}[/yellow]")
+
+
+def stage_shm(operator: pwd.struct_passwd, size: int, force: bool) -> None:
+    console.print("\n[bold blue]==>[/bold blue] [bold]Shared-memory region[/bold]")
     try:
         kvm_gid = grp.getgrnam("kvm").gr_gid
-        user_uid = pwd.getpwnam(user).pw_uid
-        os.chown(shm_path, user_uid, kvm_gid)
-        os.chmod(shm_path, 0o660)
-        console.print(f"[bold green]  ✓ Permissions (0660) and ownership ({user}:kvm) enforced on /dev/shm/looking-glass.[/bold green]")
-    except Exception as e:
-        bail(f"Failed to set ownership on /dev/shm/looking-glass. QEMU will crash without this. Error: {e}")
+    except KeyError:
+        bail("Group 'kvm' does not exist.")
 
-# ==============================================================================
-# VM XML AUTOMATION
-# ==============================================================================
-def get_all_vms() -> list[Tuple[str, str]]:
-    """Query libvirt for all defined virtual machines and their states."""
-    try:
-        res = subprocess.run(
-            ["virsh", "-c", "qemu:///system", "list", "--all"],
-            capture_output=True, text=True, check=True
-        )
-        vms = []
-        for line in res.stdout.strip().splitlines()[2:]:
-            parts = line.split()
-            if len(parts) >= 3:
-                name = parts[1]
-                state = " ".join(parts[2:])
-                vms.append((name, state))
-            elif len(parts) == 2:
-                name = parts[0]
-                state = parts[1]
-                vms.append((name, state))
-        return vms
-    except Exception as e:
-        console.print(f"[yellow]⚠ Failed to query libvirt VMs: {e}[/yellow]")
-        return []
-
-def inject_lg_into_xml(xml_str: str, byte_size: int) -> str:
-    """Safely injects Looking Glass parameters and CPU optimizations into VM XML."""
-    qemu_ns = "http://libvirt.org/schemas/domain/qemu/1.0"
-    ET.register_namespace('qemu', qemu_ns)
-    root = ET.fromstring(xml_str)
-    
-    # 1. Optimize CPU topology to resolve hyperthreading warning & socket limits
-    vcpu_elem = root.find('vcpu')
-    vcpu_count = 1
-    if vcpu_elem is not None and vcpu_elem.text:
+    # Symlink defense: /dev/shm is world-writable + sticky, never follow
+    if SHM_PATH.is_symlink():
+        bail(f"{SHM_PATH} is a symlink (possible TOCTOU attack). Remove it manually.")
+    if SHM_PATH.exists():
         try:
-            vcpu_count = int(vcpu_elem.text.strip())
-        except ValueError:
-            pass
-            
-    if vcpu_count % 2 == 0:
-        sockets = 1
-        cores = vcpu_count // 2
-        threads = 2
-    else:
-        sockets = 1
-        cores = vcpu_count
-        threads = 1
-        
-    cpu_elem = root.find('cpu')
-    if cpu_elem is None:
-        cpu_elem = ET.SubElement(root, 'cpu', mode='host-passthrough', check='none', migratable='on')
-        
-    topology = cpu_elem.find('topology')
-    if topology is None:
-        topology = ET.SubElement(cpu_elem, 'topology')
-        
-    topology.set('sockets', str(sockets))
-    topology.set('dies', '1')
-    topology.set('cores', str(cores))
-    topology.set('threads', str(threads))
-    console.print(f"[bold green]  ✓ CPU Topology optimized: {sockets} socket(s), {cores} core(s), {threads} thread(s) (matches {vcpu_count} vCPUs).[/bold green]")
-    
-    # 2. Nullify memballoon to guarantee zero DMA latency
-    devices = root.find('devices')
-    if devices is not None:
-        balloon = devices.find('memballoon')
-        if balloon is not None:
-            balloon.set('model', 'none')
-            console.print("[bold green]  ✓ Latency-inducing memballoon nullified.[/bold green]")
+            st = SHM_PATH.stat()
+        except OSError as exc:
+            bail(f"Cannot stat {SHM_PATH}: {exc}")
+        if stat.S_ISDIR(st.st_mode):
+            bail(f"{SHM_PATH} is a directory (a stale kvmfr/mount artefact). Remove it manually.")
+        if st.st_size == size and st.st_uid == operator.pw_uid and st.st_gid == kvm_gid \
+                and stat.S_IMODE(st.st_mode) == 0o660 and not force:
+            console.print(
+                f"[bold green]  ok[/bold green] {SHM_PATH} already {size >> 20} MiB "
+                f"{operator.pw_name}:kvm 0660."
+            )
+            return
+        if st.st_size and st.st_size != size:
+            console.print(
+                f"[yellow]  ! Resizing {SHM_PATH} from {st.st_size >> 20} to "
+                f"{size >> 20} MiB. Any running guest mapping it must be powered off.[/yellow]"
+            )
+        # Any mismatch requires replacing the inode; warn and unlink (live mapping already
+        # invalidated by size/owner/mode drift). Use O_EXCL to avoid raced truncation.
+        try:
+            SHM_PATH.unlink()
+        except OSError as exc:
+            bail(f"Cannot remove stale {SHM_PATH}: {exc}")
+
+    fd = os.open(SHM_PATH, os.O_CREAT | os.O_EXCL | os.O_RDWR | os.O_NOFOLLOW, 0o660)
+    try:
+        # tmpfs on Linux 7.1.8 guarantees fallocate; sparse fallback is a legacy shim and is
+        # deleted per the Aug 2026 no-compat directive.
+        os.posix_fallocate(fd, 0, size)
+        os.fchown(fd, operator.pw_uid, kvm_gid)
+        os.fchmod(fd, 0o660)
+    finally:
+        os.close(fd)
+    console.print(
+        f"[bold green]  ok[/bold green] {SHM_PATH} = {size >> 20} MiB, "
+        f"{operator.pw_name}:kvm, 0660."
+    )
+
+
+# ==============================================================================
+# HOST CPU TOPOLOGY
+# ==============================================================================
+def host_threads_per_core() -> int:
+    path = Path("/sys/devices/system/cpu/cpu0/topology/thread_siblings_list")
+    try:
+        raw = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return 1
+    count = 0
+    for chunk in raw.split(","):
+        if "-" in chunk:
+            low, high = chunk.split("-", 1)
+            count += int(high) - int(low) + 1
         else:
-            balloon = ET.SubElement(devices, 'memballoon', model='none')
-            console.print("[bold green]  ✓ Latency-inducing memballoon nullified (created none).[/bold green]")
+            count += 1
+    return max(count, 1)
 
-        # Check and inject SPICE agent channel for clipboard sharing
-        has_spice_channel = False
-        for channel in devices.findall('channel'):
-            if channel.get('type') == 'spicevmc':
-                target = channel.find('target')
-                if target is not None and target.get('name') == 'com.redhat.spice.0':
-                    has_spice_channel = True
-                    break
-        if not has_spice_channel:
-            spice_channel = ET.SubElement(devices, 'channel', type='spicevmc')
-            ET.SubElement(spice_channel, 'target', type='virtio', name='com.redhat.spice.0')
-            console.print("[bold green]  ✓ SPICE guest agent channel injected for clipboard synchronization.[/bold green]")
 
-    # 3. Add or update <qemu:commandline> using /dev/shm/looking-glass
-    qemu_cmd = root.find(f"{{{qemu_ns}}}commandline")
-    target_args = [
-        ("-device", "{'driver':'ivshmem-plain','id':'shmem0','memdev':'looking-glass'}"),
-        ("-object", f"{{'qom-type':'memory-backend-file','id':'looking-glass','mem-path':'/dev/shm/looking-glass','size':{byte_size},'share':true}}")
-    ]
-    
-    if qemu_cmd is None:
-        qemu_cmd = ET.Element(f"{{{qemu_ns}}}commandline")
-        root.append(qemu_cmd)
-        
-    args = qemu_cmd.findall(f"{{{qemu_ns}}}arg")
-    new_args = []
+# ==============================================================================
+# DOMAIN XML SURGERY
+# ==============================================================================
+def sub(parent: ET.Element, tag: str, **attrs: str) -> ET.Element:
+    found = parent.find(tag)
+    if found is None:
+        found = ET.SubElement(parent, tag)
+    for key, val in attrs.items():
+        found.set(key, val)
+    return found
+
+
+def strip_legacy_qom(root: ET.Element) -> bool:
+    """Remove the pre-<shmem> qemu:commandline ivshmem/kvmfr escape hatch."""
+    cmdline = root.find(f"{{{QEMU_NS}}}commandline")
+    if cmdline is None:
+        return False
+    args = list(cmdline.findall(f"{{{QEMU_NS}}}arg"))
+    keep: list[ET.Element] = []
     skip_next = False
-    for i, arg in enumerate(args):
+    removed = False
+    for index, arg in enumerate(args):
         if skip_next:
             skip_next = False
+            removed = True
             continue
-        val = arg.get('value', '')
-        if val in ('-device', '-object'):
-            if i + 1 < len(args):
-                next_val = args[i+1].get('value', '')
-                if 'looking-glass' in next_val or 'kvmfr' in next_val:
-                    skip_next = True
-                    continue
-        if 'looking-glass' in val or 'kvmfr' in val:
+        value = arg.get("value", "")
+        if value in ("-device", "-object") and index + 1 < len(args):
+            payload = args[index + 1].get("value", "")
+            if "looking-glass" in payload or "kvmfr" in payload or "ivshmem" in payload:
+                skip_next = True
+                removed = True
+                continue
+        if "looking-glass" in value or "kvmfr" in value:
+            removed = True
             continue
-        new_args.append(arg)
-        
-    # Clear old args
-    for arg in list(qemu_cmd):
-        qemu_cmd.remove(arg)
-        
-    # Put back filtered args
-    for arg in new_args:
-        qemu_cmd.append(arg)
-        
-    # Append the new looking-glass args
-    for arg_type, arg_val in target_args:
-        ET.SubElement(qemu_cmd, f"{{{qemu_ns}}}arg", value=arg_type)
-        ET.SubElement(qemu_cmd, f"{{{qemu_ns}}}arg", value=arg_val)
-        
-    console.print(f"[bold green]  ✓ Looking Glass shm payload injected/updated successfully.[/bold green]")
-    
-    if hasattr(ET, 'indent'):
-        ET.indent(root, space="  ", level=0)
-    return ET.tostring(root, encoding='unicode')
+        keep.append(arg)
+    for child in list(cmdline):
+        cmdline.remove(child)
+    for arg in keep:
+        cmdline.append(arg)
+    if len(cmdline) == 0:
+        root.remove(cmdline)
+    return removed
 
-def configure_vm_xml(vm_name: str, byte_size: int) -> bool:
-    """Retrieve VM XML, apply edits, and redefine VM in libvirt."""
-    console.print(f"\n[bold blue]==>[/bold blue] [bold]Configuring VM '{vm_name}' XML...[/bold]")
+
+def apply_shmem(root: ET.Element, mib: int) -> None:
+    devices = root.find("devices")
+    if devices is None:
+        devices = ET.SubElement(root, "devices")
+    for existing in devices.findall("shmem"):
+        if existing.get("name") == SHM_NAME:
+            devices.remove(existing)
+    shmem = ET.SubElement(devices, "shmem", name=SHM_NAME)
+    ET.SubElement(shmem, "model", type="ivshmem-plain")
+    size = ET.SubElement(shmem, "size", unit="M")
+    size.text = str(mib)
+
+
+def apply_cpu_topology(root: ET.Element) -> str:
+    vcpu_elem = root.find("vcpu")
     try:
-        res = subprocess.run(
-            ["virsh", "-c", "qemu:///system", "dumpxml", "--inactive", vm_name],
-            capture_output=True, text=True, check=True
-        )
-        xml_old = res.stdout
-        xml_new = inject_lg_into_xml(xml_old, byte_size)
-        
-        fd, tmp_path_str = tempfile.mkstemp(prefix=f"kvm-{vm_name}-", suffix=".xml")
-        tmp_path = Path(tmp_path_str)
-        try:
-            with os.fdopen(fd, 'w', encoding='utf-8') as f:
-                f.write(xml_new)
-            
-            subprocess.run(
-                ["virsh", "-c", "qemu:///system", "define", str(tmp_path)],
-                check=True, stdout=subprocess.DEVNULL
-            )
-            console.print(f"[bold green]  ✓ VM '{vm_name}' configuration updated in libvirt.[/bold green]")
-            return True
-        finally:
-            if tmp_path.exists():
-                tmp_path.unlink()
-    except Exception as e:
-        console.print(f"[bold red]  ✖ Failed to edit/redefine VM XML: {e}[/bold red]")
+        vcpus = int((vcpu_elem.text or "1").strip()) if vcpu_elem is not None else 1
+    except ValueError:
+        vcpus = 1
+    smt = host_threads_per_core()
+    threads = smt if smt > 1 and vcpus % smt == 0 else 1
+    cores = max(vcpus // threads, 1)
+    cpu = root.find("cpu")
+    if cpu is None:
+        cpu = ET.SubElement(root, "cpu")
+    cpu.set("mode", "host-passthrough")
+    cpu.set("check", "none")
+    cpu.set("migratable", "off")
+    sub(cpu, "topology", sockets="1", dies="1", cores=str(cores), threads=str(threads))
+    return f"1 socket x {cores} cores x {threads} threads = {cores * threads} vCPU (declared {vcpus})"
+
+
+def apply_latency_tuning(root: ET.Element) -> list[str]:
+    notes: list[str] = []
+    devices = root.find("devices")
+    if devices is None:
+        devices = ET.SubElement(root, "devices")
+
+    balloon = devices.find("memballoon")
+    if balloon is None:
+        balloon = ET.SubElement(devices, "memballoon")
+    if balloon.get("model") != "none":
+        notes.append("memballoon -> none")
+    balloon.set("model", "none")
+    for child in list(balloon):
+        balloon.remove(child)
+
+    has_agent = any(
+        channel.get("type") == "spicevmc"
+        and (channel.find("target") is not None)
+        and channel.find("target").get("name") == "com.redhat.spice.0"
+        for channel in devices.findall("channel")
+    )
+    if not has_agent:
+        channel = ET.SubElement(devices, "channel", type="spicevmc")
+        ET.SubElement(channel, "target", type="virtio", name="com.redhat.spice.0")
+        notes.append("spicevmc agent channel added")
+    return notes
+
+
+def transform_domain(xml_text: str, mib: int) -> tuple[str, list[str]]:
+    ET.register_namespace("qemu", QEMU_NS)
+    root = ET.fromstring(xml_text)
+    notes: list[str] = []
+    if strip_legacy_qom(root):
+        notes.append("legacy qemu:commandline ivshmem args removed")
+    apply_shmem(root, mib)
+    notes.append(f"native <shmem name='{SHM_NAME}'> ivshmem-plain {mib} MiB")
+    notes.append(apply_cpu_topology(root))
+    notes += apply_latency_tuning(root)
+    ET.indent(root, space="  ")
+    return ET.tostring(root, encoding="unicode") + "\n", notes
+
+
+def list_domains() -> list[tuple[str, str]]:
+    res = virsh(["list", "--all", "--name"])
+    domains: list[tuple[str, str]] = []
+    for name in res.out.split():
+        state = virsh(["domstate", name]).out or "unknown"
+        domains.append((name, state))
+    return domains
+
+
+def redefine(domain: str, mib: int) -> bool:
+    console.print(f"\n[bold blue]==>[/bold blue] [bold]Rewriting domain '{domain}'[/bold]")
+    dump = virsh(["dumpxml", "--inactive", domain])
+    if not dump.ok:
+        console.print(f"[red]  x dumpxml failed: {dump.err or dump.out}[/red]")
+        return False
+    try:
+        new_xml, notes = transform_domain(dump.out, mib)
+    except ET.ParseError as exc:
+        console.print(f"[red]  x Domain XML is not parseable: {exc}[/red]")
         return False
 
-def wait_for_vm_shutdown(vm_name: str) -> None:
-    """Poll the VM power state until it transitions to 'shut off'."""
-    with console.status(f"[cyan]Monitoring '{vm_name}' power state...", spinner="dots") as status:
-        while True:
-            try:
-                res = subprocess.run(
-                    ["virsh", "-c", "qemu:///system", "domstate", vm_name],
-                    capture_output=True, text=True, check=True
+    fd, tmp_name = tempfile.mkstemp(prefix=f"arsonix-{domain}-", suffix=".xml")
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(new_xml)
+            handle.flush()
+            os.fsync(handle.fileno())
+        res = virsh(["define", str(tmp)])
+        if not res.ok:
+            backup = Path(f"/var/lib/arsonix/{domain}.rejected.xml")
+            atomic_write(backup, new_xml)
+            console.print(f"[red]  x libvirt rejected the XML: {res.err or res.out}[/red]")
+            console.print(f"[dim]    rejected document saved to {backup}[/dim]")
+            return False
+    finally:
+        tmp.unlink(missing_ok=True)
+
+    for note in notes:
+        console.print(f"[green]  ~[/green] {note}")
+    console.print(f"[bold green]  ok[/bold green] '{domain}' redefined.")
+    return True
+
+
+def wait_for_shutdown(domain: str, budget: float = 900.0) -> bool:
+    deadline = time.monotonic() + budget
+    with console.status(f"[cyan]Waiting for '{domain}' to power off...") as status:
+        while time.monotonic() < deadline:
+            state = virsh(["domstate", domain]).out
+            if "shut off" in state:
+                return True
+            status.update(f"[cyan]'{domain}' is {state}; waiting for power off...")
+            time.sleep(2.0)
+    return False
+
+
+def interactive_domain_pass(mib: int) -> None:
+    domains = list_domains()
+    if not domains:
+        console.print("\n[yellow]No libvirt domains defined yet; Phase 6 will create one "
+                      "with <shmem> already present.[/yellow]")
+        return
+    console.print("\n[bold cyan]Domains[/bold cyan]")
+    choices: list[str] = []
+    for index, (name, state) in enumerate(domains, start=1):
+        console.print(f"  [{index}] {name} [dim]({state})[/dim]")
+        choices.append(str(index))
+    skip = str(len(domains) + 1)
+    console.print(f"  [{skip}] skip")
+    choices.append(skip)
+    choice = Prompt.ask("Select", choices=choices, default=skip)
+    if choice == skip:
+        return
+    name, state = domains[int(choice) - 1]
+    if not redefine(name, mib):
+        return
+    if state != "shut off":
+        console.print(
+            Panel(
+                f"'{name}' is {state}. The new XML is persisted but QEMU keeps the old device "
+                "model until a full power cycle (reboot from inside the guest is NOT enough).",
+                border_style="yellow",
+            )
+        )
+        if Confirm.ask("Send an ACPI shutdown now and wait?", default=False):
+            virsh(["shutdown", name])
+            if wait_for_shutdown(name) and Confirm.ask(f"Start '{name}' again?", default=True):
+                res = virsh(["start", name])
+                console.print(
+                    f"[bold green]  ok[/bold green] started."
+                    if res.ok else f"[red]  x {res.err or res.out}[/red]"
                 )
-                state = res.stdout.strip().lower()
-                if "shut off" in state:
-                    break
-                status.update(f"[cyan]Monitoring '{vm_name}' power state... Current state: [bold yellow]{state}[/bold yellow] (Please turn off VM)")
-            except Exception:
-                break
-            time.sleep(1.5)
-    console.print(f"[bold green]  ✓ VM '{vm_name}' has successfully shutdown.[/bold green]")
 
-def prompt_vm_start(vm_name: str) -> None:
-    """Prompt the user to turn the VM back on to apply settings."""
-    choice = Prompt.ask(f"\n[bold cyan]Would you like to turn the VM '{vm_name}' back on now?[/bold cyan]", choices=["y", "n"], default="y").strip().lower()
-    if choice == "y":
-        console.print(f"[cyan]Powering on VM '{vm_name}'...[/cyan]")
-        if run_cmd(["virsh", "-c", "qemu:///system", "start", vm_name], check=False) == 0:
-            console.print(f"[bold green]  ✓ VM '{vm_name}' started successfully with new Looking Glass settings.[/bold green]")
-        else:
-            console.print(f"[bold red]  ✖ Failed to start VM '{vm_name}'.[/bold red]")
-
-def interactively_configure_vm(byte_size: int) -> None:
-    """Detect VMs, prompt user, and apply XML edits."""
-    vms = get_all_vms()
-    if not vms:
-        console.print("\n[yellow]⚠ No existing KVM VMs detected on the system.[/yellow]")
-        return
-        
-    console.print("\n[bold cyan]Select an existing VM to automatically inject Looking Glass settings:[/bold cyan]")
-    
-    choices = []
-    for idx, (name, state) in enumerate(vms):
-        opt = str(idx + 1)
-        console.print(f"  [{opt}] {name} [dim]({state})[/dim]")
-        choices.append(opt)
-        
-    skip_opt = str(len(vms) + 1)
-    console.print(f"  [{skip_opt}] Skip automatic XML editing (Show manual instructions instead)")
-    choices.append(skip_opt)
-    
-    custom_opt = str(len(vms) + 2)
-    console.print(f"  [{custom_opt}] Enter a custom VM name manually")
-    choices.append(custom_opt)
-    
-    choice = Prompt.ask("\nChoice", choices=choices, default="1")
-    
-    if choice == skip_opt:
-        console.print("[yellow]Skipping automatic VM editing.[/yellow]")
-        return
-    elif choice == custom_opt:
-        vm_name = Prompt.ask("Enter custom VM name").strip()
-        if not vm_name:
-            console.print("[red]Invalid name. Skipping VM editing.[/red]")
-            return
-        state = "unknown"
-    else:
-        idx = int(choice) - 1
-        vm_name, state = vms[idx]
-        
-    success = configure_vm_xml(vm_name, byte_size)
-    if success and state == "running":
-        console.print(Panel(
-            f"[bold yellow]WARNING:[/bold yellow] VM '{vm_name}' is currently running.\n"
-            "The Looking Glass configuration has been successfully saved to the persistent XML,\n"
-            "but changes will NOT take effect in QEMU until the VM is completely powered off and booted again.",
-            border_style="yellow"
-        ))
-        
-        console.print("\n[bold cyan]How would you like to handle the VM power cycle?[/bold cyan]")
-        console.print("  [[bold green]1[/bold green]] Gracefully shutdown the VM now and wait for it to stop")
-        console.print("  [[bold green]2[/bold green]] Wait and poll for you to manually turn off the VM")
-        console.print("  [[bold green]3[/bold green]] Exit now and I will restart the VM later manually (Default)")
-        
-        cycle_choice = Prompt.ask("Choice", choices=["1", "2", "3"], default="3").strip()
-        
-        if cycle_choice == "1":
-            console.print(f"\n[cyan]Sending graceful shutdown signal to '{vm_name}'...[/cyan]")
-            run_cmd(["virsh", "-c", "qemu:///system", "shutdown", vm_name], check=False)
-            wait_for_vm_shutdown(vm_name)
-            prompt_vm_start(vm_name)
-        elif cycle_choice == "2":
-            console.print(f"\n[cyan]Waiting for you to manually turn off VM '{vm_name}'...[/cyan]")
-            wait_for_vm_shutdown(vm_name)
-            prompt_vm_start(vm_name)
 
 # ==============================================================================
-# MAIN EXECUTION
+# MAIN
 # ==============================================================================
 def main() -> None:
+    parser = argparse.ArgumentParser(description="Arsonix Phase 5: Looking Glass")
+    parser.add_argument("--shm-mib", type=int, help="explicit power-of-two region size in MiB")
+    parser.add_argument("--force-recreate", action="store_true", help="always rebuild the region")
+    parser.add_argument("--no-packages", action="store_true", help="skip package installation")
+    parser.add_argument("--domain", help="non-interactive: patch this domain")
+    args = parser.parse_args()
+
     console.clear()
-    console.print(Panel("[bold green]Phase 5: Looking Glass Host Shared Memory Configuration[/bold green]\nTarget: Arch Linux | RAM Shared Memory Backend", expand=False))
-    
-    try:
-        target_user = resolve_target_user()
-        install_looking_glass_packages(target_user)
-        
-        mib_size, byte_size = calculate_shm_size()
-        configure_tmpfiles(target_user)
-        enforce_shm_integrity(target_user, byte_size)
-        
-        # Interactively configure VM XML
-        interactively_configure_vm(byte_size)
-        
-        xml_payload = f"""  <qemu:commandline>
-    <qemu:arg value="-device"/>
-    <qemu:arg value="{{'driver':'ivshmem-plain','id':'shmem0','memdev':'looking-glass'}}"/>
-    <qemu:arg value="-object"/>
-    <qemu:arg value="{{'qom-type':'memory-backend-file','id':'looking-glass','mem-path':'/dev/shm/looking-glass','size':{byte_size},'share':true}}"/>
-  </qemu:commandline>"""
+    console.print(
+        Panel(
+            "[bold green]Arsonix Phase 5 -- Looking Glass Frame Relay[/bold green]\n"
+            "native <shmem> ivshmem-plain / tmpfiles / host-passthrough topology",
+            expand=False,
+            border_style="green",
+        )
+    )
 
-    # Note: No need for cgroups /dev/kvmfr0 whitelisting or qemu.conf edits!
+    operator = resolve_operator()
+    if not args.no_packages:
+        install_packages(["looking-glass", "freerdp"], operator)
 
-        console.print("\n[bold green]=== PHASE 5 COMPLETE ===[/bold green]")
-        console.print("The host shared memory file and persistent systemd-tmpfiles rules are fully staged.")
-        
-        console.print("\n[bold yellow]MANUAL XML FALLBACK REFERENCE (if needed):[/bold yellow]")
-        console.print("  [cyan]1.[/cyan] Change the first line of VM XML (virsh edit <vm>) to: [bold]<domain type='kvm' xmlns:qemu='http://libvirt.org/schemas/domain/qemu/1.0'>[/bold]")
-        console.print("  [cyan]2.[/cyan] Find your memory balloon and disable it to prevent DMA latency: [bold]<memballoon model='none'/>[/bold]")
-        console.print("  [cyan]3.[/cyan] Paste the following block at the absolute bottom of the file, just before [bold]</domain>[/bold]:\n")
-        
-        console.print("[cyan]━━━━━━━━━━━━━━━━━━━━━━━━━ libvirt QOM JSON Payload ━━━━━━━━━━━━━━━━━━━━━━━━━[/cyan]")
-        print(xml_payload)
-        console.print("[cyan]━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[/cyan]\n")
+    mib, size = choose_shm(args.shm_mib)
+    configure_tmpfiles(operator)
+    stage_shm(operator, size, args.force_recreate)
 
-    except KeyboardInterrupt:
-        console.print("\n\n[bold red]⚠ Process interrupted by operator. Exiting cleanly.[/bold red]\n")
-        sys.exit(130)
+    if args.domain:
+        redefine(args.domain, mib)
+    else:
+        interactive_domain_pass(mib)
+
+    state_merge(
+        shm_path=str(SHM_PATH),
+        shm_mib=mib,
+        shm_bytes=size,
+        phase_25="complete",
+    )
+
+    console.print("\n[bold green]=== PHASE 5 COMPLETE ===[/bold green]")
+    console.print(
+        Panel(
+            "Manual reference -- the ONLY XML the guest needs (inside <devices>):\n\n"
+            f"  <shmem name='{SHM_NAME}'>\n"
+            "    <model type='ivshmem-plain'/>\n"
+            f"    <size unit='M'>{mib}</size>\n"
+            "  </shmem>\n"
+            "  <memballoon model='none'/>\n\n"
+            "No xmlns:qemu, no <qemu:commandline>, no kvmfr kernel module.\n"
+            f"Client:  looking-glass-client -f /dev/shm/{SHM_NAME}\n"
+            "Guest:   install the Looking Glass host application matching the client build.",
+            title="libvirt-native configuration",
+            border_style="cyan",
+        )
+    )
+
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        console.print("\n\n[bold red]! Interrupted by operator.[/bold red]\n")
+        raise SystemExit(130) from None

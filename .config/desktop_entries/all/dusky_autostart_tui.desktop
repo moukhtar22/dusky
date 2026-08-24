@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Dusky Autostart
+GenericName=Autostart & Services Configurator
+Comment=Manage Hyprland autostart entries and background services via Dusky TUI
+Exec=foot --app-id=dusky_tui python3 /home/dusk/user_scripts/hypr/misc/tui_autostart.py
+Terminal=false
+Categories=System;Settings;DesktopSettings;Utility;
+Keywords=dusky;autostart;startup;services;hyprland;hypr;config;tui;settings;
+Icon=preferences-system
+StartupNotify=true
+StartupWMClass=dusky_tui

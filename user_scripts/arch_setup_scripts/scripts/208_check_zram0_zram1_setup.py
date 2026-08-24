@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-# =============================================================================
-# Elite Arch Linux ZRAM & Mount Diagnostic Verifier (Revision 2)
-# Scope: Exhaustive Post-Reboot Forensic Interrogation
-# Fixes: Bypasses Kernel Write-Only (WO) restrictions on mem_limit nodes
-# =============================================================================
+#d: Verify the ZRAM and mount setup
 
 import os
 import sys

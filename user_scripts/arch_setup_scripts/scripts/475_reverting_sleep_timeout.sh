@@ -1,11 +1,6 @@
 #!/bin/bash
-# hypridle reverting timeout to default
-#===============================================================================
-# HYPRIDLE CONFIGURATION APPLICATOR
-# specific for Arch/Hyprland/UWSM ecosystem
-#===============================================================================
+#d: Restore the default screen timeout
 
-# Strict mode - catch errors early
 set -o errexit
 set -o nounset
 set -o pipefail

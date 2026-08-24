@@ -1,15 +1,5 @@
 #!/usr/bin/env bash
-# Manages Asus TUF specific hardware profiles via Lua config injection
-# ==============================================================================
-# ARCH LINUX / HYPRLAND / UWSM - HARDWARE CONFIGURATION TWEAKER
-# ==============================================================================
-# Architecture: Zero-Corruption Atomic Writes, Symlink Safe, Block Injection
-# Purpose: Manage config differences for the developer's ASUS TUF F15 vs Generic hardware.
-#          - User 'dusk': Prompts to inject developer-specific hardware keys.
-#          - Other Users: Autonomously removes hardware-specific configurations.
-# Author:  Elite DevOps Architect
-# Shell:   Bash 5.0+
-# ==============================================================================
+#d: Apply ASUS TUF hardware tweaks to Hyprland
 
 set -euo pipefail
 

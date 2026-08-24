@@ -1,88 +1,79 @@
-Identify your NVIDIA GPU’s PCI IDs e.g. 
+---
+title: "dGPU Passthrough — Quick Cheat Sheet"
+tags:
+  - kvm
+  - vfio
+  - passthrough
+  - arch
+aliases:
+  - VFIO Quick Setup
+---
+
+# dGPU Passthrough — Quick Cheat Sheet
+
+> [!warning] This is a *condensed* cheat sheet. The canonical, audited guide is [[Host PC  Preparation for GPU isolation]] (Phase 1–7) + `15_gpu_probing_kernal_param_mkinit.py`. Use this only for recall after you understand the full flow.
+
+## 1. Identify IDs (sysfs is truth, not scraped text)
+
 ```bash
-lspci -nn | grep NVIDIA
+lspci -nn | grep -E "NVIDIA|VGA|Audio"
+# 01:00.0 [10de:25a0] VGA — RTX 3050 Ti Mobile
+# 01:00.1 [10de:2291] Audio
 ```
 
- Then bind it to VFIO so Linux won’t use it. You can do this by adding a module option or kernel parameter. For example, create /etc/modprobe.d/vfio.conf but (Use your GPU’s vendor:device IDs.)
- 
-> [!warning] use your gpu's vender: device ID , dont use the one in example command
-
-Open the grub file and add the kernel parameters to it. 
+## 2. Systemd-boot cmdline (not GRUB)
 
 ```bash
-sudo nvim /etc/default/grub
+sudo nvim /boot/loader/entries/arch.conf  # Type1; or /etc/kernel/cmdline for UKI Type2
+# append to `options` line (keep existing root= rw quiet …):
+intel_iommu=on iommu=pt
+# AMD: omit amd_iommu=on unless board IVRS is broken → add amd_iommu=force_enable via --amd-force-enable
 ```
 
-find this line `GRUB_CMDLINE_LINUX_DEFAULT=""` and add *YOUR* unique id's to it, make sure to add it at after any other existing kernel parameters each parameter is separated by a single space.  
+> [!info] Why `modprobe.d` is the real enforcer
+> `15_gpu_probing_kernal_param_mkinit.py:desired_params` documents `amd_iommu=on` is **not a valid token** (`parse_amd_iommu_options` accepts `off/force_enable/...`); AMD-Vi is on by default when IVRS sane. `vfio-pci.ids=` on cmdline is also racy — the committed claim lives in `/etc/modprobe.d/arsonix-vfio.conf` baked into initramfs (`modconf` before `kms`). Boot cmdline `vfio-pci.ids` is optional mirror (`--cmdline-ids`).
+
+## 3. Initramfs
 
 ```bash
-vfio-pci.ids=10de:25a0,10de:2291
+sudo nvim /etc/mkinitcpio.conf
+MODULES=(… vfio_pci vfio vfio_iommu_type1)  # keep i915/amdgpu ahead for LUKS console
+# HOOKS must have modconf before kms:
+HOOKS=(base systemd autodetect microcode modconf kms keyboard sd-vconsole block filesystems fsck)
+# or drop-in: /etc/mkinitcpio.conf.d/99-arsonix-vfio.conf → MODULES+=(vfio_pci vfio vfio_iommu_type1)
 ```
 
-Regenerate grub 
+## 4. Modprobe — the committed claim
+
 ```bash
-sudo grub-mkconfig -o /boot/grub/grub.cfg
+sudo nvim /etc/modprobe.d/arsonix-vfio.conf
 ```
-
-could reboot now if you want
-
-```bash
-systemctl reboot
-```
-
-### Now create and add options to the initramfs file conf file to start the vfio early 
-
-```bash
-sudo nvim /etc/modprobe.d/vfio.conf
-```
-
-```bash
+```ini
+# Managed by Arsonix — single source of truth
 options vfio-pci ids=10de:25a0,10de:2291
 softdep nvidia pre: vfio-pci
+softdep nouveau pre: vfio-pci
+# blacklist only discrete vendor driver; never snd_hda_intel/xhci_pci (Phase 3 NEVER_BLACKLIST)
+blacklist nouveau
+blacklist nvidia
+blacklist nvidia_drm
+blacklist nvidia_modeset
+blacklist nvidia_uvm
 ```
 
-Regenerate mkinitcpio
+## 5. Rebuild + verify
 
 ```bash
 sudo mkinitcpio -P
+sudo reboot
+lspci -nnk -d 10de:25a0   # Kernel driver in use: vfio-pci
+sudo dmesg | grep -i vfio
+# optional: sudo lsinitcpio /boot/initramfs-linux.img | grep vfio
 ```
 
-Confirm the driver in use, this command should show Kernel driver in use, before restarting it should be there respective drivers eg NVIDIA graphics card and the NVidia audio controller should be `nvidia` and `snd_hda_intel`
+> [!tip] Cross-refs
+> - Full IOMMU/ACS/ID-collision audits: [[Host PC  Preparation for GPU isolation]]`:§1.2`
+> - Slot = all functions (VGA+audio+xHCI+UCSI): `15_*:enumerate_pci`
+> - Revert: delete `arsonix-vfio.conf`, remove `vfio-pci.ids`/`module_blacklist`, `mkinitcpio -P` — see Host Preparation Appendix.
 
-```bash
-lspci -nnk
-```
-
-> [!NOTE]- e.g Command output before reboot
-> 0000:01:00.0 VGA compatible controller [0300]: NVIDIA Corporation GA107M [GeForce RTX 3050 Ti Mobile] [10de:25a0] (rev a1)
-> 	Subsystem: ASUSTeK Computer Inc. Device [1043:1ccc]
-> 	Kernel driver in use: nvidia
-> 	Kernel modules: nouveau, nvidia_drm, nvidia
-> 0000:01:00.1 Audio device [0403]: NVIDIA Corporation GA107 High Definition Audio Controller [10de:2291] (rev a1)
-> 	Subsystem: ASUSTeK Computer Inc. Device [1043:1ccc]
-> 	Kernel driver in use: snd_hda_intel
-> 	Kernel modules: snd_hda_intel
-
-
-Reboot:
-```bash
-systemctl reboot
-```
-
-
-After rebooting Confirm vfio-pci driver in use, it shoudl now be `vfio-pci` 
-
-```bash
-lspci -nnk
-```
-
-
-> [!NOTE]- e.g Command output after reboot
-> 0000:01:00.0 VGA compatible controller [0300]: NVIDIA Corporation GA107M [GeForce RTX 3050 Ti Mobile] [10de:25a0] (rev a1)
-> 	Subsystem: ASUSTeK Computer Inc. Device [1043:1ccc]
-> 	Kernel driver in use: vfio-pci
-> 	Kernel modules: nouveau, nvidia_drm, nvidia
-> 0000:01:00.1 Audio device [0403]: NVIDIA Corporation GA107 High Definition Audio Controller [10de:2291] (rev a1)
-> 	Subsystem: ASUSTeK Computer Inc. Device [1043:1ccc]
-> 	Kernel driver in use: vfio-pci
-> 	Kernel modules: snd_hda_intel
+See also: [[Grub Kernal Parameters]] (legacy GRUB warning), [[Verify VT-x and Kernel Modules and IOMMU]].

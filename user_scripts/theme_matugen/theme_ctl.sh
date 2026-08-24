@@ -6,7 +6,7 @@
 #              Handles Matugen config, physical directory swaps, and wallpaper updates.
 #              Provides full animation support for awww daemon.
 #
-# Ecosystem:   Arch Linux / Hyprland / UWSM / Wayland
+# Ecosystem:   Arch Linux / Hyprland / Wayland
 #
 # Architecture:
 #   1. INTERNAL STATE: ~/.config/dusky/settings/dusky_theme/state.conf
@@ -505,13 +505,9 @@ ensure_awww_running() {
 
     log "Starting awww-daemon..."
 
-    if command -v uwsm-app >/dev/null 2>&1; then
-        # Utilizing 99>&- to ensure uwsm/awww don't inherit the flock descriptor
-        uwsm-app -- awww-daemon --format xrgb >/dev/null 2>&1 99>&- &
-    else
-        awww-daemon --format xrgb >/dev/null 2>&1 99>&- &
-        disown $! 2>/dev/null || true
-    fi
+    # Utilizing 99>&- to ensure awww doesn't inherit the flock descriptor
+    awww-daemon --format xrgb >/dev/null 2>&1 99>&- &
+    disown $! 2>/dev/null || true
 
     wait_for_process "awww-daemon" || die "awww-daemon failed to start"
 }

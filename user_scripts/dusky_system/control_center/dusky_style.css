@@ -48,20 +48,49 @@ scrollbar:backdrop slider {
    SIDEBAR — Navigation Panel
    Translucent layered surface with refined selection states.
    ───────────────────────────────────────────────────────────────────────────── */
+.sidebar-pane,
+.sidebar-pane:dir(ltr),
+.sidebar-pane:dir(rtl),
+.sidebar-pane banner > revealer > widget,
+.content-pane,
+.content-pane:dir(ltr),
+.content-pane:dir(rtl),
+overlay-split-view > border,
+overlay-split-view > shadow,
+overlay-split-view > outline {
+    box-shadow: none;
+    border: none;
+    border-right: none;
+    border-left: none;
+    background-image: none;
+}
+
 .sidebar-container {
     background-color: alpha(@card_bg_color, 0.30);
-    border-right: 1px solid alpha(@borders, 0.12);
+    border: none;
+    border-right: none;
+    box-shadow: none;
 }
 
 .sidebar-container:backdrop {
     background-color: alpha(@card_bg_color, 0.20);
-    border-right-color: alpha(@borders, 0.06);
+    border: none;
+    border-right: none;
+    box-shadow: none;
+}
+
+.sidebar-container scrollbar {
+    opacity: 0;
+    min-width: 0px;
+    margin: 0;
+    padding: 0;
 }
 
 .sidebar-header {
     background: transparent;
     border-bottom: 1px solid alpha(@borders, 0.15);
-    padding: 10px 0;
+    padding: 0;
+    margin: 0;
 }
 
 .sidebar-header-icon {
@@ -81,8 +110,8 @@ scrollbar:backdrop slider {
 
 .sidebar-row {
     border-radius: 10px;
-    padding: 9px 14px;
-    margin-bottom: 2px;
+    padding: 8px 8px;
+    margin: 0 4px 2px 4px;
     background: transparent;
     border: 1px solid transparent;
     transition: background-color 150ms cubic-bezier(0.0, 0.0, 0.2, 1.0),
@@ -129,7 +158,7 @@ scrollbar:backdrop slider {
     min-width: 18px;
     min-height: 18px;
     color: @accent_color;
-    margin-right: 12px;
+    margin-right: 8px;
     transition: color 150ms cubic-bezier(0.0, 0.0, 0.2, 1.0);
 }
 
@@ -222,7 +251,7 @@ preferencesgroup > box > label.title {
 }
 
 preferencespage clamp > box {
-    padding: 14px 18px 28px 18px;
+    padding: 8px 12px 20px 12px;
 }
 
 
@@ -461,13 +490,18 @@ scale:backdrop slider {
    HERO CARDS — Compact Interaction Grid
    Elevated surface cards with hover lift and accent tinting.
    ───────────────────────────────────────────────────────────────────────────── */
+flowboxchild {
+    padding: 0;
+    margin: 0;
+    background: transparent;
+}
+
 .hero-card {
     background-color: alpha(@card_bg_color, 0.42);
     border: 1px solid alpha(@borders, 0.30);
-    border-radius: 16px;
-    padding: 8px 6px;
-    min-width: 65px;
-    min-height: 65px;
+    border-radius: 12px;
+    padding: 6px 8px;
+    min-height: 44px;
     transition: background-color 180ms cubic-bezier(0.0, 0.0, 0.2, 1.0),
                 border-color 180ms cubic-bezier(0.0, 0.0, 0.2, 1.0),
                 box-shadow 220ms cubic-bezier(0.0, 0.0, 0.2, 1.0);
@@ -497,8 +531,8 @@ scale:backdrop slider {
 
 .hero-icon {
     color: @accent_color;
-    -gtk-icon-size: 24px;
-    margin-bottom: 8px;
+    -gtk-icon-size: 20px;
+    margin-bottom: 3px;
     transition: color 150ms cubic-bezier(0.0, 0.0, 0.2, 1.0);
 }
 
@@ -507,18 +541,18 @@ scale:backdrop slider {
 }
 
 .hero-title {
-    font-weight: 800;
-    font-size: 0.90em;
+    font-weight: 700;
+    font-size: 0.82em;
     letter-spacing: -0.005em;
     color: @window_fg_color;
 }
 
 .hero-subtitle {
     font-weight: 600;
-    font-size: 0.70em;
+    font-size: 0.65em;
     letter-spacing: 0.01em;
     color: alpha(@window_fg_color, 0.50);
-    margin-top: 3px;
+    margin-top: 1px;
 }
 
 

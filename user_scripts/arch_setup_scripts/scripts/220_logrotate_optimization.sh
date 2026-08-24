@@ -1,12 +1,6 @@
 #!/usr/bin/env bash
-# Enforces a standard Arch Linux logrotate configuration.
-# ==============================================================================
-# Script: update_logrotate.sh
-# Description: Enforces a standard Arch Linux logrotate configuration.
-# System: Arch Linux / Hyprland / UWSM
-# ==============================================================================
+#d: Enforce standard logrotate settings
 
-# --- Safety & Configuration ---
 set -euo pipefail
 
 # ANSI Colors for Feedback

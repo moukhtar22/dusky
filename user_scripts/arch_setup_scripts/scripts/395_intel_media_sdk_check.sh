@@ -1,12 +1,6 @@
 #!/usr/bin/env bash
-# INTEL VA-API / QSV STACK DEPLOYER (5th Gen to Current)
-# Optimized for Bash 5.3+ / Arch Linux / Hyprland ecosystem
-# -----------------------------------------------------------------------------
-# Resolves the VA-API (iHD/i965) and QuickSync (MFX/OneVPL) package split
-# to dynamically satisfy the UWSM environment prober.
-# -----------------------------------------------------------------------------
+#d: Set up Intel VA-API/QuickSync hardware decoding
 
-# 1. Safety & Strict Mode
 set -euo pipefail
 
 # 2. Privileges Check

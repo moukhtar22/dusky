@@ -1,85 +1,56 @@
-# KVM & Virt-Manager Setup Guide
+---
+title: "KVM Preparation & Optimization (Roadmap)"
+tags:
+  - kvm
+  - arch
+  - roadmap
+---
 
-This guide outlines the step-by-step process for setting up a Kernel-based Virtual Machine (KVM) using `virt-manager` on Arch Linux. These steps are designed to be followed in order.
+# KVM Preparation & Optimization — Roadmap
 
-> [!INFO] Goal
-> 
-> By the end of this guide, you will have a fully functional virtualization environment capable of running Windows or Linux guests with high performance.
+> [!info] Purpose
+> Thin index that points to deep notes. Each checkbox = a gate the pipeline enforces (`05_`, `07_`, `10_`, `15_`, `20_`).
 
-## 1. Prerequisites & Verification
+## 1. Prerequisites
 
-Before installing anything, we must ensure the hardware supports virtualization.
+- [ ] [[Verify VT-x and Kernel Modules and IOMMU]] — BIOS + `lscpu` + `zgrep CONFIG_IOMMUFD` + IOMMU groups (before any libvirt)
 
-- [ ] [[Verify VT-x and Kernel Modules and IOMMU]]
-    
+## 2. Kernel modules (rare)
 
-## 2. Kernel Modules
+- [ ] [[KVM Loading Kernel Module]] — `lsmod | grep kvm` → `modprobe kvm_intel/amd` → `/etc/modules-load.d/kvm.conf`
 
-Load the necessary modules to allow the Linux kernel to act as a hypervisor.
+### Optional: RAM-backed pool
 
-- [ ] [[KVM Loading Kernel Module]]
-    
+> [!tip] Ephemeral only
+> - [ ] [[Symbolic link to zram for image file]] / [[Set ACL on the Image Directory]] → `07_storage_setup.py` (persistent vs `zram`/`tmpfs`, ACL `rwx` + `default:rwx`)
 
-### Optional: Performance Tweaks
+## 3. Daemon model — choose one (modular recommended)
 
-> [!TIP] Temporary Storage Optimization
-> 
-> Only use this if you need a temporary, high-speed storage solution in RAM.
-
-- [ ] [[Symbolic link to zram for image file]]
-    
-
-## 3. Service Configuration (Daemon Setup)
-
-You must choose **ONE** method for managing the virtualization services. Do not do both.
-
-> [!QUESTION] Which one should I choose?
-> 
-> - **Modular Daemon:** (Recommended for most modern setups but we're gonna use the monolith option instead) Runs specific services only when needed. Saves resources.
->     
-> - **Monolithic Daemon:** The classic way. Runs one giant service (`libvirtd`) that handles everything. Easier to troubleshoot for legacy tutorials.
->     
+> [!question] Which?
+> - **Modular** (idle 0 MB, socket-activated, Arch default) — [[libvert Modular daemon enable]] → `10_virt_modular_daemon.py`
+> - **Monolith** (`libvirtd`) — [[KVM Services]] — **legacy, not recommended; masked in pipeline**
 
 - [ ] **Option A (Recommended):** [[libvert Modular daemon enable]]
-    
-- [ ] **Option B (Classic):** [[KVM Services]] 
+- [ ] **Option B (Classic, archived):** [[KVM Services]]
 
-## 4. System Optimization
+## 4. Host tuning
 
-> [!WARNING] Conflict Warning
-> 
-> Do NOT use the TuneD method if you are already using TLP for power management (common on laptops). They will conflict and cause system instability.
+> [!warning] TLP conflict
+> [[Optimize the Host with TuneD]] — skip if `TLP` is active.
 
-- [ ] [[Optimize the Host with TuneD]] ( _Skip if using TLP_ )
-    
+## 5. Networking
 
-## 5. Network Configuration
+- [ ] [[Activating Network and Setting it to Autostart]] → `default` NAT (`virbr0`, `nftables`)
+- [ ] [[Network Bridging for LAN access]] → *Option 3* only if you need LAN-visible web hosting
 
-Ensure your virtual machines can connect to the internet.
+## 6. Permissions & ACLs
 
-- [ ] [[Activating Network and Setting it to Autostart]]
-    
+- [ ] [[Give the User System-Wide Permission]] — `libvirt` group + `~/.config/environment.d/libvirt.conf`
+- [ ] [[Set ACL on the Image Directory]] — `u:operator:rwx` + `d:u:operator:rwx` (and `libvirt-qemu` if de-privileged QEMU)
 
-### 6.  Networking
+Optional:
 
-> [!example] Web Hosting / Bridging
-> 
-> Follow this (OPTION 3 Within the note) only if you need your VM to appear as a separate physical device on your router (useful for web hosting or LAN gaming).
+> [!tip] Custom pool only
+> - [ ] [[Set ACL on the Image Directory]] — needed only if `TARGET != /var/lib/libvirt/images`
 
-- [ ] [[Network Bridging for LAN access]] 
-    
-
-## 6. Permissions & Access
-
-Allow your standard user account to manage virtual machines without needing `sudo` for every command.
-
-- [ ] [[Give the User System-Wide Permission]]
-    
-
-### Optional: Storage Permissions
-
-> [!TIP] Custom Directory Access
-> 
-> Only required if you are storing your VM disk images in a non-standard directory (outside of /var/lib/libvirt/images).
-
-- [ ] [[Set ACL on the Image Directory]]
+Flow → next: [[Host PC  Preparation for GPU isolation]] (VFIO) → [[+ MOC Windows Installation Through Virt Manager]].

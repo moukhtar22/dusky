@@ -27,8 +27,8 @@ vim.opt.grepformat = "%f:%l:%c:%m" -- filename, line number, column, content
 
 -- Search Settings
 vim.opt.ignorecase = true -- Case-insensitive search
-vim.opt.smartcase = false -- Case-sensitive if uppercase in search
-vim.opt.hlsearch = true -- Don't highlight search results
+vim.opt.smartcase = true -- Override ignorecase if uppercase in search (was false: comment contradicted value)
+vim.opt.hlsearch = true -- Highlight search results
 vim.opt.incsearch = true -- Show matches as you type
 
 -- Visual Settings
@@ -37,19 +37,20 @@ vim.opt.signcolumn = "yes" -- Always show sign column
 --vim.opt.colorcolumn = "100" -- Show column at 100 characters
 vim.opt.showmatch = true -- Highlight matching brackets
 vim.opt.matchtime = 2 -- How long to show matching bracket
-vim.opt.completeopt = "menuone,noinsert,noselect" -- Completion options
+vim.opt.completeopt = "menu,menuone,noinsert,noselect,popup,fuzzy" -- Bleeding-edge 0.12: include popup + fuzzy for native completion
 vim.opt.showmode = false -- Don't show mode in command line
-vim.opt.laststatus = 0 -- Hide default statusline on boot to prevent lazy load flicker
-vim.opt.ruler = false -- Hide default ruler on boot to prevent lazy load flicker
+vim.opt.laststatus = 3 -- Global statusline (was 0 hides statusline, but lualine uses globalstatus=true; 0 caused flicker and missed diagnostics)
+vim.opt.ruler = false -- Hide default ruler (lualine handles it)
 vim.opt.pumheight = 10 -- Popup menu height
 vim.opt.pumblend = 10 -- Popup menu transparency
 vim.opt.winblend = 0 -- Floating window transparency
 vim.opt.conceallevel = 0 -- Don't hide markup
 vim.opt.concealcursor = "" -- Show markup even on cursor line
-vim.opt.lazyredraw = false -- redraw while executing macros (butter UX)
+-- vim.opt.lazyredraw deprecated no-op in 0.12 (kept for compat would warn); removed
 vim.opt.redrawtime = 10000 -- Timeout for syntax highlighting redraw
 vim.opt.maxmempattern = 20000 -- Max memory for pattern matching
-vim.opt.synmaxcol = 300 -- Syntax highlighting column limit
+-- vim.opt.synmaxcol deprecated with treesitter; keep but increase for large files fallback
+vim.opt.synmaxcol = 500 -- Increased from 300 (treesitter handles most, but vim syntax fallback needs higher)
 
 -- File Handling
 vim.opt.backup = false -- Don't create backup files
@@ -57,20 +58,18 @@ vim.opt.writebackup = false -- Don't backup before overwriting
 vim.opt.swapfile = false -- Don't create swap files
 vim.opt.undofile = true -- Persistent undo
 vim.opt.updatetime = 250 -- Time in ms to trigger CursorHold
-vim.opt.timeoutlen = 2000 -- Time in ms to wait for mapped sequence
+vim.opt.timeoutlen = 500 -- Reduced from 2000 (was excessive wait for which-key; 500 is responsive yet still allows multi-key)
 vim.opt.ttimeoutlen = 0 -- No wait for key code sequences
 vim.opt.autoread = true -- Auto-reload file if changed outside
 vim.opt.autowrite = false -- Don't auto-save on some events
-vim.opt.diffopt:append("vertical") -- Vertical diff splits
-vim.opt.diffopt:append("algorithm:patience") -- Better diff algorithm
-vim.opt.diffopt:append("linematch:60") -- Better diff highlighting (smart line matching)
+-- diffopt: start from clean slate to avoid duplicate linematch:40 + linematch:60 seen in :checkhealth
+vim.opt.diffopt = "internal,filler,closeoff,vertical,algorithm:patience,linematch:60,indent-heuristic,inline:char"
 
--- Set undo directory and ensure it exists
-local undodir = "~/.local/share/nvim/undodir" -- Undo directory path
-vim.opt.undodir = vim.fn.expand(undodir) -- Expand to full path
-local undodir_path = vim.fn.expand(undodir)
-if vim.fn.isdirectory(undodir_path) == 0 then
-	vim.fn.mkdir(undodir_path, "p") -- Create if not exists
+-- Set undo directory and ensure it exists (use stdpath, uv fs_stat for 0.12)
+local undodir = vim.fn.stdpath("data") .. "/undodir"
+vim.opt.undodir = undodir
+if vim.uv.fs_stat(undodir) == nil then
+  vim.fn.mkdir(undodir, "p")
 end
 
 -- Behavior Settings
@@ -87,10 +86,13 @@ vim.opt.wildmenu = true -- Enable command-line completion menu
 vim.opt.wildmode = "longest:full,full" -- Completion mode for command-line
 vim.opt.wildignorecase = true -- Case-insensitive tab completion in commands
 
--- Folding Settings
-vim.opt.foldmethod = "expr" -- Use expression for folding
-vim.opt.foldexpr = "v:lua.vim.treesitter.foldexpr()" -- Use treesitter for folding
-vim.opt.foldlevel = 99 -- Keep all folds open by default
+-- Folding Settings (0.12 native: foldexpr requires treesitter parser for buffer, else fallback)
+vim.opt.foldmethod = "expr"
+vim.opt.foldexpr = "v:lua.vim.treesitter.foldexpr()"
+vim.opt.foldlevel = 99
+vim.opt.foldlevelstart = 99 -- Ensure folds open on new buffers
+vim.opt.foldenable = true
+vim.opt.foldtext = "" -- 0.12: use native treesitter foldtext (cleaner than legacy vim foldtext)
 
 -- Split Behavior
 vim.opt.splitbelow = true -- Horizontal splits open below

@@ -29,8 +29,15 @@ notify_user() {
     local title="$1"
     local message="$2"
     local urgency="${3:-low}"
+    # Only surface desktop notifications when invoked from rofi (rofi sets ROFI_INFO on selection).
+    # Plain CLI/keybind invocations stay silent.
+    [[ -n "${ROFI_INFO:-}" ]] || return 0
     if command -v notify-send &>/dev/null; then
-        notify-send -u "$urgency" -a "Hyprland Animations" "$title" "$message"
+        notify-send -u "$urgency" \
+            --app-name=hypr-anim \
+            --icon="${4:-applications-graphics}" \
+            -h string:x-canonical-private-synchronous:hypr-anim \
+            -t 1500 "$title" "$message" &>/dev/null || true
     fi
 }
 
@@ -109,7 +116,7 @@ apply_animation() {
         printf '%s|%s\n' "$target_orient" "$src_file" > "$STATE_FILE"
 
         reload_hyprland
-        notify_user "Success" "Applied: ${src_file##*/} (${target_orient^})"
+        notify_user "Animation Applied" "${src_file##*/} (${target_orient^})"
         return 0
     else
         notify_user "Filesystem Error" "Failed atomic write to $DEST_FILE" "critical"

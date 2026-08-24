@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# Declares and manages universal ALPM (Pacman) hooks system-wide
+#d: Set up system-wide pacman (ALPM) hooks
 
-# --- Strict Execution Pragmas ---
 set -euo pipefail
 
 # --- Color Support ---

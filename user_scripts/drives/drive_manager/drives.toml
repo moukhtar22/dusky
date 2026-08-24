@@ -24,13 +24,12 @@ mount_options = ["noatime", "uid=1000", "gid=1000", "umask=002", "windows_names"
 
 [drives.browser]
 type = "PROTECTED"
-mountpoint = "/mnt/browser"
-outer_uuid = "0a52e1bb-4fa0-4138-a150-f59467903e22"
-inner_uuid = "1adeb61a-0605-4bbc-8178-bb81fe1fca09"
+mountpoint = "/home/dusk/.config/mozilla"
+outer_uuid = "65541589-e0e0-4cc0-99f4-9b179f05ffb5"
+inner_uuid = "b982f02e-32f6-40cd-86de-964c90676cc2"
 hint = "LAP_P"
-fstype = "btrfs"
-# Copy-on-Write disabled (nodatacow), which also turns off compression for max speed.
-mount_options = ["nodatacow", "ssd", "discard=async", "noatime", "space_cache=v2", "subvol=/"]
+fstype = "ext4"
+mount_options = ["noatime", "delalloc", "commit=20"]
 
 [drives.media]
 type = "PROTECTED"
@@ -70,7 +69,7 @@ outer_uuid = "953a147e-a346-4fea-91f4-a81ec97fa56a"
 inner_uuid = "46798d3b-cda7-4031-818f-37a06abbeb37"
 hint = "game_simple"
 fstype = "btrfs"
-mount_options = ["discard=async", "compress=zstd:3", "noatime", "space_cache=v2", "autodefrag", "subvol=/"]
+mount_options = ["compress=zstd:3", "noatime", "space_cache=v2", "autodefrag", "subvol=/"]
 
 [drives.wdslow]
 type = "PROTECTED"
@@ -79,7 +78,7 @@ outer_uuid = "01f38f5b-86de-4499-b93f-6c982e2067cb"
 inner_uuid = "2765359f-232e-4165-bc69-ef402b50c74c"
 hint = "game_simple"
 fstype = "btrfs"
-mount_options = ["discard=async", "compress=zstd:3", "noatime", "space_cache=v2", "autodefrag", "subvol=/"]
+mount_options = ["compress=zstd:3", "noatime", "space_cache=v2", "autodefrag", "subvol=/"]
 
 [drives.enclosure]
 type = "PROTECTED"

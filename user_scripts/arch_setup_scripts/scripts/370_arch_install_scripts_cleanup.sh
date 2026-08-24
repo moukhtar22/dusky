@@ -1,20 +1,6 @@
 #!/usr/bin/env bash
-# Removes installation scripts (*.sh) and the git repository from root (/) after using dusky arch iso installation method
-# ==============================================================================
-#  ARCH LINUX POST-INSTALL CLEANUP (ROOT ARTIFACTS)
-# ==============================================================================
-#  Removes installation scripts (*.sh) and the git repository from the root (/)
-#  directory after a successful install.
-#
-#  Features:
-#  - Smart detection of *.sh files at /
-#  - Configurable repository target
-#  - Interactive safeguards (Batch delete, Selective, or Abort)
-#  - Autonomous execution via '--auto' flag
-# ==============================================================================
+#d: Remove install scripts from / after the ISO install
 
-# --- CONFIGURATION ---
-# Change this variable if your git repo name changes in the future
 readonly TARGET_REPO_NAME="dusky"
 readonly ROOT_PATH="/"
 
@@ -24,7 +10,7 @@ set -o nounset   # Error on undefined vars
 set -o pipefail  # Error if pipe fails
 
 # 2. Colors (Matches Orchestra style)
-if [[ -t 1 ]] && command -v tput &>/dev/null; then
+if [[ -z ${NO_COLOR-} ]] && [[ -n ${TERM-} ]] && [[ -t 1 ]] && command -v tput >/dev/null 2>&1 && [[ $(tput colors 2>/dev/null || echo -1) -ge 8 ]]; then
     RED=$(tput setaf 1)
     GREEN=$(tput setaf 2)
     YELLOW=$(tput setaf 3)

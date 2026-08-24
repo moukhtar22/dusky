@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-# deployes dusky overlay configs
-"""
-Initializes or validates the 'edit_here' user configuration overlay for Hyprland.
-Ensures all template files exist, deploying from the defaults directory.
-"""
+#d: Deploy dusky's overlay configs
 
 import argparse
 import logging
@@ -232,6 +228,7 @@ def main() -> None:
     else:
         MAIN_CONF.write_text(main_conf_content.rstrip('\n') + f"\n\n-- Source User Custom Config Overlay\n{OVERLAY_REQUIRE}\n")
         log_success(f"Appended '{OVERLAY_REQUIRE}' to '{MAIN_CONF}'.")
+
 
     # Hot-Reload
     if shutil.which("hyprctl"):

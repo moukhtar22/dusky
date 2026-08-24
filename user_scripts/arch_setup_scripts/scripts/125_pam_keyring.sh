@@ -1,12 +1,5 @@
 #!/usr/bin/env bash
-# Installation of Gnome Keyring components
-# ==============================================================================
-# Script Name: setup_gnome_keyring.sh
-# Description: Automates the installation of Gnome Keyring components and 
-#              configures PAM for auto-unlocking on login.
-#              Designed for Arch Linux (Hyprland/UWSM ecosystem).
-# Target:      /etc/pam.d/login
-# ==============================================================================
+#d: Set up GNOME Keyring with auto-unlock on login
 
 set -euo pipefail
 

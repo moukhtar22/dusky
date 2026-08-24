@@ -226,64 +226,6 @@ run_pacman() {
     done
 }
 
-# --- OS DETECTION ---
-determine_os_state() {
-    # 1. Pure CachyOS - natively manages its own architecture
-    if [[ -r /etc/os-release ]] && grep -iq 'cachyos' /etc/os-release; then
-        echo "pure_cachyos"
-        return 0
-    fi
-    # 2. Franken-Arch - Standard Arch with CachyOS repos layered on top
-    if grep -q '\[cachyos-v3\]' /etc/pacman.conf 2>/dev/null || pacman -Qq cachyos-mirrorlist &>/dev/null; then
-        echo "franken_arch"
-        return 0
-    fi
-    # 3. Pure Standard Arch
-    echo "arch"
-}
-
-# --- CACHYOS KEYRING BOOTSTRAP ---
-ensure_cachyos_keyring() {
-    if pacman -Qq cachyos-keyring &>/dev/null; then
-        log_info "CachyOS keyring already present, skipping bootstrap."
-        return 0
-    fi
-
-    log_info "CachyOS keyring not found. Bootstrapping..."
-
-    if ! pacman-key --recv-keys F3B607488DB35A47 --keyserver keyserver.ubuntu.com; then
-        log_warn "Failed to receive CachyOS key from keyserver.ubuntu.com. Trying hkps://keys.openpgp.org..."
-        pacman-key --recv-keys F3B607488DB35A47 --keyserver hkps://keys.openpgp.org || {
-            log_err "Could not import CachyOS signing key. Mirror sync may fail."
-            return 1
-        }
-    fi
-
-    pacman-key --lsign-key F3B607488DB35A47
-
-    local mirror_base="https://mirror.cachyos.org/repo/x86_64/cachyos"
-    
-    log_info "Fetching latest keyring package URL..."
-    local keyring_pkg
-    keyring_pkg=$(curl -sL "${mirror_base}/" | grep -oP 'href="\K(cachyos-keyring-[0-9]+-[0-9]+-any\.pkg\.tar\.zst)' | head -n1 || true)
-    
-    if [[ -z "$keyring_pkg" ]]; then
-        log_warn "Could not scrape dynamic keyring. Falling back to hardcoded version..."
-        keyring_pkg="cachyos-keyring-20240331-1-any.pkg.tar.zst"
-    fi
-
-    manage_pacman_lock
-
-    if run_pacman -U --needed --noconfirm \
-        "${mirror_base}/${keyring_pkg}" \
-        "${mirror_base}/cachyos-mirrorlist-27-1-any.pkg.tar.zst" \
-        "${mirror_base}/cachyos-v3-mirrorlist-27-1-any.pkg.tar.zst"; then
-        log_ok "CachyOS keyring and mirrorlist packages bootstrapped."
-    else
-        log_warn "Keyring bootstrap failed. Will attempt to continue — cachyos-rate-mirrors may still work."
-    fi
-}
-
 # --- SYSTEMD TIMER CONFIGURATION ---
 configure_arch_timer() {
     log_info "Configuring native systemd timer for automated weekly mirror updates..."
@@ -307,125 +249,11 @@ EOF
         return 0
     fi
 
-    # Standard Arch SHOULD have the timer enabled. 
-    # It is only disabled in CachyOS/Franken-Arch configurations.
     if systemctl enable --now reflector.timer &>/dev/null; then
         log_ok "reflector.timer is now active."
     else
         log_warn "Failed to enable reflector.timer. Check systemctl status."
     fi
-}
-
-install_persistent_arch_patch() {
-    local helper="/usr/local/bin/fix-mirrorlist-arch"
-
-    cat > "$helper" << 'SCRIPT'
-#!/usr/bin/env bash
-set -euo pipefail
-sed -i 's/\$arch_v3/x86_64_v3/g' /etc/pacman.d/cachyos-v3-mirrorlist 2>/dev/null || true
-sed -i 's/\$arch/x86_64_v3/g'    /etc/pacman.d/cachyos-v3-mirrorlist 2>/dev/null || true
-sed -i 's/\$arch/x86_64/g'       /etc/pacman.d/mirrorlist             2>/dev/null || true
-sed -i 's/\$arch/x86_64/g'       /etc/pacman.d/cachyos-mirrorlist     2>/dev/null || true
-SCRIPT
-    chmod +x "$helper"
-
-    cat > /etc/systemd/system/mirrorlist-arch-patch.service << 'SERVICE'
-[Unit]
-Description=Fix architecture variables in mirrorlists
-Documentation=https://wiki.archlinux.org/title/Pacman
-
-[Service]
-Type=oneshot
-ExecStartPre=/bin/sleep 1
-ExecStart=/usr/local/bin/fix-mirrorlist-arch
-SERVICE
-
-    cat > /etc/systemd/system/mirrorlist-arch-patch.path << 'PATH_UNIT'
-[Unit]
-Description=Monitor mirrorlists and reapply architecture variable fixes
-Documentation=https://wiki.archlinux.org/title/Pacman
-
-[Path]
-PathChanged=/etc/pacman.d/mirrorlist
-PathChanged=/etc/pacman.d/cachyos-mirrorlist
-PathChanged=/etc/pacman.d/cachyos-v3-mirrorlist
-
-[Install]
-WantedBy=multi-user.target
-PATH_UNIT
-
-    systemctl daemon-reload
-    systemctl enable --now mirrorlist-arch-patch.path &>/dev/null || true
-    log_ok "Persistent arch patch monitor (mirrorlist-arch-patch.path) active."
-}
-
-# --- MIRRORLIST ARCHITECTURE PATCHER ---
-patch_mirrorlist_architectures() {
-    log_info "Hardcoding architectures to prevent pacman variable evaluation bugs..."
-
-    if [[ -f "$TARGET_FILE" ]]; then
-        sed -i 's/\$arch/x86_64/g' "$TARGET_FILE"
-    fi
-
-    if [[ -f "/etc/pacman.d/cachyos-mirrorlist" ]]; then
-        sed -i 's/\$arch/x86_64/g' "/etc/pacman.d/cachyos-mirrorlist"
-    fi
-
-    if [[ -f "/etc/pacman.d/cachyos-v3-mirrorlist" ]]; then
-        sed -i 's/\$arch_v3/x86_64_v3/g' "/etc/pacman.d/cachyos-v3-mirrorlist"
-        sed -i 's/\$arch/x86_64_v3/g' "/etc/pacman.d/cachyos-v3-mirrorlist"
-    fi
-    log_ok "Architectures successfully patched."
-
-    install_persistent_arch_patch
-}
-
-# --- CACHYOS SYNC ---
-sync_cachyos() {
-    log_info "Initializing Franken-Arch Mirror Sync..."
-
-    ensure_cachyos_keyring
-
-    local attempt
-    local max_attempts=3
-    local success=0
-
-    if ! command -v cachyos-rate-mirrors &>/dev/null; then
-        log_warn "cachyos-rate-mirrors binary missing. Skipping CachyOS mirror ranking and keeping the current mirror configuration."
-    else
-        for (( attempt = 1; attempt <= max_attempts; attempt++ )); do
-            manage_pacman_lock
-
-            if run_with_spinner "Benchmarking CachyOS mirrors..." cachyos-rate-mirrors; then
-                success=1
-                break
-            fi
-
-            if (( attempt < max_attempts )); then
-                log_warn "Network latency detected. Retrying in 5 seconds (Attempt $(( attempt + 1 ))/${max_attempts})..."
-                sleep 5
-            fi
-        done
-
-        if (( ! success )); then
-            log_err "cachyos-rate-mirrors failed after ${max_attempts} attempts. Continuing with the existing mirror configuration."
-        else
-            log_ok "CachyOS mirrors optimized."
-        fi
-
-        # Disable all native timers in favor of the persistent path unit patcher
-        for bad_timer in cachyos-mirrorlist.timer cachyos-rate-mirrors.timer reflector.timer; do
-            if systemctl list-unit-files --type=timer --no-legend --plain 2>/dev/null | awk '{print $1}' | grep -Fxq "$bad_timer"; then
-                systemctl stop --now "$bad_timer" &>/dev/null || true
-                log_warn "Disabled $bad_timer — the persistent path monitor handles repatching."
-            fi
-        done
-    fi
-
-    patch_mirrorlist_architectures
-
-    log_info "Synchronizing pacman databases..."
-    run_pacman -Syy || log_warn "Pacman database sync returned non-zero, but pipeline will continue."
 }
 
 # --- ARCH LINUX SYNC ---
@@ -492,9 +320,6 @@ sync_arch() {
         log_ok "Global CDN fallback applied."
     fi
 
-    # Notice: Patchers are NOT applied here because standard Arch utilizes $arch 
-    # natively without conflicts. reflector.timer manages updates organically.
-
     log_info "Synchronizing pacman databases..."
     run_pacman -Syy || log_warn "Pacman database sync returned non-zero, but pipeline will continue."
 }
@@ -504,18 +329,7 @@ main() {
     printf '\n%s:: Commencing Zero-Interaction Mirror Orchestration%s\n' "$B" "$NC"
 
     manage_pacman_lock
-
-    local os_state
-    os_state="$(determine_os_state)"
-
-    if [[ "$os_state" == "pure_cachyos" ]]; then
-        log_info "Pure CachyOS detected. Mirror and timer management is natively handled by the OS. Exiting safely."
-        exit 0
-    elif [[ "$os_state" == "franken_arch" ]]; then
-        sync_cachyos
-    else
-        sync_arch
-    fi
+    sync_arch
 
     printf '\n%s:: Orchestration Complete. Yielding execution to next script.%s\n\n' "$G" "$NC"
 }

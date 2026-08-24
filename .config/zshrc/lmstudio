@@ -1,6 +1,6 @@
 #-- LM- Studio--
 llm() {
-  local dir="/mnt/media/Documents/do_not_delete_linux/appimages"
+  local dir="/mnt/media/downloads/llm/lmstudio/"
   
   # 1. Safely evaluate the glob and store the result in an array
   # (N)  = Null globbing: if no file matches, return empty without errors
@@ -21,12 +21,14 @@ llm() {
     --layout=reverse \
     --height=~50% \
     --border=rounded \
+    --ghost="Select version..." \
     --border-label=" 󰚩 LM-Studio Versions " \
     --border-label-pos=center \
     --info=inline-right \
-    --prompt=" " \
-    --pointer=" " \
-    --color="border:#89b4fa,label:#a6e3a1,prompt:#f9e2af,pointer:#f38ba8")
+    --prompt=" 󰚩  " \
+    --pointer="❯ " \
+    --marker="✔ " \
+    --color="${DUSKY_FZF_COLORS:-border:#89b4fa,label:#a6e3a1,prompt:#f9e2af,pointer:#f38ba8}")
 
   # 4. Handle user cancellation (e.g., pressing ESC)
   if [[ -z "$app_name" ]]; then

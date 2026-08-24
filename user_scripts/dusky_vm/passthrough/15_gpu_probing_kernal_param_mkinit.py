@@ -1,486 +1,993 @@
 #!/usr/bin/env python3
 """
-Phase 3: VFIO Kernel Isolation & Bootloader Configuration
-Target: Arch Linux (Kernel 7.1.0+), Python 3.14.5+, systemd 260
-Scope: Dynamic hardware probing, UKI-aware bootctl JSON parsing, mkinitcpio structural hook enforcement.
-Philosophy: Zero-Clutter Idempotency, Atomic Writes, Sysfs Topography.
+Arsonix KVM/VFIO Pipeline -- Phase 3 (15_gpu_probing_kernal_param_mkinit.py)
+IOMMU topology probe, VFIO claim, bootloader cmdline surgery, initramfs hardening.
+
+Target : Arch Linux rolling (Aug 2026) / Linux 7.1.8+ / Python 3.14.7+ / systemd 261+
+Sources: docs.kernel.org/driver-api/vfio, Documentation/admin-guide/kernel-parameters.txt,
+         bootctl(1), mkinitcpio(8), modprobe.d(5)
+
+Hard rules encoded here
+-----------------------
+* Device facts come from sysfs, never from scraped lspci text.
+* A GPU is a *slot*, not a function: video + HDMI-audio + xHCI + UCSI all move.
+* The token amd_iommu with value "on" is NOT parsed by the kernel
+  (parse_amd_iommu_options accepts off / force_enable / force_isolation /
+  pgtbl_v1 / pgtbl_v2 / ...). AMD-Vi is on by default when the IVRS table is
+  sane, so we emit only iommu=pt unless the operator explicitly asks for
+  --amd-force-enable.
+* vendor:device is a *class* of hardware. Before claiming an ID we enumerate every
+  PCI function that matches it; if the match set exceeds the selection we refuse to
+  proceed silently (this is how people detach their second GPU, capture card, or an
+  identically-branded NVMe controller by accident).
+* snd_hda_intel / xhci_pci / i2c_designware are NEVER blacklisted -- only softdep'd.
 """
 
-import os
-import sys
-import re
+import argparse
 import json
+import os
+import re
 import shlex
 import shutil
-import tempfile
+import stat
 import subprocess
-import dataclasses
+import sys
+import tempfile
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Never
 
-# ==============================================================================
-# BOOTSTRAP: Strict Privilege & Auto-Elevation
-# ==============================================================================
-def require_root() -> None:
-    """Enforce eUID 0. Auto-elevates via sudo if executed as standard user."""
-    if os.geteuid() != 0:
-        print("\n[INFO] Administrative privileges required. Elevating via sudo...")
-        try:
-            os.execvp("sudo", ["sudo", sys.executable] + sys.argv)
-        except OSError as e:
-            print(f"\n[FATAL] Failed to elevate privileges dynamically: {e}")
-            sys.exit(1)
+MIN_PY: tuple[int, int, int] = (3, 14, 7)
+STATE_DIR = Path("/var/lib/arsonix")
+STATE_FILE = STATE_DIR / "state.json"
+STATE_SCHEMA = 2
 
-require_root()
+SYS_PCI = Path("/sys/bus/pci/devices")
+MODPROBE_FILE = Path("/etc/modprobe.d/arsonix-vfio.conf")
+MKINITCPIO_CONF = Path("/etc/mkinitcpio.conf")
+MKINITCPIO_DROPIN_DIR = Path("/etc/mkinitcpio.conf.d")
+MKINITCPIO_DROPIN = MKINITCPIO_DROPIN_DIR / "99-arsonix-vfio.conf"
+KERNEL_CMDLINE = Path("/etc/kernel/cmdline")
+CMDLINE_D = Path("/etc/cmdline.d")
+CMDLINE_D_DROPIN = CMDLINE_D / "99-arsonix-vfio.conf"
+
+MANAGED_KEYS = ("intel_iommu", "amd_iommu", "iommu", "module_blacklist", "vfio-pci.ids")
+VOLATILE_TOKENS = {
+    "single", "1", "s", "S", "rescue", "emergency", "init=/bin/sh",
+    "systemd.unit=rescue.target", "systemd.unit=emergency.target", "systemd.debug-shell",
+}
+VOLATILE_PREFIXES = ("BOOT_IMAGE=", "initrd=", "cryptdevice_UNUSED=")
+
+CLASS_NAMES = {
+    "0300": "VGA controller", "0301": "XGA controller", "0302": "3D controller",
+    "0380": "Display controller", "0403": "HD Audio", "0c03": "USB controller",
+    "0c05": "SMBus", "0c80": "Serial (UCSI)", "0604": "PCI bridge", "0108": "NVMe",
+    "0106": "SATA", "0200": "Ethernet", "0280": "Wireless",
+}
+GPU_CLASSES = {"0300", "0301", "0302", "0380"}
+
+VENDOR_DRIVERS = {
+    "10de": ["nouveau", "nvidia", "nvidia_drm", "nvidia_modeset", "nvidia_uvm", "nvidia_peermem"],
+    "1002": ["amdgpu", "radeon"],
+    "1022": ["amdgpu"],
+    "8086": ["i915", "xe"],
+}
+# Shared host infrastructure: reroute with softdep, never blacklist.
+NEVER_BLACKLIST = {
+    "snd_hda_intel", "snd_hda_codec_hdmi", "xhci_pci", "xhci_hcd", "i2c_designware_pci",
+    "typec_ucsi", "ucsi_ccg", "ahci", "nvme",
+}
+
+
+def _hard_exit(msg: str) -> Never:
+    sys.stderr.write(f"\n[FATAL] {msg}\n\n")
+    raise SystemExit(1)
+
+
+def elevate() -> None:
+    if os.geteuid() == 0:
+        return
+    if os.environ.get("ARSONIX_ELEVATED") == "1":
+        _hard_exit("Re-exec loop detected: sudo did not yield uid 0.")
+    sudo = shutil.which("sudo")
+    if sudo is None:
+        _hard_exit("'sudo' is not in PATH. Re-run this script as root.")
+    try:
+        script = Path(sys.argv[0]).resolve(strict=True)
+    except OSError as exc:
+        _hard_exit(f"Cannot resolve own script path: {exc}")
+    sys.stderr.write("\n[INFO] Elevating via sudo (single re-exec)...\n")
+    os.environ["ARSONIX_ELEVATED"] = "1"
+    os.execv(
+        sudo,
+        [sudo, "--preserve-env=ARSONIX_ELEVATED", "--", sys.executable, str(script), *sys.argv[1:]],
+    )
+
+
+if sys.version_info[:3] < MIN_PY:
+    _hard_exit("Python 3.14.7+ required.")
+elevate()
 
 try:
     from rich.console import Console
     from rich.panel import Panel
+    from rich.prompt import Confirm, IntPrompt
     from rich.table import Table
-    from rich.prompt import IntPrompt
-except ImportError:
-    print("\n[FATAL] 'python-rich' is missing. Please ensure Phase 1 completed successfully.")
-    sys.exit(1)
+except ModuleNotFoundError:
+    _hard_exit("python-rich is missing. Run Phase 1 (05_virtio_iso.py) first.")
 
-console = Console()
+console = Console(force_terminal=True, force_interactive=True)
+DRY_RUN = False
 
-# ==============================================================================
-# DATA STRUCTURES
-# ==============================================================================
-@dataclasses.dataclass
-class VFIODevice:
-    pci_bus: str
-    video_id: str
-    video_desc: str
-    audio_id: str | None = None
-    audio_desc: str = "No companion audio detected"
-    iommu_group: str = "Unknown"
 
 # ==============================================================================
-# CORE UTILITIES
+# SHARED PRIMITIVES
 # ==============================================================================
+@dataclass(frozen=True, slots=True)
+class Cmd:
+    argv: list[str]
+    code: int
+    out: str
+    err: str
+
+    @property
+    def ok(self) -> bool:
+        return self.code == 0
+
+
+def run(argv: list[str], *, check: bool = False, timeout: float = 120.0) -> Cmd:
+    try:
+        proc = subprocess.run(
+            argv, check=False, timeout=timeout, text=True,
+            capture_output=True, stdin=subprocess.DEVNULL,
+        )
+        res = Cmd(argv, proc.returncode, (proc.stdout or "").strip(), (proc.stderr or "").strip())
+    except subprocess.TimeoutExpired:
+        res = Cmd(argv, 124, "", f"timeout after {timeout}s")
+    except FileNotFoundError:
+        res = Cmd(argv, 127, "", f"executable not found: {argv[0]}")
+    if check and not res.ok:
+        bail(f"Command failed (rc={res.code}): {' '.join(argv)}\n{res.err or res.out}")
+    return res
+
+
 def bail(msg: str) -> Never:
-    """Exit gracefully with a clear error panel."""
-    console.print(Panel(f"[bold red]FATAL ERROR:[/bold red] {msg}", border_style="red"))
-    sys.exit(1)
+    console.print(Panel(f"[bold red]FATAL[/bold red]\n{msg}", border_style="red"))
+    raise SystemExit(1)
 
-def check_deps() -> None:
-    """Ensures pciutils is installed before executing system hardware scans."""
-    if shutil.which("lspci"):
-        return
-    console.print("[yellow]⚠ Missing dependency detected: pciutils[/yellow]")
-    console.print("[cyan]  Attempting to install via pacman...[/cyan]")
-    try:
-        subprocess.run(['pacman', '-S', '--needed', '--noconfirm', 'pciutils'], check=True, stdout=subprocess.DEVNULL)
-        console.print("[green]  ✓ Dependencies installed.[/green]")
-    except subprocess.CalledProcessError:
-        bail("Failed to install required dependencies. Aborting.")
 
-def atomic_write(target_path: Path, new_content: str) -> bool:
-    """
-    Safely writes data using a temporary file and atomic swap.
-    Returns True if changes were made, False if the file is already optimal.
-    """
-    if target_path.exists() and target_path.read_text(encoding="utf-8") == new_content:
-        return False
-        
-    target_path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_path_str = tempfile.mkstemp(dir=target_path.parent, prefix=f".{target_path.name}.tmp.")
-    tmp_path = Path(tmp_path_str)
-    
-    try:
-        with os.fdopen(fd, 'w') as f:
-            f.write(new_content)
-        os.chmod(tmp_path, 0o644)
-        shutil.move(tmp_path, target_path)
+def atomic_write(path: Path, content: str, *, mode: int | None = None) -> bool:
+    keep_mode = 0o644 if mode is None else mode
+    uid, gid = 0, 0
+    if path.exists():
+        try:
+            if path.read_text(encoding="utf-8") == content:
+                return False
+        except (UnicodeDecodeError, OSError):
+            pass
+        st = path.stat()
+        keep_mode = stat.S_IMODE(st.st_mode) if mode is None else mode
+        uid, gid = st.st_uid, st.st_gid
+    if DRY_RUN:
+        console.print(f"[magenta]  [dry-run] would write {path}[/magenta]")
         return True
-    except Exception as e:
-        if tmp_path.exists():
-            tmp_path.unlink()
-        bail(f"Atomic write failed on {target_path}: {e}")
-
-# ==============================================================================
-# HARDWARE DISCOVERY & IOMMU TOPOLOGY
-# ==============================================================================
-def get_cpu_iommu_flag() -> str:
-    """Detects CPU architecture via /proc/cpuinfo to set the correct IOMMU flag."""
-    cpuinfo = Path("/proc/cpuinfo").read_text(encoding="utf-8")
-    if "GenuineIntel" in cpuinfo:
-        return "intel_iommu"
-    elif "AuthenticAMD" in cpuinfo:
-        return "amd_iommu"
-    
-    console.print("[yellow]⚠ Could not strictly determine CPU vendor. Defaulting to Intel VT-d flags.[/yellow]")
-    return "intel_iommu"
-
-def probe_gpus() -> list[VFIODevice]:
-    """Dynamically probes PCI tree for GPUs, companion audio, and IOMMU groups."""
-    console.print("\n[bold blue]==>[/bold blue] [bold]Probing system PCI & IOMMU topography...[/bold]")
-    check_deps()
-    
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".arsonix")
+    tmp = Path(tmp_name)
     try:
-        res = subprocess.run(["lspci", "-Dnn"], capture_output=True, text=True, check=True)
-        lspci_out = res.stdout
-    except subprocess.CalledProcessError:
-        bail("Failed to execute lspci.")
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(tmp, keep_mode)
+        os.chown(tmp, uid, gid)
+        os.replace(tmp, path)
+        dir_fd = os.open(path.parent, os.O_DIRECTORY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+        return True
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
-    gpu_map: dict[str, VFIODevice] = {}
-    
-    for line in lspci_out.splitlines():
-        if "[0300]" in line or "[0302]" in line:
-            bus_match = re.match(r'^([0-9a-fA-F]{4}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.\d)', line)
-            id_match = re.search(r'\[([0-9a-fA-F]{4}:[0-9a-fA-F]{4})\]', line)
-            
-            if bus_match and id_match:
-                bus = bus_match.group(1)
-                iommu_group = "Unknown"
-                iommu_path = Path(f"/sys/bus/pci/devices/{bus}/iommu_group")
-                if iommu_path.is_symlink():
-                    iommu_group = iommu_path.resolve().name
-                
-                gpu_map[bus] = VFIODevice(
-                    pci_bus=bus,
-                    video_id=id_match.group(1),
-                    video_desc=line[len(bus):].strip(),
-                    iommu_group=iommu_group
-                )
 
-    for line in lspci_out.splitlines():
-        if "Audio device" in line or "[0403]" in line:
-            bus_match = re.match(r'^([0-9a-fA-F]{4}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2})\.(\d)', line)
-            if bus_match:
-                base_bus = bus_match.group(1)
-                gpu_bus = f"{base_bus}.0" 
-                
-                if gpu_bus in gpu_map:
-                    id_match = re.search(r'\[([0-9a-fA-F]{4}:[0-9a-fA-F]{4})\]', line)
-                    if id_match:
-                        gpu_map[gpu_bus].audio_id = id_match.group(1)
-                        gpu_map[gpu_bus].audio_desc = line[len(bus_match.group(0)):].strip()
-
-    return sorted(list(gpu_map.values()), key=lambda x: x.pci_bus)
-
-def select_target_gpu(devices: list[VFIODevice]) -> list[str]:
-    """Provides an interactive UI for the administrator to isolate a specific GPU."""
-    if not devices:
-        bail("No VGA/3D controllers detected on this system.")
-
-    table = Table(title="Available Graphics Processing Units", show_header=True, header_style="bold magenta")
-    table.add_column("Opt", justify="center", style="cyan")
-    table.add_column("PCI Bus", style="dim")
-    table.add_column("IOMMU", justify="center", style="bold red")
-    table.add_column("Video Controller & ID", style="green")
-    table.add_column("Companion Audio & ID", style="yellow")
-
-    for idx, dev in enumerate(devices):
-        v_str = f"{dev.video_desc} [bold]({dev.video_id})[/bold]"
-        a_str = f"{dev.audio_desc} [bold]({dev.audio_id})[/bold]" if dev.audio_id else "None"
-        table.add_row(str(idx + 1), dev.pci_bus, dev.iommu_group, v_str, a_str)
-
-    console.print(table)
-    choice = IntPrompt.ask("\n[bold cyan]Select the discrete GPU to isolate for VFIO[/bold cyan]", choices=[str(i+1) for i in range(len(devices))])
-    
-    selected = devices[choice - 1]
-    ids = [selected.video_id]
-    if selected.audio_id:
-        ids.append(selected.audio_id)
-        
-    console.print(f"[bold green]  ✓ Selected isolation IDs: {','.join(ids)} (IOMMU Group {selected.iommu_group})[/bold green]")
-    return ids
-
-# ==============================================================================
-# BOOTLOADER INJECTION: SYSTEMD-BOOT (JSON NATIVE + UKI AWARE)
-# ==============================================================================
-def resolve_boot_path() -> Path:
-    """Dynamically resolves the XBOOTLDR or ESP path via systemd 260 bootctl."""
+def state_load() -> dict:
     try:
-        res = subprocess.run(["bootctl", "-x"], capture_output=True, text=True, check=True)
-        return Path(res.stdout.strip())
-    except Exception:
-        pass
+        data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {"schema": STATE_SCHEMA}
+    return data if isinstance(data, dict) else {"schema": STATE_SCHEMA}
 
-    try:
-        res = subprocess.run(["bootctl", "-p"], capture_output=True, text=True, check=True)
-        return Path(res.stdout.strip())
-    except Exception:
-        console.print("[yellow]  ⚠ bootctl path resolution failed entirely. Falling back to legacy /boot.[/yellow]")
-        return Path("/boot")
 
-def get_systemd_boot_target() -> tuple[Path, str, str]:
-    """
-    Uses JSON output to locate the active entry.
-    Returns: (File Path, Boot Loader Specification Type, Baked Options String)
-    """
-    console.print("  [cyan]Querying systemd-boot EFI payload data...[/cyan]")
-    
-    try:
-        res = subprocess.run(["bootctl", "list", "--json=short"], capture_output=True, text=True, check=True)
-        entries = json.loads(res.stdout)
-        
-        for entry in entries:
-            if entry.get("is_default") or entry.get("is_selected"):
-                source_path = entry.get("source")
-                entry_type = entry.get("type", "Type #1")
-                options = entry.get("options", "")
-                
-                if source_path and Path(source_path).exists():
-                    return Path(source_path), entry_type, options
-                    
-    except Exception as e:
-        console.print(f"[yellow]  ⚠ bootctl JSON query failed: {e}. Attempting dynamic fallback path resolution.[/yellow]")
-
-    boot_dir = resolve_boot_path()
-    entries_dir = boot_dir / "loader" / "entries"
-    
-    for name in ["arch-linux.conf", "arch.conf"]:
-        candidate = entries_dir / name
-        if candidate.exists():
-            return candidate, "Type #1", ""
-
-    bail("Could not dynamically resolve the target boot entry or configuration.")
-
-def generate_parameter_string(current_opts: list[str], targets: dict[str, str], blacklist_set: set[str]) -> str:
-    """Intelligently merges kernel parameters without destroying existing comma-separated values."""
-    new_opts: list[str] = []
-    
-    # Track these specific parameters to safely merge comma-separated values
-    merged_params: dict[str, set[str]] = {
-        "intel_iommu": set(),
-        "amd_iommu": set(),
-        "iommu": set(),
-        "vfio-pci.ids": set(),
-        "module_blacklist": set(),
-        "modprobe.blacklist": set()
-    }
-    
-    # 1. Parse current cmdline
-    for opt in current_opts:
-        if "=" in opt:
-            k, v = opt.split("=", 1)
-            norm_k = k.replace("vfio_pci", "vfio-pci")
-            if norm_k in merged_params:
-                merged_params[norm_k].update(filter(None, v.split(",")))
-            else:
-                new_opts.append(opt)
-        else:
-            norm_opt = opt.replace("vfio_pci", "vfio-pci")
-            if norm_opt in merged_params:
-                continue # Strip malformed standalone keys
-            new_opts.append(opt)
-            
-    # 2. Merge our target values natively into the sets
-    for k, v in targets.items():
-        norm_k = k.replace("vfio_pci", "vfio-pci")
-        if norm_k in merged_params:
-            merged_params[norm_k].update(filter(None, str(v).split(",")))
-        else:
-            new_opts.append(f"{k}={v}")
-            
-    # 3. Explicitly apply the blacklist
-    merged_params["module_blacklist"].update(blacklist_set)
-    
-    # 4. Cross-vendor pollution cleanup (The logic you noticed!)
-    # If we are currently on Intel, scrub out leftover AMD flags from previous motherboard, and vice versa.
-    cpu_flag = get_cpu_iommu_flag()
-    if cpu_flag == "intel_iommu":
-        merged_params["amd_iommu"].clear()
-    elif cpu_flag == "amd_iommu":
-        merged_params["intel_iommu"].clear()
-        
-    # 5. Reconstruct
-    for k, vals in merged_params.items():
-        if vals:
-            new_opts.append(f"{k}={','.join(sorted(vals))}")
-            
-    return " ".join(new_opts)
-
-def inject_bootloader_parameters(vfio_ids: list[str]) -> None:
-    """Safely injects kernel parameters, strictly preventing volatile pollution."""
-    target_path, entry_type, baked_options = get_systemd_boot_target()
-    cpu_flag = get_cpu_iommu_flag()
-    id_str = ",".join(vfio_ids)
-    
-    targets = {cpu_flag: "on", "iommu": "pt", "vfio-pci.ids": id_str}
-    blacklist_set = {"nouveau", "nvidia", "nvidia_drm", "nvidia_modeset", "nvidia_uvm"}
-
-    # BRANCH A: Standard Boot Loader Spec Type #1 (.conf)
-    if "Type #1" in entry_type or target_path.suffix == ".conf":
-        console.print(f"\n[bold blue]==>[/bold blue] [bold]Targeting Standard Config:[/bold] {target_path.name}")
-        content = target_path.read_text(encoding="utf-8")
-        opt_match = re.search(r'^options\s+(.*)', content, re.MULTILINE)
-        
-        if not opt_match:
-            bail(f"Could not locate the 'options' line in {target_path.name}.")
-            
-        current_opts = shlex.split(opt_match.group(1), posix=False)
-        updated_opts_line = "options " + generate_parameter_string(current_opts, targets, blacklist_set)
-        new_content = content[:opt_match.start()] + updated_opts_line + content[opt_match.end():]
-        
-        if atomic_write(target_path, new_content):
-            console.print(f"[bold green]  ✓ Injected parameters into {target_path.name}.[/bold green]")
-        else:
-            console.print("[bold green]  ✓ Kernel parameters already optimal in config.[/bold green]")
-
-    # BRANCH B: Boot Loader Spec Type #2 (Unified Kernel Image)
-    else:
-        console.print(f"\n[bold blue]==>[/bold blue] [bold]UKI Detected (Type #2):[/bold] {target_path.name}")
-        console.print("  [cyan]Pivoting parameter injection to /etc/kernel/cmdline for mkinitcpio compilation...[/cyan]")
-        
-        cmdline_path = Path("/etc/kernel/cmdline")
-        current_opts = []
-        
-        # 1. Respect explicit static configuration if it exists
-        if cmdline_path.exists():
-            content = cmdline_path.read_text(encoding="utf-8").strip()
-            current_opts = shlex.split(content, posix=False)
-            
-        # 2. Inherit safely from the compiled `.efi` payload binary
-        elif baked_options:
-            console.print("  [cyan]No static cmdline found. Extracting baseline parameters directly from active UKI binary payload...[/cyan]")
-            current_opts = shlex.split(baked_options, posix=False)
-            
-        # 3. Last resort fallback to /proc/cmdline (with explicit filtering of dynamic bootloader flags)
-        else:
-            console.print("  [yellow]⚠ No static cmdline or UKI payload options found. Attempting safe fallback via /proc/cmdline...[/yellow]")
-            proc_content = Path("/proc/cmdline").read_text(encoding="utf-8").strip()
-            
-            volatile_flags = {"single", "1", "s", "S", "rescue", "emergency", "nomodeset", "systemd.unit=rescue.target", "systemd.unit=emergency.target"}
-            raw_opts = shlex.split(proc_content, posix=False)
-            
-            # Prevent double-initrd loading or invalid BOOT_IMAGE mappings in generated UKIs
-            for opt in raw_opts:
-                if opt in volatile_flags:
-                    continue
-                if opt.startswith("BOOT_IMAGE=") or opt.startswith("initrd="):
-                    continue
-                current_opts.append(opt)
-            
-        updated_opts = generate_parameter_string(current_opts, targets, blacklist_set)
-        if atomic_write(cmdline_path, updated_opts + "\n"):
-            console.print(f"[bold green]  ✓ Injected persistent parameters safely into /etc/kernel/cmdline.[/bold green]")
-        else:
-            console.print("[bold green]  ✓ cmdline already perfectly optimized for UKI generation.[/bold green]")
-
-# ==============================================================================
-# INITRAMFS MANIPULATION 
-# ==============================================================================
-def process_mkinitcpio_file(mk_path: Path) -> None:
-    """Parses, normalizes, and injects VFIO requirements into an mkinitcpio config file."""
-    if not mk_path.exists():
+def state_merge(**kv: object) -> None:
+    if DRY_RUN:
         return
+    data = state_load()
+    data.update(kv)
+    data["schema"] = STATE_SCHEMA
+    data["updated"] = datetime.now(UTC).isoformat(timespec="seconds")
+    STATE_DIR.mkdir(parents=True, exist_ok=True, mode=0o755)
+    atomic_write(STATE_FILE, json.dumps(data, indent=2, sort_keys=True) + "\n", mode=0o644)
 
-    original_content = mk_path.read_text(encoding="utf-8")
-    
-    def patch_modules(match: re.Match) -> str:
-        mods = shlex.split(match.group(1), comments=True, posix=True)
-        for req in ['vfio_pci', 'vfio', 'vfio_iommu_type1']:
-            if req not in mods:
-                mods.append(req)
-        return f"MODULES=({' '.join(mods)})"
-
-    def patch_hooks(match: re.Match) -> str:
-        hooks = shlex.split(match.group(1), comments=True, posix=True)
-        if 'modconf' not in hooks:
-            if 'kms' in hooks:
-                hooks.insert(hooks.index('kms'), 'modconf')
-            else:
-                hooks.append('modconf')
-        else:
-            if 'kms' in hooks and hooks.index('modconf') > hooks.index('kms'):
-                hooks.remove('modconf')
-                hooks.insert(hooks.index('kms'), 'modconf')
-        return f"HOOKS=({' '.join(hooks)})"
-
-    content = re.sub(r'^MODULES=\(([^)]*)\)', patch_modules, original_content, flags=re.MULTILINE)
-    content = re.sub(r'^HOOKS=\(([^)]*)\)', patch_hooks, content, flags=re.MULTILINE)
-
-    if content != original_content:
-        if atomic_write(mk_path, content):
-            console.print(f"[bold green]  ✓ Enforced VFIO constraints in {mk_path.name}[/bold green]")
-    else:
-        console.print(f"[dim green]  ✓ Config {mk_path.name} is already optimal[/dim green]")
-
-def configure_mkinitcpio() -> None:
-    """Coordinates initramfs hardening across the primary config and all active drop-ins."""
-    console.print("\n[bold blue]==>[/bold blue] [bold]Hardening initramfs via mkinitcpio.conf & drop-ins...[/bold]")
-    
-    main_conf = Path("/etc/mkinitcpio.conf")
-    if not main_conf.exists():
-        bail(f"{main_conf} does not exist. Ensure mkinitcpio is installed.")
-
-    process_mkinitcpio_file(main_conf)
-
-    conf_d = Path("/etc/mkinitcpio.conf.d")
-    if conf_d.exists() and conf_d.is_dir():
-        for drop_in in sorted(conf_d.glob("*.conf")):
-            process_mkinitcpio_file(drop_in)
 
 # ==============================================================================
-# MODPROBE KERNEL RULES
+# PCI / IOMMU TOPOLOGY  (sysfs is the source of truth)
 # ==============================================================================
-def write_modprobe_rules(vfio_ids: list[str]) -> None:
-    """Generates the absolute Ring 0 isolation rules, merging seamlessly with existing VFIO devices."""
-    vfio_conf = Path("/etc/modprobe.d/vfio.conf")
-    console.print("\n[bold blue]==>[/bold blue] [bold]Generating static kernel driver rules...[/bold]")
-    
-    content = vfio_conf.read_text(encoding="utf-8") if vfio_conf.exists() else ""
-    
-    # 1. Merge VFIO IDs safely to prevent destroying non-GPU passthrough
-    existing_ids = set()
-    id_match = re.search(r'^options\s+vfio-pci\s+ids=([0-9a-fA-F:,]+)', content, re.MULTILINE)
-    if id_match:
-        existing_ids.update(filter(None, id_match.group(1).split(",")))
-        
-    existing_ids.update(vfio_ids)
-    id_str = ",".join(sorted(existing_ids))
-    
-    if re.search(r'^options\s+vfio-pci\s+ids=.*', content, re.MULTILINE):
-        content = re.sub(r'^options\s+vfio-pci\s+ids=.*', f'options vfio-pci ids={id_str}', content, flags=re.MULTILINE)
-    else:
-        content += f"\noptions vfio-pci ids={id_str}\n"
+@dataclass(frozen=True, slots=True)
+class PciDevice:
+    addr: str
+    vendor: str
+    device: str
+    klass: str
+    driver: str | None
+    iommu_group: str | None
+    boot_vga: bool
+    label: str
 
-    targets = ["nvidia", "nvidia_drm", "nvidia_modeset", "nvidia_uvm", "nouveau"]
-    for sd in targets:
-        sd_line = f"softdep {sd} pre: vfio-pci"
-        if not re.search(rf'^softdep\s+{sd}\s+pre:\s+vfio-pci', content, re.MULTILINE):
-            content += f"{sd_line}\n"
+    @property
+    def ids(self) -> str:
+        return f"{self.vendor}:{self.device}"
 
-        bl_line = f"blacklist {sd}"
-        if not re.search(rf'^blacklist\s+{sd}', content, re.MULTILINE):
-            content += f"{bl_line}\n"
+    @property
+    def slot(self) -> str:
+        return self.addr.rsplit(".", 1)[0]
 
-    content = re.sub(r'\n{3,}', '\n\n', content).strip() + "\n"
-    
-    if atomic_write(vfio_conf, content):
-        console.print("[bold green]  ✓ Modprobe isolation dependencies bound securely.[/bold green]")
-    else:
-        console.print("[bold green]  ✓ VFIO modprobe isolation rules are already perfect.[/bold green]")
+    @property
+    def klass4(self) -> str:
+        return self.klass[:4]
+
+    @property
+    def klass_name(self) -> str:
+        return CLASS_NAMES.get(self.klass4, f"class {self.klass4}")
+
+    @property
+    def nodedev(self) -> str:
+        return "pci_" + self.addr.replace(":", "_").replace(".", "_")
+
+
+def _read(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def lspci_labels() -> dict[str, str]:
+    """Vendor/device marketing strings, keyed by full domain address."""
+    if shutil.which("lspci") is None:
+        return {}
+    res = run(["lspci", "-Dmm"], timeout=60)
+    labels: dict[str, str] = {}
+    for line in res.out.splitlines():
+        try:
+            fields = shlex.split(line)
+        except ValueError:
+            continue
+        if len(fields) >= 4:
+            labels[fields[0]] = f"{fields[2]} {fields[3]}"
+    return labels
+
+
+def enumerate_pci() -> list[PciDevice]:
+    labels = lspci_labels()
+    devices: list[PciDevice] = []
+    for node in sorted(SYS_PCI.iterdir()):
+        vendor = _read(node / "vendor").removeprefix("0x")
+        device = _read(node / "device").removeprefix("0x")
+        klass = _read(node / "class").removeprefix("0x")
+        if not vendor or not device or not klass:
+            continue
+        driver_link = node / "driver"
+        driver = driver_link.resolve().name if driver_link.is_symlink() else None
+        group_link = node / "iommu_group"
+        group = group_link.resolve().name if group_link.is_symlink() else None
+        devices.append(
+            PciDevice(
+                addr=node.name,
+                vendor=vendor,
+                device=device,
+                klass=klass,
+                driver=driver,
+                iommu_group=group,
+                boot_vga=_read(node / "boot_vga") == "1",
+                label=labels.get(node.name, "unknown device"),
+            )
+        )
+    return devices
+
+
+def group_members(devices: list[PciDevice], group: str | None) -> list[PciDevice]:
+    return [] if group is None else [d for d in devices if d.iommu_group == group]
+
+
+def iommu_active() -> bool:
+    root = Path("/sys/class/iommu")
+    return root.is_dir() and any(root.iterdir())
+
+
+def cpu_vendor() -> str:
+    text = Path("/proc/cpuinfo").read_text(encoding="utf-8")
+    if "GenuineIntel" in text:
+        return "intel"
+    if "AuthenticAMD" in text:
+        return "amd"
+    return "unknown"
+
 
 # ==============================================================================
-# MAIN EXECUTION
+# SELECTION
+# ==============================================================================
+@dataclass(slots=True)
+class Claim:
+    functions: list[PciDevice] = field(default_factory=list)
+    groups: set[str] = field(default_factory=set)
+
+    @property
+    def ids(self) -> list[str]:
+        return sorted({d.ids for d in self.functions})
+
+    @property
+    def addrs(self) -> list[str]:
+        return [d.addr for d in self.functions]
+
+
+def render_gpu_table(devices: list[PciDevice], slots: list[str]) -> None:
+    table = Table(title="Discrete graphics slots", header_style="bold magenta")
+    table.add_column("#", justify="center", style="cyan")
+    table.add_column("Slot", style="dim")
+    table.add_column("IOMMU", justify="center", style="bold red")
+    table.add_column("Functions", style="green")
+    table.add_column("Driver in use", style="yellow")
+    table.add_column("Flags")
+
+    for index, slot in enumerate(slots, start=1):
+        funcs = [d for d in devices if d.slot == slot]
+        primary = next((d for d in funcs if d.klass4 in GPU_CLASSES), funcs[0])
+        fn_lines = "\n".join(
+            f"{d.addr.split(':')[-1]} {d.klass_name} [{d.ids}] {d.label}" for d in funcs
+        )
+        drv_lines = "\n".join(d.driver or "-" for d in funcs)
+        flags = []
+        if primary.boot_vga:
+            flags.append("[bold red]boot_vga[/bold red]")
+        if any(d.driver == "vfio-pci" for d in funcs):
+            flags.append("[green]already vfio[/green]")
+        groups = sorted({d.iommu_group or "?" for d in funcs})
+        table.add_row(str(index), slot, ",".join(groups), fn_lines, drv_lines, " ".join(flags))
+    console.print(table)
+
+
+def audit_groups(devices: list[PciDevice], claim: Claim) -> None:
+    strangers: list[PciDevice] = []
+    for group in sorted(claim.groups):
+        for member in group_members(devices, group):
+            if member.addr in claim.addrs:
+                continue
+            if member.klass4 == "0604":  # bridges cannot be bound and do not need to be
+                continue
+            strangers.append(member)
+    if not strangers:
+        console.print("[bold green]  ok[/bold green] IOMMU groups are clean (no foreign endpoints).")
+        return
+    table = Table(title="ACS WARNING -- foreign endpoints share the target IOMMU group(s)",
+                  header_style="bold red")
+    table.add_column("Address")
+    table.add_column("Group", justify="center")
+    table.add_column("Class")
+    table.add_column("Driver")
+    table.add_column("Label")
+    for dev in strangers:
+        table.add_row(dev.addr, dev.iommu_group or "?", dev.klass_name, dev.driver or "-", dev.label)
+    console.print(table)
+    console.print(
+        "[yellow]Every endpoint in a group must be handed to the guest together. Move the card "
+        "to a CPU-attached x16 slot or use a board with real ACS. Do NOT use ACS-override "
+        "patches on a host that handles anything you care about.[/yellow]"
+    )
+    if not Confirm.ask("Continue despite the shared group?", default=False):
+        raise SystemExit(0)
+
+
+def audit_id_collisions(devices: list[PciDevice], claim: Claim) -> None:
+    collisions: list[PciDevice] = []
+    for dev in devices:
+        if dev.ids in claim.ids and dev.addr not in claim.addrs:
+            collisions.append(dev)
+    if not collisions:
+        console.print("[bold green]  ok[/bold green] No other PCI function matches the claimed IDs.")
+        return
+    table = Table(title="ID COLLISION -- vfio-pci ids= would also capture these",
+                  header_style="bold red")
+    table.add_column("Address")
+    table.add_column("IDs")
+    table.add_column("Class")
+    table.add_column("Driver")
+    table.add_column("Label")
+    for dev in collisions:
+        table.add_row(dev.addr, dev.ids, dev.klass_name, dev.driver or "-", dev.label)
+    console.print(table)
+    console.print(
+        "[yellow]'options vfio-pci ids=' matches by vendor:device, not by address. These "
+        "functions would be detached from the host at boot as well.[/yellow]\n"
+        "[yellow]For identical twin cards, bind by address instead:\n"
+        "  /etc/modprobe.d/arsonix-vfio.conf ->  (drop ids=)\n"
+        "  echo vfio-pci > /sys/bus/pci/devices/<addr>/driver_override  via a systemd unit,\n"
+        "  or use the 'driverctl set-override <addr> vfio-pci' persistence helper.[/yellow]"
+    )
+    if not Confirm.ask("Claim these IDs anyway?", default=False):
+        raise SystemExit(0)
+
+
+def select_claim(devices: list[PciDevice], want_slot: str | None) -> Claim:
+    console.print("\n[bold blue]==>[/bold blue] [bold]Probing PCI / IOMMU topology[/bold]")
+    if not iommu_active():
+        console.print(
+            "[yellow]  ! /sys/class/iommu is empty: the IOMMU is not active yet. Groups shown "
+            "below may be absent. This is normal on the first Phase 3 run.[/yellow]"
+        )
+    gpu_slots = sorted({d.slot for d in devices if d.klass4 in GPU_CLASSES})
+    if not gpu_slots:
+        bail("No VGA/3D/display controller found in sysfs.")
+    render_gpu_table(devices, gpu_slots)
+
+    if want_slot:
+        slot = want_slot if want_slot in gpu_slots else None
+        if slot is None:
+            bail(f"--slot {want_slot} is not a discrete graphics slot. Options: {gpu_slots}")
+    elif len(gpu_slots) == 1:
+        slot = gpu_slots[0]
+        console.print(f"[dim]Only one graphics slot present: {slot}[/dim]")
+    else:
+        index = IntPrompt.ask(
+            "\n[bold cyan]Slot to isolate for VFIO[/bold cyan]",
+            choices=[str(i + 1) for i in range(len(gpu_slots))],
+        )
+        slot = gpu_slots[index - 1]
+
+    funcs = [d for d in devices if d.slot == slot]
+    primary = next((d for d in funcs if d.klass4 in GPU_CLASSES), funcs[0])
+    if primary.boot_vga:
+        console.print(
+            Panel(
+                f"{slot} is the firmware boot VGA device. Isolating it leaves the host with no "
+                "console unless a second GPU (or serial/SSH) is available.",
+                title="boot_vga",
+                border_style="red",
+            )
+        )
+        if not Confirm.ask("Proceed and blind the host console?", default=False):
+            raise SystemExit(0)
+
+    claim = Claim(functions=funcs, groups={d.iommu_group for d in funcs if d.iommu_group})
+    console.print(
+        f"[bold green]  ok[/bold green] Claiming {len(funcs)} function(s) in slot {slot}: "
+        f"{', '.join(d.addr for d in funcs)}"
+    )
+    audit_groups(devices, claim)
+    audit_id_collisions(devices, claim)
+    return claim
+
+
+# ==============================================================================
+# KERNEL COMMAND LINE
+# ==============================================================================
+def desired_params(vendor: str, blacklist: set[str], ids: list[str], amd_force: bool,
+                   cmdline_ids: bool) -> dict[str, str]:
+    params: dict[str, str] = {"iommu": "pt"}
+    match vendor:
+        case "intel":
+            params["intel_iommu"] = "on"
+        case "amd":
+            if amd_force:
+                params["amd_iommu"] = "force_enable"
+        case _:
+            console.print("[yellow]  ! Unknown CPU vendor; emitting iommu=pt only.[/yellow]")
+    if blacklist:
+        params["module_blacklist"] = ",".join(sorted(blacklist))
+    if cmdline_ids and ids:
+        params["vfio-pci.ids"] = ",".join(sorted(ids))
+    return params
+
+
+def merge_cmdline(current: str, desired: dict[str, str], vendor: str) -> str:
+    """
+    Rebuild a kernel command line: keep every foreign token verbatim and in order,
+    own MANAGED_KEYS outright, honour the '--' init separator, drop volatile tokens.
+    """
+    try:
+        tokens = shlex.split(current, posix=False)
+    except ValueError:
+        tokens = current.split()
+    kept: list[str] = []
+    tail: list[str] = []
+    seen_sep = False
+    for token in tokens:
+        if token == "--":
+            seen_sep = True
+            continue
+        if seen_sep:
+            tail.append(token)
+            continue
+        if token in VOLATILE_TOKENS or token.startswith(VOLATILE_PREFIXES):
+            continue
+        key = token.split("=", 1)[0].replace("vfio_pci.", "vfio-pci.")
+        if key in MANAGED_KEYS:
+            continue
+        kept.append(token)
+
+    # Cross-vendor de-pollution: never leave the other vendor's IOMMU switch behind.
+    stale = "amd_iommu" if vendor == "intel" else "intel_iommu"
+    kept = [t for t in kept if not t.startswith(stale + "=")]
+
+    for key in MANAGED_KEYS:
+        if key in desired:
+            kept.append(f"{key}={desired[key]}")
+    if tail:
+        kept += ["--", *tail]
+    return " ".join(kept)
+
+
+# --- systemd-boot entry resolution -------------------------------------------
+@dataclass(frozen=True, slots=True)
+class BootEntry:
+    kind: str  # "type1" | "type2"
+    path: Path | None
+    options: str
+    ident: str
+
+
+def _pick(entry: dict, keys: tuple[str, ...]) -> object:
+    for key in keys:
+        if key in entry and entry[key] not in (None, ""):
+            return entry[key]
+    return None
+
+
+def boot_root() -> Path:
+    for flag in ("-x", "-p"):
+        res = run(["bootctl", flag], timeout=30)
+        if res.ok and res.out:
+            candidate = Path(res.out.splitlines()[0].strip())
+            if candidate.is_dir():
+                return candidate
+    bail("bootctl cannot resolve $BOOT/ESP. Is systemd-boot installed (bootctl status)?")
+
+
+def parse_bootctl_text() -> list[dict]:
+    """Deterministic secondary parser for 'bootctl list' key: value blocks."""
+    res = run(["bootctl", "list", "--no-pager"], timeout=30)
+    entries: list[dict] = []
+    current: dict = {}
+    for raw in res.out.splitlines():
+        if not raw.strip():
+            if current:
+                entries.append(current)
+                current = {}
+            continue
+        match = re.match(r"^\s{2,}([a-z\- ]+):\s*(.*)$", raw)
+        if match:
+            current[match.group(1).strip()] = match.group(2).strip()
+    if current:
+        entries.append(current)
+    normalised = []
+    for entry in entries:
+        kind = "type2" if "Type #2" in entry.get("type", "") else "type1"
+        normalised.append(
+            {
+                "type": kind,
+                "source": entry.get("source", ""),
+                "options": entry.get("options", ""),
+                "id": entry.get("id", ""),
+                "isDefault": "(default)" in entry.get("title", ""),
+                "isSelected": "(selected)" in entry.get("title", ""),
+            }
+        )
+    return normalised
+
+
+def resolve_boot_entry() -> BootEntry:
+    console.print("\n[bold blue]==>[/bold blue] [bold]Resolving the active boot entry[/bold]")
+    raw: list[dict] = []
+    res = run(["bootctl", "list", "--json=short"], timeout=30)
+    if res.ok and res.out.startswith(("[", "{")):
+        try:
+            parsed = json.loads(res.out)
+            raw = parsed if isinstance(parsed, list) else [parsed]
+        except json.JSONDecodeError:
+            raw = []
+    if not raw:
+        console.print("[yellow]  ! JSON unavailable; parsing bootctl text output.[/yellow]")
+        raw = parse_bootctl_text()
+    if not raw:
+        bail("bootctl reported no boot entries.")
+
+    def score(entry: dict) -> int:
+        sel = bool(_pick(entry, ("isSelected", "is_selected")))
+        dfl = bool(_pick(entry, ("isDefault", "is_default")))
+        return (2 if sel else 0) + (1 if dfl else 0)
+
+    candidates = [e for e in raw if str(_pick(e, ("type",)) or "").startswith("type")]
+    if not candidates:
+        bail("bootctl returned only automatic entries; no Type #1/#2 entry to patch.")
+    best = max(candidates, key=score)
+    kind = "type2" if "2" in str(_pick(best, ("type",))) else "type1"
+    path_str = _pick(best, ("path", "source", "sourcePath"))
+    ident = str(_pick(best, ("id",)) or "?")
+    path: Path | None = None
+    if isinstance(path_str, str):
+        # bootctl prints paths like /efi//loader/entries/arch.conf
+        path = Path(re.sub(r"/{2,}", "/", path_str))
+    if path is None or not path.exists():
+        guess = boot_root() / "loader" / "entries" / ident
+        path = guess if guess.exists() else None
+    options = str(_pick(best, ("options",)) or "")
+    console.print(
+        f"[bold green]  ok[/bold green] {kind} entry '{ident}'"
+        + (f" -> {path}" if path else " (no on-disk snippet)")
+    )
+    return BootEntry(kind, path, options, ident)
+
+
+def patch_type1(entry: BootEntry, desired: dict[str, str], vendor: str) -> None:
+    if entry.path is None or entry.path.suffix != ".conf":
+        bail(f"Type #1 entry '{entry.ident}' has no writable .conf snippet.")
+    content = entry.path.read_text(encoding="utf-8")
+    match = re.search(r"^(options[ \t]+)(.*)$", content, re.MULTILINE)
+    if match:
+        merged = merge_cmdline(match.group(2), desired, vendor)
+        new_content = content[: match.start()] + match.group(1) + merged + content[match.end():]
+    else:
+        merged = merge_cmdline("", desired, vendor)
+        new_content = content.rstrip("\n") + f"\noptions {merged}\n"
+    if atomic_write(entry.path, new_content):
+        console.print(f"[green]  ~[/green] {entry.path}")
+        console.print(f"[dim]    options {merged}[/dim]")
+    else:
+        console.print(f"[bold green]  ok[/bold green] {entry.path} already convergent.")
+
+
+def depollute_cmdline_dropins(keep: Path | None) -> None:
+    if not CMDLINE_D.is_dir():
+        return
+    for conf in sorted(CMDLINE_D.glob("*.conf")):
+        if keep is not None and conf == keep:
+            continue
+        text = conf.read_text(encoding="utf-8")
+        tokens = text.split()
+        cleaned = [
+            t for t in tokens
+            if t.split("=", 1)[0].replace("vfio_pci.", "vfio-pci.") not in MANAGED_KEYS
+        ]
+        if len(cleaned) != len(tokens):
+            atomic_write(conf, (" ".join(cleaned) + "\n") if cleaned else "\n")
+            console.print(f"[green]  ~[/green] de-polluted {conf}")
+
+
+def patch_type2(entry: BootEntry, desired: dict[str, str], vendor: str) -> None:
+    """
+    Unified Kernel Image: the command line is baked at build time. Own exactly one
+    source file so mkinitcpio/ukify cannot concatenate duplicate managed keys.
+    """
+    dropins = sorted(CMDLINE_D.glob("*.conf")) if CMDLINE_D.is_dir() else []
+    if KERNEL_CMDLINE.is_file():
+        target, seed = KERNEL_CMDLINE, KERNEL_CMDLINE.read_text(encoding="utf-8")
+        depollute_cmdline_dropins(None)
+    elif dropins:
+        target = CMDLINE_D_DROPIN
+        seed = " ".join(f.read_text(encoding="utf-8").strip() for f in dropins)
+        depollute_cmdline_dropins(CMDLINE_D_DROPIN)
+    else:
+        target = KERNEL_CMDLINE
+        seed = entry.options
+        if not seed.strip():
+            console.print(
+                "[yellow]  ! No /etc/kernel/cmdline and no baked options; seeding from "
+                "/proc/cmdline with volatile tokens filtered.[/yellow]"
+            )
+            seed = Path("/proc/cmdline").read_text(encoding="utf-8")
+
+    merged = merge_cmdline(seed, desired, vendor)
+    if target == CMDLINE_D_DROPIN:
+        # Only our managed keys live in the drop-in; foreign tokens stay where they were.
+        merged = " ".join(f"{k}={desired[k]}" for k in MANAGED_KEYS if k in desired)
+    if atomic_write(target, merged + "\n"):
+        console.print(f"[green]  ~[/green] {target}")
+        console.print(f"[dim]    {merged}[/dim]")
+    else:
+        console.print(f"[bold green]  ok[/bold green] {target} already convergent.")
+
+
+def inject_cmdline(claim: Claim, vendor: str, blacklist: set[str], amd_force: bool,
+                   cmdline_ids: bool) -> None:
+    entry = resolve_boot_entry()
+    desired = desired_params(vendor, blacklist, claim.ids, amd_force, cmdline_ids)
+    console.print(
+        "[dim]managed: " + " ".join(f"{k}={v}" for k, v in desired.items()) + "[/dim]"
+    )
+    if entry.kind == "type1":
+        patch_type1(entry, desired, vendor)
+    else:
+        patch_type2(entry, desired, vendor)
+
+
+# ==============================================================================
+# INITRAMFS
+# ==============================================================================
+def find_array(content: str, name: str) -> tuple[int, int, str] | None:
+    match = re.search(rf"^[ \t]*{re.escape(name)}[ \t]*\+?=[ \t]*\(", content, re.MULTILINE)
+    if not match:
+        return None
+    index, depth = match.end(), 1
+    while index < len(content) and depth:
+        if content[index] == "(":
+            depth += 1
+        elif content[index] == ")":
+            depth -= 1
+        index += 1
+    return match.start(), index, content[match.end(): index - 1]
+
+
+def patch_hooks(path: Path) -> None:
+    """modconf must precede kms so /etc/modprobe.d lands before DRM drivers bind."""
+    if not path.is_file():
+        return
+    content = path.read_text(encoding="utf-8")
+    found = find_array(content, "HOOKS")
+    if found is None:
+        return
+    start, end, body = found
+    try:
+        hooks = shlex.split(body, comments=True)
+    except ValueError:
+        console.print(f"[yellow]  ! Unparsable HOOKS array in {path}; left untouched.[/yellow]")
+        return
+    original = list(hooks)
+    if "modconf" in hooks:
+        if "kms" in hooks and hooks.index("modconf") > hooks.index("kms"):
+            hooks.remove("modconf")
+            hooks.insert(hooks.index("kms"), "modconf")
+    else:
+        anchor = hooks.index("kms") if "kms" in hooks else len(hooks)
+        hooks.insert(anchor, "modconf")
+    if hooks == original:
+        console.print(f"[bold green]  ok[/bold green] HOOKS order already correct in {path.name}.")
+        return
+    new_content = content[:start] + "HOOKS=(" + " ".join(hooks) + ")" + content[end:]
+    if atomic_write(path, new_content):
+        console.print(f"[green]  ~[/green] {path}: HOOKS=({' '.join(hooks)})")
+
+
+def write_modules_dropin(main_conf: Path) -> None:
+    wanted = ["vfio_pci", "vfio", "vfio_iommu_type1"]
+    existing: list[str] = []
+    if main_conf.is_file():
+        found = find_array(main_conf.read_text(encoding="utf-8"), "MODULES")
+        if found:
+            try:
+                existing = shlex.split(found[2], comments=True)
+            except ValueError:
+                existing = []
+    missing = [m for m in wanted if m not in existing]
+    if not missing:
+        console.print("[bold green]  ok[/bold green] vfio modules already in the main MODULES array.")
+        MKINITCPIO_DROPIN.unlink(missing_ok=True)
+        return
+    payload = (
+        "# Managed by Arsonix (Phase 3). VFIO must exist in early userspace so the\n"
+        "# stub driver can claim the GPU before any DRM driver probes it.\n"
+        f"MODULES+=({' '.join(missing)})\n"
+    )
+    if atomic_write(MKINITCPIO_DROPIN, payload):
+        console.print(f"[green]  ~[/green] {MKINITCPIO_DROPIN}")
+    else:
+        console.print(f"[bold green]  ok[/bold green] {MKINITCPIO_DROPIN} already convergent.")
+
+
+def configure_initramfs() -> None:
+    console.print("\n[bold blue]==>[/bold blue] [bold]Hardening early userspace[/bold]")
+    if shutil.which("mkinitcpio") is None:
+        console.print("[yellow]  ! mkinitcpio absent; skipping mkinitcpio configuration.[/yellow]")
+        return
+    if not MKINITCPIO_CONF.is_file():
+        bail("/etc/mkinitcpio.conf missing while the mkinitcpio binary exists.")
+    MKINITCPIO_DROPIN_DIR.mkdir(parents=True, exist_ok=True, mode=0o755)
+    write_modules_dropin(MKINITCPIO_CONF)
+    patch_hooks(MKINITCPIO_CONF)
+    for drop_in in sorted(MKINITCPIO_DROPIN_DIR.glob("*.conf")):
+        if drop_in != MKINITCPIO_DROPIN:
+            patch_hooks(drop_in)
+
+
+def regenerate_initramfs() -> None:
+    console.print("\n[bold blue]==>[/bold blue] [bold]Rebuilding initramfs / UKI[/bold]")
+    if DRY_RUN:
+        console.print("[magenta]  [dry-run] skipping regeneration.[/magenta]")
+        return
+    if shutil.which("mkinitcpio") and any(Path("/etc/mkinitcpio.d").glob("*.preset")):
+        argv = ["mkinitcpio", "-P"]
+    elif shutil.which("dracut"):
+        argv = ["dracut", "--regenerate-all", "--force"]
+    elif shutil.which("kernel-install"):
+        argv = ["kernel-install", "add-all"]
+    else:
+        bail("No initramfs generator found (mkinitcpio / dracut / kernel-install).")
+    console.print(f"  [cyan]{' '.join(argv)}[/cyan]")
+    proc = subprocess.run(argv, check=False, stdin=subprocess.DEVNULL)
+    if proc.returncode != 0:
+        bail(f"{argv[0]} failed with rc={proc.returncode}. The host is NOT safe to reboot yet.")
+    console.print("[bold green]  ok[/bold green] Images regenerated.")
+
+
+# ==============================================================================
+# MODPROBE RULES
+# ==============================================================================
+def conflicting_modules(devices: list[PciDevice], claim: Claim) -> tuple[set[str], set[str]]:
+    """Return (softdep_modules, blacklist_modules)."""
+    softdeps: set[str] = set()
+    for dev in claim.functions:
+        if dev.driver and dev.driver not in {"vfio-pci", "pcieport"}:
+            softdeps.add(dev.driver.replace("-", "_"))
+        softdeps.update(VENDOR_DRIVERS.get(dev.vendor, []) if dev.klass4 in GPU_CLASSES else [])
+        if dev.klass4 == "0403":
+            softdeps.add("snd_hda_intel")
+        if dev.klass4 == "0c03":
+            softdeps.add("xhci_pci")
+        if dev.klass4 == "0c80":
+            softdeps.add("i2c_designware_pci")
+
+    survivors = {
+        d.vendor for d in devices
+        if d.klass4 in GPU_CLASSES and d.addr not in claim.addrs
+    }
+    blacklist: set[str] = set()
+    for dev in claim.functions:
+        if dev.klass4 not in GPU_CLASSES:
+            continue
+        if dev.vendor in survivors:
+            console.print(
+                f"[yellow]  ! Another {dev.vendor} GPU stays on the host; its driver will NOT "
+                "be blacklisted (softdep ordering only).[/yellow]"
+            )
+            continue
+        blacklist.update(VENDOR_DRIVERS.get(dev.vendor, []))
+    blacklist -= NEVER_BLACKLIST
+    softdeps -= {"vfio_pci"}
+    return softdeps, blacklist
+
+
+def audit_foreign_modprobe() -> None:
+    """Two 'options vfio-pci ids=' lines in modprobe.d do not merge -- they fight."""
+    offenders: list[Path] = []
+    for directory in (Path("/etc/modprobe.d"), Path("/run/modprobe.d"), Path("/usr/lib/modprobe.d")):
+        if not directory.is_dir():
+            continue
+        for conf in sorted(directory.glob("*.conf")):
+            if conf == MODPROBE_FILE:
+                continue
+            text = conf.read_text(encoding="utf-8", errors="replace")
+            if re.search(r"^[ \t]*options[ \t]+vfio[-_]pci\b", text, re.MULTILINE):
+                offenders.append(conf)
+    if not offenders:
+        return
+    console.print(
+        Panel(
+            "Other modprobe.d files already set 'options vfio-pci':\n  "
+            + "\n  ".join(str(p) for p in offenders)
+            + "\n\nkmod concatenates every matching options line; a second ids= assignment "
+            "overwrites the first array slot instead of merging. Consolidate into "
+            f"{MODPROBE_FILE} or the claim will be non-deterministic.",
+            title="modprobe.d conflict",
+            border_style="yellow",
+        )
+    )
+
+
+def write_modprobe_rules(claim: Claim, softdeps: set[str], blacklist: set[str]) -> None:
+    console.print("\n[bold blue]==>[/bold blue] [bold]Writing static driver-binding rules[/bold]")
+    audit_foreign_modprobe()
+    lines = [
+        "# Managed by Arsonix (Phase 3). Regenerated on every run -- edit the pipeline,",
+        "# not this file. Single source of truth for the VFIO claim.",
+        "#",
+        "# Claimed functions:",
+    ]
+    lines += [f"#   {d.addr}  {d.ids}  {d.klass_name}  {d.label}" for d in claim.functions]
+    lines.append("")
+    lines.append(f"options vfio-pci ids={','.join(claim.ids)}")
+    lines.append("")
+    for module in sorted(softdeps):
+        lines.append(f"softdep {module} pre: vfio-pci")
+    if blacklist:
+        lines.append("")
+        for module in sorted(blacklist):
+            lines.append(f"blacklist {module}")
+    payload = "\n".join(lines) + "\n"
+    if atomic_write(MODPROBE_FILE, payload):
+        console.print(f"[green]  ~[/green] {MODPROBE_FILE}")
+    else:
+        console.print(f"[bold green]  ok[/bold green] {MODPROBE_FILE} already convergent.")
+    console.print(f"[dim]    ids={','.join(claim.ids)}[/dim]")
+    console.print(f"[dim]    softdep: {', '.join(sorted(softdeps)) or 'none'}[/dim]")
+    console.print(f"[dim]    blacklist: {', '.join(sorted(blacklist)) or 'none'}[/dim]")
+
+
+# ==============================================================================
+# MAIN
 # ==============================================================================
 def main() -> None:
-    console.clear()
-    console.print(Panel("[bold green]KVM GPU Passthrough: Phase 3[/bold green]\nTarget: VFIO Isolation & Host Kernel Configuration", expand=False))
-    
-    try:
-        devices = probe_gpus()
-        target_ids = select_target_gpu(devices)
-        
-        inject_bootloader_parameters(target_ids)
-        configure_mkinitcpio()
-        write_modprobe_rules(target_ids)
-        
-        console.print("\n[bold blue]==>[/bold blue] [bold]Compiling Initramfs Environment (mkinitcpio -P)...[/bold]")
-        subprocess.run(["mkinitcpio", "-P"], check=True)
-        
-        console.print("\n[bold green]=== PHASE 3 COMPLETE ===[/bold green]")
-        console.print("The host kernel is now structurally programmed to drop the GPU at boot.")
-        console.print(Panel("ACTION REQUIRED: Reboot your system now. The isolation takes effect at Ring 0 during startup.", border_style="yellow"))
+    global DRY_RUN
+    parser = argparse.ArgumentParser(description="Arsonix Phase 3: VFIO isolation")
+    parser.add_argument("--slot", help="pre-select a PCI slot, e.g. 0000:01:00")
+    parser.add_argument("--dry-run", action="store_true", help="print changes, write nothing")
+    parser.add_argument("--cmdline-ids", action="store_true",
+                        help="also mirror vfio-pci.ids onto the kernel command line")
+    parser.add_argument("--amd-force-enable", action="store_true",
+                        help="emit amd_iommu=force_enable for boards with a broken IVRS")
+    parser.add_argument("--no-rebuild", action="store_true", help="skip initramfs regeneration")
+    args = parser.parse_args()
+    DRY_RUN = args.dry_run
 
-    except KeyboardInterrupt:
-        console.print("\n\n[bold red]⚠ Process interrupted by operator. Exiting cleanly.[/bold red]\n")
-        sys.exit(130)
+    console.clear()
+    console.print(
+        Panel(
+            "[bold green]Arsonix Phase 3 -- VFIO Isolation & Kernel Plumbing[/bold green]\n"
+            "sysfs topology / ACS audit / bootctl / mkinitcpio",
+            expand=False,
+            border_style="green",
+        )
+    )
+    if DRY_RUN:
+        console.print("[magenta]DRY RUN: no file will be modified.[/magenta]")
+
+    devices = enumerate_pci()
+    claim = select_claim(devices, args.slot)
+    vendor = cpu_vendor()
+    softdeps, blacklist = conflicting_modules(devices, claim)
+
+    inject_cmdline(claim, vendor, blacklist, args.amd_force_enable, args.cmdline_ids)
+    configure_initramfs()
+    write_modprobe_rules(claim, softdeps, blacklist)
+    if not args.no_rebuild:
+        regenerate_initramfs()
+
+    state_merge(
+        vfio_ids=claim.ids,
+        vfio_addrs=claim.addrs,
+        vfio_nodedevs=[d.nodedev for d in claim.functions],
+        vfio_groups=sorted(claim.groups),
+        vfio_slot=claim.functions[0].slot,
+        cpu_vendor=vendor,
+        phase_15="complete",
+    )
+
+    table = Table(title="Phase 3 -- VFIO claim", header_style="bold magenta")
+    table.add_column("Address", style="cyan")
+    table.add_column("IDs")
+    table.add_column("Class")
+    table.add_column("IOMMU", justify="center")
+    table.add_column("libvirt nodedev", style="dim")
+    for dev in claim.functions:
+        table.add_row(dev.addr, dev.ids, dev.klass_name, dev.iommu_group or "?", dev.nodedev)
+    console.print(table)
+
+    console.print("\n[bold green]=== PHASE 3 COMPLETE ===[/bold green]")
+    console.print(
+        Panel(
+            "REBOOT REQUIRED. Verify afterwards:\n"
+            "  cat /proc/cmdline | tr ' ' '\\n' | grep -E 'iommu|vfio'\n"
+            "  lspci -nnk -d " + claim.ids[0] + "     # Kernel driver in use: vfio-pci\n"
+            "  dmesg | grep -i -e DMAR -e IOMMU -e vfio",
+            border_style="yellow",
+        )
+    )
+
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        console.print("\n\n[bold red]! Interrupted by operator.[/bold red]\n")
+        raise SystemExit(130) from None

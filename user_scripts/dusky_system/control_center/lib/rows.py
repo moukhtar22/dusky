@@ -49,6 +49,7 @@ gi.require_version("Gio", "2.0")
 from gi.repository import Adw, Gdk, Gio, GLib, GObject, Gtk, Pango
 
 import lib.utility as utility
+import lib.service_manager as svc_mgr
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -57,8 +58,14 @@ log = logging.getLogger(__name__)
 
 
 # =============================================================================
-# CONSTANTS
+# CONSTANTS & HELPERS
 # =============================================================================
+class _SafeFormatDict(dict):
+    """Dictionary that returns the unformatted placeholder for missing format keys."""
+    def __missing__(self, key: str) -> str:
+        return f"{{{key}}}"
+
+
 DEFAULT_ICON: Final[str] = "utilities-terminal-symbolic"
 DEFAULT_INTERVAL_SECONDS: Final[int] = 5
 MONITOR_INTERVAL_SECONDS: Final[int] = 2
@@ -66,8 +73,8 @@ MIN_STEP_VALUE: Final[float] = 1e-9
 SLIDER_DEBOUNCE_MS: Final[int] = 150
 SUBPROCESS_TIMEOUT_SHORT: Final[int] = 2
 SUBPROCESS_TIMEOUT_LONG: Final[int] = 5
-ICON_PIXEL_SIZE: Final[int] = 28
-LABEL_MAX_WIDTH_CHARS: Final[int] = 16
+ICON_PIXEL_SIZE: Final[int] = 20
+LABEL_MAX_WIDTH_CHARS: Final[int] = 12
 
 # Bumped to 12 to prevent thread starvation on map storms
 EXECUTOR_MAX_WORKERS: Final[int] = 12
@@ -134,49 +141,6 @@ class _ExecutorManager:
 def _get_executor() -> ThreadPoolExecutor:
     """Module-level accessor for the singleton executor."""
     return _ExecutorManager().get()
-
-
-class _SettingsExecutorManager:
-    """
-    Dedicated single-worker executor for persisted setting writes.
-    This preserves submission order and prevents stale values from
-    winning when the same key is updated rapidly.
-    """
-    __slots__ = ("_executor", "_lock", "_is_shutdown")
-    _instance: _SettingsExecutorManager | None = None
-
-    def __new__(cls) -> _SettingsExecutorManager:
-        if cls._instance is None:
-            instance = super().__new__(cls)
-            instance._executor = None
-            instance._lock = threading.Lock()
-            instance._is_shutdown = False
-            atexit.register(instance.shutdown)
-            cls._instance = instance
-        return cls._instance
-
-    def get(self) -> ThreadPoolExecutor:
-        if self._executor is None or self._is_shutdown:
-            with self._lock:
-                if self._executor is None or self._is_shutdown:
-                    self._is_shutdown = False
-                    self._executor = ThreadPoolExecutor(
-                        max_workers=1,
-                        thread_name_prefix="dusky-settings-",
-                    )
-        return self._executor
-
-    def shutdown(self) -> None:
-        with self._lock:
-            if self._executor is not None and not self._is_shutdown:
-                log.debug("Shutting down settings write executor.")
-                self._is_shutdown = True
-                self._executor.shutdown(wait=False, cancel_futures=True)
-                self._executor = None
-
-
-def _get_settings_executor() -> ThreadPoolExecutor:
-    return _SettingsExecutorManager().get()
 
 
 # =============================================================================
@@ -274,6 +238,9 @@ class RowProperties(TypedDict, total=False):
     buttons: list[dict[str, Any]]
     hyprland_event: str
     mode: str
+    service: str
+    scope: str
+    unit: str
 
 
 class RowContext(TypedDict, total=False):
@@ -575,10 +542,7 @@ def _submit_task_safe(func: Callable[[], None], state: WidgetState) -> bool:
 
 def _submit_setting_save_safe(key: str, value: object) -> bool:
     try:
-        _get_settings_executor().submit(utility.save_setting, key, value)
-        return True
-    except RuntimeError:
-        return False
+        return utility.save_setting(key, value)  # type: ignore[arg-type]
     except Exception as e:
         log.error("Failed to submit setting save for %r: %s", key, e)
         return False
@@ -720,12 +684,21 @@ class HyprlandIPCMixin:
             except GLib.Error as e:
                 if not e.matches(Gio.io_error_quark(), Gio.IOErrorEnum.CANCELLED):
                     log.debug("Hyprland IPC connect failed: %s", e.message)
-                    GLib.timeout_add_seconds(2, self._reconnect_hyprland_ipc)
+                    self._schedule_hyprland_reconnect()
 
         client.connect_async(addr, cancellable, on_connected)
 
+    def _schedule_hyprland_reconnect(self) -> None:
+        with self._state.lock:
+            if self._state.is_destroyed:
+                return
+            if self._state.hyprland.source_id > 0:
+                _safe_source_remove(self._state.hyprland.source_id)
+            self._state.hyprland.source_id = GLib.timeout_add_seconds(2, self._reconnect_hyprland_ipc)
+
     def _reconnect_hyprland_ipc(self) -> bool:
         with self._state.lock:
+            self._state.hyprland.source_id = 0
             if self._state.is_destroyed:
                 return GLib.SOURCE_REMOVE
         self._start_hyprland_ipc()
@@ -741,14 +714,26 @@ class HyprlandIPCMixin:
                         GLib.idle_add(self._on_hyprland_ipc_event)
                     source.read_line_async(GLib.PRIORITY_DEFAULT, cancellable, on_read)
                 else:
-                    GLib.timeout_add_seconds(2, self._reconnect_hyprland_ipc)
+                    self._schedule_hyprland_reconnect()
             except GLib.Error as e:
                 if not e.matches(Gio.io_error_quark(), Gio.IOErrorEnum.CANCELLED):
-                    GLib.timeout_add_seconds(2, self._reconnect_hyprland_ipc)
+                    self._schedule_hyprland_reconnect()
                     
         stream.read_line_async(GLib.PRIORITY_DEFAULT, cancellable, on_read)
 
+    def _stop_hyprland_ipc(self) -> None:
+        with self._state.lock:
+            if self._state.hyprland.source_id > 0:
+                _safe_source_remove(self._state.hyprland.source_id)
+                self._state.hyprland.source_id = 0
+            if self._state.hyprland.cancellable is not None:
+                with suppress(Exception):
+                    self._state.hyprland.cancellable.cancel()
+                self._state.hyprland.cancellable = None
+
     def _on_hyprland_ipc_event(self) -> bool:
+        if isinstance(self, Gtk.Widget) and not self.get_mapped():
+            return GLib.SOURCE_REMOVE
         if hasattr(self, "force_refresh"):
             self.force_refresh()
         return GLib.SOURCE_REMOVE
@@ -782,7 +767,7 @@ class AsyncPollingMixin:
             slot.on_output = on_output
             slot.timeout = timeout
 
-        if immediate:
+        if immediate and (not isinstance(self, Gtk.Widget) or self.get_mapped()):
             self._poll_command(slot, command, on_output, timeout)
 
         old_source_id = 0
@@ -793,6 +778,9 @@ class AsyncPollingMixin:
             slot.source_id = 0
 
         _safe_source_remove(old_source_id)
+
+        if isinstance(self, Gtk.Widget) and not self.get_mapped():
+            return
 
         with self._state.lock:
             if self._state.is_destroyed:
@@ -805,6 +793,43 @@ class AsyncPollingMixin:
                 on_output,
                 timeout,
             )
+
+    def _pause_all_polls(self) -> None:
+        """Stops all active polling timers and in-flight subprocesses to save battery while unmapped."""
+        with self._state.lock:
+            for slot in self._state._slots:
+                if slot.source_id > 0:
+                    _safe_source_remove(slot.source_id)
+                    slot.source_id = 0
+                if slot.cancellable is not None:
+                    with suppress(Exception):
+                        slot.cancellable.cancel()
+                    slot.cancellable = None
+                    slot.is_running = False
+
+    def _resume_all_polls(self) -> None:
+        """Resumes active polling timers when widget becomes mapped/visible."""
+        slots_to_resume = []
+        interval = max(1, _safe_int(self.properties.get("interval"), DEFAULT_INTERVAL_SECONDS)) if hasattr(self, "properties") else DEFAULT_INTERVAL_SECONDS
+        with self._state.lock:
+            if self._state.is_destroyed:
+                return
+            for slot in self._state._slots:
+                if slot.current_command and slot.on_output and slot.source_id == 0:
+                    slots_to_resume.append((slot, slot.current_command, slot.on_output, slot.timeout))
+
+        for sl, cmd, out, tm in slots_to_resume:
+            with self._state.lock:
+                if not self._state.is_destroyed:
+                    sl.source_id = GLib.timeout_add_seconds(
+                        interval,
+                        self._poll_tick,
+                        sl,
+                        cmd,
+                        out,
+                        tm,
+                    )
+            self._poll_command(sl, cmd, out, tm)
 
     def force_refresh(self) -> None:
         """Forces an immediate repoll of all active slots (used heavily by IPC Mixin)."""
@@ -829,7 +854,9 @@ class AsyncPollingMixin:
         timeout: int,
     ) -> bool:
         if isinstance(self, Gtk.Widget) and not self.get_mapped():
-            return GLib.SOURCE_CONTINUE
+            with self._state.lock:
+                slot.source_id = 0
+            return GLib.SOURCE_REMOVE
 
         with self._state.lock:
             if self._state.is_destroyed:
@@ -954,6 +981,9 @@ class StateMonitorMixin(AsyncPollingMixin):
             )
             return
 
+        if isinstance(self, Gtk.Widget) and not self.get_mapped():
+            return
+
         key = str(self.properties.get("key", "")).strip()
         settings_dir = utility.SETTINGS_DIR.resolve()
         file_path = (settings_dir / key).resolve()
@@ -979,6 +1009,13 @@ class StateMonitorMixin(AsyncPollingMixin):
         except Exception as e:
             log.error("File monitor setup failed for %s: %s", key, e)
 
+    def _cancel_file_monitor(self) -> None:
+        with self._state.lock:
+            if self._state.monitor.cancellable is not None:
+                if isinstance(self._state.monitor.cancellable, Gio.FileMonitor):
+                    self._state.monitor.cancellable.cancel()
+                self._state.monitor.cancellable = None
+
     def _handle_state_output(self, output: str) -> None:
         new_state = output.strip().lower() in TRUE_VALUES
         self._apply_state_update(new_state)
@@ -992,6 +1029,9 @@ class StateMonitorMixin(AsyncPollingMixin):
         key: str,
         target_name: str,
     ) -> None:
+        if isinstance(self, Gtk.Widget) and not self.get_mapped():
+            return
+
         with self._state.lock:
             if self._state.is_destroyed:
                 return
@@ -1093,7 +1133,21 @@ class BaseActionRow(DynamicIconMixin, HyprlandIPCMixin, Adw.ActionRow):
         if _is_dynamic_icon(icon_config) and isinstance(icon_config, dict):
             self._start_icon_update_loop(icon_config)
             
+        self.connect("map", self._on_base_map)
+        self.connect("unmap", self._on_base_unmap)
+
+    def _on_base_map(self, _widget: Gtk.Widget) -> None:
         self._start_hyprland_ipc()
+        self._resume_all_polls()
+        if hasattr(self, "_start_state_monitor"):
+            self._start_state_monitor()
+        self.force_refresh()
+
+    def _on_base_unmap(self, _widget: Gtk.Widget) -> None:
+        self._stop_hyprland_ipc()
+        self._pause_all_polls()
+        if hasattr(self, "_cancel_file_monitor"):
+            self._cancel_file_monitor()
 
     def _create_icon_widget(self, icon: object) -> Gtk.Image:
         if isinstance(icon, dict) and icon.get("type") == "file":
@@ -1132,6 +1186,8 @@ class ButtonRow(BaseActionRow):
         super().__init__(properties, on_press, context)
 
         multi_buttons = properties.get("buttons")
+        if multi_buttons and isinstance(multi_buttons, dict):
+            multi_buttons = [multi_buttons]
 
         if multi_buttons and isinstance(multi_buttons, list):
             box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
@@ -1140,11 +1196,22 @@ class ButtonRow(BaseActionRow):
 
             for btn_cfg in multi_buttons:
                 b = Gtk.Button()
-                if icon_name := btn_cfg.get("icon"):
+                icon_name = btn_cfg.get("icon")
+                btn_text = btn_cfg.get("button_text")
+                show_label = btn_cfg.get("show_label")
+
+                if icon_name and show_label is True and btn_text and str(btn_text).strip() not in ("", "None"):
+                    btn_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+                    btn_box.append(Gtk.Image.new_from_icon_name(icon_name))
+                    btn_box.append(Gtk.Label(label=str(btn_text)))
+                    b.set_child(btn_box)
+                    b.set_tooltip_text(str(btn_text))
+                elif icon_name:
                     b.set_child(Gtk.Image.new_from_icon_name(icon_name))
-                    b.set_tooltip_text(str(btn_cfg.get("button_text", "Action")))
+                    if btn_text:
+                        b.set_tooltip_text(str(btn_text))
                 else:
-                    b.set_label(str(btn_cfg.get("button_text", "Action")))
+                    b.set_label(str(btn_text or "Action"))
 
                 b.connect("clicked", self._on_multi_clicked, btn_cfg)
                 if s := btn_cfg.get("style"):
@@ -1155,7 +1222,23 @@ class ButtonRow(BaseActionRow):
                 box.append(b)
             self.add_suffix(box)
         else:
-            self.btn = Gtk.Button(label=str(properties.get("button_text", "Run")))
+            b_label = str(properties.get("button_text", "Run"))
+            button_icon = properties.get("button_icon")
+            show_label = properties.get("show_label")
+
+            if button_icon and show_label is False:
+                self.btn = Gtk.Button()
+                self.btn.set_child(Gtk.Image.new_from_icon_name(button_icon))
+                self.btn.set_tooltip_text(b_label)
+            elif button_icon and b_label:
+                self.btn = Gtk.Button()
+                btn_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+                btn_box.append(Gtk.Image.new_from_icon_name(button_icon))
+                btn_box.append(Gtk.Label(label=b_label))
+                self.btn.set_child(btn_box)
+            else:
+                self.btn = Gtk.Button(label=b_label)
+
             self.btn.set_valign(Gtk.Align.CENTER)
             self.btn.add_css_class("run-btn")
 
@@ -1201,6 +1284,9 @@ class ButtonRow(BaseActionRow):
         return GLib.SOURCE_CONTINUE
 
     def _queue_dynamic_state_read(self) -> None:
+        if not self.get_mapped():
+            return
+
         with self._state.lock:
             if self._state.is_destroyed or self._state.misc.is_running:
                 return
@@ -1253,7 +1339,8 @@ class ButtonRow(BaseActionRow):
         self._trigger_action(self.on_action)
 
     def _on_multi_clicked(self, _b: Gtk.Button, cfg: dict[str, Any]) -> None:
-        if act := cfg.get("on_press"):
+        act = cfg.get("on_press") or self.on_action
+        if act:
             self._trigger_action(act)
 
     def _trigger_action(self, act: Any) -> None:
@@ -1766,9 +1853,23 @@ class LabelRow(BaseActionRow):
     def _handle_async_output(self, output: str) -> None:
         self._update_label(output.strip() if output else LABEL_NA)
 
+    def _on_base_map(self, widget: Gtk.Widget) -> None:
+        super()._on_base_map(widget)
+        self._trigger_update()
+        interval = _safe_int(self.properties.get("interval"), 0)
+        is_exec = isinstance(self.value_config, dict) and self.value_config.get("type") == "exec"
+        if not is_exec and interval > 0:
+            with self._state.lock:
+                if not self._state.is_destroyed and self._state.value.source_id == 0:
+                    self._state.value.source_id = GLib.timeout_add_seconds(
+                        interval, self._on_timeout,
+                    )
+
     def _on_timeout(self) -> bool:
         if isinstance(self, Gtk.Widget) and not self.get_mapped():
-            return GLib.SOURCE_CONTINUE
+            with self._state.lock:
+                self._state.value.source_id = 0
+            return GLib.SOURCE_REMOVE
         with self._state.lock:
             if self._state.is_destroyed:
                 return GLib.SOURCE_REMOVE
@@ -1776,6 +1877,9 @@ class LabelRow(BaseActionRow):
         return GLib.SOURCE_CONTINUE
 
     def _trigger_update(self) -> None:
+        if isinstance(self, Gtk.Widget) and not self.get_mapped():
+            return
+
         with self._state.lock:
             if self._state.value.is_running or self._state.is_destroyed:
                 return
@@ -1870,6 +1974,8 @@ class SliderRow(SliderMonitorMixin, BaseActionRow):
         context: RowContext | None = None,
     ) -> None:
         super().__init__(properties, on_change, context)
+        self.set_title("")
+        self.set_subtitle("")
 
         self.min_val = _safe_float(properties.get("min"), 0.0)
         self.max_val = _safe_float(properties.get("max"), 100.0)
@@ -1893,11 +1999,24 @@ class SliderRow(SliderMonitorMixin, BaseActionRow):
 
         self.slider = Gtk.Scale(orientation=Gtk.Orientation.HORIZONTAL, adjustment=adj)
         self.slider.set_valign(Gtk.Align.CENTER)
-        self.slider.set_hexpand(False)
+        self.slider.set_hexpand(True)
         self.slider.set_draw_value(False)
-        self.slider.set_size_request(250, -1)
+        self.slider.set_margin_start(4)
+        self.slider.set_margin_end(4)
         self.slider.connect("value-changed", self._on_value_changed)
+
         self.add_suffix(self.slider)
+
+        if main_box := self.get_first_child():
+            child = main_box.get_first_child()
+            while child:
+                if isinstance(child, Gtk.Box):
+                    first_inner = child.get_first_child()
+                    if isinstance(first_inner, Gtk.Label):
+                        child.set_visible(False)
+                    elif first_inner != self.icon_widget:
+                        child.set_hexpand(True)
+                child = child.get_next_sibling()
 
         self._start_value_monitor()
 
@@ -2044,6 +2163,7 @@ class SelectionRow(DynamicIconMixin, HyprlandIPCMixin, Adw.ComboRow):
 
         self.connect("notify::selected", self._on_selected)
         self.connect("map", self._on_map)
+        self.connect("unmap", self._on_unmap)
 
         if _is_dynamic_icon(icon_config) and isinstance(icon_config, dict):
             self._start_icon_update_loop(icon_config)
@@ -2094,6 +2214,9 @@ class SelectionRow(DynamicIconMixin, HyprlandIPCMixin, Adw.ComboRow):
             self._programmatic_update = False
 
     def _queue_options_fetch(self) -> None:
+        if not self.get_mapped():
+            return
+
         with self._state.lock:
             if self._state.is_destroyed:
                 return
@@ -2134,6 +2257,9 @@ class SelectionRow(DynamicIconMixin, HyprlandIPCMixin, Adw.ComboRow):
                     self._options_fetch_running = False
 
     def _queue_selection_fetch(self) -> None:
+        if not self.get_mapped():
+            return
+
         with self._state.lock:
             if self._state.is_destroyed:
                 return
@@ -2222,13 +2348,27 @@ class SelectionRow(DynamicIconMixin, HyprlandIPCMixin, Adw.ComboRow):
             )
 
     def _on_map(self, _widget: Gtk.Widget) -> None:
+        self._start_hyprland_ipc()
+        self._resume_all_polls()
         self._queue_selection_fetch()
         if self.properties.get("options_command"):
             self._queue_options_fetch()
+        if (self.properties.get("value_command") or self.properties.get("key")) and self._state.value.source_id == 0:
+            self._start_selection_monitor()
+
+    def _on_unmap(self, _widget: Gtk.Widget) -> None:
+        self._stop_hyprland_ipc()
+        self._pause_all_polls()
+        with self._state.lock:
+            if self._state.value.source_id > 0:
+                _safe_source_remove(self._state.value.source_id)
+                self._state.value.source_id = 0
 
     def _check_selection_tick(self) -> bool:
         if not self.get_mapped():
-            return GLib.SOURCE_CONTINUE
+            with self._state.lock:
+                self._state.value.source_id = 0
+            return GLib.SOURCE_REMOVE
 
         with self._state.lock:
             if self._state.is_destroyed:
@@ -2526,6 +2666,10 @@ class ExpanderRow(DynamicIconMixin, HyprlandIPCMixin, Adw.ExpanderRow):
                     return PathRow(props, item.get("on_action"), self.context)
                 case "flag_group":
                     return FlagGroupRow(props, item.get("on_action"), self.context)
+                case "service":
+                    return ServiceToggleRow(props, item.get("on_toggle"), self.context)
+                case "service_card":
+                    return ServiceToggleCard(props, item.get("on_toggle"), self.context)
                 case _:
                     log.warning("Unknown item type '%s' in expander, skipping", item_type)
                     return None
@@ -2986,13 +3130,9 @@ class AsyncSelectorRow(DynamicIconMixin, HyprlandIPCMixin, Adw.PreferencesRow):
 
         strings: list[str] = []
 
-        class SafeDict(dict):
-            def __missing__(self, key):
-                return f"{{{key}}}"
-
         for item in self.json_data:
             try:
-                label = self.display_template.format_map(SafeDict(item))
+                label = self.display_template.format_map(_SafeFormatDict(item))
                 strings.append(label)
             except Exception:
                 strings.append("Format Error")
@@ -3054,15 +3194,11 @@ class AsyncSelectorRow(DynamicIconMixin, HyprlandIPCMixin, Adw.PreferencesRow):
             return
 
         if self.on_action.get("type") == "exec" and (cmd_template := self.on_action.get("command")):
-            class SafeDict(dict):
-                def __missing__(self, key):
-                    return f"{{{key}}}"
-
             title = str(self.properties.get("title", "Action"))
 
             try:
                 safe_dict = {k: shlex.quote(str(v)) for k, v in selected_dict.items()}
-                final_cmd = cmd_template.format_map(SafeDict(safe_dict))
+                final_cmd = cmd_template.format_map(_SafeFormatDict(safe_dict))
             except Exception as e:
                 log.error("AsyncSelector action formatting failed: %s", e)
                 utility.toast(self.toast_overlay, f"✖ Failed: {title}", 4)
@@ -3204,7 +3340,28 @@ class GridCard(DynamicIconMixin, HyprlandIPCMixin, GridCardBase):
         if self.text_file:
             self._start_dynamic_style_poll()
             
+        self.connect("map", self._on_grid_map)
+        self.connect("unmap", self._on_grid_unmap)
+
+    def _on_grid_map(self, _widget: Gtk.Widget) -> None:
         self._start_hyprland_ipc()
+        self._resume_all_polls()
+        if self.text_file and self._state.value.source_id == 0:
+            self._start_dynamic_style_poll()
+        if (badge_file := self.properties.get("badge_file")) and self._state.misc.source_id == 0:
+            self._start_badge_monitor(str(badge_file))
+        self.force_refresh()
+
+    def _on_grid_unmap(self, _widget: Gtk.Widget) -> None:
+        self._stop_hyprland_ipc()
+        self._pause_all_polls()
+        with self._state.lock:
+            if self._state.value.source_id > 0:
+                _safe_source_remove(self._state.value.source_id)
+                self._state.value.source_id = 0
+            if self._state.misc.source_id > 0:
+                _safe_source_remove(self._state.misc.source_id)
+                self._state.misc.source_id = 0
 
     def force_refresh(self) -> None:
         super().force_refresh()
@@ -3230,12 +3387,17 @@ class GridCard(DynamicIconMixin, HyprlandIPCMixin, GridCardBase):
                 return GLib.SOURCE_REMOVE
 
         if not self.get_mapped():
-            return GLib.SOURCE_CONTINUE
+            with self._state.lock:
+                self._state.value.source_id = 0
+            return GLib.SOURCE_REMOVE
 
         self._queue_dynamic_state_fetch()
         return GLib.SOURCE_CONTINUE
 
     def _queue_dynamic_state_fetch(self) -> None:
+        if not self.get_mapped():
+            return
+
         with self._state.lock:
             if self._state.is_destroyed or self._state.value.is_running:
                 return
@@ -3294,7 +3456,9 @@ class GridCard(DynamicIconMixin, HyprlandIPCMixin, GridCardBase):
 
     def _check_badge_tick(self, path_str: str) -> bool:
         if not self.get_mapped():
-            return GLib.SOURCE_CONTINUE
+            with self._state.lock:
+                self._state.misc.source_id = 0
+            return GLib.SOURCE_REMOVE
 
         with self._state.lock:
             if self._state.is_destroyed:
@@ -3304,6 +3468,9 @@ class GridCard(DynamicIconMixin, HyprlandIPCMixin, GridCardBase):
         return GLib.SOURCE_CONTINUE
 
     def _queue_badge_fetch(self, path_str: str) -> None:
+        if not self.get_mapped():
+            return
+
         with self._state.lock:
             if self._state.is_destroyed or self._state.misc.is_running:
                 return
@@ -3392,12 +3559,23 @@ class GridToggleCard(DynamicIconMixin, StateMonitorMixin, HyprlandIPCMixin, Grid
                 self._set_visual(val)
 
         self.connect("clicked", self._on_clicked)
+        self.connect("map", self._on_grid_toggle_map)
+        self.connect("unmap", self._on_grid_toggle_unmap)
+
         self._start_state_monitor()
 
         if _is_dynamic_icon(icon_conf) and isinstance(icon_conf, dict):
             self._start_icon_update_loop(icon_conf)
-            
+
+    def _on_grid_toggle_map(self, _widget: Gtk.Widget) -> None:
         self._start_hyprland_ipc()
+        self._resume_all_polls()
+        self._start_state_monitor()
+        self.force_refresh()
+
+    def _on_grid_toggle_unmap(self, _widget: Gtk.Widget) -> None:
+        self._stop_hyprland_ipc()
+        self._pause_all_polls()
 
     def _apply_state_update(self, new_state: bool) -> bool:
         with self._state.lock:
@@ -3432,4 +3610,522 @@ class GridToggleCard(DynamicIconMixin, StateMonitorMixin, HyprlandIPCMixin, Grid
             key_str = str(key).strip()
             _submit_setting_save_safe(key_str, new_state)
 
+
+# =============================================================================
+# SYSTEMD SERVICE TOGGLE ROWS (Lazy, Efficient, Polkit-Aware)
+# =============================================================================
+class _ServiceBase:
+    """
+    Shared helper for service rows.
+    - Validates unit/scope strictly
+    - Provides single-shot async is-active check on map (no polling)
+    - Toggle via pkexec/systemctl with polkit caching (~5-10 min via auth_admin_keep)
+    - Generation + cancellable guards eliminate races & hang risks
+    """
+
+    def _init_service_params(self, properties: RowProperties) -> bool:
+        raw_unit = properties.get("service") or properties.get("unit") or properties.get("key") or ""
+        raw_scope = properties.get("scope") or properties.get("target_scope") or "system"
+        spec = svc_mgr.normalize_service_spec(raw_unit, raw_scope)
+        if spec is None:
+            self._service_unit: str | None = None
+            self._service_scope: svc_mgr.Scope = "system"  # type: ignore
+            self._service_invalid_reason: str = f"Invalid service: {raw_unit!r}"
+            log.warning("Service toggle invalid spec: unit=%r scope=%r", raw_unit, raw_scope)
+            return False
+        self._service_unit = spec.unit
+        self._service_scope = spec.scope
+        self._service_invalid_reason = ""
+        return True
+
+    def _format_subtitle(self, is_active: bool | None, checking: bool = False) -> str:
+        if checking:
+            return "Checking…"
+        if is_active is None:
+            return "Status unknown"
+        base = str(self.properties.get("description", "")).strip()
+        state_str = "Active" if is_active else "Inactive"
+        if base:
+            return f"{base} • {state_str}"
+        return state_str
+
+
+class ServiceToggleRow(DynamicIconMixin, HyprlandIPCMixin, Adw.ActionRow, _ServiceBase):
+    """
+    List row with Gtk.Switch for systemd services.
+
+    Efficiency: Checks state ONLY when mapped (page visible). No periodic polling.
+    Correctness: If service was toggled outside CC, navigating back triggers fresh is-active.
+    Security: System scope uses pkexec → hyprpolkitagent prompts, caches via auth_admin_keep.
+    Robustness: Generation counters, cancellables, 4s/45s timeouts, revert on failure.
+    """
+
+    __gtype_name__ = "DuskyServiceToggleRow"
+
+    def __init__(
+        self,
+        properties: RowProperties,
+        on_toggle: ActionConfig | None = None,
+        context: RowContext | None = None,
+    ) -> None:
+        # We bypass BaseActionRow to avoid StateMonitorMixin polling
+        Adw.ActionRow.__init__(self)
+        self.add_css_class("action-row")
+
+        self._state = WidgetState()
+        self.properties: RowProperties = properties
+        self.on_action: ActionConfig = on_toggle or {}
+        self.context: RowContext = context or {}
+        self.toast_overlay: Adw.ToastOverlay | None = self.context.get("toast_overlay")
+
+        title = str(properties.get("title", "Service")).strip() or "Service"
+        self.set_title(GLib.markup_escape_text(title))
+        if sub := properties.get("description", ""):
+            self.set_subtitle(GLib.markup_escape_text(str(sub)))
+
+        icon_config = properties.get("icon", DEFAULT_ICON)
+        self.icon_widget = self._create_icon_widget(icon_config)
+        self.add_prefix(self.icon_widget)
+        if _is_dynamic_icon(icon_config) and isinstance(icon_config, dict):
+            self._start_icon_update_loop(icon_config)
+
+        # Service params
+        self._service_valid = self._init_service_params(properties)
+        self._is_active: bool | None = None
+        self._operation_in_progress = False
+        self._programmatic_update = False
+        self._service_handle: Any = None
+        self._toggle_handle: Any = None
+
+        # Switch widget
+        self.toggle_switch = Gtk.Switch()
+        self.toggle_switch.set_valign(Gtk.Align.CENTER)
+        self.toggle_switch.set_sensitive(False)  # disabled until first check
+        # If invalid, keep disabled and show error subtitle
+        if not self._service_valid:
+            self.set_subtitle(GLib.markup_escape_text(self._service_invalid_reason))
+            self.toggle_switch.set_sensitive(False)
+        else:
+            # Show checking state initially
+            self.set_subtitle(GLib.markup_escape_text(self._format_subtitle(None, checking=True)))
+
+        self.toggle_switch.connect("state-set", self._on_toggle_changed)
+        self.add_suffix(self.toggle_switch)
+        self.set_activatable_widget(self.toggle_switch)
+
+        self.connect("map", self._on_service_map)
+        self.connect("unmap", self._on_service_unmap)
+        self._start_hyprland_ipc()
+
+    def _create_icon_widget(self, icon: object) -> Gtk.Image:
+        if isinstance(icon, dict) and icon.get("type") == "file":
+            if path := icon.get("path"):
+                p = _expand_path(str(path))
+                if p.exists():
+                    img = Gtk.Image.new_from_file(str(p))
+                    img.add_css_class("action-row-prefix-icon")
+                    img.set_valign(Gtk.Align.CENTER)
+                    return img
+        icon_name = _resolve_static_icon_name(icon)
+        img = Gtk.Image.new_from_icon_name(icon_name)
+        img.add_css_class("action-row-prefix-icon")
+        img.set_valign(Gtk.Align.CENTER)
+        return img
+
+    # ── Lifecycle ──────────────────────────────────────────────────────────
+    def _on_service_map(self, _w: Gtk.Widget) -> None:
+        self._start_hyprland_ipc()
+        self._resume_all_polls()  # for dynamic icon
+        if self._service_valid and not self._operation_in_progress:
+            self._trigger_check()
+
+    def _on_service_unmap(self, _w: Gtk.Widget) -> None:
+        self._stop_hyprland_ipc()
+        self._pause_all_polls()
+        # cancel in-flight checks
+        with self._state.lock:
+            if self._state.monitor.cancellable is not None:
+                try:
+                    self._state.monitor.cancellable.cancel()
+                except Exception:
+                    pass
+                self._state.monitor.cancellable = None
+                self._state.monitor.is_running = False
+            # Also cancel service-specific handles if stored
+            if self._service_handle is not None:
+                try:
+                    self._service_handle.cancel()
+                except Exception:
+                    pass
+                self._service_handle = None
+            if self._toggle_handle is not None:
+                try:
+                    self._toggle_handle.cancel()
+                except Exception:
+                    pass
+                self._toggle_handle = None
+
+    def force_refresh(self) -> None:
+        """Public hook for control_center page switch to force fresh check."""
+        if self.get_mapped() and self._service_valid and not self._operation_in_progress:
+            self._trigger_check()
+
+    # ── State Check (single-shot, no polling) ──────────────────────────────
+    def _trigger_check(self) -> None:
+        if not self._service_valid or self._service_unit is None:
+            return
+        if not self.get_mapped():
+            return
+        with self._state.lock:
+            if self._state.is_destroyed or self._state.monitor.is_running:
+                return
+            self._state.monitor.is_running = True
+            self._state.monitor.generation += 1
+            generation = self._state.monitor.generation
+            # clear previous cancellable
+            if self._state.monitor.cancellable is not None:
+                try:
+                    self._state.monitor.cancellable.cancel()
+                except Exception:
+                    pass
+            self._state.monitor.cancellable = None
+
+        # Visual: checking
+        self.set_subtitle(GLib.markup_escape_text(self._format_subtitle(None, checking=True)))
+        self.toggle_switch.set_sensitive(False)
+
+        # Capture current unit/scope for closure
+        unit = self._service_unit
+        scope = self._service_scope
+
+        def _on_result(is_active: bool | None) -> None:
+            with self._state.lock:
+                if self._state.is_destroyed or self._state.monitor.generation != generation:
+                    return
+                # If a toggle is in progress, ignore stale check results to avoid flicker
+                if self._operation_in_progress:
+                    self._state.monitor.is_running = False
+                    self._state.monitor.cancellable = None
+                    return
+                self._state.monitor.is_running = False
+                self._state.monitor.cancellable = None
+            # Update UI on main thread already (callback via idle)
+            if is_active is None:
+                self.set_subtitle(GLib.markup_escape_text("Status unavailable"))
+                # Keep switch sensitive but not active, allow retry on next map
+                self.toggle_switch.set_sensitive(True)
+                return
+            self._apply_state_update(is_active, generation)
+
+        # Use service_manager for strict argv handling
+        handle = svc_mgr.check_single_service_async(scope, unit, timeout=svc_mgr.TIMEOUT_IS_ACTIVE, on_result=_on_result)
+        with self._state.lock:
+            if not self._state.is_destroyed and self._state.monitor.generation == generation:
+                self._state.monitor.cancellable = handle
+
+    def _apply_state_update(self, new_state: bool, generation: int) -> bool:
+        with self._state.lock:
+            if self._state.is_destroyed or self._state.monitor.generation != generation:
+                return GLib.SOURCE_REMOVE
+            if self._operation_in_progress:
+                return GLib.SOURCE_REMOVE
+        if self._is_active is not None and new_state == self._is_active:
+            # Still update subtitle/toggle sensitivity
+            self._is_active = new_state
+            self.set_subtitle(GLib.markup_escape_text(self._format_subtitle(new_state)))
+            self.toggle_switch.set_sensitive(True)
+            # Programmatic update without triggering state-set
+            if new_state != self.toggle_switch.get_active():
+                self._programmatic_update = True
+                try:
+                    self.toggle_switch.set_active(new_state)
+                finally:
+                    self._programmatic_update = False
+            return GLib.SOURCE_REMOVE
+
+        self._is_active = new_state
+        self.set_subtitle(GLib.markup_escape_text(self._format_subtitle(new_state)))
+        self._programmatic_update = True
+        try:
+            self.toggle_switch.set_active(new_state)
+        finally:
+            self._programmatic_update = False
+        self.toggle_switch.set_sensitive(True)
+        return GLib.SOURCE_REMOVE
+
+    # ── Toggle Handling ────────────────────────────────────────────────────
+    def _on_toggle_changed(self, _switch: Gtk.Switch, state: bool) -> bool:
+        if self._programmatic_update:
+            return False
+        if not self._service_valid or self._service_unit is None:
+            return True
+        if self._operation_in_progress:
+            # Revert optimistic change, show toast
+            self._programmatic_update = True
+            try:
+                self.toggle_switch.set_active(not state)
+            finally:
+                self._programmatic_update = False
+            utility.toast(self.toast_overlay, "Operation in progress…", 2)
+            return True  # block default handling (we already reverted)
+
+        # Cancel any pending check to avoid race overwriting optimistic state
+        with self._state.lock:
+            if self._state.monitor.cancellable is not None:
+                with suppress(Exception):
+                    self._state.monitor.cancellable.cancel()
+                self._state.monitor.cancellable = None
+                self._state.monitor.is_running = False
+
+        # Optimistically keep the switch at requested state but disable during operation
+        self._operation_in_progress = True
+        self.toggle_switch.set_sensitive(False)
+        self.set_subtitle(GLib.markup_escape_text("Applying…"))
+
+        # Save previous state for revert
+        previous = self._is_active
+        # Update internal to match requested (for visual)
+        self._is_active = state
+
+        unit = self._service_unit
+        scope = self._service_scope
+
+        def _on_toggle_done(success: bool, msg: str) -> None:
+            with self._state.lock:
+                if self._state.is_destroyed:
+                    return
+            self._operation_in_progress = False
+            self.toggle_switch.set_sensitive(True)
+            if success:
+                # Confirm state via fresh check instead of trusting previous?
+                # Keep optimistic state but refresh subtitle; schedule re-check for certainty
+                self.set_subtitle(GLib.markup_escape_text(self._format_subtitle(state)))
+                utility.toast(self.toast_overlay, msg, 2)
+                # Re-check after brief delay to ensure systemd settled (avoid race where is-active still old)
+                GLib.timeout_add(350, lambda: (self._trigger_check(), GLib.SOURCE_REMOVE)[1])
+            else:
+                # Revert
+                self._is_active = previous
+                self._programmatic_update = True
+                try:
+                    self.toggle_switch.set_active(previous if previous is not None else not state)
+                finally:
+                    self._programmatic_update = False
+                self.set_subtitle(GLib.markup_escape_text(self._format_subtitle(previous)))
+                utility.toast(self.toast_overlay, msg, 4)
+            # Clear toggle handle
+            with self._state.lock:
+                self._toggle_handle = None
+
+        handle = svc_mgr.toggle_service_async(scope, unit, state, timeout=svc_mgr.TIMEOUT_TOGGLE, on_complete=_on_toggle_done)
+        with self._state.lock:
+            self._toggle_handle = handle
+        # Allow switch to visually move to requested state (optimistic)
         return False
+
+    def do_unroot(self) -> None:
+        sources = self._state.mark_destroyed_and_get_sources()
+        # cancel service handles
+        if self._service_handle is not None:
+            with suppress(Exception):
+                self._service_handle.cancel()
+        if self._toggle_handle is not None:
+            with suppress(Exception):
+                self._toggle_handle.cancel()
+        _batch_source_remove(*sources)
+        Adw.ActionRow.do_unroot(self)
+
+
+class ServiceToggleCard(DynamicIconMixin, HyprlandIPCMixin, GridCardBase, _ServiceBase):
+    """
+    Grid card variant for systemd services. Visual toggle-active state matches row.
+    Single-shot check on map, pkexec for system, no polling.
+    """
+
+    __gtype_name__ = "DuskyServiceToggleCard"
+
+    def __init__(
+        self,
+        properties: RowProperties,
+        on_toggle: ActionConfig | None = None,
+        context: RowContext | None = None,
+    ) -> None:
+        super().__init__(properties, on_toggle, context)
+
+        self._service_valid = self._init_service_params(properties)
+        self._is_active: bool | None = None
+        self._operation_in_progress = False
+        self._service_handle: Any = None
+        self._toggle_handle: Any = None
+
+        icon_conf = properties.get("icon", DEFAULT_ICON)
+        box = self._build_content(
+            _resolve_static_icon_name(icon_conf),
+            str(properties.get("title", "Service")),
+        )
+        self.status_lbl = Gtk.Label(label="Checking…", css_classes=["hero-subtitle"])
+        box.append(self.status_lbl)
+        self.set_child(box)
+
+        if not self._service_valid:
+            self.status_lbl.set_label("Invalid")
+            self.set_sensitive(False)
+            self.set_tooltip_text(self._service_invalid_reason)
+
+        self.connect("clicked", self._on_clicked)
+        self.connect("map", self._on_card_map)
+        self.connect("unmap", self._on_card_unmap)
+
+        if _is_dynamic_icon(icon_conf) and isinstance(icon_conf, dict):
+            self._start_icon_update_loop(icon_conf)
+
+    def _on_card_map(self, _w: Gtk.Widget) -> None:
+        self._start_hyprland_ipc()
+        self._resume_all_polls()
+        if self._service_valid and not self._operation_in_progress:
+            self._trigger_check()
+
+    def _on_card_unmap(self, _w: Gtk.Widget) -> None:
+        self._stop_hyprland_ipc()
+        self._pause_all_polls()
+        with self._state.lock:
+            if self._state.monitor.cancellable is not None:
+                with suppress(Exception):
+                    self._state.monitor.cancellable.cancel()
+                self._state.monitor.cancellable = None
+                self._state.monitor.is_running = False
+            if self._service_handle is not None:
+                with suppress(Exception):
+                    self._service_handle.cancel()
+                self._service_handle = None
+            if self._toggle_handle is not None:
+                with suppress(Exception):
+                    self._toggle_handle.cancel()
+                self._toggle_handle = None
+
+    def force_refresh(self) -> None:
+        if self.get_mapped() and self._service_valid and not self._operation_in_progress:
+            self._trigger_check()
+
+    def _trigger_check(self) -> None:
+        if not self._service_valid or getattr(self, "_service_unit", None) is None:
+            return
+        if not self.get_mapped():
+            return
+        with self._state.lock:
+            if self._state.is_destroyed or self._state.monitor.is_running:
+                return
+            self._state.monitor.is_running = True
+            self._state.monitor.generation += 1
+            generation = self._state.monitor.generation
+            if self._state.monitor.cancellable is not None:
+                with suppress(Exception):
+                    self._state.monitor.cancellable.cancel()
+            self._state.monitor.cancellable = None
+
+        self.status_lbl.set_label("Checking…")
+        self.set_sensitive(False)
+
+        unit = self._service_unit  # type: ignore
+        scope = self._service_scope  # type: ignore
+
+        def _on_result(is_active: bool | None) -> None:
+            with self._state.lock:
+                if self._state.is_destroyed or self._state.monitor.generation != generation:
+                    return
+                if self._operation_in_progress:
+                    self._state.monitor.is_running = False
+                    self._state.monitor.cancellable = None
+                    return
+                self._state.monitor.is_running = False
+                self._state.monitor.cancellable = None
+            if is_active is None:
+                self.status_lbl.set_label("Error")
+                self.set_sensitive(True)
+                return
+            self._apply_state_update(is_active, generation)
+
+        handle = svc_mgr.check_single_service_async(scope, unit, timeout=svc_mgr.TIMEOUT_IS_ACTIVE, on_result=_on_result)
+        with self._state.lock:
+            if not self._state.is_destroyed and self._state.monitor.generation == generation:
+                self._state.monitor.cancellable = handle
+
+    def _apply_state_update(self, new_state: bool, generation: int) -> bool:
+        with self._state.lock:
+            if self._state.is_destroyed or self._state.monitor.generation != generation:
+                return GLib.SOURCE_REMOVE
+            if self._operation_in_progress:
+                return GLib.SOURCE_REMOVE
+        self._is_active = new_state
+        self.status_lbl.set_label(STATE_ON if new_state else STATE_OFF)
+        if new_state:
+            self.add_css_class("toggle-active")
+        else:
+            self.remove_css_class("toggle-active")
+        self.set_sensitive(True)
+        return GLib.SOURCE_REMOVE
+
+    def _on_clicked(self, _btn: Gtk.Button) -> None:
+        if not self._service_valid or getattr(self, "_service_unit", None) is None:
+            return
+        if self._operation_in_progress:
+            utility.toast(self.toast_overlay, "Operation in progress…", 2)
+            return
+        # Cancel any pending check to avoid race
+        with self._state.lock:
+            if self._state.monitor.cancellable is not None:
+                with suppress(Exception):
+                    self._state.monitor.cancellable.cancel()
+                self._state.monitor.cancellable = None
+                self._state.monitor.is_running = False
+        new_state = not bool(self._is_active)
+        self._operation_in_progress = True
+        self.set_sensitive(False)
+        self.status_lbl.set_label("Applying…")
+
+        unit = self._service_unit  # type: ignore
+        scope = self._service_scope  # type: ignore
+        previous = self._is_active
+
+        def _on_done(success: bool, msg: str) -> None:
+            with self._state.lock:
+                if self._state.is_destroyed:
+                    return
+            self._operation_in_progress = False
+            self.set_sensitive(True)
+            if success:
+                self._is_active = new_state
+                self.status_lbl.set_label(STATE_ON if new_state else STATE_OFF)
+                if new_state:
+                    self.add_css_class("toggle-active")
+                else:
+                    self.remove_css_class("toggle-active")
+                utility.toast(self.toast_overlay, msg, 2)
+                GLib.timeout_add(350, lambda: (self._trigger_check(), GLib.SOURCE_REMOVE)[1])
+            else:
+                self._is_active = previous
+                # revert visual to previous
+                if previous:
+                    self.add_css_class("toggle-active")
+                    self.status_lbl.set_label(STATE_ON)
+                else:
+                    self.remove_css_class("toggle-active")
+                    self.status_lbl.set_label(STATE_OFF)
+                utility.toast(self.toast_overlay, msg, 4)
+            with self._state.lock:
+                self._toggle_handle = None
+
+        handle = svc_mgr.toggle_service_async(scope, unit, new_state, timeout=svc_mgr.TIMEOUT_TOGGLE, on_complete=_on_done)
+        with self._state.lock:
+            self._toggle_handle = handle
+
+    def do_unroot(self) -> None:
+        sources = self._state.mark_destroyed_and_get_sources()
+        if self._service_handle is not None:
+            with suppress(Exception):
+                self._service_handle.cancel()
+        if self._toggle_handle is not None:
+            with suppress(Exception):
+                self._toggle_handle.cancel()
+        _batch_source_remove(*sources)
+        Gtk.Button.do_unroot(self)

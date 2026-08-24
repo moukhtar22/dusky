@@ -1,9 +1,10 @@
-## If you need help with installation, troubleshooting or just want to hangout, join the Discord server.
+## If you need help with installation, troubleshooting or just want to hangout, participate on the Community discord server.
 
+### The official Discord Server has been deleted.
 
-[Join Discord Server][discord]
+A community Discord server has been created! You can join it below. Please note that the original developer is not involved with this community server in any capacity.
 
-[discord]: https://discord.gg/Nv2a7yTBQS
+[Join Community Discord Server](https://discord.gg/V2EeUJwd4)
 
 ## Updated demo video now out on YouTube with all major features covered! 
 (since the release of this video around 5 major features have been added, scroll down to the `overview` section for details)
@@ -143,7 +144,7 @@ The steepest learning curve will be the keybinds. I have designed them to be int
 
 > 💡 Pro Tip:
 >
-> Press `CTRL + SHIFT + ?` to open the Keybinds Cheatsheet. You can click commands in this menu to run them directly!
+> Press `CTRL + SHIFT + SPACE` to open the Keybinds Cheatsheet. You can click commands in this menu to run them directly!
 
 
 It's been tested to work on other arch based distros with hyprland installed (fresh installed) like catchyOS

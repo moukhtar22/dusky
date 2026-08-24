@@ -3,14 +3,15 @@
 .config/btop/btop.conf
 .config/cava/config
 .config/desktop_entries/
+.config/dolphinrc
 .config/dusky/version
 .config/dusky_sites/
 .config/dusky_nvim/
-.config/fastfetch/
 .config/firefox_extention_export_data_backup/
-.config/firefox_extentions/matugenfox/
+.config/firefox_extentions/ai_bridge/
+.config/firefox_extentions/dusky_sites/
+.config/firefox_extentions/dusky_template_generator/
 .config/foot/
-.config/fontconfig/
 .config/gtk-3.0/settings.ini
 .config/gtk-4.0/settings.ini
 .config/dusky_recorder/config.conf
@@ -35,7 +36,6 @@
 .config/pacman/makepkg.conf
 .config/pacseek/
 .config/swappy/
-.config/uwsm/
 .config/waybar/01_mechabar_h
 .config/waybar/02_reminiscent_h
 .config/waybar/03_float_pacman_h
@@ -60,6 +60,7 @@
 .config/qt6ct/
 .config/rofi/
 .config/systemd/user/swaync.service.d/
+.config/systemd/user/hyprland-session.target
 .config/xdg-desktop-portal/hyprland-portals.conf
 .config/xdg-terminals.list
 .config/xsettingsd/
@@ -73,9 +74,7 @@
 .gitignore
 .config/starship.toml
 .config/mimeapps.list
-.local/share/rofi_cliphist_and_errands_backup/errands/data.json
-.local/share/rofi_cliphist_and_errands_backup/rofi-cliphist/
-Documents/dusky_backups/
+.npmrc
 Documents/pensive/Adobe/
 Documents/pensive/linux/
 Documents/pensive/templates/

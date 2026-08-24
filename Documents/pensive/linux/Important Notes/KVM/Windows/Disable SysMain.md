@@ -1,41 +1,27 @@
+---
+title: "Disable SysMain (SuperFetch) in VM"
+tags:
+  - kvm
+  - windows
+  - performance
+---
 
-In a virtualized environment, minimizing background resource usage is critical for performance. **SysMain** (formerly known as SuperFetch) is a standard Windows feature designed to preload frequently used applications into memory.
+# Disable SysMain (SuperFetch) in VM
 
-> [!NOTE] Why disable this?
-> 
-> While useful on bare metal hardware with slow HDDs, in a VM environment, SysMain often consumes a significant amount of CPU and RAM as a background service without providing a tangible benefit. Disabling it frees up resources for your actual tasks.
+> [!note] Why
+> `SysMain` preloads apps into RAM — useful on bare-metal HDD, wasteful in a VM where host already caches and RAM is scarce. Disabling frees CPU/RAM.
 
-### Instructions
+## Inside Windows VM
 
-Follow these steps inside your Windows Virtual Machine:
+1. `Win + R` → `services.msc` → Enter
+2. Scroll to **SysMain** (press `S` to jump)
+3. Right-click → **Properties**:
+   - **Startup type:** `Disabled`
+   - **Service status:** **Stop** (if Running)
+4. **Apply** → **OK**
 
-1. Open the Services Manager
-    
-    Click the run dialog (or press Win + R), type `services.msc`, and press Enter to open the Services window.
-    
-2. Locate the Service
-    
-    Scroll down the list of services until you find SysMain.
-    
-    - _Tip: You can press `S` on your keyboard to jump to the services starting with that letter._
-        
-3. Open Properties
-    
-    Right-click on SysMain and select Properties.
-    
-4. Disable the Service
-    
-    In the properties window, perform the following two actions to ensure it is completely disabled:
-    
-    1. **Startup type**: Change this from "Automatic" to **Disabled**. (This prevents it from turning on when you reboot).
-        
-    2. **Service status**: Click the **Stop** button if the service is currently running.
-        
-5. Save Changes
-    
-    Click Apply and then OK to close the window.
-    
+Verify: `services.msc` shows `SysMain` — `Disabled` / `Stopped`.
 
-> [!SUCCESS] Done
-> 
-> SysMain is now permanently disabled for this Virtual Machine.
+> [!success] Done — persists across reboot.
+
+See: [[Optimize Windows Performance]] hub, [[Disable Unnecessary Scheduled Tasks]].

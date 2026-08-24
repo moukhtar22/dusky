@@ -1,94 +1,62 @@
-# Advanced Security: Core Isolation & Memory Integrity
+---
+title: "Core Isolation / Memory Integrity (Optional)"
+tags:
+  - kvm
+  - windows
+  - security
+  - vbs
+---
 
-> [!WARNING] Optional Configuration
-> 
-> This step is optional. Your Windows 11 VM already has standard security if you have selected the Q35 chipset, enabled Secure Boot and TPM 2.0, and installed the correct VirtIO drivers.
-> 
-> Enabling Core Isolation requires **Nested Virtualization**. This adds a layer of complexity and may impact performance (FPS in games or general responsiveness). Only proceed if you specifically require high-level security features or VBS (Virtualization-based Security).
+# Core Isolation / Memory Integrity — Optional
 
-## 1. Prerequisites
+> [!warning] Optional — perf cost
+> Enabling VBS + **Memory integrity** adds virtualization overhead (nested EPT). For gaming passthrough it can cost FPS/latency. Keep it **off** unless compliance demands it. Standard Q35+UEFI+TPM 2.0+virtio already covers normal Win11 security.
 
-Before attempting to enable Core Isolation, you must ensure your physical host processor supports the necessary virtualization extensions.
+## Prereqs
 
-1. Check if your CPU meets the [Microsoft Processor Requirements](https://learn.microsoft.com/en-us/windows-hardware/design/minimum/windows-processor-requirements "null").
-    
-2. If your processor is not supported, **skip this entire guide**.
-    
+- CPU meets [Microsoft CPU requirements](https://learn.microsoft.com/en-us/windows-hardware/design/minimum/windows-processor-requirements)
+- Host already on `host-passthrough` + correct topology
 
-## 2. Enabling Nested Virtualization (XML Editing)
+## Enable nested feature (XML edit — VM must be shut off)
 
-To allow Windows to use Core Isolation, we need to pass specific CPU features from your host Linux system to the Guest VM.
+In `virsh edit win11`, find single-line:
 
-1. **Shut down** your Windows 11 Guest VM completely.
-    
-2. Open **Virt-Manager**.
-    
-3. Open the **Virtual Hardware Details** page (the lightbulb icon).
-    
-4. Select **Overview** in the left panel.
-    
-5. Click the **XML** tab in the right panel.
-    
-
-> [!TIP] Intel vs. AMD
-> 
-> You need to add a specific flag depending on your processor manufacturer:
-> 
-> - **Intel** users need the `vmx` flag.
->     
-> - **AMD** users need the `svm` flag.
->     
-
-Locate the `<cpu>` section. It will usually look like a single line ending in `/>`. You need to expand this tag to include the feature policy.
-
-**Find this line:**
-
-```
+```xml
 <cpu mode="host-passthrough" check="none" migratable="on"/>
 ```
 
-**Replace it with ONE of the following blocks:**
+Replace per vendor:
 
-### Option A: For Intel CPUs
+**Intel (`vmx`):**
 
-```
+```xml
 <cpu mode="host-passthrough" check="none" migratable="on">
   <feature policy="require" name="vmx"/>
 </cpu>
 ```
 
-### Option B: For AMD CPUs
+**AMD (`svm`):**
 
-```
+```xml
 <cpu mode="host-passthrough" check="none" migratable="on">
   <feature policy="require" name="svm"/>
 </cpu>
 ```
 
-6. Click **Apply** to save the changes.
-    
+→ **Apply**.
 
-## 3. Enabling Security in Windows
+> [!tip] Alternative via `virt-xml`
+> ```bash
+> virsh shutdown win11
+> virt-xml win11 --edit --cpu host-passthrough,vmx.require=on  # or svm
+> ```
 
-Now that the VM has access to the virtualization hardware features, you can enable the security settings inside Windows.
+## Inside Windows
 
-1. **Start** your Windows 11 VM.
-    
-2. Navigate to **Settings** > **Privacy & security** > **Windows Security** > **Device security**.
-    
-3. Click on **Core isolation details**.
-    
-4. Toggle the **Memory integrity** switch to **On**.
-    
+1. **Settings → Privacy & security → Windows Security → Device security → Core isolation details**
+2. **Memory integrity → On** → Reboot when prompted → verify stays **On**.
 
-> [!NOTE] Reboot Required
-> 
-> Windows will prompt you to restart to apply these changes.
+> [!note] If toggle stays gray
+> Re-check `msinfo32` → **Virtualization-based security** should be `Running` and `Kernel DMA Protection`. If `Off`, re-edit `<cpu>` above and ensure no duplicate `<cpu>` entries (duplicate kills the second `feature`; `10_virt_modular_daemon:enforce_kv_config` collapses duplicates — `virsh define` does similarly).
 
-## 4. Verification
-
-After the VM reboots:
-
-1. Go back to **Settings** > **Privacy & security** > **Windows Security** > **Device security**.
-    
-2. Verify that **Core isolation** is active and that your device meets the enhanced security requirements.
+See: [[+ MOC Windows Installation Through Virt Manager]], `30_kvm_vm_deploy.py` (no VBS by default).

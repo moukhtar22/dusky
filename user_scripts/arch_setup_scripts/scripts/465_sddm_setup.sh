@@ -1,11 +1,5 @@
 #!/usr/bin/env bash
-# sddm setup
-
-# ==============================================================================
-#  Dusky SDDM Theme Setup Script (Platinum SSO Edition)
-#  Repository: github.com/dusklinux/sddm_theme
-#  Target: Arch Linux (Linux 7.0+, Systemd 260+, Bash 5.3+)
-# ==============================================================================
+#d: Install and configure the dusky SDDM theme
 
 set -euo pipefail
 

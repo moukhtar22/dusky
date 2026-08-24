@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import shutil
 import subprocess
 import sys
 import os
@@ -272,9 +273,18 @@ def main():
             )
 
         run_command(
-            "sudo pacman -S --needed --noconfirm steam lutris wine flatpak gamemode lib32-gamemode mangohud lib32-mangohud gamescope desktop-file-utils fuse-overlayfs bubblewrap",
+            "sudo pacman -S --needed --noconfirm steam lutris wine flatpak gamemode lib32-gamemode mangohud lib32-mangohud gamescope desktop-file-utils fuse-overlayfs bubblewrap psmisc",
             "Install Steam, Lutris, System Wine, Flatpak daemon, Gamescope, GameMode, MangoHud, fuse-overlayfs, bubblewrap, and Utils."
         )
+
+        aur_helper = next((h for h in ("paru", "yay") if shutil.which(h)), None)
+
+        if not shutil.which("dwarfs") and aur_helper:
+            run_command(
+                f"{aur_helper} -S --noconfirm dwarfs",
+                "Install DwarFS filesystem tools from AUR (required by jc141 repacks).",
+                critical=False
+            )
 
         run_command(
             "flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo && "

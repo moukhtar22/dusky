@@ -1,17 +1,38 @@
-### spice-guest-tools (Performance /latency)
+---
+title: "GNOME Boxes — Windows Guest Tools (SPICE)"
+tags:
+  - kvm
+  - gnome-boxes
+  - windows
+  - spice
+---
 
-install the driver (spice-guest-tools) for guest windows os to improve performance. 
-can be downlaoded from 
-https://www.spice-space.org/download.html
+# GNOME Boxes — Windows Guest (SPICE Tools)
 
-> [!NOTE]- Website secition where the download is. - spice-guest-tools
-> ### Windows binaries
-> 
-> Windows SPICE Guest Tools ([spice-guest-tools](https://www.spice-space.org/download/windows/spice-guest-tools/spice-guest-tools-latest.exe)) - This installer contains some optional drivers and services that can be installed in the Windows guest to improve SPICE performance and integration. This includes the qxl video driver and the SPICE guest agent (for copy and paste, automatic resolution switching, ...)
+> [!info] Scope
+> Boxes `qemu:///session` Windows VM — SPICE for display + clipboard (no VFIO here). For `qemu:///system` Windows + passthrough see [[+ MOC Windows GPU Passthrough]].
 
+## spice-guest-tools (display, agent, qxl)
 
-### WebDAV (file sharing between guest and host)
+Install **spice-guest-tools** inside **Windows guest** (not host):
 
-> [!NOTE]- Website section where the download link is - WebDAV
-> Other packages not included in the Windows SPICE Guest Tools:
-> - [Spice WebDAV daemon](https://www.spice-space.org/download/windows/spice-webdavd/) - Needed to enable [folder sharing](https://www.spice-space.org/spice-user-manual.html#_folder_sharing) in the Windows guest
+- Download: <https://www.spice-space.org/download.html> → **Windows binaries → Windows SPICE Guest Tools** (`spice-guest-tools-latest.exe`) — includes `qxl` video, `spice-agent` (copy/paste, auto-resize), optional `virtio` serial drivers.
+- Install → reboot.
+
+Verify in guest: `services.msc` → **RDP/SPICE agents** running; `Device Manager → Display adapters` → **Red Hat QXL**.
+
+> [!tip] CLI x64 path issue?
+> Boxes default `qxl` driver may show `Standard VGA` pre-tools → after install it becomes `Red Hat QXL`.
+
+## WebDAV (guest↔host file sharing, separate from clipboard)
+
+Clipboard (`spice-vdagent` / `spice-guest-tools`) ≠ Shared Folders.
+
+For **folder sharing** via SPICE WebDAV need **Spice WebDAV daemon** inside Windows guest:
+
+- <https://www.spice-space.org/download/windows/spice-webdavd/> → install → plus **SPICE WebDAV channel** in VM XML (Boxes usually omits; add via `virt-manager --connect qemu:///session` → Add Hardware → Channel → `org.spice-space.webdav.0` per SPICE manual: <https://www.spice-space.org/spice-user-manual.html#_folder_sharing>)
+
+> [!note] virtiofs vs WebDAV
+> `virtiofs` (`host_zram` shared folder for `qemu:///system` VMs) is different stack (see [[Setting up Shared Directory Between Guest_win11 and Host]]). Boxes `session` VMs typically use **WebDAV**, not `virtiofs`, for folder sharing.
+
+See: [[gnome-boxes]] (scope + clipboard plumbing), [[SSHing into vm]].

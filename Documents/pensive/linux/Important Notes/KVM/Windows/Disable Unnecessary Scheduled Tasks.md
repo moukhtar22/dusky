@@ -1,29 +1,48 @@
-Review and disable any unnecessary scheduled tasks.
+---
+title: "Disable Unnecessary Scheduled Tasks"
+tags:
+  - kvm
+  - windows
+  - performance
+---
 
-To get a list of all scheduled tasks, open the Terminal as an Administrator and run the following command:
+# Disable Unnecessary Scheduled Tasks
 
-C:\> Get-ScheduledTask
+> [!abstract] Goal
+> Stop Windows background defrag/telemetry bursts that steal VM I/O/CPU.
 
-Use the command below to search for tasks that have the word 'schedule' in their name.
+## List tasks (Admin PowerShell)
 
-C:\> Get-ScheduledTask -TaskName '*schedule*'
+```powershell
+Get-ScheduledTask
+Get-ScheduledTask -TaskName '*schedule*'
+```
 
-TaskPath                                TaskName                         State
---------                                --------                         -----
-\Microsoft\Windows\Defrag\              ScheduledDefrag                  Ready
-\Microsoft\Windows\Diagnosis\           Scheduled                        Ready
-\Microsoft\Windows\UpdateOrchestrator\  Schedule Maintenance Work        Disabled
-\Microsoft\Windows\UpdateOrchestrator\  Schedule Scan                    Ready
-\Microsoft\Windows\UpdateOrchestrator\  Schedule Scan Static Task        Ready
-\Microsoft\Windows\UpdateOrchestrator\  Schedule Wake To Work            Disabled
-\Microsoft\Windows\UpdateOrchestrator\  Schedule Work                    Ready
-\Microsoft\Windows\Windows Defender\    Windows Defender Scheduled Scan  Ready
-\Microsoft\Windows\WindowsUpdate\       Scheduled Start                  Ready
+Example output:
 
-I'm only going to disable the ScheduledDefrag task. It is entirely up to you which other scheduled tasks you wish to disable.
+```
+TaskPath                                TaskName                     State
+\Microsoft\Windows\Defrag\               ScheduledDefrag              Ready
+\Microsoft\Windows\Diagnosis\            Scheduled                    Ready
+\Microsoft\Windows\UpdateOrchestrator\   Schedule Scan                Ready
+```
 
-C:\> Disable-ScheduledTask -TaskPath '\Microsoft\Windows\Defrag\' -TaskName ScheduledDefrag
+## Disable chosen tasks (example: defrag — host storage `discard=unmap` handles TRIM)
 
-TaskPath                    TaskName         State
---------                    --------         -----
-\Microsoft\Windows\Defrag\  ScheduledDefrag  Disabled
+```powershell
+Disable-ScheduledTask -TaskPath '\Microsoft\Windows\Defrag\' -TaskName ScheduledDefrag
+# verify
+Get-ScheduledTask -TaskPath '\Microsoft\Windows\Defrag\' -TaskName ScheduledDefrag | Select TaskPath,TaskName,State
+# → State: Disabled
+```
+
+Re-enable if ever needed:
+
+```powershell
+Enable-ScheduledTask -TaskPath '\Microsoft\Windows\Defrag\' -TaskName ScheduledDefrag
+```
+
+> [!warning] Don’t blindly disable all
+> Keep `Time Synchronization` / `UpdateOrchestrator` if you rely on Windows Update control via `Windows Update MiniTool` / `O&O ShutUp10`.
+
+See: [[Optimize Windows Performance]].

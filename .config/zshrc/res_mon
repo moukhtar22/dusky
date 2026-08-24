@@ -248,14 +248,12 @@ res_mon() {
             --info=inline-right
             --prompt=" ⚡ ${title_metric} ❯ "
             --header="$full_header"
-            --pointer=""
-            --marker="✓"
+            --ghost="Filter processes..."
+            --pointer="❯ "
+            --marker="✔ "
             
-            # Adopted exact PKG color schema (Darker BG, vibrant accents)
-            --color="bg+:#1e1e2e,bg:#11111b,spinner:#f5e0dc"
-            --color="fg:#cdd6f4,fg+:#cdd6f4,header:#89b4fa,info:#cba6f7"
-            --color="pointer:#a6e3a1,marker:#f5e0dc,prompt:#cba6f7"
-            --color="hl:#f38ba8,hl+:#f38ba8,border:#585b70,label:#a6e3a1"
+            # Adopt Matugen dynamic color schema
+            --color="${DUSKY_FZF_COLORS:-bg+:#1e1e2e,bg:#11111b,fg:#cdd6f4}"
             
             # Using 100% forces FZF to defer smcup/rmcup to our custom wrapper, preventing terminal flashing
             --height=100%

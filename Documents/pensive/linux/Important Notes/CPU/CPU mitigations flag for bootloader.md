@@ -1,757 +1,192 @@
-# Kernel mitigation boot flags on Arch Linux
-## Writing, applying, and verifying x86 CPU-mitigation parameters with **Limine** or **systemd-boot**
-*Updated for current Arch/Linux practice, March 2026*
+# CPU Mitigation Boot Flags — systemd-boot
 
-> [!summary]
-> Disabling CPU-side-channel mitigations is **not** a uniform `vulnerability_name=off` exercise.  
-> Mainline Linux uses a mix of parameter names such as `mitigations=off`, `pti=off`, `spectre_v2=off`, `nospectre_v1`, `mds=off`, `tsx_async_abort=off`, `mmio_stale_data=off`, `reg_file_data_sampling=off`, and others.  
-> On Arch, the correct workflow is:
-> 1. Identify the exact vulnerability status in `/sys/devices/system/cpu/vulnerabilities/`
-> 2. Look up the documented kernel parameter
-> 3. **Append** the flag to the existing boot command line
-> 4. Rebuild the entry or UKI if required
-> 5. Reboot and verify via `/proc/cmdline`, `/sys/.../vulnerabilities/*`, and the kernel log
+*Arch Linux x86_64 · Updated August 2026*
+
+> [!summary] Workflow
+> 1. Inspect current state: `/sys/devices/system/cpu/vulnerabilities/*`
+> 2. Pick the **documented** parameter — [[CPU Vulnerabilities]]
+> 3. **Append** it to the boot entry's `options` line
+> 4. Reboot, then verify via `/proc/cmdline`, sysfs, and the kernel log
 
 ---
 
-## Scope
+## Read This First
 
-This note is a permanent reference for **Arch Linux on x86_64**, specifically when booting with:
-
-- **systemd-boot**
-- **Limine**
-
-It assumes a typical modern Arch setup with:
-
-- **LUKS2**-encrypted root
-- **Btrfs** root filesystem
-- optional **Btrfs snapshot booting**
-- optional **UKI** workflow under systemd-boot
-
-This note is **not** about GRUB.
-
-> [!note]
-> Most mitigation parameters discussed here are **x86-specific**. If the system is ARM64, RISC-V, or PowerPC, the available files and parameters differ.
-
----
-
-## Threat model and safety
-
-> [!warning]
-> Disabling CPU vulnerability mitigations materially reduces protection against:
-> - local privilege escalation
-> - cross-process data leakage
-> - cross-VM leakage on virtualized hosts
-> - some speculative-execution side channels
+> [!warning] Boot flags only work on kernels built with mitigations
+> Mitigation parameters require `CONFIG_CPU_MITIGATIONS=y` at compile time. Check before wasting a reboot:
 >
-> Only disable mitigations on systems you control, for trusted-code benchmarking, controlled lab work, or tightly bounded performance testing.
-
-Do **not** disable mitigations on:
-
-- multi-user machines
-- virtualization hosts running untrusted guests
-- developer workstations that routinely execute untrusted binaries
-- systems handling sensitive secrets or production workloads
-
----
-
-## Core rules
-
-### 1. Sysfs vulnerability names are **reporting names**, not guaranteed command-line names
-
-This shows the kernel’s current vulnerability status:
-
-```bash
-grep . /sys/devices/system/cpu/vulnerabilities/*
-```
-
-Example filenames may include:
-
-- `spectre_v1`
-- `spectre_v2`
-- `spec_store_bypass`
-- `meltdown`
-- `mds`
-- `tsx_async_abort`
-- `mmio_stale_data`
-- `reg_file_data_sampling`
-- `gather_data_sampling`
-- `retbleed`
-- `spec_rstack_overflow`
-- `srbds`
-
-The **filename** is useful, but the boot parameter may be different. For example:
-
-- `meltdown` status is typically controlled by `pti=off` or `nopti`
-- `spectre_v1` does **not** use `spectre_v1=off`; the disable form is `nospectre_v1`
-
----
-
-### 2. Kernel mitigation parameters are **not** a uniform namespace
-
-Examples of real patterns in mainline Linux:
-
-- `mitigations=off`
-- `pti=off`
-- `nospectre_v1`
-- `spectre_v2=off`
-- `spec_store_bypass_disable=off`
-- `mds=off`
-- `tsx_async_abort=off`
-- `mmio_stale_data=off`
-- `reg_file_data_sampling=off`
-
-Do **not** assume `foo=off` exists just because `/sys/.../foo` exists.
-
----
-
-### 3. Prefer canonical parameter forms over aliases
-
-Aliases exist, but explicit forms are clearer and more reproducible.
-
-Examples:
-
-- Prefer `pti=off` over `nopti`
-- Prefer `spectre_v2=off` over `nospectre_v2`
-- Prefer `spec_store_bypass_disable=off` over `nospec_store_bypass_disable`
-
-Exception:
-
-- `nospectre_v1` is the normal public disable form for Spectre v1 on x86
-
----
-
-### 4. Use the documented value token
-
-Kernel parameters are usually string-valued, not boolean in the shell sense.
-
-Use:
-
-```text
-spectre_v2=off
-```
-
-Do **not** guess:
-
-```text
-spectre_v2=0
-```
-
-Common value tokens seen in mitigation controls include:
-
-- `off`
-- `auto`
-- `on`
-- `force`
-- `prctl`
-- `full`
-- `full,nosmt`
-- `auto,nosmt`
-
-Not every parameter supports every token.
-
----
-
-### 5. Unknown parameters do **not** help, and the kernel often logs them
-
-If a parameter is unrecognized by your kernel:
-
-- it will not control the mitigation
-- the kernel usually logs it during early boot
-- some unknown tokens may be forwarded to userspace/init depending on syntax, but they still do not affect mitigation state
-
-Always verify with the running kernel log after reboot.
-
----
-
-## Reliable workflow
-
-### 1. Inspect current mitigation state
-
-```bash
-grep . /sys/devices/system/cpu/vulnerabilities/*
-```
-
-### 2. Check the active kernel command line
-
-```bash
-cat /proc/cmdline
-```
-
-### 3. Look up the exact parameter in kernel documentation
-
-Primary references:
-
-- `Documentation/admin-guide/hw-vuln/`
-- `Documentation/admin-guide/kernel-parameters.rst`
-- online: `docs.kernel.org/admin-guide/hw-vuln/`
-- online: `docs.kernel.org/admin-guide/kernel-parameters.html`
-
-### 4. Append the desired parameter to the existing working command line
-
-Do **not** replace the entire line.
-
-### 5. Rebuild the boot artifact if your workflow requires it
-
-- **systemd-boot Type #1 entry**: edit text entry only
-- **systemd-boot UKI**: edit embedded cmdline source, then rebuild the UKI
-- **Limine**: edit `CMDLINE=` in the active `limine.conf`; no bootloader reinstall is required just for cmdline changes
-
-### 6. Reboot and verify
-
-Use:
-
-```bash
-cat /proc/cmdline
-grep . /sys/devices/system/cpu/vulnerabilities/*
-sudo journalctl -b -k
-```
-
----
-
-## Common x86 mitigation parameters
-### Non-exhaustive, but current and commonly relevant
-
-> [!note]
-> Availability depends on kernel version, CPU vendor/family, microcode level, and architecture.  
-> If the CPU is not affected, the corresponding sysfs file usually reports `Not affected`, and the parameter will have no meaningful effect.
-
-| Sysfs vulnerability file | Common boot parameter | Notes |
-|---|---|---|
-| `meltdown` | `pti=off` | Alias: `nopti` |
-| `spectre_v1` | `nospectre_v1` | No generic `spectre_v1=off` interface |
-| `spectre_v2` | `spectre_v2=off` | Alias commonly exists: `nospectre_v2` |
-| `spectre_bhi` | `spectre_bhi=off` | Branch History Injection control on affected systems |
-| `spec_store_bypass` | `spec_store_bypass_disable=off` | Alias commonly exists: `nospec_store_bypass_disable` |
-| `l1tf` | `l1tf=off` | Relevant mainly on affected Intel systems |
-| `mds` | `mds=off` | Often interacts with shared buffer-clearing mitigations |
-| `tsx_async_abort` | `tsx_async_abort=off` | TAA; related to TSX and MDS behavior |
-| `mmio_stale_data` | `mmio_stale_data=off` | Shares mitigation mechanisms with some Intel buffer issues |
-| `reg_file_data_sampling` | `reg_file_data_sampling=off` | RFDS |
-| `gather_data_sampling` | `gather_data_sampling=off` | GDS / Downfall |
-| `retbleed` | `retbleed=off` | On kernels/CPUs exposing it |
-| `spec_rstack_overflow` | `spec_rstack_overflow=off` | AMD SRSO control on affected systems |
-| `srbds` | `srbds=off` | Special Register Buffer Data Sampling / CrossTalk |
-
-### Global master switch
-
-```text
-mitigations=off
-```
-
-This is the broad, blunt option.
-
-Use it when the goal is:
-
-- quick lab testing
-- broad “remove mitigation overhead” benchmarking
-- validating the performance delta between hardened and minimally mitigated states
-
-Use per-vulnerability flags instead when you need:
-
-- finer control
-- clearer auditability
-- reproducibility across multiple test systems
-
-> [!important]
-> `mitigations=off` disables **most optional CPU vulnerability mitigations**, but it is **not** a promise to remove every hardening layer in the system. It does not undo:
-> - compiler-generated hardening in already-built userspace binaries
-> - all non-CPU security features
-> - firmware behavior
-> - microcode changes that expose or alter architectural behavior
-
----
-
-## Parameter patterns and examples
-
-### Minimal targeted example
-
-```text
-spectre_v2=off spec_store_bypass_disable=off reg_file_data_sampling=off
-```
-
-### Broader explicit example
-
-```text
-pti=off nospectre_v1 spectre_v2=off spec_store_bypass_disable=off mds=off tsx_async_abort=off mmio_stale_data=off l1tf=off reg_file_data_sampling=off gather_data_sampling=off retbleed=off spec_rstack_overflow=off srbds=off
-```
-
-### Broad master-switch example
-
-```text
-mitigations=off
-```
-
-> [!warning]
-> Do **not** combine a large set of guessed flags copied from random forum posts. Use only parameters documented for your kernel and CPU family.
-
----
-
-## Arch-specific bootloader application
-## Preserve LUKS2 and Btrfs boot arguments
-
-> [!warning]
-> On an encrypted Btrfs root, the mitigation flags must be **appended** to the existing working command line.
+> ```bash
+> zcat /proc/config.gz | grep CONFIG_CPU_MITIGATIONS
+> ```
 >
-> If you accidentally remove or damage:
-> - `rd.luks.*` or `cryptdevice=...`
-> - `root=...`
-> - `rootfstype=btrfs`
-> - `rootflags=subvol=...` or `rootflags=subvolid=...`
-> - `resume=...` if you use hibernation
+> On this machine the custom `dusky-gaming`/`dusky-battery` kernels are built with `CONFIG_CPU_MITIGATIONS=n` — **every mitigation flag is a no-op there**, and their sysfs files report `Vulnerable` regardless. The stock `Arch Linux (linux)` entry supports flags.
 >
-> the system may fail to unlock or mount the correct root subvolume.
+> Also pointless: disabling a mitigation for something your CPU is `Not affected` by.
 
-Typical existing Arch command-line patterns include one of the following:
-
-### systemd initramfs / `sd-encrypt` / dracut style
-
-```text
-rd.luks.name=<LUKS_UUID>=cryptroot root=/dev/mapper/cryptroot rootfstype=btrfs rootflags=subvol=@ rw
-```
-
-### mkinitcpio `encrypt` hook style
-
-```text
-cryptdevice=UUID=<LUKS_UUID>:cryptroot root=/dev/mapper/cryptroot rootfstype=btrfs rootflags=subvol=@ rw
-```
-
-Append mitigation flags to the **end**:
-
-```text
-rd.luks.name=<LUKS_UUID>=cryptroot root=/dev/mapper/cryptroot rootfstype=btrfs rootflags=subvol=@ rw spectre_v2=off spec_store_bypass_disable=off
-```
+> [!warning] Threat model
+> Disabling mitigations reduces protection against local privilege escalation, cross-process/cross-VM leakage, and speculative side channels. Only do it on machines you control, for trusted-code benchmarking.
 
 ---
 
-## systemd-boot
+## Boot Layout on This Machine (verified)
 
-### Type #1 entry files (`loader/entries/*.conf`)
+- Bootloader: **systemd-boot**, ESP mounted at `/boot` (vfat)
+- Root: plain **Btrfs**, subvol `/@`, unencrypted
+- Entries in `/boot/loader/entries/`:
+	- `<machine-id>-7.2.0-dusky-gaming.conf` / `-dusky-battery.conf` — generated by `kernel-install`
+	- `arch-linux.conf` (stock kernel) + fallback entry
+- Current/default selection: `bootctl status`
 
-These are text entries such as:
+```bash
+sudo bootctl status
+findmnt / /boot
+```
 
-- `/boot/loader/entries/*.conf`
-- `/efi/loader/entries/*.conf`
+Always confirm `/boot` is actually mounted before editing anything under it.
 
-depending on how the ESP/XBOOTLDR is mounted on your system.
+---
 
-A typical entry:
+## The Entry Format
+
+Type #1 entries are plain text. Real example from this machine:
 
 ```ini
-title   Arch Linux
-linux   /vmlinuz-linux
-initrd  /intel-ucode.img
-initrd  /initramfs-linux.img
-options rd.luks.name=<LUKS_UUID>=cryptroot root=/dev/mapper/cryptroot rootfstype=btrfs rootflags=subvol=@ rw spectre_v2=off spec_store_bypass_disable=off
+title      Dusky gaming
+version    7.2.0-dusky-gaming
+options    rw quiet splash ... root=UUID=c7c2a1a4-fdbd-42af-a253-90f82eca5670 rootfstype=btrfs rootflags=subvol=/@ rw <FLAGS HERE>
+linux      /22d434e8ca4f425482251d8a6ba8ddea/7.2.0-dusky-gaming/linux
+initrd     /22d434e8ca4f425482251d8a6ba8ddea/7.2.0-dusky-gaming/initrd
 ```
 
-Notes:
+### Arguments that must never be lost
 
-- Keep the microcode image first if you use one.
-- Use `amd-ucode.img` on AMD systems.
-- Editing the text entry is enough; no `bootctl install` is required for a mere cmdline change.
+Append to the end of `options`; never replace the line:
 
-### Safe workflow: create a separate benchmark entry
-
-Instead of modifying your default entry in place, duplicate it:
-
-- `arch-linux.conf` → `arch-linux-bench.conf`
-
-Then add mitigation flags only to the benchmark entry.
-
-This preserves a clean rollback path from the boot menu.
+- `root=UUID=...`
+- `rootfstype=btrfs`
+- `rootflags=subvol=/@`
+- `rw`
+- (`resume=...` if hibernation were used)
 
 ---
 
-### Type #2 entries / UKIs (`EFI/Linux/*.efi`)
+## Applying Flags
 
-If you boot a **Unified Kernel Image**, the command line is typically **embedded** in the UKI.
-
-In that case:
-
-- editing `loader/entries/*.conf` is irrelevant or insufficient
-- you must edit the cmdline source used to build the UKI
-- then regenerate the UKI
-
-On Arch, the common cmdline source is:
-
-```text
-/etc/kernel/cmdline
-```
-
-Example:
-
-```text
-rd.luks.name=<LUKS_UUID>=cryptroot root=/dev/mapper/cryptroot rootfstype=btrfs rootflags=subvol=@ rw spectre_v2=off spec_store_bypass_disable=off
-```
-
-Then rebuild using the method your system actually uses.
-
-#### Common Arch UKI rebuild patterns
-
-If your mkinitcpio presets generate UKIs:
+### One-off test — edit the entry directly
 
 ```bash
-sudoedit /etc/kernel/cmdline
-sudo mkinitcpio -P
+ts=$(printf '%(%F-%H%M%S)T' -1)
+src=/boot/loader/entries/arch-linux.conf
+sudo install -Dm0644 -- "$src" "${src}.bak.${ts}"
+sudoedit "$src"
 ```
 
-If your system uses `kernel-install`/`ukify` style UKI generation:
+Then append flags to the `options` line:
+
+```text
+spectre_v2=off spec_store_bypass_disable=off reg_file_data_sampling=off vmscape=off
+```
+
+or the blunt master switch:
+
+```text
+mitigations=off
+```
+
+> [!tip] Keep a clean rollback path
+> Duplicate the entry file (e.g. `arch-linux-bench.conf`) and put flags only in the benchmark copy. `bootctl list` will show both in the menu; the untouched original stays as fallback.
+
+### Making changes survive kernel updates — `/etc/kernel/cmdline`
+
+Entries for the `dusky-*` kernels (package `linux-dusky-gaming`) are **regenerated on every kernel install/update** by `/usr/lib/kernel/install.d/90-loaderentry.install`. Its `options` line comes from the first existing source of:
+
+```text
+/etc/kernel/cmdline                 ← the normal place
+/usr/lib/kernel/cmdline
+/proc/cmdline                       fallback: current cmdline minus BOOT_IMAGE=/initrd=
+```
+
+This machine has **no** `/etc/kernel/cmdline` yet, so entries inherit whatever was live at install time. To make flag additions persistent across updates:
 
 ```bash
+# 1) Seed with the current working cmdline:
+sudo sh -c 'cat /proc/cmdline > /etc/kernel/cmdline'
+# 2) Edit to taste (append flags, keep everything else):
 sudoedit /etc/kernel/cmdline
+# 3) Regenerate entries now instead of waiting for the next kernel update:
 sudo kernel-install add "$(uname -r)" "/usr/lib/modules/$(uname -r)/vmlinuz"
 ```
 
-> [!important]
-> Use the workflow your machine already uses. Do **not** run random rebuild commands blindly on a production boot setup.
+Keep every existing argument when editing — this file becomes the single source of truth for all future entries.
 
-> [!note]
-> If Secure Boot is enabled and you sign UKIs manually or via a tool such as `sbctl`, re-sign the rebuilt UKI before rebooting.
+### UKI note
+
+If you ever switch to unified kernel images (`ukify`), the cmdline lives inside the signed `.efi` — text entries stop mattering; edit `/etc/kernel/cmdline` and rebuild/re-sign the UKI (`sbctl` if Secure Boot).
 
 ---
 
-## Limine
+## Verify After Reboot
 
-Edit the active `limine.conf` and append the mitigation parameters to the existing `CMDLINE=` value.
+```bash
+cat /proc/cmdline
+grep . /sys/devices/system/cpu/vulnerabilities/*
+sudo journalctl -b -k | grep -Ei 'unknown kernel command line|mitigat|microcode'
+```
 
-Common installation layouts place `limine.conf` on the boot volume, often at one of:
+Benchmark metadata worth recording:
 
-- `/boot/limine.conf`
-- `/efi/limine.conf`
-- `/boot/EFI/limine/limine.conf`
-- `/efi/EFI/limine/limine.conf`
+```bash
+uname -r
+cat /proc/cmdline
+grep . /sys/devices/system/cpu/vulnerabilities/*
+journalctl -k -b | grep -i microcode
+```
 
-The exact path depends on how Limine was installed.
+---
 
-A typical Linux entry:
+## Troubleshooting
+
+| Symptom | Likely cause |
+|---|---|
+| Status unchanged after reboot | Kernel lacks `CONFIG_CPU_MITIGATIONS=y` (see top) |
+| Status unchanged, kernel has mitigations | Wrong parameter name — sysfs filename ≠ parameter name (e.g. `spectre_v1` → `nospectre_v1`, not `spectre_v1=off`) |
+| Flag had no effect but others did | Edited an entry you didn't boot — check `Current Entry` in `bootctl status`; or shared plumbing (MDS/TAA/MMIO/RFDS VERW family interact) |
+| `Unknown kernel command line parameters` in log | Typo or parameter unsupported by this kernel version |
+| Worked before, broken after update | `kernel-install` regenerated the entry — use `/etc/kernel/cmdline` |
+
+Also remember: microcode updates can change what is affected/mitigated, and `Not affected` items ignore their parameters entirely.
+
+---
+
+## Rollback
+
+1. Reboot into the untouched safe entry (`arch-linux.conf`).
+2. Restore the backup made during editing, or simply delete the appended flags.
+3. If `/etc/kernel/cmdline` was changed, revert it and regenerate entries as shown above.
+
+Boot assets live on the ESP (vfat) — Btrfs snapshots of `/` do **not** cover `/boot`. Back up `/boot/loader/entries/` explicitly before experiments.
+
+---
+
+## Limine (other machines)
+
+Edit the active `limine.conf` (`/boot/limine.conf`, `/efi/limine.conf`, or under `EFI/limine/`) and append parameters to the existing `CMDLINE=` value. Changing only `CMDLINE=` requires no Limine reinstall. Keep a second menu entry without the flags as fallback.
 
 ```ini
 :Arch Linux (bench)
     PROTOCOL=linux
     KERNEL_PATH=boot():/vmlinuz-linux
     MODULE_PATH=boot():/initramfs-linux.img
-    CMDLINE=rd.luks.name=<LUKS_UUID>=cryptroot root=/dev/mapper/cryptroot rootfstype=btrfs rootflags=subvol=@ rw spectre_v2=off spec_store_bypass_disable=off
-```
-
-Notes:
-
-- Preserve the existing, working `CMDLINE=` arguments.
-- If your working entry already loads microcode or multiple initrds/modules, keep that ordering unchanged.
-- Changing only `CMDLINE=` does **not** require reinstalling Limine.
-
-### Recommended Limine practice
-
-Create a second menu entry, for example:
-
-- `:Arch Linux`
-- `:Arch Linux (bench / mitigations off)`
-
-This gives you a clean fallback without touching the default boot path.
-
----
-
-## Btrfs snapshot considerations
-
-> [!warning]
-> Btrfs snapshots do **not** automatically protect your bootloader configuration if `/boot` or `/efi` is on a separate ESP/XBOOTLDR VFAT partition, which is the common Arch setup.
-
-Important consequences:
-
-1. Rolling back the root subvolume does **not** necessarily roll back:
-   - `loader/entries/*.conf`
-   - `limine.conf`
-   - UKIs stored under `EFI/Linux/`
-   - microcode images and initramfs images on the ESP/XBOOTLDR
-
-2. Snapshot boot entries may use different:
-   - `rootflags=subvol=...`
-   - `rootflags=subvolid=...`
-
-3. If you boot snapshots directly, each snapshot-specific entry may need its own cmdline maintenance.
-
-### Recommended snapshot-safe practice
-
-- Keep a **known-good fallback entry** with no mitigation-disabling flags.
-- Back up the active bootloader config before editing it.
-- If using UKIs, keep at least one older known-good UKI available.
-- Verify `/boot` and `/efi` are actually mounted before editing files.
-
-Check mountpoints first:
-
-```bash
-findmnt / /boot /efi
-```
-
-> [!important]
-> A very common failure mode on Arch is editing `/boot/...` while `/boot` is **not mounted**, which writes files into the root filesystem mountpoint directory instead of the actual ESP/XBOOTLDR.
-
----
-
-## Verification after reboot
-
-### 1. Confirm the running kernel got the flags
-
-```bash
-cat /proc/cmdline
-```
-
-### 2. Check the vulnerability status files
-
-```bash
-grep . /sys/devices/system/cpu/vulnerabilities/*
-```
-
-### 3. Check the kernel log for parameter parsing and mitigation messages
-
-Preferred:
-
-```bash
-sudo journalctl -b -k | grep -Ei 'unknown kernel command line|mitigat|microcode|IBRS|IBPB|VERW|RFDS|GDS|BHI|SRBDS'
-```
-
-Alternative:
-
-```bash
-dmesg | grep -Ei 'unknown kernel command line|mitigat|microcode|IBRS|IBPB|VERW|RFDS|GDS|BHI|SRBDS'
-```
-
-### 4. Record benchmark metadata
-
-For reproducible performance work, record at minimum:
-
-```bash
-uname -r
-cat /proc/cmdline
-grep . /sys/devices/system/cpu/vulnerabilities/*
-sudo journalctl -b -k | grep -Ei 'microcode|Command line'
-```
-
-> [!note]
-> Early microcode updates materially affect mitigation availability and performance. Treat the microcode version as part of the benchmark environment.
-
----
-
-## Minimal audit script
-
-```bash
-#!/usr/bin/env bash
-set -euo pipefail
-shopt -s nullglob
-
-printf 'kernel   : %s\n' "$(uname -r)"
-printf 'cmdline  : %s\n' "$(</proc/cmdline)"
-printf '\nvulnerabilities:\n'
-
-for f in /sys/devices/system/cpu/vulnerabilities/*; do
-  printf '  %-28s %s\n' "${f##*/}" "$(<"$f")"
-done
-```
-
-Run it after reboot to capture the effective state.
-
----
-
-## Troubleshooting
-
-### The mitigation still shows as active
-
-Common reasons:
-
-#### 1. Wrong parameter name
-You guessed the parameter from the sysfs filename instead of using documented kernel syntax.
-
-Example:
-
-- wrong: `spectre_v1=off`
-- correct: `nospectre_v1`
-
----
-
-#### 2. You edited the wrong boot source
-
-Typical examples:
-
-- edited a systemd-boot text entry, but the machine actually boots a **UKI**
-- edited `/boot/...` while `/boot` was not mounted
-- edited the wrong `limine.conf`
-- modified a non-default menu entry, but booted a different one
-
-Use:
-
-```bash
-bootctl status
-cat /proc/cmdline
-findmnt /boot /efi
+    CMDLINE=root=UUID=<UUID> rootfstype=btrfs rootflags=subvol=@ rw mitigations=off
 ```
 
 ---
 
-#### 3. UKI not rebuilt
+## Bottom Line
 
-If the cmdline is embedded in the UKI, editing `/etc/kernel/cmdline` changes nothing until the UKI is regenerated.
-
----
-
-#### 4. Shared mitigation mechanisms
-
-Some Intel vulnerabilities share mitigation plumbing, especially buffer-clearing paths.
-
-Examples:
-
-- `mds`
-- `tsx_async_abort`
-- `mmio_stale_data`
-- `reg_file_data_sampling`
-
-Disabling only one knob may not produce the status string you expected if related mitigations remain enabled.
-
----
-
-#### 5. Microcode changed the mitigation landscape
-
-A microcode update may:
-
-- expose new mitigation capabilities
-- alter default mitigation mode
-- change performance characteristics
-- add or remove vulnerability files or status wording
-
-Always record microcode state when comparing results.
-
----
-
-#### 6. The CPU is `Not affected`
-
-If the kernel reports `Not affected`, toggling the corresponding parameter is usually meaningless.
-
----
-
-#### 7. Some hardening is not globally toggleable
-
-Not every mitigation or hardening measure is a single boot switch. Some protections are:
-
-- compiled into kernel code paths
-- dependent on CPU feature state
-- only partially controllable
-- scoped differently from the sysfs reporting entry
-
----
-
-## Rollback procedure
-
-### Preferred rollback strategy
-
-1. Keep a separate **safe** boot entry:
-   - systemd-boot: duplicate the entry without mitigation-disabling flags
-   - Limine: duplicate the stanza without mitigation-disabling flags
-
-2. If the benchmark entry misbehaves:
-   - reboot
-   - choose the safe entry
-   - remove or correct the flags
-   - rebuild the UKI if applicable
-
-### Back up boot configuration before changes
-
-#### systemd-boot text entry example
-
-```bash
-ts=$(printf '%(%F-%H%M%S)T' -1)
-src=/boot/loader/entries/arch-linux.conf
-sudo install -Dm0644 -- "$src" "${src}.bak.${ts}"
-```
-
-#### Limine config example
-
-```bash
-ts=$(printf '%(%F-%H%M%S)T' -1)
-src=/boot/limine.conf
-sudo install -Dm0644 -- "$src" "${src}.bak.${ts}"
-```
-
-Adjust paths for your actual layout.
-
-> [!important]
-> If your boot assets live on the ESP/XBOOTLDR, a Btrfs rollback of `/` will not restore them. Back up the boot partition configuration explicitly.
-
----
-
-## Practical recommendations
-
-### For quick “all mitigations off” lab testing
-
-Use:
-
-```text
-mitigations=off
-```
-
-Then verify with:
-
-```bash
-cat /proc/cmdline
-grep . /sys/devices/system/cpu/vulnerabilities/*
-```
-
----
-
-### For repeatable, explicit benchmarking
-
-Prefer explicit per-mitigation flags such as:
-
-```text
-pti=off nospectre_v1 spectre_v2=off spec_store_bypass_disable=off mds=off tsx_async_abort=off mmio_stale_data=off reg_file_data_sampling=off gather_data_sampling=off retbleed=off spec_rstack_overflow=off srbds=off
-```
-
-This makes the test state easier to audit later.
-
----
-
-### For multi-machine administration
-
-Record:
-
-- kernel version
-- microcode version
-- exact kernel command line
-- vulnerability status files
-- bootloader type
-- whether the system uses text entries or UKIs
-- root unlock method (`rd.luks.*` vs `cryptdevice=`)
-
----
-
-## Reference locations
-
-### Kernel documentation
-
-- `Documentation/admin-guide/hw-vuln/`
-- `Documentation/admin-guide/kernel-parameters.rst`
-
-### Runtime state
-
-- `/proc/cmdline`
-- `/sys/devices/system/cpu/vulnerabilities/*`
-
-### Bootloader-related paths
-
-#### systemd-boot
-- `/boot/loader/entries/*.conf`
-- `/efi/loader/entries/*.conf`
-- `/etc/kernel/cmdline`
-- `/EFI/Linux/*.efi`
-
-#### Limine
-- active `limine.conf` on the boot volume
-
----
-
-## Bottom line
-
-- Do **not** assume every vulnerability maps to `name=off`
-- Use the **documented** parameter for the running kernel
-- On Arch with **LUKS2 + Btrfs**, **append** flags to the existing root-unlock and root-mount arguments
-- With **systemd-boot UKIs**, change `/etc/kernel/cmdline` and rebuild the UKI
-- With **Limine**, edit the active `CMDLINE=` and keep a fallback entry
-- Verify with `/proc/cmdline`, `/sys/devices/system/cpu/vulnerabilities/*`, and the kernel log before trusting benchmark results
+- First check `CONFIG_CPU_MITIGATIONS` — flags are meaningless otherwise
+- Use **documented** parameters, never guessed `name=off` forms
+- **Append** to `options`; preserve root arguments
+- Prefer a separate benchmark entry over editing the daily-driver one
+- Persist intent in `/etc/kernel/cmdline` so `kernel-install` regenerations keep it
+- Verify with `/proc/cmdline` + sysfs + kernel log before trusting any benchmark

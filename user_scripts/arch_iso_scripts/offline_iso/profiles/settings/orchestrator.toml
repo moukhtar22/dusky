@@ -1,0 +1,295 @@
+# ==============================================================================
+# Dusky Arch ISO Offline Orchestrator Master Settings Configuration
+# Location: profiles/settings/orchestrator.toml
+# ==============================================================================
+# This file decouples all system and UI settings from the ISO offline orchestrator.
+# All paths support:
+#   - Relative subpaths under user home (e.g., "Documents" -> ~/Documents)
+#   - Tilde expansion (e.g., "~/Pictures/files/history")
+#   - Absolute paths (e.g., "/var/log/dusky")
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# UI & VISUAL DISPLAY SETTINGS
+# ------------------------------------------------------------------------------
+[ui]
+# Render in plain ASCII instead of Unicode symbols if set to true
+ascii_mode = false
+
+# Default initial width percentage of the left execution tree pane (15 to 80)
+left_pane_width = 38
+
+# Minimum and maximum allowable percentage bounds when dragging or resizing the left pane
+min_left_pane_width = 15
+max_left_pane_width = 80
+
+# Fallback terminal grid dimensions (columns and lines) when PTY size detection fails
+fallback_pty_columns = 120
+fallback_pty_lines = 40
+
+# Maximum lines kept in each task's RichLog widget memory buffer before trimming
+max_log_lines = 6000
+
+# Maximum line count preserved in individual task output deques
+max_deque_lines = 5000
+
+# Maximum number of search result items rendered in task & log search modals
+search_result_limit = 200
+
+# Ordered list of relative or absolute paths to search for Matugen-generated TUI theme JSON files
+theme_paths = [
+    ".config/matugen/generated/dusky_tui.json",
+    ".config/matugen/generated_fresh/dusky_tui.json",
+]
+
+# Fallback color palette (in Hex) used if no Matugen theme file is found
+[ui.default_palette]
+bg = "#0d1117"
+fg = "#c9d1d9"
+accent = "#58a6ff"
+warning = "#d29922"
+success = "#3fb950"
+muted = "#8b949e"
+error = "#f85149"
+
+# Unicode symbols used in normal UI rendering mode
+[ui.unicode_symbols]
+logo = "◈"
+completed = "✓"
+running = "◉"
+failed = "x"
+skipped = "⊘"
+pending = "·"
+sep = "│"
+
+# Plain ASCII alternative symbols used when ascii_mode = true
+[ui.ascii_symbols]
+logo = "DUSKY"
+completed = "OK"
+running = "RUN"
+failed = "ERR"
+skipped = "SKIP"
+pending = "..."
+sep = "|"
+
+
+# ------------------------------------------------------------------------------
+# PATHS & DIRECTORY STRUCTURE
+# ------------------------------------------------------------------------------
+[paths]
+# Root documents directory. Change to any relative, tilde (~/...), or absolute path.
+# Examples: "Documents", "~/Pictures/files/history", "/var/log/dusky"
+documents_dir = "Documents"
+
+# Application namespace used under /run/user/<uid>/ and ~/.cache/
+namespace = "dusky_iso"
+
+# Single-instance lock filename created inside the runtime directory
+lock_file = "orchestrator_iso.lock"
+
+# Temporary askpass helper script filename prefix created inside runtime askpass folder
+askpass_prefix = ".dusky_iso_askpass_"
+
+# Subdirectory under documents_dir where SQLite state databases are saved
+state_subdir = "state"
+
+# Subdirectory under documents_dir where execution log folders are stored
+logs_subdir = "logs"
+
+# Subdirectory under documents_dir where Git update backups are saved
+backups_subdir = "dusky_backups"
+
+
+# ------------------------------------------------------------------------------
+# LOGGING TOGGLE
+# ------------------------------------------------------------------------------
+[logging]
+# Set to false to completely turn off writing log files under ~/Documents/logs/
+# Set to true for normal per-run log recording
+enabled = true
+
+# Toggle writing individual per-task output log files (useful for massive sequences)
+write_task_logs = true
+
+# Toggle writing the JSON/Markdown final report files summarizing the run
+write_reports = true
+
+
+# ------------------------------------------------------------------------------
+# EXECUTION & DATABASE TUNING
+# ------------------------------------------------------------------------------
+[execution]
+# Maximum deferral passes allowed for tasks waiting on unfulfilled dependencies
+max_defer_passes = 3
+
+# Minimum required free disk space buffer (in bytes) before attempting backups/updates (64MB)
+disk_space_reserve_bytes = 67108864
+
+# SQLite database busy timeout in milliseconds (busy_timeout)
+db_busy_timeout = 5000
+
+# Default interpreter for extensionless scripts or unmapped file suffixes
+default_interpreter = "bash"
+
+# Script extension to interpreter binary mapping
+[execution.extension_interpreters]
+".py" = "python3"
+".sh" = "bash"
+".fish" = "fish"
+
+
+# ------------------------------------------------------------------------------
+# SYSTEM CONDITIONS & HARDWARE MAPS
+# ------------------------------------------------------------------------------
+[conditions]
+# Command array used to check if a system package is installed
+package_check_cmd = ["pacman", "-Qq"]
+
+# Command array used to check if a systemd system service is active
+service_active_cmd = ["systemctl", "is-active", "--quiet"]
+
+# Command array used to check if a systemd user service is active
+user_service_active_cmd = ["systemctl", "--user", "is-active", "--quiet"]
+
+# PCI Vendor Hex ID mapping used for DRM sysfs GPU condition evaluation
+[conditions.gpu_vendor_map]
+nvidia = "0x10de"
+intel = "0x8086"
+amd = "0x1002"
+vmware = "0x15ad"
+virtio = "0x1af4"
+
+
+# ------------------------------------------------------------------------------
+# NOTIFICATIONS & AUDIO ALERTS
+# ------------------------------------------------------------------------------
+[notifications]
+# Toggle audio chimes on task/sequence events
+audio_enabled = true
+
+# Toggle desktop popup notifications via notify-send
+desktop_enabled = true
+
+# Application name displayed in desktop notification banners
+app_name = "Dusky Arch ISO Installer"
+
+# Priority list of audio player executables used to play audio notifications
+audio_players = ["pw-play", "paplay"]
+
+# Fallback sound file used if a specific event sound is missing
+fallback_sound = "/usr/share/sounds/freedesktop/stereo/bell.oga"
+
+# Sound file paths mapped by event type
+[notifications.sound_map]
+alert = "/usr/share/sounds/freedesktop/stereo/dialog-warning.oga"
+info = "/usr/share/sounds/freedesktop/stereo/dialog-information.oga"
+complete = "/usr/share/sounds/freedesktop/stereo/complete.oga"
+
+
+# ------------------------------------------------------------------------------
+# SUDO & PRIVILEGE ESCALATION
+# ------------------------------------------------------------------------------
+[sudo]
+# Interval in seconds for maintaining background sudo credential heartbeat (keep-alive)
+heartbeat_interval = 45
+
+# Sudoers timestamp timeout in minutes written to temporary /etc/sudoers.d/ drop-ins
+timestamp_timeout = 15
+
+# System directory where temporary sudoers drop-in files are written
+sudoers_dir = "/etc/sudoers.d"
+
+# Filename prefix used for temporary /etc/sudoers.d/ drop-in files
+dropin_prefix = "99_dusky_iso_"
+
+# List of environment variables preserved during privilege escalation
+env_keep = [
+    "HOME",
+    "USER",
+    "PATH",
+    "TERM",
+    "COLORTERM",
+    "LANG",
+    "LC_ALL",
+    "TZ",
+    "PYTHONUNBUFFERED",
+    "PYTHONUTF8",
+    "PYTHONDONTWRITEBYTECODE",
+    "PAGER",
+    "EDITOR",
+]
+
+
+# ------------------------------------------------------------------------------
+# GIT SETTINGS
+# ------------------------------------------------------------------------------
+[git]
+# Default upstream git branch to track
+upstream_branch = "main"
+
+# Default upstream git ref target
+upstream_ref = "refs/dusky/upstream/main"
+
+# Default git repository URL fallback
+default_repo_url = "https://github.com/dusklinux/dusky"
+
+# Maximum git fetch retry attempts on network failures
+fetch_max_attempts = 5
+
+# Timeout in seconds for git fetch commands
+timeout_fetch = 90
+
+# Maximum number of historical git update backups to retain
+backup_retention = 10
+
+# Environment variables stripped before invoking git commands
+env_strip = [
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_LITERAL_PATHSPECS",
+    "GIT_ASKPASS",
+    "SSH_ASKPASS",
+]
+
+# Environment variables injected during git invocations
+[git.env_inject]
+GIT_TERMINAL_PROMPT = "0"
+GIT_SSH_COMMAND = "ssh -o BatchMode=yes"
+GIT_PAGER = "cat"
+PAGER = "cat"
+GIT_OPTIONAL_LOCKS = "0"
+
+
+# ------------------------------------------------------------------------------
+# AUTOMATED INTERACTIVE TTY PROMPTS
+# ------------------------------------------------------------------------------
+[prompts]
+# Minimum delay in seconds between auto-responding to matching interactive prompt patterns
+cooldown = 0.35
+
+# Regex rules for detecting interactive prompts (e.g. Sudo, Pacman, PGP key imports)
+[[prompts.rules]]
+name = "pgp_import"
+pattern = "(?i)(::\\s*Import PGP key.*\\?\\s*\\[Y/n\\]|::\\s*Append key\\?.*\\[Y/n\\]|Import PGP key.*\\?\\s*\\[Y/n\\])"
+kind = "yes"
+
+[[prompts.rules]]
+name = "pacman_proceed"
+pattern = "(?i)::\\s*(Proceed with (?:installation|download|upgrade)|Continue (?:installation|download|upgrade)).*\\?\\s*\\[Y/n\\]"
+kind = "yes"
+
+[[prompts.rules]]
+name = "pacman_replace"
+pattern = "(?i)::\\s*Replace\\s+.*\\?\\s*\\[Y/n\\]"
+kind = "yes"
+
+[[prompts.rules]]
+name = "pacman_remove_conflict"
+pattern = "(?i)::\\s*Remove conflicting file.*\\?\\s*\\[Y/n\\]"
+kind = "yes"
+
+[[prompts.rules]]
+name = "generic_yes"
+pattern = "(?i)\\[Y/n\\]|\\(Y/n\\)"
+kind = "yes"

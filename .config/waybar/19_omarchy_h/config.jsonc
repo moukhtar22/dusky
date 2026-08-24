@@ -40,26 +40,64 @@
       "3": [],
       "4": [],
       "5": []
-    }
+    },
+    "on-scroll-up": "hyprctl dispatch 'hl.dsp.focus({ workspace = \"e-1\" })'",
+    "on-scroll-down": "hyprctl dispatch 'hl.dsp.focus({ workspace = \"e+1\" })'"
   },
   "custom/omarchy": {
-    "format": "󰣇",
-    "on-click": "rofi -show drun -run-command 'uwsm app -- {cmd}'",
-    "on-click-right": "uwsm-app -- kitty",
+    "format": "󰌽",
+    "on-click": "rofi -show drun -run-command 'dusky-run {cmd}'",
+    "on-click-right": "dusky-run kitty",
     "tooltip-format": "Apps Menu"
   },
 
   "clock#horizontal": {
     "format": "{:L%A %H:%M}",
     "format-alt": "{:L%d %B W%V %Y}",
-    "tooltip": false,
-    "on-click-right": "uwsm-app -- gnome-clocks"
+    "tooltip": true,
+    "tooltip-format": "<tt>{calendar}</tt>",
+    "calendar": {
+      "mode": "year",
+      "mode-mon-col": 3,
+      "weeks-pos": "right",
+      "on-scroll": 1,
+      "format": {
+        "months": "<span color='#ffb786'><b>{}</b></span>",
+        "days": "<span color='#e2e2e2'>{}</span>",
+        "weeks": "<span color='#c9ca93'>W{}</span>",
+        "weekdays": "<span color='#ffb786'><b>{}</b></span>",
+        "today": "<span color='#131313' background='#ffb786'><b>{}</b></span>"
+      }
+    },
+    "actions": {
+      "on-click-right": "mode",
+      "on-scroll-up": "shift_up",
+      "on-scroll-down": "shift_down"
+    }
   },
   "clock#vertical": {
     "format": "{:%H\n  —\n%M}",
     "format-alt": "{:L%d %B W%V %Y}",
-    "tooltip": false,
-    "on-click-right": "uwsm-app -- gnome-clocks"
+    "tooltip": true,
+    "tooltip-format": "<tt>{calendar}</tt>",
+    "calendar": {
+      "mode": "year",
+      "mode-mon-col": 3,
+      "weeks-pos": "right",
+      "on-scroll": 1,
+      "format": {
+        "months": "<span color='#ffb786'><b>{}</b></span>",
+        "days": "<span color='#e2e2e2'>{}</span>",
+        "weeks": "<span color='#c9ca93'>W{}</span>",
+        "weekdays": "<span color='#ffb786'><b>{}</b></span>",
+        "today": "<span color='#131313' background='#ffb786'><b>{}</b></span>"
+      }
+    },
+    "actions": {
+      "on-click-right": "mode",
+      "on-scroll-up": "shift_up",
+      "on-scroll-down": "shift_down"
+    }
   },
   "custom/weather": {
     "format": "{}",
@@ -94,8 +132,8 @@
     "tooltip-format-discharging": "{power:>1.0f}W↓ {capacity}%",
     "tooltip-format-charging": "{power:>1.0f}W↑ {capacity}%",
     "interval": 5,
-    "on-click": "uwsm-app -- kitty --class power_saver.sh --hold -e $HOME/user_scripts/battery/power_saver.sh --interactive",
-    "on-click-right": "uwsm-app -- kitty --class dusky_hypridle.sh -e $HOME/user_scripts/hypridle/dusky_hypridle.sh",
+    "on-click": "dusky-run kitty --class power_saver.sh --hold -e $HOME/user_scripts/battery/power_saver.sh --interactive",
+    "on-click-right": "dusky-run kitty --class dusky_hypridle.sh -e $HOME/user_scripts/hypridle/dusky_hypridle.sh",
     "states": {
       "warning": 20,
       "critical": 10
@@ -108,11 +146,11 @@
     "format-connected": "󰂱",
     "format-no-controller": "",
     "tooltip-format": "Devices connected: {num_connections}",
-    "on-click": "uwsm-app -- kitty --class bluetui -e bluetui"
+    "on-click": "dusky-run kitty --class bluetui -e bluetui"
   },
   "pulseaudio": {
     "format": "{icon}",
-    "on-click": "uwsm-app -- pavucontrol",
+    "on-click": "dusky-run pavucontrol",
     "on-click-right": "pactl set-sink-mute @DEFAULT_SINK@ toggle",
     "tooltip-format": "Playing at {volume}%",
     "scroll-step": 5,
@@ -144,7 +182,7 @@
   },
   "custom/power": {
     "format": "⏻",
-    "on-click": "uwsm-app -- ~/user_scripts/wlogout/wlogout_scale.sh",
+    "on-click": "dusky-run ~/user_scripts/wlogout/wlogout_scale.sh",
     "tooltip-format": "Power Menu"
   }
 }

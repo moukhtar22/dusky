@@ -1,0 +1,14 @@
+/*
+ * export.map — restrict exported dynamic symbols to the EGL/GL API only.
+ *
+ * Everything else (internal helpers like fx_log, fx_ensure_before_gl, etc.)
+ * becomes local, so this interposer can never accidentally shadow libc/libdl
+ * symbols in any process that dlopens it as libEGL.so.1.
+ */
+{
+    global:
+        egl*;
+        gl*;
+    local:
+        *;
+};

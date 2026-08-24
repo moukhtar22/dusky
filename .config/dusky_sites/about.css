@@ -1,0 +1,471 @@
+/* =====================================================================
+ * Dusky Sites — Firefox 153 "about:" master template
+ * File:    ~/.config/dusky_sites/about.css
+ * Target:  Firefox 153.0.3 (Gecko, August 2026) + forks (LibreWolf,
+ *          Zen, Waterfox, Floorp, FireDragon)
+ * Loaded:  copied into <profile>/chrome/dusky_about.css by
+ *          dusky_sites_setup.py, imported from userContent.css.
+ *
+ * PRECONDITION: dusky_sites_setup.py prepends the Matugen palette
+ * (:root { --background: …; --primary: …; }) wrapped in the same
+ * @-moz-document url-prefix("about:") block, so every var() below
+ * resolves against the live Material You 3 palette.
+ *
+ * !! DO NOT add a default XUL @namespace here. A default namespace of
+ * http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul makes
+ * every un-prefixed element selector (button, input, table, dialog…)
+ * match ONLY XUL elements. All Firefox 153 about: pages are HTML
+ * documents, so a XUL default namespace silently kills ~70% of this
+ * sheet and lets Gecko's default dark-gray / warning fallbacks bleed
+ * through. If a rule ever needs XUL, use a prefixed namespace:
+ *   @namespace xul url("http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul");
+ * ===================================================================== */
+
+@-moz-document url-prefix("about:") {
+
+  /* ===================================================================
+   * 0. ROOT — color-scheme + full design-system token override
+   *
+   * Custom properties INHERIT through shadow DOM boundaries. Setting
+   * them on :root is the only reliable way for userContent.css to
+   * re-skin moz-card / moz-button / moz-toggle / moz-checkbox /
+   * moz-message-bar / moz-input-search internals, since author sheets
+   * cannot select inside chrome-privileged shadow roots.
+   * =================================================================== */
+  :root {
+    /* Force the dark leg of every light-dark() pair in
+     * tokens-shared.css. Without this, a light OS theme makes Gecko
+     * resolve light-leg grays underneath Matugen dark surfaces →
+     * muddy brown/red color-mix() hover states. */
+    color-scheme: dark !important;
+
+    /* ---- Layer 2: semantic tokens (design-system/tokens-shared) ---- */
+
+    /* Text */
+    --text-color: var(--on_surface) !important;
+    --text-color-deemphasized: var(--on_surface_variant) !important;
+    --text-color-disabled: color-mix(in srgb, var(--on_surface) 40%, transparent) !important;
+    --text-color-error: var(--error) !important;
+
+    /* Page + box surfaces.
+     * --background-color-box drives moz-card, groupbox, richlistitem.
+     * --background-color-box-info drives ONLY informational callouts —
+     * never map it (or --background-color-box) to --error_container. */
+    --background-color-canvas: var(--background) !important;
+    --background-color-box: var(--surface_container) !important;
+    --background-color-box-info: var(--surface_container_high) !important;
+
+    /* Status surfaces — keep these SCOPED to their real meaning.
+     * These are what moz-message-bar resolves per its type attribute. */
+    --background-color-information: color-mix(in srgb, var(--primary_container) 55%, var(--surface_container)) !important;
+    --background-color-success: color-mix(in srgb, var(--secondary_container) 60%, var(--surface_container)) !important;
+    --background-color-warning: color-mix(in srgb, var(--tertiary_container) 60%, var(--surface_container)) !important;
+    --background-color-critical: color-mix(in srgb, var(--error_container) 55%, var(--surface_container)) !important;
+
+    /* moz-message-bar shadow tokens (FF 153 names) */
+    --message-bar-background-color: var(--surface_container_high) !important;
+    --message-bar-text-color: var(--on_surface) !important;
+    --message-bar-icon-color: var(--primary) !important;
+
+    /* Borders */
+    --border-color: var(--outline_variant) !important;
+    --border-color-deemphasized: color-mix(in srgb, var(--outline_variant) 60%, transparent) !important;
+    --border-color-interactive: var(--primary) !important;
+    --border-interactive-color: var(--primary) !important;
+    --border-interactive-color-hover: var(--primary_fixed) !important;
+    --border-interactive-color-active: var(--primary_fixed_dim) !important;
+    --border-interactive-color-disabled: var(--surface_variant) !important;
+
+    /* Cards (moz-card shadow root reads these, inherited) */
+    --card-background-color: var(--surface_container) !important;
+    --card-border-color: var(--outline_variant) !important;
+    --card-shadow: 0 1px 2px color-mix(in srgb, var(--surface_container_lowest) 70%, transparent) !important;
+
+    /* Accent */
+    --color-accent-primary: var(--primary) !important;
+    --color-accent-primary-hover: var(--primary_fixed) !important;
+    --color-accent-primary-active: var(--primary_fixed_dim) !important;
+
+    /* Buttons (moz-button + <button> both consume these) */
+    --button-background-color: var(--surface_container_high) !important;
+    --button-background-color-hover: var(--surface_container_highest) !important;
+    --button-background-color-active: var(--surface_bright) !important;
+    --button-background-color-disabled: color-mix(in srgb, var(--surface_container_high) 55%, transparent) !important;
+    --button-text-color: var(--on_surface) !important;
+    --button-border-color: transparent !important;
+    --button-background-color-primary: var(--primary) !important;
+    --button-background-color-primary-hover: var(--primary_fixed) !important;
+    --button-background-color-primary-active: var(--primary_fixed_dim) !important;
+    --button-text-color-primary: var(--on_primary) !important;
+    --button-background-color-destructive: var(--error) !important;
+    --button-background-color-destructive-hover: color-mix(in srgb, var(--error) 85%, var(--on_error)) !important;
+    --button-text-color-destructive: var(--on_error) !important;
+    --button-background-color-ghost: transparent !important;
+    --button-background-color-ghost-hover: var(--surface_container_high) !important;
+    --button-background-color-ghost-active: var(--surface_container_highest) !important;
+
+    /* Links */
+    --link-color: var(--primary) !important;
+    --link-color-hover: var(--primary_fixed) !important;
+    --link-color-active: var(--primary_fixed_dim) !important;
+    --link-color-visited: var(--tertiary) !important;
+
+    /* Focus */
+    --focus-outline-color: var(--primary) !important;
+    --focus-outline-width: 2px;
+    --focus-outline: var(--focus-outline-width) solid var(--focus-outline-color) !important;
+    --focus-outline-offset: 2px;
+
+    /* Inputs (moz-input-search / moz-input-text / plain HTML inputs) */
+    --input-text-color: var(--on_surface) !important;
+    --input-background-color: var(--surface_container_low) !important;
+    --input-border-color: var(--outline) !important;
+    --input-border-color-hover: var(--on_surface_variant) !important;
+    --input-border-color-focus: var(--primary) !important;
+    --input-background-color-disabled: color-mix(in srgb, var(--surface_container_low) 55%, transparent) !important;
+
+    /* moz-checkbox */
+    --checkbox-border-color: var(--outline) !important;
+    --checkbox-unchecked-background-color: var(--surface_container_low) !important;
+    --checkbox-unchecked-hover-background-color: var(--surface_container_high) !important;
+    --checkbox-unchecked-active-background-color: var(--surface_container_highest) !important;
+    --checkbox-checked-background-color: var(--primary) !important;
+    --checkbox-checked-hover-background-color: var(--primary_fixed) !important;
+    --checkbox-checked-active-background-color: var(--primary_fixed_dim) !important;
+    --checkbox-checked-color: var(--on_primary) !important;
+    --checkbox-checked-border-color: transparent !important;
+
+    /* moz-toggle */
+    --toggle-background-color: var(--surface_variant) !important;
+    --toggle-background-color-hover: color-mix(in srgb, var(--surface_variant) 85%, var(--on_surface)) !important;
+    --toggle-background-color-active: color-mix(in srgb, var(--surface_variant) 75%, var(--on_surface)) !important;
+    --toggle-background-color-pressed: var(--primary) !important;
+    --toggle-background-color-pressed-hover: var(--primary_fixed) !important;
+    --toggle-background-color-pressed-active: var(--primary_fixed_dim) !important;
+    --toggle-border-color: var(--outline) !important;
+    --toggle-border-color-hover: var(--on_surface_variant) !important;
+    --toggle-dot-background-color: var(--on_surface_variant) !important;
+    --toggle-dot-background-color-on-pressed: var(--on_primary) !important;
+
+    /* moz-page-nav (about:addons / about:settings sidebar) */
+    --page-nav-button-background-color-selected: var(--secondary_container) !important;
+    --page-nav-button-text-color-selected: var(--on_secondary_container) !important;
+    --page-nav-button-background-color-hover: var(--surface_container_high) !important;
+
+    /* Tables / trees (about:config, about:support, about:processes) */
+    --table-header-background-color: var(--surface_container_high) !important;
+    --table-row-background-color: var(--surface) !important;
+    --table-row-background-color-alternate: var(--surface_container_low) !important;
+
+    /* ---- Layer 3: legacy --in-content-* shims ---- */
+    --in-content-page-background: var(--background) !important;
+    --in-content-page-color: var(--on_surface) !important;
+    --in-content-text-color: var(--on_surface) !important;
+    --in-content-deemphasized-text: var(--on_surface_variant) !important;
+    --in-content-box-background: var(--surface_container) !important;
+    --in-content-box-background-odd: var(--surface_container_low) !important;
+    --in-content-box-info-background: var(--surface_container_high) !important;
+    --in-content-box-border-color: var(--outline_variant) !important;
+    --in-content-border-color: var(--outline_variant) !important;
+    --in-content-border-hover: var(--outline) !important;
+    --in-content-border-active: var(--primary) !important;
+    --in-content-border-invalid: var(--error) !important;
+    --in-content-item-hover: color-mix(in srgb, var(--primary) 14%, transparent) !important;
+    --in-content-item-hover-text: var(--on_surface) !important;
+    --in-content-item-selected: var(--secondary_container) !important;
+    --in-content-item-selected-text: var(--on_secondary_container) !important;
+    --in-content-icon-color: var(--on_surface_variant) !important;
+    --in-content-accent-color: var(--primary) !important;
+    --in-content-accent-color-hover: var(--primary_fixed) !important;
+    --in-content-accent-color-active: var(--primary_fixed_dim) !important;
+    --in-content-button-background: var(--surface_container_high) !important;
+    --in-content-button-background-hover: var(--surface_container_highest) !important;
+    --in-content-button-background-active: var(--surface_bright) !important;
+    --in-content-button-text-color: var(--on_surface) !important;
+    --in-content-button-border-color: transparent !important;
+    --in-content-primary-button-background: var(--primary) !important;
+    --in-content-primary-button-background-hover: var(--primary_fixed) !important;
+    --in-content-primary-button-background-active: var(--primary_fixed_dim) !important;
+    --in-content-primary-button-text-color: var(--on_primary) !important;
+    --in-content-danger-button-background: var(--error) !important;
+    --in-content-danger-button-background-hover: color-mix(in srgb, var(--error) 85%, var(--on_error)) !important;
+    --in-content-danger-button-text-color: var(--on_error) !important;
+    --in-content-focus-outline-color: var(--primary) !important;
+    --in-content-link-color: var(--primary) !important;
+    --in-content-link-color-hover: var(--primary_fixed) !important;
+    --in-content-link-color-active: var(--primary_fixed_dim) !important;
+    --in-content-link-color-visited: var(--tertiary) !important;
+    --in-content-table-background: var(--surface_container_low) !important;
+    --in-content-table-border-color: var(--outline_variant) !important;
+    --in-content-table-header-background: var(--surface_container_high) !important;
+    --in-content-table-header-color: var(--on_surface) !important;
+    --in-content-sidebar-background: var(--surface_container_low) !important;
+
+    /* System-color fallbacks */
+    --color-canvas: var(--background) !important;
+    accent-color: var(--primary);
+  }
+
+  /* ===================================================================
+   * 1. GENERIC DOCUMENT SURFACES
+   * =================================================================== */
+  html,
+  body {
+    background-color: var(--background-color-canvas) !important;
+    color: var(--text-color) !important;
+    scrollbar-color: var(--surface_variant) transparent;
+  }
+
+  ::selection {
+    background-color: color-mix(in srgb, var(--primary) 35%, transparent) !important;
+    color: var(--on_surface) !important;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--focus-outline-color) !important;
+    outline-offset: 2px;
+  }
+
+  a:any-link { color: var(--link-color) !important; }
+  a:any-link:hover { color: var(--link-color-hover) !important; }
+  a:any-link:active { color: var(--link-color-active) !important; }
+  a:visited { color: var(--link-color-visited) !important; }
+
+  /* ===================================================================
+   * 2. NATIVE FORM CONTROLS
+   * =================================================================== */
+  button:not(.primary):not([type="submit"]),
+  select {
+    background-color: var(--button-background-color) !important;
+    color: var(--button-text-color) !important;
+    border: 1px solid var(--outline_variant) !important;
+    border-radius: 8px;
+  }
+  button:not(.primary):hover:not([disabled]) {
+    background-color: var(--button-background-color-hover) !important;
+  }
+  button:not(.primary):active:not([disabled]) {
+    background-color: var(--button-background-color-active) !important;
+  }
+  button.primary,
+  button[type="submit"],
+  button[autofocus] {
+    background-color: var(--button-background-color-primary) !important;
+    color: var(--button-text-color-primary) !important;
+    border: none !important;
+    border-radius: 8px;
+  }
+  button.primary:hover:not([disabled]) {
+    background-color: var(--button-background-color-primary-hover) !important;
+  }
+  button[disabled] {
+    background-color: var(--button-background-color-disabled) !important;
+    color: var(--text-color-disabled) !important;
+  }
+
+  input:is([type="text"], [type="search"], [type="email"],
+           [type="url"], [type="number"], [type="password"]),
+  textarea,
+  search-textbox,
+  #searchInput,
+  .main-search,
+  #about-config-search {
+    background-color: var(--input-background-color) !important;
+    color: var(--input-text-color) !important;
+    border: 1px solid var(--input-border-color) !important;
+    border-radius: 8px;
+    caret-color: var(--primary);
+  }
+  input:is([type="text"], [type="search"], [type="number"],
+           [type="password"]):focus,
+  textarea:focus {
+    border-color: var(--input-border-color-focus) !important;
+    outline: 1px solid var(--input-border-color-focus) !important;
+  }
+  ::placeholder { color: var(--on_surface_variant) !important; opacity: 0.75; }
+
+  input[type="checkbox"],
+  input[type="radio"],
+  progress,
+  input[type="range"] {
+    accent-color: var(--primary) !important;
+  }
+
+  /* ===================================================================
+   * 3. CARDS, GROUPS, DIALOGS
+   * =================================================================== */
+  moz-card,
+  .card,
+  .card-heading,
+  groupbox,
+  section[data-category] .groupbox-body {
+    background-color: var(--card-background-color) !important;
+    color: var(--text-color) !important;
+    border-color: var(--card-border-color) !important;
+  }
+  setting-group,
+  moz-fieldset {
+    color: var(--text-color) !important;
+  }
+
+  dialog,
+  .dialogBox {
+    background-color: var(--surface_container) !important;
+    color: var(--on_surface) !important;
+    border: 1px solid var(--outline_variant) !important;
+    border-radius: 12px;
+  }
+  #dialogOverlay,
+  .dialogOverlay {
+    background-color: color-mix(in srgb, var(--surface_container_lowest) 60%, transparent) !important;
+  }
+
+  /* ===================================================================
+   * 4. about:preferences / about:settings
+   * =================================================================== */
+  #categories {
+    background-color: transparent !important;
+  }
+  #categories > .category {
+    color: var(--on_surface_variant) !important;
+    border-radius: 10px;
+    margin-inline: 6px;
+  }
+  #categories > .category:hover {
+    background-color: var(--surface_container_high) !important;
+    color: var(--on_surface) !important;
+  }
+  #categories > .category[selected],
+  #categories > .category.selected {
+    background-color: var(--secondary_container) !important;
+    color: var(--on_secondary_container) !important;
+  }
+  #categories > .category[selected] .category-icon {
+    fill: var(--on_secondary_container) !important;
+    -moz-context-properties: fill;
+  }
+  .sticky-container,
+  .search-container,
+  #preferences-body,
+  .main-content {
+    background-color: var(--background-color-canvas) !important;
+  }
+  .sidebar-footer-link:hover {
+    background-color: var(--surface_container_high) !important;
+  }
+
+  /* ===================================================================
+   * 5. about:config
+   * =================================================================== */
+  #toolbar { background-color: var(--background-color-canvas) !important; }
+  #prefs {
+    background-color: var(--surface) !important;
+    color: var(--on_surface) !important;
+  }
+  #prefs > tr:nth-child(odd) { background-color: var(--surface_container_low) !important; }
+  #prefs > tr:hover { background-color: var(--surface_container_high) !important; }
+  #prefs > tr.has-user-value { color: var(--primary_fixed) !important; }
+  #prefs button.button-add,
+  #prefs button.primary { background-color: var(--primary) !important; color: var(--on_primary) !important; }
+  .deletion { background-color: color-mix(in srgb, var(--error_container) 40%, var(--surface)) !important; }
+
+  /* ===================================================================
+   * 6. about:support / about:processes
+   * =================================================================== */
+  table { border-color: var(--outline_variant) !important; }
+  th {
+    background-color: var(--table-header-background-color) !important;
+    color: var(--on_surface) !important;
+  }
+  td { border-color: var(--outline_variant) !important; }
+  tr:nth-child(even) > td { background-color: var(--table-row-background-color-alternate) !important; }
+  #process-tbody > tr:hover { background-color: var(--surface_container_high) !important; }
+
+  /* ===================================================================
+   * 7. XUL leftovers: richlistbox / trees
+   * =================================================================== */
+  richlistbox {
+    background-color: var(--surface_container_low) !important;
+    color: var(--on_surface) !important;
+    border: 1px solid var(--outline_variant) !important;
+  }
+  richlistitem[selected="true"] {
+    background-color: var(--secondary_container) !important;
+    color: var(--on_secondary_container) !important;
+  }
+  richlistitem:hover:not([selected="true"]) {
+    background-color: var(--surface_container_high) !important;
+  }
+  treechildren {
+    background-color: var(--surface_container_low) !important;
+    color: var(--on_surface) !important;
+  }
+  treechildren::-moz-tree-row(selected) {
+    background-color: var(--secondary_container) !important;
+  }
+  treechildren::-moz-tree-cell-text(selected) {
+    color: var(--on_secondary_container) !important;
+  }
+
+  /* ===================================================================
+   * 8. about:addons
+   * =================================================================== */
+  #main { background-color: var(--background-color-canvas) !important; }
+  addon-card,
+  recommended-addon-card,
+  .addon.card {
+    background-color: var(--card-background-color) !important;
+    border-color: var(--card-border-color) !important;
+  }
+  .addon-badge { background-color: var(--surface_container_highest) !important; }
+  panel-list {
+    background-color: var(--surface_container_high) !important;
+    color: var(--on_surface) !important;
+    border: 1px solid var(--outline_variant) !important;
+  }
+  panel-item::part(button):hover {
+    background-color: var(--surface_container_highest) !important;
+  }
+}
+
+/* =====================================================================
+ * 9. about:newtab / about:home
+ * ===================================================================== */
+@-moz-document url("about:newtab"), url("about:home"), url("about:blank") {
+  :root {
+    --newtab-background-color: var(--background, #0e1416) !important;
+    --newtab-background-color-secondary: var(--surface_container, #1b2122) !important;
+    --newtab-text-primary-color: var(--on_background, #dee3e5) !important;
+    --newtab-text-secondary-color: var(--on_surface_variant, #bfc8ca) !important;
+    --newtab-contextual-text-primary-color: var(--on_surface, #dee3e5) !important;
+    --newtab-primary-action-background: var(--primary, #82d3e2) !important;
+    --newtab-primary-action-background-dimmed: color-mix(in srgb, var(--primary, #82d3e2) 25%, transparent) !important;
+    --newtab-primary-element-text-color: var(--on_primary, #00363e) !important;
+    --newtab-element-hover-color: var(--surface_container_high, #252b2c) !important;
+    --newtab-element-active-color: var(--surface_container_highest, #303637) !important;
+    --newtab-element-secondary-color: var(--surface_container_high, #252b2c) !important;
+    --newtab-element-secondary-hover-color: var(--surface_container_highest, #303637) !important;
+    --newtab-border-color: var(--outline_variant, #3f484a) !important;
+    --newtab-wordmark-color: var(--on_background, #dee3e5) !important;
+    --newtab-status-success: var(--secondary, #b1cbd0) !important;
+    --newtab-status-error: var(--error, #ffb4ab) !important;
+    --newtab-button-static-background: var(--surface_container_high, #252b2c) !important;
+    --newtab-button-static-hover-background: var(--surface_container_highest, #303637) !important;
+    color-scheme: dark !important;
+  }
+  body {
+    background-color: var(--newtab-background-color) !important;
+    color: var(--newtab-text-primary-color) !important;
+  }
+  .top-site-outer .tile,
+  .card-outer,
+  .ds-card {
+    background-color: var(--newtab-background-color-secondary) !important;
+  }
+  .search-wrapper .search-handoff-button,
+  .search-wrapper input {
+    background-color: var(--surface_container, #1b2122) !important;
+    color: var(--on_surface, #dee3e5) !important;
+    border: 1px solid var(--outline_variant, #3f484a) !important;
+  }
+}

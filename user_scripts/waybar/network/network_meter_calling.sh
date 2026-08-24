@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # waybar-net: Minimal JSON output for Waybar (Zero-Fork Edition)
+# shellcheck disable=SC2154
 
 # 1. OPTIMIZATION: Use ${UID} (Bash variable) instead of $(id -u) (Process fork)
 STATE_DIR="${XDG_RUNTIME_DIR:-/run/user/${UID}}/waybar-net"
@@ -48,8 +49,7 @@ fmt_v() {
     if (( len >= 3 )); then
         _out="${s:0:3}"
     elif (( len == 2 )); then
-        # Natively pass literal JSON unicode escape so Waybar parses it perfectly
-        _out="\\u2005${s}\\u2005"
+        _out=" ${s}"
     elif (( len == 1 )); then
         _out=" ${s} "
     else

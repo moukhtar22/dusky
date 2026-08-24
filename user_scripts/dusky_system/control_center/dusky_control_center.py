@@ -41,6 +41,12 @@ from typing import (
 # =============================================================================
 # VERSION CHECK
 # =============================================================================
+# Safe check to prevent systemd service restart loops when running headless
+import os
+if not os.environ.get("WAYLAND_DISPLAY") and not os.environ.get("DISPLAY"):
+    sys.stderr.write("dusky-control-center: error: WAYLAND_DISPLAY and DISPLAY are not set. Cannot run GUI application.\n")
+    sys.exit(5)
+
 if sys.version_info < (3, 14, 5):
     sys.exit("[FATAL] Python 3.14.5+ is required.")
 
@@ -100,10 +106,10 @@ CSS_FILENAME: Final[str] = "dusky_style.css"
 SCRIPT_DIR: Final[Path] = Path(__file__).resolve().parent
 
 # UI Layout Constants
-WINDOW_DEFAULT_WIDTH: Final[int] = 1180
-WINDOW_DEFAULT_HEIGHT: Final[int] = 780
-SIDEBAR_MIN_WIDTH: Final[int] = 180
-SIDEBAR_MAX_WIDTH: Final[int] = 180
+WINDOW_DEFAULT_WIDTH: Final[int] = 639
+WINDOW_DEFAULT_HEIGHT: Final[int] = 800
+SIDEBAR_MIN_WIDTH: Final[int] = 154
+SIDEBAR_MAX_WIDTH: Final[int] = 154
 SIDEBAR_WIDTH_FRACTION: Final[float] = 0.25
 
 # Page Identifiers
@@ -153,6 +159,8 @@ class ItemType(StrEnum):
     FILE_GENERATOR = "file_generator"
     ASYNC_SELECTOR = "async_selector"
     FLAG_GROUP = "flag_group"
+    SERVICE = "service"
+    SERVICE_CARD = "service_card"
 
 
 class SectionType(StrEnum):
@@ -252,6 +260,13 @@ class SearchHit:
     page_idx: int
     nav_path: tuple[str, ...]
     unique_id: str
+    score: int = 0
+
+
+def _fuzzy_subsequence(needle: str, haystack: str) -> bool:
+    """Return True if all chars of *needle* appear in *haystack* in order."""
+    it = iter(haystack)
+    return all(char in it for char in needle)
 
 
 @dataclass(slots=True)
@@ -332,10 +347,15 @@ class DuskyControlCenter(Adw.Application):
     def do_activate(self) -> None:
         """
         Application entry point.
-        DAEMON LOGIC: Window is pre-built in do_startup. Just present it.
+        DAEMON LOGIC: Window is pre-built in do_startup. Toggle visibility.
         """
         if self._window:
-            self._window.present()
+            if self._window.get_visible():
+                self._window.set_visible(False)
+                self._cancel_debounce()
+                gc.collect()
+            else:
+                self._window.present()
 
     def do_shutdown(self) -> None:
         """Cleanup resources on application exit."""
@@ -513,7 +533,7 @@ class DuskyControlCenter(Adw.Application):
         Gtk.StyleContext.add_provider_for_display(
             display,
             provider,
-            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
+            Gtk.STYLE_PROVIDER_PRIORITY_USER + 10,
         )
 
         self._css_provider = provider
@@ -551,7 +571,7 @@ class DuskyControlCenter(Adw.Application):
         """Construct and present the main application window."""
         self._window = Adw.Window(application=self, title=APP_TITLE)
         self._window.set_default_size(WINDOW_DEFAULT_WIDTH, WINDOW_DEFAULT_HEIGHT)
-        self._window.set_size_request(760, 600)
+        self._window.set_size_request(520, 460)
         self._window.connect("close-request", self._on_close_request)
 
         key_ctrl = Gtk.EventControllerKey()
@@ -559,6 +579,7 @@ class DuskyControlCenter(Adw.Application):
         self._window.add_controller(key_ctrl)
 
         self._toast_overlay = Adw.ToastOverlay()
+        utility.register_toast_overlay(self._toast_overlay)
 
         self._split_view = Adw.OverlaySplitView()
         self._split_view.set_min_sidebar_width(SIDEBAR_MIN_WIDTH)
@@ -583,15 +604,11 @@ class DuskyControlCenter(Adw.Application):
     def _on_close_request(self, window: Adw.Window) -> bool:
         """
         Intercept window close. Return True to prevent destruction.
-        Hide window and GC to free RAM without freezing the compositor unmap animation.
+        Hide window and suspend all background activity to achieve zero-CPU idle.
         """
         window.set_visible(False)
-
-        def _deferred_gc() -> bool:
-            gc.collect()
-            return GLib.SOURCE_REMOVE
-
-        GLib.timeout_add(500, _deferred_gc)
+        self._cancel_debounce()
+        gc.collect()
         return True
 
     def _on_key_pressed(
@@ -820,6 +837,7 @@ class DuskyControlCenter(Adw.Application):
 
         toolbar = Adw.ToolbarView()
         header = Adw.HeaderBar()
+        header.set_show_end_title_buttons(False)
         header.pack_start(self._create_sidebar_toggle_button())
         toolbar.add_top_bar(header)
 
@@ -934,23 +952,27 @@ class DuskyControlCenter(Adw.Application):
         if self._search_results_group is None:
             return
 
-        count = 0
+        # Collect then sort by relevance so the most useful matches surface first.
+        hits = sorted(
+            (hit for hit in self._iter_matching_items(query) if hit.score > 0),
+            key=lambda hit: hit.score,
+            reverse=True,
+        )
 
-        for hit in self._iter_matching_items(query):
-            if count >= SEARCH_MAX_RESULTS:
-                overflow_row = Adw.ActionRow(
-                    title=f"Showing first {SEARCH_MAX_RESULTS} results...",
-                    subtitle="Refine your search for more specific results",
-                )
-                overflow_row.set_activatable(False)
-                overflow_row.add_css_class("dim-label")
-                self._search_results_group.add(overflow_row)
-                break
-
+        kept = hits[:SEARCH_MAX_RESULTS]
+        for hit in kept:
             self._search_results_group.add(self._build_search_result_row(hit))
-            count += 1
 
-        if count == 0:
+        if len(hits) > SEARCH_MAX_RESULTS:
+            overflow_row = Adw.ActionRow(
+                title=f"Showing first {SEARCH_MAX_RESULTS} results...",
+                subtitle="Refine your search for more specific results",
+            )
+            overflow_row.set_activatable(False)
+            overflow_row.add_css_class("dim-label")
+            self._search_results_group.add(overflow_row)
+
+        if not kept:
             no_results = Adw.ActionRow(
                 title="No results found",
                 subtitle="Try different search terms",
@@ -1137,7 +1159,8 @@ class DuskyControlCenter(Adw.Application):
 
         unique_id = self._generate_widget_id(item)
 
-        if query in title.casefold() or query in desc.casefold():
+        score = self._score_search_match(query, title, desc)
+        if score > 0:
             yield SearchHit(
                 title=title or "Unnamed",
                 description=f"{breadcrumb} • {desc}" if desc else breadcrumb,
@@ -1145,6 +1168,7 @@ class DuskyControlCenter(Adw.Application):
                 page_idx=page_idx,
                 nav_path=nav_path,
                 unique_id=unique_id,
+                score=score,
             )
 
         if item_type == ItemType.NAVIGATION:
@@ -1174,6 +1198,63 @@ class DuskyControlCenter(Adw.Application):
                         nav_path,
                     )
 
+    @staticmethod
+    def _score_search_match(query: str, title: str, desc: str) -> int:
+        """
+        Rank a config item against a search query.
+
+        Returns a non-negative relevance score (0 == no match). Substring and
+        word-prefix matches outrank fuzzy subsequences, and title matches
+        always outrank description matches. Typo-tolerant fuzzy matching lets
+        users find settings without needing the exact spelling.
+        """
+        q = query.casefold()
+        if not q:
+            return 0
+        t = title.casefold()
+        d = desc.casefold()
+
+        # Fuzzy subsequence is typo-tolerant but noisy for very short queries;
+        # only apply it once the user has typed enough to disambiguate.
+        allow_fuzzy = len(q) >= 3
+
+        # Exact / prefix / substring match on the title is the strongest signal.
+        if t == q:
+            return 1000
+        if t.startswith(q):
+            return 900
+        if q in t:
+            return 800
+
+        # Alphanumeric normalized matching (e.g., "wifi" <-> "Wi-Fi", "lockscreen" <-> "Lock Screen")
+        q_clean = "".join(c for c in q if c.isalnum())
+        t_clean = "".join(c for c in t if c.isalnum())
+        d_clean = "".join(c for c in d if c.isalnum())
+
+        if q_clean and t_clean == q_clean:
+            return 950
+        if q_clean and t_clean.startswith(q_clean):
+            return 850
+        if q_clean and q_clean in t_clean:
+            return 750
+
+        if any(word.startswith(q) for word in t.split()):
+            return 500
+        if allow_fuzzy and _fuzzy_subsequence(q, t):
+            return 300
+
+        # Description matches are weaker but still useful.
+        if q in d:
+            return 200
+        if q_clean and q_clean in d_clean:
+            return 175
+        if any(word.startswith(q) for word in d.split()):
+            return 150
+        if allow_fuzzy and _fuzzy_subsequence(q, d):
+            return 100
+
+        return 0
+
     # ─────────────────────────────────────────────────────────────────────────
     # SIDEBAR
     # ─────────────────────────────────────────────────────────────────────────
@@ -1186,13 +1267,8 @@ class DuskyControlCenter(Adw.Application):
         header.add_css_class("sidebar-header")
         header.set_show_end_title_buttons(False)
 
-        title_box = Gtk.Box(spacing=8)
-        icon = Gtk.Image.new_from_icon_name(ICON_SYSTEM)
-        icon.add_css_class("sidebar-header-icon")
         title = Gtk.Label(label="Dusky", css_classes=["title"])
-        title_box.append(icon)
-        title_box.append(title)
-        header.set_title_widget(title_box)
+        header.set_title_widget(title)
 
         self._search_btn = Gtk.ToggleButton(icon_name=ICON_SEARCH)
         self._search_btn.set_tooltip_text("Search (Ctrl+F)")
@@ -1349,6 +1425,7 @@ class DuskyControlCenter(Adw.Application):
 
         toolbar = Adw.ToolbarView()
         header = Adw.HeaderBar()
+        header.set_show_end_title_buttons(False)
 
         if len(path) == 1:
             header.pack_start(self._create_sidebar_toggle_button())
@@ -1403,12 +1480,17 @@ class DuskyControlCenter(Adw.Application):
         if title := props.get("title"):
             group.set_title(GLib.markup_escape_text(str(title)))
 
+        if props.get("center_title"):
+            self._center_preferences_group(group)
+            GLib.idle_add(lambda g=group: (self._center_preferences_group(g), GLib.SOURCE_REMOVE)[1])
+
         flow = Gtk.FlowBox()
         flow.set_valign(Gtk.Align.START)
         flow.set_selection_mode(Gtk.SelectionMode.NONE)
-        flow.set_column_spacing(12)
-        flow.set_row_spacing(12)
-        flow.set_min_children_per_line(2)
+        flow.set_homogeneous(True)
+        flow.set_column_spacing(10)
+        flow.set_row_spacing(10)
+        flow.set_min_children_per_line(3)
         flow.set_max_children_per_line(3)
 
         def append_grid_item(grid_item: ConfigItem) -> None:
@@ -1421,8 +1503,13 @@ class DuskyControlCenter(Adw.Application):
                 match item_type:
                     case ItemType.TOGGLE_CARD:
                         child = rows.GridToggleCard(item_props, grid_item.get("on_toggle"), ctx)
+                    case ItemType.SERVICE_CARD:
+                        child = rows.ServiceToggleCard(item_props, grid_item.get("on_toggle"), ctx)
                     case ItemType.GRID_CARD:
                         child = rows.GridCard(item_props, grid_item.get("on_press"), ctx)
+                    case ItemType.SERVICE:
+                        # Allow service rows in grid as toggle cards fallback
+                        child = rows.ServiceToggleCard(item_props, grid_item.get("on_toggle"), ctx)
                     case _:
                         log.warning(
                             "Unsupported grid item type '%s', defaulting to GridCard",
@@ -1438,6 +1525,8 @@ class DuskyControlCenter(Adw.Application):
             flow.append(child)
 
         for item in section.get("items", []):
+            if not isinstance(item, dict):
+                continue
             if item.get("type") == ItemType.DIRECTORY_GENERATOR:
                 for gen_item in self._process_directory_generator(item):
                     append_grid_item(gen_item)
@@ -1449,6 +1538,39 @@ class DuskyControlCenter(Adw.Application):
 
         group.add(flow)
         return group
+
+    def _center_preferences_group(self, group: Adw.PreferencesGroup) -> None:
+        """Center the heading/description labels of a PreferencesGroup."""
+        try:
+            # group -> vertical box
+            outer = group.get_first_child()
+            if not isinstance(outer, Gtk.Box):
+                return
+            header = outer.get_first_child()
+            if not isinstance(header, Gtk.Box):
+                return
+            # header is horizontal box with class "header"
+            # its first child is vertical labels box
+            labels_box = header.get_first_child()
+            if not isinstance(labels_box, Gtk.Box):
+                return
+            # Traverse labels inside labels_box
+            label = labels_box.get_first_child()
+            while label is not None:
+                if isinstance(label, Gtk.Label):
+                    label.set_halign(Gtk.Align.CENTER)
+                    label.set_xalign(0.5)
+                    label.set_hexpand(True)
+                    label.set_justify(Gtk.Justification.CENTER)
+                label = label.get_next_sibling()
+            # Also center the header box itself if needed
+            header.set_halign(Gtk.Align.CENTER)
+            header.set_hexpand(True)
+            labels_box.set_halign(Gtk.Align.CENTER)
+            labels_box.set_hexpand(True)
+            outer.set_halign(Gtk.Align.FILL)
+        except Exception as e:
+            log.debug("Failed to center group title: %s", e)
 
     def _build_standard_section(
         self,
@@ -1464,7 +1586,14 @@ class DuskyControlCenter(Adw.Application):
         if desc := props.get("description"):
             group.set_description(GLib.markup_escape_text(str(desc)))
 
+        if props.get("center_title"):
+            # Defer slightly to ensure labels are realized, but also try immediately
+            self._center_preferences_group(group)
+            GLib.idle_add(lambda g=group: (self._center_preferences_group(g), GLib.SOURCE_REMOVE)[1])
+
         for item in section.get("items", []):
+            if not isinstance(item, dict):
+                continue
             if item.get("type") == ItemType.DIRECTORY_GENERATOR:
                 for gen_item in self._process_directory_generator(item):
                     group.add(self._build_item_row(gen_item, ctx))
@@ -1691,6 +1820,10 @@ class DuskyControlCenter(Adw.Application):
                     row = rows.AsyncSelectorRow(props, item.get("on_action"), ctx)
                 case ItemType.FLAG_GROUP:
                     row = rows.FlagGroupRow(props, item.get("on_action"), ctx)
+                case ItemType.SERVICE:
+                    row = rows.ServiceToggleRow(props, item.get("on_toggle"), ctx)
+                case ItemType.SERVICE_CARD:
+                    row = rows.ServiceToggleCard(props, item.get("on_toggle"), ctx)
                 case _:
                     log.warning("Unknown item type '%s', defaulting to button", item_type)
                     row = rows.ButtonRow(props, item.get("on_press"), ctx)

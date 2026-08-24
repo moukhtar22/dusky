@@ -1,9 +1,5 @@
 #!/usr/bin/env bash
-# battery notify configurator
-#===============================================================================
-# BATTERY NOTIFY CONFIGURATION
-# Configure battery notification thresholds for battery_notify.sh
-#===============================================================================
+#d: Configure battery notification thresholds
 
 set -euo pipefail
 
@@ -11,7 +7,7 @@ set -euo pipefail
 # CONFIGURATION
 #===============================================================================
 readonly NOTIFY_SCRIPT="${HOME}/user_scripts/battery/notify/battery_notify.sh"
-readonly SERVICE_NAME="battery_notify.service"
+readonly SERVICE_NAME="dusky_battery.service"
 readonly SCRIPT_NAME="${0##*/}"
 
 # Sensible defaults for most users
@@ -78,7 +74,7 @@ warn() {
 }
 
 is_valid_percent() {
-    [[ -n "${1:-}" && "$1" =~ ^[0-9]+$ && "$1" -ge 1 && "$1" -le 100 ]]
+    [[ -n "${1:-}" && "${1:-}" =~ ^[0-9]+$ && "${1:-}" -ge 1 && "${1:-}" -le 100 ]]
 }
 
 #===============================================================================
@@ -92,7 +88,19 @@ check_battery() {
         fi
     fi
 
-    # Method 2: sysfs fallback
+    # Method 2: sysfs check of type
+    local type_file
+    for type_file in /sys/class/power_supply/*/type; do
+        if [[ -f "${type_file}" ]]; then
+            local type_val
+            type_val=$(tr '[:upper:]' '[:lower:]' < "${type_file}" 2>/dev/null | tr -d '[:space:]') || true
+            if [[ "${type_val}" == "battery" ]]; then
+                return 0
+            fi
+        fi
+    done
+
+    # Method 3: sysfs fallback glob
     local bat_path
     for bat_path in /sys/class/power_supply/BAT*; do
         [[ -d "$bat_path" ]] && return 0
@@ -281,7 +289,7 @@ run_tui() {
     local choice
 
     while true; do
-        clear
+        clear || true
         show_header
 
         choice=$(gum choose \

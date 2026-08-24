@@ -271,7 +271,7 @@ if [[ "$(tty)" == "/dev/tty1" ]]; then
     
     clear
     cd /root/arch_install/
-    ./000_dusky_arch_install.sh
+    ./000_dusky_arch_install.sh --auto
 fi
 EOF
   chmod +x "${PROFILE_DIR}/airootfs/root/.automated_script.sh"

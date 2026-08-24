@@ -12,6 +12,13 @@ _DUSKY_TUI_ROOT = Path(__file__).resolve().parent.parent / "dusky_tui"
 if str(_DUSKY_TUI_ROOT) not in sys.path:
     sys.path.insert(0, str(_DUSKY_TUI_ROOT))
 
+import sys
+from pathlib import Path
+
+_dusky_root = Path.home() / "user_scripts" / "dusky_tui"
+if str(_dusky_root) not in sys.path:
+    sys.path.insert(0, str(_dusky_root))
+
 from python.frontend.core_types import ConfigItem
 
 # =============================================================================
@@ -129,18 +136,6 @@ SCHEMA = {
                 "listener:5.timeout": 2000000000
             },
             extended_help="**Presentation Mode**\n\nEffectively disables all idle timeouts. Useful when watching movies, presenting, or running long background tasks without audio playing."
-        ),
-        ConfigItem(
-            label="Factory Reset Everything",
-            key="preset_factory_reset",
-            scope="DEFAULT",
-            type_="preset",
-            default=None,
-            group="Reset",
-            preset_payload={
-                "__ALL_DEFAULTS__": True
-            },
-            extended_help="**Factory Reset**\n\nReverts all idle timeouts back to their original configuration."
         ),
     ]
 }

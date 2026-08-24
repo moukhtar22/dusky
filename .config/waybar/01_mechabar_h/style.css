@@ -33,9 +33,7 @@
 
 /* WAYBAR_OPAQUE_SWITCH_END */
 
-* {
-	/* ignore GTK theme */
-	all: initial;
+#waybar {
 	color: @on_surface;
 }
 
@@ -55,11 +53,11 @@ tooltip label {
 #workspaces button.active label,
 #workspaces button.focused label,
 #custom-distro {
-	font-size: 20px;
+	font-size: 18px;
 }
 
 #custom-power {
-	font-size: 16px;
+	font-size: 18px;
 }
 
 #custom-left_div,
@@ -67,7 +65,7 @@ tooltip label {
 #custom-right_div,
 #custom-right_inv {
 	font-family: "JetBrainsMono Nerd Font";
-	font-size: 22px;
+	font-size: 18.5px;
 }
 
 /*---------------
@@ -191,7 +189,7 @@ tooltip label {
 }
 #pulseaudio,
 #wireplumber {
-	background-color: @glass_tier_mid;
+	background-color: @glass_tier_low;
 }
 
 #custom-left_div.7 {
@@ -199,7 +197,7 @@ tooltip label {
 	color: @glass_tier_mid;
 }
 #backlight {
-	background-color: @glass_tier_high;
+	background-color: @glass_tier_mid;
 	padding: 0 6px;
 }
 
@@ -218,7 +216,8 @@ tooltip label {
 #custom-power {
 	background-color: @glass_bar;
 	color: @secondary;
-	padding: 0 10px 0 10px;
+	border-radius: 16px;
+	padding: 0 19px 0 16px;
 }
 
 #custom-inhibit-suspend {
@@ -299,13 +298,29 @@ button:hover {
 	color: @hover-fg;
 }
 
-tooltip {
-	border: 2px solid @on_background;
-	border-radius: 10px;
-	background-color: @glass_tooltip;
+tooltip decoration {
+    background-color: transparent;
+    border: none;
+    box-shadow: none;
 }
-tooltip > box {
-	padding: 0 6px;
+
+tooltip,
+tooltip.background,
+.tooltip {
+    background-color: alpha(@surface_container, 0.57);
+    background: linear-gradient(135deg, alpha(@surface_container, 0.57), alpha(@surface_container_high, 0.57));
+    border: 1px solid alpha(@primary, 0.5);
+    border-radius: 12px;
+    box-shadow: none;
+}
+
+tooltip label,
+.tooltip label {
+    color: @on_surface;
+    padding: 8px 12px;
+    font-family: "JetBrainsMono Nerd Font Propo", "JetBrainsMono Nerd Font", monospace;
+    font-size: 12px;
+    font-weight: 600;
 }
 
 menu {

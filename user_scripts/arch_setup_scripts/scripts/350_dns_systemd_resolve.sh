@@ -1,27 +1,5 @@
 #!/usr/bin/env bash
-# =============================================================================
-# ARCH LINUX systemd-resolved CONFIGURATOR
-# =============================================================================
-# Purpose:
-#   - Configure systemd-resolved via a drop-in under /etc/systemd/resolved.conf.d
-#   - Use explicit public DNS servers with authenticated DoT server names
-#   - Clear fallback DNS so distro/default fallback resolvers are not used
-#   - Disable LLMNR
-#   - Disable systemd-resolved mDNS handling so another mDNS stack
-#     (commonly Avahi, often alongside nss-mdns in NSS) can own UDP/5353
-#   - Select the correct /etc/resolv.conf target for stub vs non-stub mode
-#
-# Notes:
-#   - Installed packages alone do not determine runtime behavior.
-#   - nss-mdns only affects glibc/NSS lookups if /etc/nsswitch.conf contains
-#     an mdns* entry in the hosts: line.
-#   - If another local DNS service owns a conflicting port-53 listener,
-#     this script will switch systemd-resolved to non-stub mode automatically.
-#   - In non-stub mode, glibc applications only keep using systemd-resolved if
-#     /etc/nsswitch.conf contains 'resolve' in the hosts: line.
-#   - This script does not try to override per-link DNS supplied by DHCP,
-#     NetworkManager, systemd-networkd, Tailscale, or other VPN software.
-# =============================================================================
+#d: Configure systemd-resolved DNS
 
 set -Eeuo pipefail
 shopt -s inherit_errexit 2>/dev/null || true

@@ -45,7 +45,9 @@
       "6": [],
       "7": [],
       "8": []
-    }
+    },
+    "on-scroll-up": "hyprctl dispatch 'hl.dsp.focus({ workspace = \"e-1\" })'",
+    "on-scroll-down": "hyprctl dispatch 'hl.dsp.focus({ workspace = \"e+1\" })'"
   },
   "hyprland/window": {
     "format": "{title} - {class}",
@@ -78,12 +80,12 @@
   "cpu": {
     "interval": 2,
     "format": "󰍛 {usage}%",
-    "on-click-right": "uwsm-app -- kitty --class htop -e htop"
+    "on-click-right": "dusky-run kitty --class htop -e htop"
   },
   "memory": {
     "interval": 2,
     "format": "󰍛 {percentage}%",
-    "on-click-right": "uwsm-app -- kitty --class io_monitor.sh -e $HOME/user_scripts/drives/io_monitor.sh",
+    "on-click-right": "dusky-run kitty --class dusky_disk_monitor_io.py -e $HOME/user_scripts/drives/dusky_disk_monitor_io.py",
     "states": {
       "warning": 70,
       "critical": 90
@@ -92,16 +94,23 @@
   "clock": {
     "format": "{:%I:%M %p  %a %e }",
     "format-alt": "{:%A %d/%m/%Y}",
-    "tooltip-format": "<span>{calendar}</span>",
+    "tooltip-format": "<tt>{calendar}</tt>",
     "calendar": {
-      "mode": "month",
+      "mode": "year",
       "mode-mon-col": 3,
       "on-click-right": "mode",
       "format": {
-        "months": "<span weight='bold'>{}</span>",
-        "weekdays": "<span weight='bold'>{}</span>",
-        "today": "<span weight='bold' underline='single'>{}</span>"
+        "months": "<span color='#ffb786'><b>{}</b></span>",
+        "days": "<span color='#e2e2e2'>{}</span>",
+        "weeks": "<span color='#c9ca93'>W{}</span>",
+        "weekdays": "<span color='#ffb786'><b>{}</b></span>",
+        "today": "<span color='#131313' background='#ffb786'><b>{}</b></span>"
       }
+    },
+    "actions": {
+      "on-click-right": "mode",
+      "on-scroll-up": "shift_up",
+      "on-scroll-down": "shift_down"
     }
   },
   "custom/inhibit-suspend": {
@@ -110,7 +119,7 @@
     "return-type": "json",
     "interval": 5,
     "signal": 9,
-    "on-click": "uwsm-app -- ~/user_scripts/waybar/toggle_hypridle.sh",
+    "on-click": "dusky-run ~/user_scripts/waybar/toggle_hypridle.sh",
     "escape": true
   },
   "network": {
@@ -177,12 +186,12 @@
     "format-off": "󰂲",
     "format-connected": "󰂱",
     "tooltip-format": "Devices connected: {num_connections}",
-    "on-click": "uwsm-app -- blueman-manager",
-    "on-click-right": "uwsm-app -- kitty --class bluetui -e bluetui"
+    "on-click": "dusky-run blueman-manager",
+    "on-click-right": "dusky-run kitty --class bluetui -e bluetui"
   },
   "pulseaudio": {
     "format": "{icon} {volume}%",
-    "on-click": "uwsm-app -- pavucontrol",
+    "on-click": "dusky-run pavucontrol",
     "on-click-right": "pactl set-sink-mute @DEFAULT_SINK@ toggle",
     "tooltip-format": "Playing at {volume}%",
     "scroll-step": 5,

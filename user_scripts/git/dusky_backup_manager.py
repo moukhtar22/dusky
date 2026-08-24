@@ -17,10 +17,9 @@ from typing import Never
 
 # Rich UI components
 from rich.console import Console
+from rich.markup import escape
 from rich.panel import Panel
-from rich.prompt import Prompt, Confirm
 from rich.table import Table
-from rich.columns import Columns
 from rich.theme import Theme
 from rich import box
 
@@ -35,6 +34,16 @@ custom_theme = Theme({
 })
 
 console = Console(theme=custom_theme)
+
+def _ask(prompt: str = " ❯ ") -> str:
+    """Reads a stripped line, exiting gracefully on Ctrl-D (EOF) instead of crashing."""
+    try:
+        return input(prompt).strip()
+    except EOFError:
+        console.print()
+        console.print("[warning]⚠ Input stream closed — aborting cleanly.[/warning]")
+        kill_ssh_agent()
+        sys.exit(0)
 
 # Constants
 DEFAULT_REPO_NAME = "dusky"
@@ -92,6 +101,7 @@ def dotgit(*args: str, input_data: bytes | None = None) -> tuple[int, str, str]:
             "git",
             "--no-optional-locks",
             "--no-advice",
+            "-c", "core.quotepath=false",
             *args
         ]
         return run_cmd(cmd, input_data=input_data)
@@ -128,8 +138,15 @@ def build_dependency_matrix() -> Table:
     return table
 
 def start_ssh_agent() -> None:
-    """Launches ssh-agent and sets environment variables in os.environ."""
+    """Reuses a reachable SSH agent when present; otherwise spawns one."""
     global ssh_agent_pid
+    if os.environ.get("SSH_AUTH_SOCK"):
+        # rc 0 = agent with identities, rc 1 = agent alive without keys —
+        # both mean a working agent is already reachable.
+        code, _, _ = run_cmd(["ssh-add", "-l"])
+        if code in (0, 1):
+            console.print("[info]➔ Using existing SSH agent.[/info]")
+            return
     try:
         code, stdout, _ = run_cmd(["ssh-agent", "-s"], check=True)
         for line in stdout.splitlines():
@@ -159,7 +176,7 @@ def generate_ssh_key(email: str) -> None:
     if SSH_KEY_PATH.is_file():
         console.print(f"[warning]⚠ Warn: SSH key already exists at {SSH_KEY_PATH}[/warning]")
         console.print("[bold cyan]Do you want to overwrite it? (y/N)[/bold cyan]")
-        ans = input(" ❯ ").strip().lower()
+        ans = _ask().lower()
         if ans not in ("y", "yes"):
             console.print("[info]➔ Using existing SSH key.[/info]")
             return
@@ -194,13 +211,13 @@ def setup_github_ssh_linking(email: str) -> None:
         f"[warning]ACTION REQUIRED:[/warning] Add this public key to GitHub:\n"
         f"1. Go to: [highlight]https://github.com/settings/keys[/highlight]\n"
         f"2. Click 'New SSH Key', give it a name, and paste the key below:\n\n"
-        f"[white]{pub_key_content}[/white]",
+        f"[white]{escape(pub_key_content)}[/white]",
         title="GitHub SSH Key Setup",
         border_style="yellow",
         box=box.ROUNDED
     ))
     console.print("Press [highlight][Enter][/highlight] once you have added the key to GitHub")
-    input(" ❯ ")
+    _ask()
 
     console.print("[info]Verifying GitHub connection via SSH...[/info]")
     # ssh -T returns 1 on success for GitHub auth checks
@@ -211,8 +228,12 @@ def setup_github_ssh_linking(email: str) -> None:
         console.print("[error]✖ Error: GitHub SSH connection failed.[/error]")
         sys.exit(1)
 
-def stage_and_commit_dotfiles(commit_msg: str) -> None:
-    """Stages dotfiles matching the .git_dusky_list and commits them."""
+def stage_and_commit_dotfiles(commit_msg: str) -> bool:
+    """Stages dotfiles matching the .git_dusky_list and commits them.
+
+    Returns True when the repository is ready to push (committed or already
+    clean), False when staging/commit failed.
+    """
     if not DOTFILES_LIST.is_file():
         console.print(f"[warning]⚠ Warn: {DOTFILES_LIST} not found. Staging tracked changes only (-u).[/warning]")
         dotgit("add", "-u")
@@ -235,11 +256,11 @@ def stage_and_commit_dotfiles(commit_msg: str) -> None:
             if not full_path.is_absolute():
                 full_path = HOME / clean
 
-            # Check if file exists on disk OR is tracked by git (for deletions)
-            if full_path.exists() or clean in tracked_files:
+            # Check if file exists on disk OR is a symlink (even broken) OR is tracked by git (for deletions)
+            if full_path.exists() or full_path.is_symlink() or clean in tracked_files:
                 valid_paths.append(clean)
             else:
-                console.print(f"[muted]  ➔ Skipping missing untracked path: {clean}[/muted]")
+                console.print(f"[muted]  ➔ Skipping missing untracked path: {escape(clean)}[/muted]")
 
         if valid_paths:
             console.print(f"[info]Processing staging payload ({len(valid_paths)} paths)...[/info]")
@@ -267,8 +288,10 @@ def stage_and_commit_dotfiles(commit_msg: str) -> None:
             console.print("[success]✔ Changes committed successfully.[/success]")
         else:
             console.print(f"[error]✖ Commit failed:[/error] {stderr_com.strip()}")
+            return False
     else:
         console.print("[info]➔ Nothing to commit (Working tree clean).[/info]")
+    return True
 
 def execute_sync(config: AppConfig, mode: str) -> None:
     """Orchestrates the repository sync process."""
@@ -307,7 +330,9 @@ def execute_sync(config: AppConfig, mode: str) -> None:
         dotgit("remote", "add", "origin", config.repo_url)
 
         # Stage and commit files
-        stage_and_commit_dotfiles(config.commit_msg)
+        if not stage_and_commit_dotfiles(config.commit_msg):
+            console.print("[error]✖ Aborting sync: staging/commit failed — nothing was pushed.[/error]")
+            sys.exit(1)
 
         # Set branch to main
         dotgit("branch", "-m", "main")
@@ -320,11 +345,12 @@ def execute_sync(config: AppConfig, mode: str) -> None:
         else:
             console.print(Panel(
                 f"[error]✖ Push failed.[/error]\n"
-                f"Please ensure you created an [bold yellow]EMPTY[/bold yellow] repository named '{config.repo}' on GitHub.\n"
+                f"Please ensure you created an [bold yellow]EMPTY[/bold yellow] repository named '{escape(config.repo)}' on GitHub.\n"
                 f"Error: {stderr_push.strip()}",
                 border_style="red",
                 box=box.ROUNDED
             ))
+            sys.exit(1)
 
     elif mode == "RELINK":
         console.print(Panel(
@@ -373,7 +399,9 @@ def execute_sync(config: AppConfig, mode: str) -> None:
             dotgit("reset", "--mixed", "--quiet", "HEAD")
 
         # Stage and commit files
-        stage_and_commit_dotfiles(config.commit_msg)
+        if not stage_and_commit_dotfiles(config.commit_msg):
+            console.print("[error]✖ Aborting sync: staging/commit failed — nothing was pushed.[/error]")
+            sys.exit(1)
 
         # Push to origin
         code_branch, stdout_branch, _ = dotgit("symbolic-ref", "--quiet", "--short", "HEAD")
@@ -386,41 +414,55 @@ def execute_sync(config: AppConfig, mode: str) -> None:
                 console.print(Panel("[success]✔ Relink Speedrun Complete! Bare repository is linked and synced.[/success]", border_style="green", box=box.ROUNDED))
             else:
                 console.print(Panel(f"[error]✖ Push failed.[/error]\nError: {stderr_push.strip()}", border_style="red", box=box.ROUNDED))
+                sys.exit(1)
 
-def prompt_configuration() -> AppConfig:
-    """Prompts the user for config details interactively using clean fallbacks."""
+def prompt_configuration(args: argparse.Namespace) -> AppConfig:
+    """Prompts for config details; provided CLI flags become defaults and are
+    never discarded. With both identity flags present the run stays fully
+    non-interactive (original fast path)."""
     console.print("\n[highlight]=== Absolute Engine Parameters ===[/highlight]")
-    
-    console.print("[bold white]Git User Identity (Name for Git commits, e.g., 'dusk')[/bold white]")
-    username = ""
-    while not username.strip():
-        username = input(" ❯ ").strip()
-        if not username:
-            console.print("[error]✖ Git User Identity (Name for Git commits) is required and cannot be empty.[/error]")
-            
-    console.print("[bold white]GitHub Username (Your GitHub account username, e.g., 'yourusername')[/bold white]")
-    gh_user = ""
-    while not gh_user.strip():
-        gh_user = input(" ❯ ").strip()
-        if not gh_user:
-            console.print("[error]✖ GitHub Username (Your GitHub account username) is required and cannot be empty.[/error]")
 
-    default_email = f"{gh_user.strip()}@users.noreply.github.com"
-    console.print(f"[bold white]Git Email Address (Optional, used for commit history) [default: {default_email}][/bold white]")
-    email = input(" ❯ ").strip() or default_email
+    username = (args.username or "").strip()
+    if not username:
+        console.print("[bold white]Git User Identity (Name for Git commits, e.g., 'dusk')[/bold white]")
+        while not username:
+            username = _ask()
+            if not username:
+                console.print("[error]✖ Git User Identity (Name for Git commits) is required and cannot be empty.[/error]")
 
-    console.print("[bold white]Target Repository Architecture (The GitHub repository name) [default: dusky][/bold white]")
-    repo = input(" ❯ ").strip() or "dusky"
+    gh_user = (args.gh_user or "").strip()
+    if not gh_user:
+        console.print("[bold white]GitHub Username (Your GitHub account username, e.g., 'yourusername')[/bold white]")
+        while not gh_user:
+            gh_user = _ask()
+            if not gh_user:
+                console.print("[error]✖ GitHub Username (Your GitHub account username) is required and cannot be empty.[/error]")
 
-    console.print("[bold white]Initial/Sync Commit Payload (Commit message for syncing changes) [default: Dusky backup sync][/bold white]")
-    commit_msg = input(" ❯ ").strip() or "Dusky backup sync"
+    # Full identity supplied via flags -> zero-prompt fast path (unchanged).
+    interactive = not (args.username and args.gh_user)
+
+    default_email = args.email or f"{gh_user}@users.noreply.github.com"
+    email = default_email
+    if interactive and not args.email:
+        console.print(f"[bold white]Git Email Address (Optional, used for commit history) [default: {default_email}][/bold white]")
+        email = _ask() or default_email
+
+    repo = args.repo or DEFAULT_REPO_NAME
+    if interactive:
+        console.print(f"[bold white]Target Repository Architecture (The GitHub repository name) [default: {repo}][/bold white]")
+        repo = _ask() or repo
+
+    commit_msg = args.commit_msg or "Dusky backup sync"
+    if interactive and not args.commit_msg:
+        console.print("[bold white]Initial/Sync Commit Payload (Commit message for syncing changes) [default: Dusky backup sync][/bold white]")
+        commit_msg = _ask() or commit_msg
 
     return AppConfig(
-        username=username.strip(),
-        email=email.strip(),
-        gh_user=gh_user.strip(),
-        repo=repo.strip(),
-        commit_msg=commit_msg.strip()
+        username=username,
+        email=email,
+        gh_user=gh_user,
+        repo=repo,
+        commit_msg=commit_msg
     )
 
 def main() -> Never:
@@ -459,10 +501,10 @@ def main() -> Never:
         console.print(cmd_table)
         
         console.print("\n[highlight]Choose Action [1/2/q] [default: 1][/highlight]")
-        choice = input(" ❯ ").strip() or "1"
+        choice = _ask() or "1"
         while choice not in ("1", "2", "q"):
             console.print("[error]✖ Invalid choice. Please choose '1', '2', or 'q'.[/error]")
-            choice = input(" ❯ ").strip() or "1"
+            choice = _ask() or "1"
             
         if choice == "1":
             mode = "NEW"
@@ -471,31 +513,20 @@ def main() -> Never:
         else:
             sys.exit(0)
 
-    # Gather parameters (via CLI or Interactive Prompt)
-    if args.username and args.gh_user:
-        resolved_email = args.email or f"{args.gh_user}@users.noreply.github.com"
-        resolved_msg = args.commit_msg or "Dusky backup sync"
-        config = AppConfig(
-            username=args.username,
-            email=resolved_email,
-            gh_user=args.gh_user,
-            repo=args.repo,
-            commit_msg=resolved_msg
-        )
-    else:
-        config = prompt_configuration()
+    # Gather parameters (via CLI or Interactive Prompt — flags are never discarded)
+    config = prompt_configuration(args)
 
     # Final review confirmation
     console.print(Panel(
-        f"Git Identity: {config.username} <{config.email}>\n"
-        f"Target Node:  {config.repo_url}\n"
+        f"Git Identity: {escape(config.username)} <{escape(config.email)}>\n"
+        f"Target Node:  {escape(config.repo_url)}\n"
         f"Operation:    {mode}",
         title="Verify Final Deployment Parameters",
         border_style="cyan",
         box=box.ROUNDED
     ))
     console.print("\n[bold cyan]Execute architecture deployment? (Y/n)[/bold cyan]")
-    ans = input(" ❯ ").strip().lower()
+    ans = _ask().lower()
     if ans and ans not in ("y", "yes"):
         console.print("[error]✖ Deployment sequence completely aborted by operator.[/error]")
         sys.exit(1)

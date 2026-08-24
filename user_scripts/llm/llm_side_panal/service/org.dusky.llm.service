@@ -1,0 +1,4 @@
+[D-BUS Service]
+Name=org.dusky.llm
+Exec=/home/dusk/user_scripts/llm/llm_side_panal/dusky_llm.py --gapplication-service
+SystemdService=dusky_llm.service

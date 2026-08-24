@@ -2,9 +2,36 @@
 set -eo pipefail
 
 # ── Config ────────────────────────────────────────────────
-GAME_DIR="$HOME/Downloads/Factorio-jc141"
+# Set GAME_DIR to a specific path to override, or leave blank ("") to auto-detect.
+GAME_DIR=""
 NVIDIA_WRAPPER="$HOME/user_scripts/gaming/nvidia-glx-workaround/use_intel_not_nvidia.sh"
 # ──────────────────────────────────────────────────────────
+
+# Auto-detect default GAME_DIR if not explicitly set
+find_default_game_dir() {
+    local candidates=(
+        "/mnt/zram1/Factorio_2.1.14"
+        "/mnt/zram1/factorio"
+        "$HOME/Downloads/Factorio-jc141"
+    )
+    for c in "${candidates[@]}"; do
+        if [ -d "$c" ] && [ -f "$c/files/game-root.dwarfs" ]; then
+            echo "$c"
+            return 0
+        fi
+    done
+    for d in /mnt/zram1/Factorio* "$HOME/Downloads/Factorio*" "$HOME/Games/Factorio*"; do
+        if [ -d "$d" ] && [ -f "$d/files/game-root.dwarfs" ]; then
+            echo "$d"
+            return 0
+        fi
+    done
+    echo "/mnt/zram1/Factorio_2.1.14"
+}
+
+if [ -z "$GAME_DIR" ]; then
+    GAME_DIR="$(find_default_game_dir)"
+fi
 
 # Resolve to absolute path if relative (and not a default path)
 resolve_path() {
@@ -128,5 +155,18 @@ if [ ! -x "$GAME_BIN" ]; then
     exit 1
 fi
 
-exec "$NVIDIA_WRAPPER" "$GAME_BIN" "$@"
+# Native-Wayland EGL shim fix (applied by use_wayland/fix_run_on_wayland.py).
+# Launched directly here (bypassing start.n.sh), the game needs the shim set
+# explicitly; gracefully no-ops if the fix hasn't been installed yet.
+# Persistent location: ~/.factorio/wayland_fix (survives game re-downloads).
+# run.sh runs unsandboxed, so the primary copy is the right one.
+SHIM="$HOME/.factorio/wayland_fix/libEGL.so.1"
+if [ -f "$SHIM" ]; then
+    export LD_PRELOAD="$SHIM${LD_PRELOAD:+:$LD_PRELOAD}"
+fi
 
+if [ -x "$NVIDIA_WRAPPER" ]; then
+    exec "$NVIDIA_WRAPPER" "$GAME_BIN" "$@"
+else
+    exec "$GAME_BIN" "$@"
+fi

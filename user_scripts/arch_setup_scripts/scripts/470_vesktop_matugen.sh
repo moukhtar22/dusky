@@ -1,12 +1,6 @@
 #!/usr/bin/env bash
-# vesktop setup , a better discord client
+#d: Set up Vesktop (Discord) with Matugen theming
 
-# ==============================================================================
-#  Vesktop & Matugen Automation Suite
-#  Target: Arch Linux (Hyprland) | Deps: yay/paru, jq
-# ==============================================================================
-
-# --- Strict Mode ---
 set -euo pipefail
 IFS=$'\n\t'
 

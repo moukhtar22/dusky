@@ -1,47 +1,89 @@
-# Optional: Relocating Storage to ZRAM
+---
+title: "Storage Topology — Persistent vs RAM-Backed (ZRAM)"
+tags:
+  - kvm
+  - storage
+  - zram
+  - libvirt
+  - arch
+aliases:
+  - Relocating Storage to ZRAM
+---
 
-> [!info] Objective
-> 
-> This step changes the default storage location for Virtual Machines from your physical hard drive to your RAM (ZRAM).
-> 
-> Why do this? > 1. Speed: RAM is significantly faster than any SSD.
-> 
-> 2. Hardware Health: It prevents "wear and tear" (write cycles) on your SSD, which is great for testing operating systems you don't intend to keep.
+# Storage Topology — Persistent vs RAM-Backed
 
-> [!danger] CRITICAL WARNING
-> 
-> ZRAM is Volatile Memory. > Anything you install or save into this specific storage pool WILL BE DELETED when you turn off or restart your computer.
-> 
-> Only follow this step if you are creating a temporary Virtual Machine (like a test environment) that you do not need to save.
+> [!abstract] Goal
+> Choose where qcow2 images live. Canonical: `07_storage_setup.py` — persistent `/var/lib/libvirt/images` vs ephemeral `zram`/`tmpfs` vs custom, with POSIX ACL + backing-fstype audit.
 
-### The Process
+## Options (interactive, `--path` for non-interactive)
 
-By default, KVM/QEMU stores virtual hard drives in `/var/lib/libvirt/images`. We are going to delete that folder and replace it with a "shortcut" (symbolic link) that points to your ZRAM drive.
-
-Copy and run the following block in your terminal:
+| Choice | Example path | Volatile | Use case |
+|---|---|---|---|
+| **Persistent** | `/var/lib/libvirt/images` | no | daily driver, survives reboot |
+| **Ephemeral** | `/mnt/zram1` / `/mnt/tmpfs` | **yes** | throw-away lab, SSD wear avoid, max I/O |
+| **Custom** | `/mnt/media/…/kvm` | depends on mount | external NVMe, NAS cache |
 
 ```bash
-# 1. Remove the default image directory 
-# (Note: This assumes the directory is empty. If it fails, ensure no VMs are currently defined)
+# probe backing fact (longest-prefix /proc/self/mountinfo)
+findmnt --target /mnt/zram1
+grep zram /proc/self/mountinfo
+```
+
+> [!danger] Volatile = data loss on reboot
+> Anything on `tmpfs`, `ramfs`, or `/dev/zram*` **vanishes** on power-off/reboot. Use only for VMs you can afford to lose. `07_*.py` warns if you pick persistent atop volatile or vice-versa.
+
+## Legacy pattern (symlink) — retired
+
+Old notes did:
+
+```bash
 sudo rmdir /var/lib/libvirt/images
-
-# 2. Create the new directory inside your ZRAM mount point
-# We use sudo here because /mnt usually belongs to the root user
-sudo mkdir -p /mnt/zram1/os/
-
-# 3. Create the Symbolic Link
-# This tricks the system into thinking the ZRAM folder is actually the standard libvirt folder
-sudo ln -nfs /mnt/zram1/os/ /var/lib/libvirt/images 
+sudo mkdir -p /mnt/zram1/os
+sudo ln -nfs /mnt/zram1/os /var/lib/libvirt/images
+ls -la /var/lib/libvirt/  # images -> /mnt/zram1/os
 ```
 
-### Verification
+> [!warning] Legacy — why symlink is no longer recommended
+> - Breaks libvirt `dir` pool bookkeeping (`pool-dumpxml` shows symlink target, not declared path).
+> - Mount ordering: if `zram` device mounts late, libvirt starts with dangling link.
+> - ACL traversal audit (`07_*:provision_acls`) expects a **real directory**, not a symlink chase.
+> Prefer a **real pool**: create the directory, provision ACLs, then declare it as a libvirt pool (see below).
 
-To make sure the link was created successfully, you can run:
+## Current approach (no symlink)
 
+```bash
+# 1. Create the target
+TARGET=/var/lib/libvirt/images          # or /mnt/zram1 / /mnt/media/kvm
+sudo mkdir -p "$TARGET"
+sudo chmod 0711 "$TARGET"               # pipeline default before ACLs
+
+# 2. Provision ACLs (07_storage_setup.py does this atomically with getfacl/setfacl, never strips)
+# --x on every parent above TARGET, rwx + default:rwx on TARGET itself
+# Verify:
+getfacl "$TARGET"
+
+# 3. Expose as libvirt pool so virt-manager sees it
+sudo virsh pool-define-as arsonix-images dir --target "$TARGET"
+sudo virsh pool-build arsonix-images
+sudo virsh pool-start arsonix-images
+sudo virsh pool-autostart arsonix-images
+sudo virsh pool-refresh arsonix-images
 ```
-ls -la /var/lib/libvirt/
+
+## Verify
+
+```bash
+ls -ld "$TARGET"
+findmnt --target "$TARGET"
+virsh pool-list --all --details
+virsh pool-dumpxml arsonix-images | grep -A2 '<target>'
 ```
 
-You should see an arrow -> pointing images to your ZRAM location:
+## When ephemeral makes sense
 
-images -> /mnt/zram1/os/
+- You explicitly want a throwaway Windows/Linux lab and will copy out artifacts before reboot.
+- SSD wear avoidance for heavy snapshot churn.
+
+Otherwise: **keep persistent** and use `qcow2` `lazy_refcounts` / `cluster_size=64k` (see `30_kvm_vm_deploy.py:provision_disk`).
+
+See: [[Set ACL on the Image Directory]] (ACL deep dive), `07_storage_setup.py`.

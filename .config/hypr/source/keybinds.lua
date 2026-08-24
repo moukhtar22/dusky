@@ -12,7 +12,7 @@ local function is_target_app_active()
     local w = hl.get_active_window()
     if not w then return false end
     local class = w.class or ""
-    return class == "dusky_tui" or class == "wallpaper_selector.py" or class == "factorio" or class == "terminal_clipboard.sh"
+    return class == "dusky_tui" or class == "wallpaper_selector.py" or class == "factorio" or class == "terminal_clipboard.sh" or class == "dusky_snapshot_manager.py"
 end
 
 local function cond_bind(key, default_dsp, flags)
@@ -21,7 +21,11 @@ local function cond_bind(key, default_dsp, flags)
             hl.dispatch(hl.dsp.pass({ window = "activewindow" }))
         else
             if default_dsp then
-                hl.dispatch(default_dsp)
+                if type(default_dsp) == "function" then
+                    default_dsp()
+                else
+                    hl.dispatch(default_dsp)
+                end
             else
                 hl.dispatch(hl.dsp.pass({ window = "activewindow" }))
             end
@@ -73,13 +77,13 @@ end
 
 hl.bind(
     "ALT + SPACE",
-    hl.dsp.exec_cmd([[pkill rofi; rofi -show drun -run-command "{cmd}"]]),
+    hl.dsp.exec_cmd([[pkill rofi; dusky-run rofi -show drun]]),
     { description = "Launch Menu for Apps" }
 )
 
 hl.bind(
-    "CTRL + SHIFT + code:61",
-    hl.dsp.exec_cmd("pkill rofi; " .. dusky_scripts .. "rofi/keybindings.sh"),
+    "CTRL + SHIFT + SPACE",
+    hl.dsp.exec_cmd("pkill rofi; " .. dusky_scripts .. "hypr/input/rofi_keybinds/keybindings.sh"),
     { description = "Show Keybinds" }
 )
 
@@ -138,25 +142,25 @@ hl.bind(
 -- 3. SYSTEM UTILITIES & TOGGLES
 -- -------------------------------------------------------------------------------------------------
 
-hl.bind(
+cond_bind(
     "ALT + 1",
     hl.dsp.exec_cmd("foot --app-id=dusky_tui python $HOME/user_scripts/dusky_tui/python/main/main.py $HOME/user_scripts/network_manager/tui_dusky_network.py"),
     { description = "Wi-Fi Manager" }
 )
 
-hl.bind(
+cond_bind(
     "ALT + 2",
     hl.dsp.exec_cmd("blueman-manager"),
     { description = "Bluetooth Manager" }
 )
 
-hl.bind(
+cond_bind(
     "ALT + 3",
     hl.dsp.exec_cmd("pavucontrol"),
     { description = "Audio Mixer" }
 )
 
-hl.bind(
+cond_bind(
     "ALT + 4",
     hl.dsp.exec_cmd(dusky_scripts .. "images/wallpaper_selector.py"),
     { description = "Dusky Wallpaper Selector" }
@@ -174,15 +178,15 @@ hl.bind(
     { description = "Cycle Fav Wallpaper" }
 )
 
-hl.bind(
+cond_bind(
     "ALT + 5",
-    hl.dsp.exec_cmd(terminal .. " -e " .. dusky_scripts .. "drives/drive_manager.sh unlock browser"),
+    hl.dsp.exec_cmd(terminal .. " -e " .. dusky_scripts .. "drives/drive_manager/drive_manager.py unlock browser"),
     { description = "Unlock Browser" }
 )
 
-hl.bind(
+cond_bind(
     "ALT + SHIFT + 5",
-    hl.dsp.exec_cmd(terminal .. " -e " .. dusky_scripts .. "drives/drive_manager.sh lock browser"),
+    hl.dsp.exec_cmd(terminal .. " -e " .. dusky_scripts .. "drives/drive_manager/drive_manager.py lock browser"),
     { description = "Lock Browser", locked = true }
 )
 
@@ -217,7 +221,7 @@ hl.bind(
 
  local SUBMAP_MANUAL_PT = "keybinds_disabled"  -- NOT "passthrough" (reserved dispatcher name)
 
- hl.bind(
+ cond_bind(
      "ALT + 6",
      function()
          hl.notification.create({ text = "Passthrough Enabled - Press ALT+6 to exit", timeout = 3000 })
@@ -273,13 +277,13 @@ hl.bind(
 
 
 -- --- Waybar Toggle ---
-hl.bind(
+cond_bind(
     "ALT + 9",
     hl.dsp.exec_cmd(dusky_scripts .. "waybar/waybar_toggle.sh"),
     { description = "Start Waybar for 1 Min" }
 )
 
-hl.bind(
+cond_bind(
     "ALT + 0",
     hl.dsp.exec_cmd("pkill tray-tui; foot --app-id=dusky_tui tray-tui"),
     { description = "system Tray TUI" }
@@ -531,19 +535,21 @@ hl.bind(
     { description = "OCR Fullscreen" }
 )
 
--- ollama Sidebar
+-- Dusky LLM Side Panel
 hl.bind(
     "SUPER + ALT + O",
-    hl.dsp.exec_cmd(terminal .. " --class ollama_terminal.sh -e " .. dusky_scripts .. "llm/ollama_terminal.sh"),
-    { description = "AI LLM Ollama Chat" }
+    hl.dsp.exec_cmd(dusky_scripts .. "llm/llm_side_panal/toggle_llm_side_panal.sh"),
+    { description = "Dusky AI LLM Side Panel" }
 )
 
 -- Music Recognition
 hl.bind(
     "SUPER + ALT + M",
-    hl.dsp.exec_cmd(terminal .. " --class music_recognition.sh --hold  " .. dusky_scripts .. "music/music_recognition.sh"),
+    hl.dsp.exec_cmd(terminal .. " --class music_recognition.py  " .. dusky_scripts .. "music/music_recognition.py"),
     { description = "Music Recognition aka Shazam" }
 )
+
+
 
 -- Kokoro TTS
 hl.bind(
@@ -562,7 +568,7 @@ hl.bind(
 -- NVIDIA Parakeet
 hl.bind(
     "SUPER + I",
-    hl.dsp.exec_cmd(dusky_scripts .. "tts_stt/dusky_parakeet/trigger.sh"),
+    hl.dsp.exec_cmd(dusky_scripts .. "tts_stt/dusky_parakeet/dusky_trigger.py --push"),
     { description = "STT Parakeet GPU" }
 )
 
@@ -1145,6 +1151,13 @@ hl.bind(
 )
 
 -- Player Controls (Routed through script for OSD feedback)
+
+hl.bind(
+  "SUPER + SHIFT + B",
+  hl.dsp.exec_cmd("dusky-run " .. dusky_scripts .."audio/radio/dusky_radio_menu.sh"),
+  { description = "Live Radio Menu" }
+)
+
 hl.bind(
     "XF86AudioNext",
     hl.dsp.exec_cmd(dusky_scripts .. "mako_osd/osd_router/osd_router.sh --next"),
@@ -1205,14 +1218,21 @@ cond_bind(
 -- Audio/Mic Switching
 cond_bind(
     "ALT + O",
-    hl.dsp.exec_cmd("pkill rofi; " .. dusky_scripts .. "audio/dusky_output.sh"),
+    hl.dsp.exec_cmd("pkill rofi; " .. dusky_scripts .. "audio/dusky_in_out_source.sh --output"),
     { description = "Switch Audio Output", locked = true }
 )
 
 cond_bind(
     "ALT + I",
-    hl.dsp.exec_cmd("pkill rofi; " .. dusky_scripts .. "audio/dusky_input.sh"),
+    hl.dsp.exec_cmd("pkill rofi; " .. dusky_scripts .. "audio/dusky_in_out_source.sh --input"),
     { description = "Switch Mic Input", locked = true }
+)
+
+-- Dusky Audio Studio GUI
+hl.bind(
+    "ALT + N",
+    hl.dsp.exec_cmd("dusky-run " .. dusky_scripts .. "audio/dusky_audio_studio/dusky_audio_studio.py"),
+    { description = "Dusky Audio Studio & Voice DSP", submap_universal = true }
 )
 
 -- Calculator

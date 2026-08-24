@@ -1,567 +1,328 @@
-# Disk Management, Benchmarking, Health Monitoring, and NVMe Diagnostics in Arch Linux
+# Disk Management, Benchmarking, Health Monitoring & NVMe Diagnostics
 
-> [!note]
-> This note is a permanent reference for inspecting storage devices, validating mounts, benchmarking I/O, checking drive health, and diagnosing NVMe power-management issues on Arch Linux.
+> [!note] Scope
+> Permanent reference for **device inspection, mounts, benchmarking, drive health, TRIM, LUKS handling, and NVMe power management** on Arch Linux. Updated **August 2026**, verified against kernel 7.x (`util-linux 2.42`, `nvme-cli 2.16`, `smartmontools 7.5`, `cryptsetup 2.8`).
+>
+> Related: [[Storage Stack]] · [[BTRFS]] · [[Bitlocker]] · [[Fixing Un Mountable NTFS drive]]
 
-> [!important]
-> Device nodes such as `/dev/sdX`, `/dev/nvme0n1`, and `/dev/dm-0` are **not stable identifiers**. For `/etc/fstab`, scripts, and automation, prefer:
-> - `UUID=...`
-> - `PARTUUID=...`
-> - `/dev/disk/by-id/...`
+> [!info] This machine (verified August 2026)
+> - `nvme0n1` — Intel SSDPEKNU512GZ: p1 LUKS2 (ext4 `browser` → `~/.config/mozilla`), p2 vfat `DUSKY_EFI` → `/boot`, p3 btrfs `DUSKY_ROOT` (root fs)
+> - `nvme1n1` — Samsung SSD 980 1TB: p1 LUKS2 (ext4 → `/mnt/media`)
+> - Both LUKS containers run with the `discards` flag active; swap is zram
+> - Custom kernels are built without loop/exFAT support (`CONFIG_BLK_DEV_LOOP=n`, `CONFIG_EXFAT_FS=n`); `ntfs3` ships as a module
 
 > [!warning]
-> Benchmarking and low-level storage commands can be destructive or misleading:
-> - Never write directly to a raw block device unless you intend to overwrite it.
-> - Avoid benchmarking on a busy system.
-> - Do **not** use `zram`, `tmpfs`, or RAM-backed filesystems when you intend to measure physical disk performance.
-> - File-based benchmarks on compressed or CoW filesystems can be distorted unless you account for that.
+> - Device nodes like `/dev/sdX`, `/dev/nvme0n1`, `/dev/dm-0` are **not stable** — this machine's root disk moved between `nvme1n1` and `nvme0n1` across boots while fstab comments still said `nvme1n1p3`. Only UUIDs kept it booting.
+>   For `/etc/fstab`, scripts, automation use `UUID=`, `PARTUUID=`, or `/dev/disk/by-id/...`.
+> - Never write to a raw block device unless you intend to destroy it.
+> - Don't benchmark on a busy system, and never measure "disk" speed on `zram`/`tmpfs`.
+> - File-based benchmarks on compressed/CoW filesystems are distorted unless accounted for.
 
 ---
 
 ## Core Packages
 
-Install tools as needed:
-
 ```bash
 sudo pacman -S --needed \
-    pciutils \
-    nvme-cli \
-    smartmontools \
-    sysstat \
-    fio \
-    hdparm \
-    cryptsetup \
-    udisks2 \
-    ncdu \
-    baobab \
-    mdadm \
-    lvm2 \
-    parted
+    pciutils nvme-cli smartmontools sysstat fio hdparm \
+    cryptsetup udisks2 ncdu gptfdisk parted dosfstools e2fsprogs
 ```
-
-### Package Summary
 
 | Package | Tools |
 |---|---|
-| `util-linux` | `lsblk`, `blkid`, `findmnt`, `mount`, `fdisk`, `blockdev` |
-| `pciutils` | `lspci` |
-| `nvme-cli` | `nvme` |
-| `smartmontools` | `smartctl`, `smartd` |
-| `sysstat` | `iostat`, `pidstat` |
-| `fio` | realistic storage benchmarking |
-| `hdparm` | ATA/SATA read tests and device info |
-| `cryptsetup` | LUKS management |
-| `udisks2` | `udisksctl` for desktop-friendly unlock/mount operations |
-| `ncdu`, `baobab` | disk usage analysis |
-| `mdadm` | Linux software RAID |
-| `lvm2` | LVM inspection and management |
-| `parted` | `partprobe` and partitioning utilities |
+| `util-linux` | `lsblk`, `blkid`, `findmnt`, `wipefs`, `mount`, `fdisk`, `cfdisk`, `blockdev` |
+| `pciutils` / `nvme-cli` / `smartmontools` | `lspci` · `nvme` · `smartctl`, `smartd` |
+| `sysstat` / `fio` / `hdparm` | `iostat`, `pidstat` · real benchmarks · ATA read tests |
+| `cryptsetup` / `udisks2` | LUKS/bitlk CLI · desktop unlock/mount via Polkit |
+| `ncdu` | terminal usage analyzer |
+| `gptfdisk` / `parted` | `gdisk`, `sgdisk` · `partprobe` |
+| `mdadm` / `lvm2` | software RAID · LVM (install only if used) |
 
 ---
 
-## Device Discovery and Topology
+## Device Discovery
 
-### Primary Discovery Commands
+| Purpose | Command |
+|---|---|
+| Best overview | `lsblk -e7 -o NAME,PATH,SIZE,TYPE,FSTYPE,FSVER,LABEL,UUID,MOUNTPOINTS,MODEL,SERIAL,ROTA,TRAN` |
+| Filesystem signatures + UUIDs | `blkid` |
+| Mounts + effective options | `findmnt -o TARGET,SOURCE,FSTYPE,OPTIONS` |
+| Partition tables / sector size | `sudo fdisk -l` |
+| Signatures on a disk (dry-run) | `sudo wipefs -n /dev/sdX` |
+| Storage controllers | `lspci -nn \| grep -iE 'non-volatile memory\|sata\|ahci\|raid'` |
+| NVMe namespaces/controllers | `sudo nvme list` · `sudo nvme list-subsys` |
 
-| Purpose | Command | Notes |
-|---|---|---|
-| List block devices | `lsblk -e7 -o NAME,PATH,SIZE,TYPE,FSTYPE,FSVER,LABEL,UUID,MOUNTPOINTS,MODEL,SERIAL,ROTA,TRAN` | Best general overview. `-e7` hides loop devices. |
-| Show filesystem signatures | `blkid` | Displays UUID, PARTUUID, and filesystem type. |
-| Show all mount sources and options | `findmnt -o TARGET,SOURCE,FSTYPE,OPTIONS` | Prefer this over plain `mount` for inspection. |
-| Show partition tables | `sudo fdisk -l` | Good for sizes, sector sizes, GPT/MBR layout. |
-| Show partition tables with alignment-friendly tooling | `sudo parted -l` | Useful when working with GPT and modern disks. |
-| Show on-disk signatures safely | `sudo wipefs -n /dev/sdX` | Non-destructive; lists filesystem/RAID/LUKS signatures. |
-| List PCI storage controllers | `lspci -nn | grep -iE 'non-volatile memory|sata|ahci|raid|storage'` | Identifies NVMe, AHCI, RAID, etc. |
-| List NVMe devices | `sudo nvme list` | NVMe namespaces and controller association. |
-| List NVMe subsystems and paths | `sudo nvme list-subsys` | Useful on multi-path or multi-controller systems. |
-
-### Recommended Starting View
+`-e7` excludes loop devices. Persistent symlinks live in `/dev/disk/by-id`, `by-uuid`, `by-partuuid`:
 
 ```bash
-lsblk -e7 -o NAME,PATH,SIZE,TYPE,FSTYPE,LABEL,UUID,MOUNTPOINTS,MODEL,SERIAL,ROTA,TRAN
-```
-
-### Stable Naming
-
-To inspect persistent device symlinks:
-
-```bash
-ls -l /dev/disk/by-id
-ls -l /dev/disk/by-uuid
-ls -l /dev/disk/by-partuuid
+ls -l /dev/disk/by-id /dev/disk/by-uuid /dev/disk/by-partuuid
 ```
 
 > [!tip]
-> For scripts and `/etc/fstab`, `UUID=` and `PARTUUID=` are usually the most portable choices. For whole-disk references, `/dev/disk/by-id/...` is often ideal.
+> `UUID=`/`PARTUUID=` are the portable choices for fstab; whole-disk references belong in scripts as `/dev/disk/by-id/...`.
 
 ---
 
-## Filesystems, Mount State, and Capacity
-
-### Inspect Mounted Filesystems
+## Mounts, Capacity, fstab
 
 ```bash
-findmnt -o TARGET,SOURCE,FSTYPE,OPTIONS
+findmnt -o TARGET,SOURCE,FSTYPE,OPTIONS   # everything
+findmnt -no OPTIONS /mnt/media            # one mountpoint's effective options
+df -hT                                    # usage by filesystem
 ```
 
-To see the exact effective options for one mountpoint:
-
-```bash
-findmnt -no OPTIONS /mnt/media
-```
-
-To show usage by filesystem:
-
-```bash
-df -hT
-```
-
-### Validate `/etc/fstab`
-
-After editing `/etc/fstab`, verify it before rebooting:
+After editing `/etc/fstab`, validate **before rebooting**:
 
 ```bash
 sudo findmnt --verify --verbose
-sudo mount -a
 ```
 
-> [!warning]
-> `mount -a` attempts to mount all eligible entries that are not already mounted and not marked `noauto`. Run it only after reviewing your `fstab`.
-
-### Mount an Entry Already Defined in `/etc/fstab`
-
-If `/mnt/media` exists as an `fstab` mountpoint:
+Mount any entry already defined in fstab by naming its mountpoint:
 
 ```bash
 sudo mount /mnt/media
 ```
 
-This works because `mount` can resolve the entry by mountpoint.
+> [!warning]
+> `sudo mount -a` mounts every eligible non-`noauto` entry. Review the file first.
 
 ---
 
-## Benchmarking and I/O Performance
-
-## Benchmarking Rules That Matter
-
-> [!important]
-> A single throughput number is rarely enough. For meaningful results:
-> - Benchmark on an idle system.
-> - Prefer `fio` over `dd`.
-> - Use a test size large enough to escape cache effects.
-> - For SSDs, use larger write tests if you care about **sustained** performance beyond pseudo-SLC cache.
-> - For Btrfs or other compressed/CoW filesystems, benchmark in a directory with compression disabled and ideally `NOCOW`, or benchmark an unmounted raw device only if you fully understand the risks.
-
-### Use `fio` for Real Benchmarks
-
-`fio` is the standard tool for storage benchmarking.
-
-#### Safe Sequential Write and Read Test on a Mounted Filesystem
+## Partitioning & Formatting
 
 ```bash
-readonly TESTDIR=/mnt/test
-readonly TESTFILE="$TESTDIR/fio.bin"
+# Partition interactively (GPT): fdisk or cfdisk
+sudo fdisk /dev/sdX
 
+# Non-interactive GPT example: one partition filling the disk, type Linux
+sudo sgdisk -n 1:0:0 -t 1:8300 /dev/sdX
+
+# Re-read the table after changes
+sudo partprobe /dev/sdX
+```
+
+```bash
+# Create filesystems (label optional but recommended)
+sudo mkfs.btrfs -L DUSKY_DATA /dev/sdX1
+sudo mkfs.ext4 -L DATA        /dev/sdX2
+sudo mkfs.vfat -F 32 -n EFI   /dev/sdX3      # ESP only
+sudo mkfs.ntfs --quick -L WIN /dev/sdX4
+```
+
+> [!note]
+> exFAT needs kernel support (`CONFIG_EXFAT_FS`/module + `exfatprogs`). The custom `dusky-*` kernels here ship **without it** — stock `linux` has it.
+
+### Per-Medium Tuning
+
+The medium dictates the flags more than the filesystem does:
+
+| Medium | What limits it | Good moves | Toxic moves |
+|---|---|---|---|
+| Internal SSD/NVMe | write amplification (FTL erase-before-write) | compression, async TRIM, `noatime` | defragmenting, sync discard, `autodefrag` |
+| Rotational HDD | seek time | contiguous writes, `autodefrag` (Btrfs), longer journal `commit=` | any TRIM/discard, NOCOW on small files |
+| USB flash / SD card | cheap NAND, weak FTL, sudden removal | `uid=`/`gid=` synthesis, `errors=remount-ro`, minimal metadata churn | the `flush` mount option (halves throughput, burns endurance) |
+
+ext4 specifics (this machine's `/mnt/media`): rely on `fstrim.timer`, never the mount-time `discard` flag — ext4's discard is synchronous and stalls the I/O queue on deletes. Useful set: `noatime,lazytime,commit=20` (larger window = fewer journal flushes, up to 20 s of data loss on power cut).
+
+exFAT for >32 GB cross-platform flash:
+
+```fstab
+UUID=<exfat-uuid>  /mnt/usb  exfat  uid=1000,gid=1000,dmask=0022,fmask=0133,noatime,nofail,x-systemd.automount  0  0
+```
+
+---
+
+## Benchmarking
+
+> [!important]
+> One throughput number proves little. Benchmark idle and prefer `fio` over `dd`. `--direct=1` bypasses the page cache, but SSDs still front writes with their own pseudo-SLC cache — only runs much larger than that reveal **sustained** speed. Expect CoW/compressed-Btrfs numbers to differ from raw-device truth.
+
+### `fio` — Real Benchmarks
+
+Sequential write then read:
+
+```bash
+readonly TESTDIR=/mnt/test TESTFILE=/mnt/test/fio.bin
 mkdir -p -- "$TESTDIR"
 
-fio --name=seqwrite \
-    --filename="$TESTFILE" \
-    --size=4G \
-    --rw=write \
-    --bs=1M \
-    --ioengine=io_uring \
-    --direct=1 \
-    --iodepth=16 \
-    --refill_buffers=1 \
-    --randrepeat=0 \
-    --group_reporting \
-    --fsync_on_close=1
+fio --name=seqwrite --filename="$TESTFILE" --size=4G \
+    --rw=write --bs=1M --ioengine=io_uring --direct=1 --iodepth=16 \
+    --refill_buffers=1 --randrepeat=0 --group_reporting --fsync_on_close=1
 
-fio --name=seqread \
-    --filename="$TESTFILE" \
-    --size=4G \
-    --rw=read \
-    --bs=1M \
-    --ioengine=io_uring \
-    --direct=1 \
-    --iodepth=16 \
+fio --name=seqread --filename="$TESTFILE" --size=4G \
+    --rw=read --bs=1M --ioengine=io_uring --direct=1 --iodepth=16 \
     --group_reporting
 
 rm -f -- "$TESTFILE"
 ```
 
-#### Safe Random Mixed Read/Write Test
+Random 70/30 mix (latency/IOPS profile):
 
 ```bash
-readonly TESTDIR=/mnt/test
-readonly TESTFILE="$TESTDIR/fio-rand.bin"
-
-mkdir -p -- "$TESTDIR"
-
-fio --name=randrw \
-    --filename="$TESTFILE" \
-    --size=4G \
-    --rw=randrw \
-    --rwmixread=70 \
-    --bs=4k \
-    --ioengine=io_uring \
-    --direct=1 \
-    --iodepth=32 \
-    --time_based=1 \
-    --runtime=30 \
-    --refill_buffers=1 \
-    --randrepeat=0 \
-    --group_reporting
+fio --name=randrw --filename="$TESTFILE" --size=4G \
+    --rw=randrw --rwmixread=70 --bs=4k --ioengine=io_uring \
+    --direct=1 --iodepth=32 --time_based=1 --runtime=30 \
+    --refill_buffers=1 --randrepeat=0 --group_reporting
 
 rm -f -- "$TESTFILE"
 ```
 
 > [!note]
-> - `--direct=1` bypasses the page cache.
-> - `--ioengine=io_uring` is appropriate on modern Arch kernels. If unavailable in your environment, fall back to `--ioengine=libaio`.
-> - For HDDs, lower queue depths such as `1-4` are often more representative of real workloads.
+> - `--direct=1` bypasses the page cache; `io_uring` is standard on current kernels (fall back to `libaio` only if unavailable).
+> - For HDDs use queue depths 1–4 and `--bs` matching real workloads.
 
-### `dd` for Quick Spot Checks
-
-`dd` is acceptable for a quick sanity check, but it is **not** a full benchmark tool.
-
-#### Write Test to a Regular File
+### `dd` — Spot Check Only
 
 ```bash
-dd if=/dev/zero of=/mnt/test/dd-test.bin bs=1M count=4096 oflag=direct status=progress conv=fdatasync
-```
-
-#### Read Test from That File
-
-```bash
-dd if=/mnt/test/dd-test.bin of=/dev/null bs=1M iflag=direct status=progress
-```
-
-#### Cleanup
-
-```bash
-rm -f -- /mnt/test/dd-test.bin
+dd if=/dev/zero of=/mnt/test/dd.bin bs=1M count=4096 oflag=direct status=progress conv=fdatasync
+dd if=/mnt/test/dd.bin of=/dev/null bs=1M iflag=direct status=progress
+rm -f /mnt/test/dd.bin
 ```
 
 > [!warning]
-> - Write tests overwrite the target file.
-> - Do **not** set `of=/dev/sdX` or `of=/dev/nvme0n1` unless you intend to destroy data.
-> - `dd` does not give good latency, queue-depth, or mixed-workload insight.
+> `of=` pointing at a block device destroys it. `dd` says nothing about latency or mixed workloads.
 
-### `hdparm` Read Test for SATA/ATA Devices
-
-For a quick non-destructive read test on a SATA/ATA disk:
+### `hdparm` — Quick Read Test
 
 ```bash
-sudo hdparm -t /dev/sdX
+sudo hdparm -t /dev/sdX     # buffered device read (works on NVMe too)
 ```
 
-> [!note]
-> - `hdparm -t` performs a buffered device read speed test.
-> - `hdparm -T` measures cache/buffer performance, **not** real disk throughput.
-> - `hdparm` is primarily relevant to ATA/SATA devices. For NVMe, use `fio`.
+`-T` measures host cache, not the disk.
 
 ---
 
-## Continuous I/O Monitoring
-
-### Per-Device Utilization and Latency
+## I/O Monitoring
 
 ```bash
-iostat -dx 1
+iostat -dx 1        # per-device utilization
+pidstat -d 1        # per-process I/O
 ```
 
-Useful columns include:
+Key `iostat -dx` columns (sysstat ≥ 12.5 splits latency per direction):
 
-- `r/s`, `w/s` — read/write IOPS
-- `rkB/s`, `wkB/s` — throughput
-- `await` — average time per I/O request
-- `aqu-sz` — average queue depth
-- `%util` — useful, but not the only saturation indicator
-
-### Per-Process Disk I/O
-
-```bash
-pidstat -d 1
-```
-
-> [!tip]
-> `iostat` shows what devices are doing; `pidstat` helps identify **which processes** are causing it.
+| Column | Meaning |
+|---|---|
+| `r/s`, `w/s`, `d/s`, `f/s` | read/write/discard/flush IOPS |
+| `rkB/s`, `wkB/s` | throughput |
+| `r_await`, `w_await` | average ms per request, per direction |
+| `aqu-sz` | average queue depth |
+| `%util` | busy fraction — not the whole saturation story |
 
 ---
 
-## Drive Health Monitoring
+## Drive Health
 
-## Recommended Tools
-
-- `smartctl` for SATA, SAS, USB-attached disks, and also NVMe
-- `nvme-cli` for NVMe-native logs and features
-
-### Comprehensive SMART / Health Report
-
-#### SATA / SAS / USB-SATA
+### Reports
 
 ```bash
-sudo smartctl -x /dev/sdX
+sudo smartctl -x /dev/sdX          # SATA/SAS/USB full report
+sudo smartctl -x /dev/nvme0        # NVMe full report (controller device!)
+sudo nvme smart-log /dev/nvme0 -H  # NVMe-native log with decoded thresholds
+sudo smartctl --scan-open          # probe types, esp. behind USB bridges
 ```
 
-#### NVMe
+If a USB bridge hides SMART, hint the transport: `sudo smartctl -d sat -x /dev/sdX`.
 
-```bash
-sudo smartctl -x /dev/nvme0
-sudo nvme smart-log /dev/nvme0 -H
-```
-
-> [!important]
-> For NVMe, use the **controller device** such as `/dev/nvme0`, not a partition like `/dev/nvme0n1p1`.
-
-### Quick Health Status
-
-```bash
-sudo smartctl -H /dev/sdX
-sudo smartctl -H /dev/nvme0
-```
+Quick status: `sudo smartctl -H /dev/sdX` / `sudo smartctl -H /dev/nvme0`.
 
 > [!warning]
-> A reported overall health of `PASSED` is **not** a complete diagnosis. Always inspect the detailed attributes/logs.
+> `PASSED` ≠ healthy. Read the attributes/logs. A USB bridge may forward only partial data.
 
-### What to Watch For
+### What to Watch
 
 | Signal | Meaning |
 |---|---|
-| SATA `Reallocated_Sector_Ct` increasing | Media deterioration |
-| SATA `Current_Pending_Sector` > 0 | Unstable sectors; take seriously |
-| SATA `Offline_Uncorrectable` > 0 | Unreadable sectors detected |
-| SATA `UDMA_CRC_Error_Count` increasing | Often cable, connector, or backplane issue rather than media failure |
-| NVMe `critical_warning` non-zero | Serious controller/media condition |
-| NVMe `media_errors` increasing | Real media/controller errors |
-| NVMe `percentage_used` | Endurance estimate; can exceed 100 |
-| NVMe `num_err_log_entries` | Cumulative and sometimes noisy; correlate with kernel logs |
+| SATA `Reallocated_Sector_Ct` rising | media deteriorating |
+| SATA `Current_Pending_Sector` > 0 | unstable sectors — take seriously |
+| SATA `UDMA_CRC_Error_Count` rising | cable/connector, usually not media |
+| NVMe `critical_warning` ≠ 0 | serious controller/media condition |
+| NVMe `media_errors` rising | real media errors |
+| NVMe `percentage_used` | endurance consumed (can exceed 100) |
 
-### SMART Self-Tests
+### Self-Tests
 
-#### SATA / SAS
-
-Short test:
+SATA/SAS:
 
 ```bash
-sudo smartctl -t short /dev/sdX
+sudo smartctl -t short /dev/sdX       # short offline test
+sudo smartctl -t long  /dev/sdX       # extended
+sudo smartctl -l selftest /dev/sdX    # results
 ```
 
-Extended test:
+NVMe (codes: `1` short · `2` extended · `0xf` abort):
 
 ```bash
-sudo smartctl -t long /dev/sdX
-```
-
-View self-test results:
-
-```bash
-sudo smartctl -l selftest /dev/sdX
-```
-
-#### NVMe Device Self-Test
-
-Short self-test:
-
-```bash
-sudo nvme device-self-test /dev/nvme0 --start=1
-```
-
-Extended self-test:
-
-```bash
-sudo nvme device-self-test /dev/nvme0 --start=2
-```
-
-View self-test log:
-
-```bash
+sudo nvme device-self-test /dev/nvme0 -s 1
+sudo nvme device-self-test /dev/nvme0 -s 2
 sudo nvme self-test-log /dev/nvme0
 ```
 
-### Enable Background Monitoring
+### Background Monitoring
 
 ```bash
-sudo systemctl enable --now smartd.service
+sudo systemctl enable --now smartd.service   # reads /etc/smartd.conf
 ```
 
-`smartd` reads `/etc/smartd.conf`.
-
-### USB Bridge Caveat
-
-Many USB-to-SATA/NVMe bridges require an explicit device type. Let `smartctl` probe first:
-
-```bash
-sudo smartctl --scan-open
-```
-
-If needed, use the hinted device type, for example:
-
-```bash
-sudo smartctl -d sat -x /dev/sdX
-```
-
-> [!note]
-> Some USB bridges expose only partial SMART data, and some do not forward vendor-specific logs correctly.
+Full TUI for live SMART + I/O across all drives: `~/user_scripts/drives/dusky_disk_monitor_io.py` · SSD wear/over-provisioning audit: `~/user_scripts/drives/drive_health/dusky_drive_health.py`.
 
 ---
 
 ## NVMe Reference
 
-## Controller vs Namespace
-
 > [!important]
-> NVMe naming is easy to misuse:
-> - `/dev/nvme0` = **controller**
-> - `/dev/nvme0n1` = **namespace block device**
-> - `/dev/nvme0n1p1` = **partition**
->
-> Many `nvme-cli` management commands target the **controller** (`/dev/nvme0`), not a partition.
-
-### Core NVMe Inspection Commands
-
-List controllers and namespaces:
+> `/dev/nvme0` = controller · `/dev/nvme0n1` = namespace · `/dev/nvme0n1p1` = partition.
+> Most `nvme-cli` admin commands target the **controller**.
 
 ```bash
-sudo nvme list
-sudo nvme list-subsys
+sudo nvme list                          # devices + firmware + usage
+sudo nvme id-ctrl /dev/nvme0 -H         # controller capabilities
+sudo nvme id-ns   /dev/nvme0n1 -H       # namespace properties
+sudo nvme error-log /dev/nvme0          # error log entries
+sudo nvme fw-log /dev/nvme0             # firmware slots
 ```
 
-Identify controller capabilities:
+### Power Management Layers
+
+1. **NVMe Power Management feature** (0x02) — host-selected power state
+2. **APST** (0x0c) — autonomous transitions inside the controller
+3. **PCIe ASPM** — link-level power saving
+4. **Linux runtime PM** — kernel suspend/resume of the PCI device
 
 ```bash
-sudo nvme id-ctrl /dev/nvme0 -H
-```
-
-Identify namespace properties:
-
-```bash
-sudo nvme id-ns /dev/nvme0n1 -H
-```
-
-Show error log:
-
-```bash
-sudo nvme error-log /dev/nvme0
-```
-
-Show firmware slot information:
-
-```bash
-sudo nvme fw-log /dev/nvme0
-```
-
----
-
-## NVMe Power Management
-
-Modern NVMe behavior is controlled by several layers:
-
-1. **NVMe Power Management Feature** — current host-selected power state
-2. **APST** — Autonomous Power State Transitions inside the controller
-3. **PCIe ASPM** — link-level power saving on the PCIe bus
-4. **Linux Runtime PM** — kernel-managed runtime suspend/resume of the device
-
-### Inspect Current NVMe Power Features
-
-Current power management feature:
-
-```bash
+# Current power state + APST configuration
 sudo nvme get-feature /dev/nvme0 --feature-id=0x02 -H
-```
-
-APST configuration:
-
-```bash
 sudo nvme get-feature /dev/nvme0 --feature-id=0x0c -H
-```
 
-Check whether the controller supports APST:
+# APST support & power-state descriptors
+sudo nvme id-ctrl /dev/nvme0 -H | grep -iE 'apsta|npss'
+sudo nvme id-ctrl /dev/nvme0 -H | grep -E '^ps[[:space:]]+[0-9]+'
 
-```bash
-sudo nvme id-ctrl /dev/nvme0 -H | grep -i apsta
-```
-
-Show controller power-state descriptors and number of power states:
-
-```bash
-sudo nvme id-ctrl /dev/nvme0 -H | grep -iE 'npss|ps[[:space:]]+[0-9]+'
-```
-
-### Linux NVMe APST Tuning
-
-Check the kernel's current APST latency policy:
-
-```bash
+# Kernel APST latency knob and runtime PM state
 cat /sys/module/nvme_core/parameters/default_ps_max_latency_us
-```
-
-> [!note]
-> On Linux, APST is normally managed automatically. The main tuning knob is `nvme_core.default_ps_max_latency_us`, not manual forcing of a specific NVMe power state.
-
-### Runtime PM State
-
-```bash
-cat /sys/class/nvme/nvme0/device/power/control
+cat /sys/class/nvme/nvme0/device/power/control     # auto | on
 cat /sys/class/nvme/nvme0/device/power/runtime_status
-cat /sys/class/nvme/nvme0/device/power/runtime_suspended_time
 ```
 
-Typical `power/control` values:
-
-- `auto` — runtime power management enabled
-- `on` — runtime power management disabled
-
-### PCIe ASPM Inspection
-
-First locate the NVMe PCI device:
+PCIe ASPM:
 
 ```bash
 lspci -nn | grep -i 'non-volatile memory controller'
-```
-
-Then inspect link capabilities and controls:
-
-```bash
-sudo lspci -vv -s 01:00.0 | grep -E 'LnkCap:|LnkCtl:|LnkSta:|L1SubCap:|L1SubCtl1:|ASPM'
-```
-
-Check the global kernel ASPM policy:
-
-```bash
+sudo lspci -vv -s 02:00.0 | grep -E 'LnkCap:|LnkCtl:|LnkSta:'
 cat /sys/module/pcie_aspm/parameters/policy
 ```
 
 > [!warning]
-> ASPM availability is influenced by firmware/BIOS, platform quirks, and the endpoint/root-port pair. Linux cannot always enable states that firmware or hardware does not permit.
+> Firmware/platform can veto ASPM regardless of kernel settings — this laptop's ACPI FADT declares ASPM unsupported even with `pcie_aspm=force` on the cmdline.
 
-### Practical Guidance
-
-- Prefer the platform defaults unless you are **actively diagnosing** a problem.
-- Manual `nvme set-feature ... --feature-id=0x02` changes are often temporary and may be overridden by resets or the kernel.
-- If a system shows NVMe timeouts, resets, or suspend/resume instability, APST or ASPM may be involved.
-
-### Diagnostic-Only Boot Parameters
-
-If you need to test whether power management is causing errors:
-
-- Disable NVMe APST:
+Diagnostic-only boot parameters (high power cost, laptops suffer):
 
 ```text
-nvme_core.default_ps_max_latency_us=0
+nvme_core.default_ps_max_latency_us=0   # disable APST
+pcie_aspm=off                           # disable PCIe ASPM
 ```
 
-- Disable PCIe ASPM globally:
-
-```text
-pcie_aspm=off
-```
-
-> [!warning]
-> These are **diagnostic** settings, not good defaults. They can increase power draw significantly, especially on laptops.
-
-### First Places to Look When NVMe Is Misbehaving
+When NVMe misbehaves, look first at:
 
 ```bash
 journalctl -k -b | grep -iE 'nvme|pcie|aer|timeout|reset'
@@ -569,297 +330,158 @@ sudo nvme smart-log /dev/nvme0 -H
 sudo nvme error-log /dev/nvme0
 ```
 
-Also verify SSD firmware is current.
+Then update controller firmware if outdated.
 
 ---
 
-## SSD / NVMe Maintenance: TRIM and Discard
-
-### Check Discard Support End-to-End
+## TRIM / Discard
 
 ```bash
-lsblk -D
+lsblk -D                        # discard support end-to-end (non-zero = supported)
+sudo fstrim -av                 # trim all mounted supported filesystems
+systemctl enable --now fstrim.timer   # weekly TRIM — the Arch default recommendation
 ```
 
-If the stack supports discard, you will see non-zero discard granularity/max values.
+For ext4 volumes, scheduled TRIM (`fstrim.timer`, weekly) is the right default — ext4's mount-time `discard` option works synchronously and stalls the queue on deletes. Btrfs needs neither: it enables asynchronous discard by itself ([[BTRFS]]).
 
-### Run TRIM Manually
+### TRIM Through LUKS
+
+Discards do not pass through dm-crypt unless allowed:
 
 ```bash
-sudo fstrim -av
+# One-shot
+sudo cryptsetup open --allow-discards /dev/nvme1n1p1 extdisk
+
+# Persistently (survives reboots, stored in LUKS2 metadata)
+sudo cryptsetup open --allow-discards --persistent /dev/nvme1n1p1 extdisk
 ```
 
-### Enable Periodic TRIM
-
-```bash
-sudo systemctl enable --now fstrim.timer
-```
+Or in `/etc/crypttab`: `extdisk UUID=<luks-uuid> none discard`.
 
 > [!note]
-> Periodic `fstrim.timer` is generally the simplest and safest default on Arch for SSDs and NVMe drives.
+> systemd-cryptsetup (fstab/crypttab unlocks) enables discards by default on modern Arch — this machine's containers already show `flags: discards`. Manual `cryptsetup open` without flags does not.
 
-### Online `discard` vs Periodic `fstrim`
+### LUKS Performance on NVMe
 
-- Periodic `fstrim` is usually preferred.
-- Continuous online discard is supported on modern filesystems, but it can add write-path overhead depending on workload and stack.
-- On Btrfs, `discard=async` is reasonable if you intentionally want online discard.
-
-### TRIM Through LUKS / dm-crypt
-
-TRIM does **not** pass through an encrypted mapping unless you allow it.
-
-Examples:
-
-- one-shot unlock:
-
-```bash
-sudo cryptsetup open --allow-discards /dev/nvme1n1p1 extdisk
-```
-
-- persistent configuration via `/etc/crypttab`:
+dm-crypt by default hands encryption work to kernel worker threads. On drives with single-digit-µs latency, the context switch costs more than the drive access — bypass it in `/etc/crypttab` (kernel ≥ 5.9, systemd ≥ 248):
 
 ```text
-extdisk UUID=<luks-uuid> none discard
+media  UUID=<luks-uuid>  /etc/keys/media.key  no-read-workqueue,no-write-workqueue,discard
 ```
 
+At format time, consider enlarging dm-crypt's crypto sector so each 4 KiB is one encryption operation instead of eight 512 B ones (irreversible — set it when creating the container):
+
+```bash
+sudo cryptsetup luksFormat --type luks2 --sector-size 4096 /dev/nvme1n1p1
+```
+
+Check what the hardware reports first — `cat /sys/block/nvme0n1/queue/{logical,physical}_block_size`; both NVMe drives here report **512**, where the default is already aligned and the gain is smaller.
+
+This machine unlocks via keyfiles through `~/user_scripts/drives/drive_manager/drive_manager.py` (`drives.toml` maps outer/inner UUIDs → keyfile hints); the crypttab line above is the declarative equivalent.
+
 > [!warning]
-> Allowing discard through encryption leaks some information about which blocks are unused. For many personal systems this is acceptable; for higher-threat environments, evaluate the tradeoff carefully.
+> Passing discards leaks which blocks are unused. Acceptable for personal systems; consider carefully elsewhere.
 
 ---
 
 ## Common Operations
 
-## Unlock and Mount Encrypted Volumes
+### Unlock & Mount LUKS
 
-### Desktop-Friendly Method: `udisksctl`
-
-Unlock a LUKS device:
+Desktop-friendly (Polkit, no sudo in an active session):
 
 ```bash
-udisksctl unlock -b /dev/nvme1n1p1
+udisksctl unlock -b /dev/nvme1n1p1     # prints the mapper device
+udisksctl mount  -b /dev/mapper/luks-<uuid>
+udisksctl unmount -b /dev/mapper/luks-<uuid>
+udisksctl lock   -b /dev/nvme1n1p1
 ```
 
-This returns the created mapped device, typically something like `/dev/dm-2`.
-
-Mount the unlocked filesystem:
-
-```bash
-udisksctl mount -b /dev/dm-2
-```
-
-Unmount and lock it again:
-
-```bash
-udisksctl unmount -b /dev/dm-2
-udisksctl lock -b /dev/nvme1n1p1
-```
-
-> [!note]
-> In an interactive desktop session, `udisksctl` often works through Polkit without `sudo`. On a TTY or minimal environment, root privileges may still be required.
-
-### Low-Level Method: `cryptsetup`
-
-Open with a chosen mapper name:
+Low-level:
 
 ```bash
 sudo cryptsetup open /dev/nvme1n1p1 extdisk
-```
-
-Mount it:
-
-```bash
 sudo mount /dev/mapper/extdisk /mnt/media
-```
-
-Unmount and close:
-
-```bash
 sudo umount /mnt/media
 sudo cryptsetup close extdisk
 ```
 
-### Re-Read a Partition Table After Changes
-
-If you changed a partition table and need the kernel to re-read it:
+### Partition Table Re-read
 
 ```bash
+sudo partprobe /dev/sdX                # preferred
 sudo blockdev --rereadpt /dev/sdX
-sudo partprobe /dev/sdX
 ```
 
 > [!warning]
-> If partitions are in use, the kernel may refuse to reload the table. Unmount users first or reboot.
+> In-use partitions block re-reading. Unmount users or reboot.
 
 ---
 
-## HDD-Specific Performance Notes
+## Usage Analysis
 
-These points apply to **spinning disks**, not SSDs/NVMe.
+```bash
+df -hT                     # filesystem level
+du -xhd1 / | sort -h       # one directory level, stay on one filesystem
+ncdu -x /                  # interactive (-x keeps to one filesystem)
+```
 
-- Sequential throughput is usually higher at the **outer tracks** near the beginning of the disk.
-- Putting hot sequential data near the start of the disk can improve throughput.
-- Partition size by itself does **not** magically improve performance.
-- Performance improves only when your frequently accessed data stays within a smaller, faster region and average seek distance is reduced.
-
-> [!note]
-> On SSDs and NVMe drives, partition placement does not provide the same physical-layout advantage.
+On Btrfs, `df`/`du` lie politely — allocator truth comes from `sudo btrfs filesystem usage /` ([[BTRFS]]).
 
 ---
 
-## Disk Usage Analysis
-
-### CLI
-
-Filesystem usage:
+## RAID / LVM Inspection
 
 ```bash
-df -hT
-```
-
-Directory usage, limited to one filesystem:
-
-```bash
-du -xhd1 / | sort -h
-```
-
-Interactive terminal UI:
-
-```bash
-ncdu /
-```
-
-### GUI
-
-Install and run GNOME Disk Usage Analyzer:
-
-```bash
-sudo pacman -S --needed baobab
-```
-
-> [!note]
-> On Btrfs, `df`, `du`, and allocator-level usage can differ. For Btrfs-specific space accounting, use:
-> ```bash
-> sudo btrfs filesystem usage /
-> ```
-
----
-
-## RAID and LVM Quick Inspection
-
-### Linux Software RAID (`mdadm`)
-
-Show active arrays:
-
-```bash
-cat /proc/mdstat
-```
-
-Inspect one array:
-
-```bash
+cat /proc/mdstat                      # active arrays
 sudo mdadm --detail /dev/md0
-```
-
-### LVM
-
-Show physical volumes:
-
-```bash
-sudo pvs
-```
-
-Show volume groups:
-
-```bash
-sudo vgs
-```
-
-Show logical volumes and backing devices:
-
-```bash
-sudo lvs -a -o +devices
+sudo pvs && sudo vgs && sudo lvs -a -o +devices
 ```
 
 > [!warning]
-> RAID improves availability and/or performance depending on level, but **RAID is not backup**.
+> RAID is not backup.
 
 ---
 
-## Kernel Logs and Failure Triage
-
-When storage problems appear, inspect the kernel log first:
+## Failure Triage
 
 ```bash
 journalctl -k -b --no-pager
-```
-
-Filter for common storage-related errors:
-
-```bash
 journalctl -k -b | grep -iE 'nvme|ata|ahci|aer|i/o error|timeout|reset|crc|medium error|ext4-fs error|btrfs|xfs'
 ```
 
-### Common Interpretation Hints
-
-- `I/O error`, `medium error` — likely media or transport failure
-- `UDMA CRC` — usually cable/backplane/connector issue
-- `nvme timeout`, `controller reset`, `AER` — often link, firmware, or power-management related
-- Filesystem errors (`EXT4-fs error`, `BTRFS`, `XFS`) may be the **result**, not the root cause
+- `I/O error`, `medium error` → media/transport failure
+- `UDMA CRC` → cable/backplane
+- `nvme timeout`, `controller reset`, `AER` → link/firmware/power-management
+- Filesystem errors are often the *symptom*, not the cause
 
 ---
 
-## Minimal Command Cheat Sheet
-
-### Identify Disks
+## Cheat Sheet
 
 ```bash
+# Identify
 lsblk -e7 -o NAME,PATH,SIZE,TYPE,FSTYPE,LABEL,UUID,MOUNTPOINTS,MODEL,SERIAL,ROTA,TRAN
-blkid
-findmnt -o TARGET,SOURCE,FSTYPE,OPTIONS
-sudo fdisk -l
-lspci -nn | grep -iE 'non-volatile memory|sata|ahci|raid|storage'
-sudo nvme list
-```
+blkid && findmnt -o TARGET,SOURCE,FSTYPE,OPTIONS && sudo wipefs -n /dev/sdX
 
-### Benchmark
+# Monitor
+iostat -dx 1 && pidstat -d 1
 
-```bash
-iostat -dx 1
-pidstat -d 1
-sudo hdparm -t /dev/sdX
-```
+# Health
+sudo smartctl -x /dev/nvme0 && sudo nvme smart-log /dev/nvme0 -H
+sudo systemctl enable --now smartd.service fstrim.timer
 
-### Health
-
-```bash
-sudo smartctl -x /dev/sdX
-sudo smartctl -x /dev/nvme0
-sudo nvme smart-log /dev/nvme0 -H
-sudo systemctl enable --now smartd.service
-```
-
-### NVMe Power
-
-```bash
+# NVMe power
 sudo nvme get-feature /dev/nvme0 --feature-id=0x02 -H
 sudo nvme get-feature /dev/nvme0 --feature-id=0x0c -H
 cat /sys/module/nvme_core/parameters/default_ps_max_latency_us
 cat /sys/module/pcie_aspm/parameters/policy
-sudo lspci -vv -s 01:00.0
-```
 
-### Mount / Encrypt
-
-```bash
-sudo mount /mnt/media
+# Mount / encrypt
+sudo findmnt --verify --verbose
 udisksctl unlock -b /dev/nvme1n1p1
 sudo cryptsetup open /dev/nvme1n1p1 extdisk
-```
 
-### TRIM
-
-```bash
-lsblk -D
-sudo fstrim -av
-sudo systemctl enable --now fstrim.timer
+# TRIM
+lsblk -D && sudo fstrim -av
 ```

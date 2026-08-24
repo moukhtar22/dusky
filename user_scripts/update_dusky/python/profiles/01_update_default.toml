@@ -1,0 +1,176 @@
+# ==============================================================================
+# Dusky Updater Default Profile
+# Path: profiles/01_update_default.toml
+# ==============================================================================
+[profile]
+name = "subscripts"
+description = "dusky update scripts"
+version = "9.5.0"
+
+[git]
+repo_url = "https://github.com/dusklinux/dusky"
+branch = "main"
+
+# Topologically decoupled search heuristics replacing static path dictionaries
+search_dirs = [
+    "user_scripts/arch_setup_scripts/scripts",
+    "user_scripts/arch_setup_scripts",
+    "user_scripts/networking",
+    "user_scripts/misc_extra",
+    "user_scripts/misc_extra/delete_in_3_weeks",
+    "user_scripts/update_dusky/update_checker",
+    "user_scripts/dusky_system/reload_cc",
+    "user_scripts/services",
+    "user_scripts/update_dusky",
+    "user_scripts/rofi",
+    "user_scripts/images",
+    "user_scripts/theme_matugen/config",
+    "user_scripts/firefox/theme_matugen",
+    "user_scripts/firefox",
+    "user_scripts/theme_matugen",
+    "user_scripts/waybar",
+    "user_scripts/tts_stt/dusky_kokoro",
+    "user_scripts/tts_stt/dusky_parakeet",
+    "user_scripts/starship",
+    "user_scripts/keylogger",
+]
+
+[conflict_resolutions]
+# "update_checker.sh" = "user_scripts/update_dusky/update_checker.sh"
+
+# ==============================================================================
+# Update sequence tasks format:
+#   Mode | Flags | Script Name & Arguments
+#
+# Field 1 (Mode):
+#   U = Run as user
+#   S = Run with elevated sudo privileges
+#
+# Field 2 (Optional Flags):
+#   ignore-fail         Suppress script failure exit codes
+#   interactive         Pass raw terminal TTY control for interactive scripts
+#   once, once:content  Re-run when the script content changes
+#   once:forever        Never re-run once completed
+#   once:sealed         Never re-run; notify once when the script content changes
+#   if:<condition>      Conditional execution (e.g., if:wayland, if:gpu:nvidia, if:pkg:hyprland)
+#   timeout:<seconds>   Per-task execution timeout in seconds
+#   retry:<count>       Retry attempts on task failure
+#   retry_delay:<secs>  Seconds to wait between retry attempts
+# ==============================================================================
+[sequence]
+tasks = [
+    # ================= CUSTOM =====================
+    "U | once | backup_hyprlang_files.sh",
+    "U | once | 480_dusky_commands.py -b",
+    # ================= Scripts =====================
+    # "U | 002_pre_generated_colors.sh",
+    # "U | 003_network_connect.sh",
+    "U | once | 005_hypr_custom_config_setup.py",
+    "U | once | 006_animation_default.sh",
+    # "U | once | 005_hypr_custom_config_setup.py --force --workspace_rules",
+    "U | once | 005_hypr_custom_config_setup.py --force --environment_variables",
+    "U | once | 005_hypr_custom_config_setup.py --force --autostart",
+    "U | once | 010_package_removal.sh --auto",
+    # ================= CUSTOM =======================
+    # "U | once | paru_packages.sh",
+    # ================= Scripts =====================
+    "U | once | 015_set_thunar_terminal.py -t foot",
+    "U | 020_desktop_entries.py",
+    "U | once | 025_configure_keyboard.sh",
+    # "U | 040_long_sleep_timeout.sh",
+    # "S | 045_battery_limiter.sh",
+    # "S | 050_pacman_config.sh --auto",
+    "S | once | 051_pacman_hooks.sh --auto",
+    "S | once | 055_pacman_reflector.sh",
+    "S | 060_package_installation.py -p updater_packages --no-upgrade --auto-exit",
+    # "S | 070_openssh_setup.sh",
+    # "U | 075_changing_shell_zsh.sh",
+    # "S | 080_aur_paru_fallback_yay.sh",
+    # "S | 085_warp.py",
+    # "U | 090_paru_packages_optional.sh",
+    # "S | 095_battery_limiter_again_dusk.sh",
+    # "U | 100_paru_packages.sh",
+    # "S | 120_create_mount_directories.sh",
+    "S | once | 127_pam_keyring_greetd.py --mode auto",
+    "U | once | 130_systemd_dbus_service_manager.py --default",
+    # "U | 135_battery_notify_service.sh",
+    "U | once | 137_snapper_isolation_subvolume.sh --auto",
+    "U | once | 140_dusky_font_configurator.py",
+    "U | once | 145_matugen_directories.py",
+    # "U | 150_wallpapers_download.sh",
+    # "U | 155_blur_shadow_opacity.sh",
+    # "U | ignore-fail | 160_theme_ctl.py",
+    "U | once | 165_qtct_config.sh",
+    "S | once | 180_udev_usb_notify.sh",
+    # "S | 190_dusk_fstab.py",
+    # "S | firefox_symlink_partition.py",
+    # "S | 200_tlp_config.py",
+    # "S | 205_zram_configuration.sh",
+    # "S | 210_zram_optimize_swappiness.sh",
+    "S | once | 211_systemd_oomd_zram.py",
+    # "S | 215_powerkey_lid_close_behaviour.sh",
+    # "S | 220_logrotate_optimization.sh",
+    "S | once | 225_faillock_timeout.py --preset lenient -y",
+    # "U | 230_asus_tuf_tweaks.sh",
+    "U | 235_file_manager_switch.sh --apply-state",
+    "U | 236_browser_switcher.sh --apply-state",
+    "U | 237_text_editer_switcher.sh --apply-state",
+    "U | 238_terminal_switcher.sh --apply-state",
+    # "S | 245_asusd_service_fix.sh",
+    # "S | 250_ftp_arch.sh",
+    # "U | 255_tldr_update.sh",
+    # "U | 260_spotify.sh",
+    # "U | 265_mouse_button_reverse.sh --right",
+    "U | once | 290_dusky_service_toggler.py --default",
+    # "S | once | 295_initramfs_optimization.py",
+    # "U | once | 300_git_config.sh",
+    # "U | user_scripts/git/dusky_backup_manager.py --new",
+    # "U | user_scripts/git/dusky_backup_manager.py --relink",
+    # "S | once | 320_systemdboot_optimization.py --auto",
+    # "S | 325_hosts_files_block.sh",
+    # "S | once | 330_gtk_root_symlink.sh",
+    "U | once | 331_sync_kde_apps.py",
+    # "S | 335_preload_config.sh",
+    # "S | once | 350_dns_systemd_resolve.sh",
+    # "U | once | 360_obsidian_pensive_vault_configure.sh",
+    # "U | 365_cache_purge.sh",
+    # "S | once | 370_arch_install_scripts_cleanup.sh",
+    # "U | once | 375_cursor_theme_bibata_classic_modern.sh",
+    # "S | 380_nvidia_open_source.sh",
+    "U | once | 383_configure_hyprland_gpu.py --auto",
+    # "S | 385_waydroid_setup.sh",
+    "U | once | 390_clipboard_persistance.py --ram --quiet",
+    # "S | once | 395_intel_media_sdk_check.sh",
+    # "U | 405_spicetify_matugen_setup.sh",
+    # "U | 410_waybar_swap_config.py --state",
+    # "U | once | 415_mpv_setup.sh",
+    # "S | 430_btrfs_zstd_compression_stats.sh",
+    "U | once | 434_wayclick_soundpacks_download.sh --auto",
+    # "U | once | 435_key_sound_wayclick_setup.sh --setup",
+    # "U | once | 440_config_bat_notify.sh --default",
+    "U | 455_hyprctl_reload.sh",
+    # "U | 460_switch_clipboard.sh --terminal --force", no longer required!
+    # "S | once | 465_sddm_setup.sh",
+    # "U | once | 470_vesktop_matugen.sh",
+    "S | once | 473_add_user_to_group.sh --auto",
+    # "U | 475_reverting_sleep_timeout.sh",
+    "S | once | 485_sudoers_nopassword.sh",
+    # ================= CUSTOM =======================
+    "U | once | copy_service_files.sh --default",
+    "U | update_checker.sh --num",
+    # "U | cc_restart.sh --quiet",
+    "U | wallpaper_selector.py --build-cache",
+    # "U | once | append_defaults_keybinds_edit_here.sh",
+    "U | ignore-fail | tui_matugen.py --smart",
+    "U | ignore-fail | hypr_anim.sh --current",
+    "U | ignore-fail | theme_ctl.sh refresh",
+    "U | ignore-fail | update_counter.sh",
+    # "U | once | system_update.sh --pacman",
+    "S | once | fix_wayland_session.py",
+    "U | tui_starship.py --apply-state",
+    "U | once | keylogger_installer.py",
+    # ==============================================
+
+
+    "U | once | 480_dusky_commands.py -a",
+]

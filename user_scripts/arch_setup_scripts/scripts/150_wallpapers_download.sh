@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Downloads dusky wallpaers and copies them to the required directory
+#d: Download dusky wallpapers and install them
 
 set -euo pipefail
 

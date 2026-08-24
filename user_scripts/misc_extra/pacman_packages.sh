@@ -12,16 +12,14 @@ declare -ar pkgs_misc=(
     "wl-clip-persist"
 
     #thunar
-"thunar" "thunar-archive-plugin" "file-roller" "thunar-volman" "thunar-media-tags-plugin" "thunar-shares-plugin" "thunar-vcs-plugin" "tumbler" "ffmpegthumbnailer" "webp-pixbuf-loader" "poppler-glib" "libgsf" "libgepub" "libopenraw" "resvg" "gvfs" "gvfs-mtp" "gvfs-nfs" "gvfs-smb" "gvfs-gphoto2" "gvfs-afc" "gvfs-dnssd" "catfish" "gnome-keyring" "meld" "xreader" "imagemagick"
+"thunar" "thunar-archive-plugin" "file-roller" "thunar-volman" "thunar-media-tags-plugin" "thunar-shares-plugin" "thunar-vcs-plugin" "tumbler" "ffmpegthumbnailer" "webp-pixbuf-loader" "poppler-glib" "libgsf" "libgepub" "libopenraw" "resvg" "gvfs" "gvfs-mtp" "gvfs-nfs" "gvfs-smb" "gvfs-gphoto2" "gvfs-afc" "gvfs-dnssd" "catfish" "gnome-keyring" "meld" "xreader" "imagemagick" "kio-admin"
 
     "mousepad"
     "mako"
     "python-evdev"
     "python-pyudev"
     "python-textual"
-
     "papirus-icon-theme"
-
     "ufw"
 )
 
@@ -72,8 +70,7 @@ TARGET_OS=""
 parse_args() {
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --cachyos|--cachy) TARGET_OS="cachyos"; shift ;;
-      --arch)            TARGET_OS="arch"; shift ;;
+      --cachyos|--cachy|--arch) shift ;; # Ignored for backward compatibility
       *)                 shift ;; # Safely ignore unknown flags
     esac
   done
@@ -243,23 +240,6 @@ run_pacman() {
   done
 }
 
-determine_os_state() {
-  if [[ -z "${TARGET_OS}" ]]; then
-    print_info "Analyzing system state for keyring requirements..."
-    
-    if grep -qi "ID=cachyos" /etc/os-release 2>/dev/null; then
-       print_info "Pure CachyOS detected."
-       TARGET_OS="cachyos_pure"
-    elif pacman -Qq cachyos-mirrorlist &>/dev/null; then
-       print_ok "Franken-Arch detected (CachyOS packages found on Standard Arch)."
-       TARGET_OS="cachyos"
-    else
-       print_info "Standard Arch Linux detected."
-       TARGET_OS="arch"
-    fi
-  fi
-}
-
 ensure_keyring() {
   local keyring_dir='/etc/pacman.d/gnupg'
 
@@ -272,25 +252,15 @@ ensure_keyring() {
 
   print_warn "Pacman keyring is not initialized. Initializing now..."
   pacman-key --init
-
-  if [[ "${TARGET_OS}" == "cachyos" ]]; then
-      print_info "Populating Arch Linux and CachyOS keyrings..."
-      pacman-key --populate archlinux cachyos
-  else
-      print_info "Populating standard Arch Linux keyring..."
-      pacman-key --populate archlinux
-  fi
+  print_info "Populating standard Arch Linux keyring..."
+  pacman-key --populate archlinux
 
   print_ok "Keyring populated."
 }
 
 refresh_keyring_package() {
   print_info "Refreshing keyring packages..."
-  if [[ "${TARGET_OS}" == "cachyos" ]]; then
-      run_pacman --sync --refresh --needed --noconfirm -- archlinux-keyring cachyos-keyring
-  else
-      run_pacman --sync --refresh --needed --noconfirm -- archlinux-keyring
-  fi
+  run_pacman --sync --refresh --needed --noconfirm -- archlinux-keyring
   print_ok "Keyring packages are current."
 }
 
@@ -407,17 +377,8 @@ main() {
   validate_group_configuration
   acquire_script_lock
   
-  # Inject Auto-Detection Logic before touching pacman-keys
-  determine_os_state
-  
-  if [[ "${TARGET_OS}" != "cachyos_pure" ]]; then
-    ensure_keyring
-    refresh_keyring_package
-  else
-    print_info "Skipping manual keyring configuration (Managed by CachyOS)."
-  fi
-  
- # upgrade_system
+  ensure_keyring
+  refresh_keyring_package
 
   for i in "${!GROUP_LABELS[@]}"; do
     install_group "${GROUP_LABELS[i]}" "${GROUP_ARRAYS[i]}"

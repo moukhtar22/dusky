@@ -11,7 +11,7 @@ This workspace contains automated configuration scripts for setting up a GPU pas
 - **Guest VM Name**: `win_10_dusky` (DNS name: `win_10_dusky`)
 - **Guest IP Address**: `192.168.122.9`
 - **Guest OS**: Windows 10
-- **Guest SSH Credentials**: User `dusky`, Password `2345` (default shell configured to PowerShell)
+- **Guest SSH Credentials**: User `dusky`, Password `<configured during setup>` (default shell configured to PowerShell)
 - **Shared Directory (VirtIO-FS)**: Host `/mnt/zram1` is mounted as drive `Z:` inside the Windows VM.
 
 ---

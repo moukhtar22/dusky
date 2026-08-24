@@ -115,7 +115,8 @@ def optimize_cpu_performance():
     Temporarily set CPU scaling governors of online CPUs to performance and enable turbo.
     Restores original settings on exit.
     """
-    sudo_pwd = "2345"
+    import getpass
+    sudo_pwd = getpass.getpass("[CPU Opt] Enter sudo password: ")
     original_governors = {}
     original_no_turbo = None
     no_turbo_path = "/sys/devices/system/cpu/intel_pstate/no_turbo"

@@ -147,10 +147,10 @@ hl.bind(
 hl.on("hyprland.start", function()
 
 
-    hl.exec_cmd("uwsm-app -- sh -c '. $HOME/.config/dusky/settings/cliphist_db_env && exec wl-paste --type text --watch cliphist store'")
-    hl.exec_cmd("uwsm-app -- sh -c '. $HOME/.config/dusky/settings/cliphist_db_env && exec wl-paste --type image --watch cliphist store'")
+    hl.exec_cmd("dusky-run -- sh -c '. $HOME/.config/dusky/settings/cliphist_db_env && exec wl-paste --type text --watch cliphist store'")
+    hl.exec_cmd("dusky-run -- sh -c '. $HOME/.config/dusky/settings/cliphist_db_env && exec wl-paste --type image --watch cliphist store'")
 
-    hl.exec_cmd("uwsm-app -- wl-clip-persist --clipboard regular")
+    hl.exec_cmd("dusky-run -- wl-clip-persist --clipboard regular")
 
     -- --- OPTIONAL / USER INTERFACE ---
     hl.exec_cmd("systemctl --user import-environment $(env | cut -d'=' -f 1)")
@@ -166,7 +166,7 @@ hl.on("hyprland.start", function()
     -- hl.exec_cmd("~/user_scripts/rofi/dusky_glance.sh --uptime")
     -- hl.exec_cmd("~/user_scripts/rofi/dusky_glance.sh --workspace")
     -- hl.exec_cmd("~/user_scripts/rofi/dusky_glance.sh --clock")
-    hl.exec_cmd('foot --hold --title "Dusky Orchestra" bash -c "~/user_scripts/arch_setup_scripts/ORCHESTRA_iso.sh"')
+    hl.exec_cmd('foot --hold --title "Dusky Orchestra" bash -c "~/user_scripts/arch_setup_scripts/orchestrator.sh"')
 
 end)
 
@@ -316,3 +316,6 @@ require("source.window_rules")
 -- and rules are already available. Uses globals from default_apps.lua.
 require("source.keybinds")
 
+
+-- gpu 
+pcall(require, "gpu")

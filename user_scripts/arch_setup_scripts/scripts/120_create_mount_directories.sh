@@ -1,20 +1,6 @@
 #!/usr/bin/env bash
-# creates mount directories at /mnt/
-# -----------------------------------------------------------------------------
-# Script: 016_create_mount_directories.sh
-# Description: Pre-creates stable mount points in /mnt
-# Context: 
-#   By default, Linux automounts external drives to dynamic paths like 
-#   '/run/media/$USER/Label'. This changes every time you reconnect a drive.
-#
-#   This script creates PERMANENT directories in '/mnt/name'.
-#   This allows you to map your drives via UUID in '/etc/fstab' so they 
-#   always appear in the same place for scripts, torrents, and steam libraries.
-#
-# System: Arch Linux / Hyprland / UWSM
-# -----------------------------------------------------------------------------
+#d: Create stable mount points under /mnt
 
-# --- Configuration ---
 readonly BASE_DIR="/mnt"
 # These are Dusk's specific mount points
 readonly DUSK_PRESETS=(

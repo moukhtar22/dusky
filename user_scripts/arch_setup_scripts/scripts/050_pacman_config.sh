@@ -1,20 +1,6 @@
 #!/usr/bin/env bash
-# configures pacman.conf for better settings
-# -----------------------------------------------------------------------------
-# Description: True atomic overwrite and rollback of /etc/pacman.conf
-# Target:      /etc/pacman.conf
-# Ecosystem:   Arch Linux / Hyprland / UWSM
-#
-# Supported Flags:
-#   --auto, auto : Run in non-interactive mode. Bypasses user prompts.
-#                  Silently aborts if CachyOS is detected to protect the OS.
-#   --revert     : Bypasses generation. Atomically restores the pacman
-#                  configuration from /etc/pacman.conf.bak.
-#   --cachyos    : Force CachyOS target (Overrides auto-detection).
-#   --arch       : Force Standard Arch target (Overrides auto-detection).
-# -----------------------------------------------------------------------------
+#d: Tune pacman.conf for better package management
 
-# --- Strict Error Handling ---
 set -euo pipefail
 
 # --- Presentation Constants (Bash 5+ ANSI Quoting) ---
@@ -57,7 +43,6 @@ fi
 # --- 2. Argument Parsing ---
 AUTO_MODE=0
 REVERT_MODE=0
-TARGET_OS=""
 
 for arg in "$@"; do
     case "${arg}" in
@@ -67,11 +52,8 @@ for arg in "$@"; do
         --revert)
             REVERT_MODE=1
             ;;
-        --cachyos|--cachy)
-            TARGET_OS="cachyos"
-            ;;
-        --arch)
-            TARGET_OS="arch"
+        --cachyos|--cachy|--arch)
+            # Ignored for backward compatibility
             ;;
     esac
 done
@@ -104,24 +86,7 @@ if (( REVERT_MODE == 1 )); then
     fi
 fi
 
-# --- 4. Organic State Intelligence ---
-if [[ -z "${TARGET_OS}" ]]; then
-    log_info "Analyzing system state to determine optimal configuration..."
-
-    if grep -qi "ID=cachyos" /etc/os-release 2>/dev/null; then
-        log_info "Pure CachyOS detected. CachyOS manages its own pacman configuration."
-        log_info "Aborting pacman configuration update to preserve system integrity."
-        exit 0
-    elif pacman -Qq cachyos-mirrorlist &>/dev/null; then
-        log_ok "Franken-Arch detected (CachyOS packages found on Standard Arch)."
-        TARGET_OS="cachyos"
-    else
-        log_info "Standard Arch Linux detected."
-        TARGET_OS="arch"
-    fi
-fi
-
-# --- 5. Atomic Backup Current Configuration ---
+# --- 4. Atomic Backup Current Configuration ---
 if [[ -f "${TARGET_FILE}" ]]; then
     log_info "Creating atomic backup of current configuration..."
     TMP_BACKUP="$(mktemp "${TARGET_DIR}/.pacman.conf.bak.XXXXXX")"
@@ -138,11 +103,11 @@ if [[ -f "${TARGET_FILE}" ]]; then
     fi
 fi
 
-# --- 6. Main Logic & True Atomic Write ---
+# --- 5. Main Logic & True Atomic Write ---
 # Create temp file on the SAME filesystem to guarantee rename(2) atomicity
 TMP_FILE="$(mktemp "${TARGET_DIR}/.pacman.conf.XXXXXX")"
 
-log_info "Generating new configuration for ${TARGET_OS^^}..."
+log_info "Generating new configuration for Standard Arch Linux..."
 
 {
     cat << 'EOF'
@@ -178,6 +143,8 @@ LocalFileSigLevel = Optional
 # keyring can then be populated with the keys of all official Arch Linux
 # packagers with `pacman-key --populate archlinux`.
 
+Architecture = auto
+
 #
 # REPOSITORIES
 #   - can be defined here or included from another file
@@ -196,57 +163,6 @@ LocalFileSigLevel = Optional
 # The header [repo-name] is crucial - it must be present and
 # uncommented to enable the repo.
 #
-
-EOF
-
-    # --- DYNAMIC CACHYOS INJECTION ---
-    if [[ "${TARGET_OS}" == "cachyos" ]]; then
-        cat << 'CACHYOS_BLOCK_EOF'
-# Architecture must be set to "auto" for CachyOS repos on Franken-Arch.
-# The mirrorlist files (installed by cachyos-v3-mirrorlist package) contain
-# hardcoded x86_64_v3 paths — they do NOT rely on pacman's $arch variable.
-# Using "x86_64_v3 x86_64" here causes pacman to request the wrong arch
-# strings and triggers 404 errors.
-Architecture = auto
-
-# CachyOS Optimised Repositories for x86-64-v3
-# Source: https://wiki.cachyos.org/features/optimized_repos/
-# Installation methodology: https://github.com/CachyOS/cachyos-repo-add-script
-#
-# IMPORTANT REPO ORDER: Architecture-specific repos MUST come before [cachyos].
-# Pacman resolves packages in repo order — v3-optimised packages must win.
-
-[cachyos-v3]
-# SigLevel inherits global "Required DatabaseOptional" — do NOT set Optional TrustAll.
-Include = /etc/pacman.d/cachyos-v3-mirrorlist
-
-[cachyos-core-v3]
-Include = /etc/pacman.d/cachyos-v3-mirrorlist
-
-[cachyos-extra-v3]
-Include = /etc/pacman.d/cachyos-v3-mirrorlist
-
-# WARNING: The [cachyos] repo contains CachyOS's forked pacman (with INSTALLED_FROM
-# tracking and auto-arch detection). Pacman 6.1 added feature validation that can
-# produce warnings when the standard Arch pacman reads packages built with the
-# CachyOS fork. CachyOS themselves state: "If you want to avoid this, don't add the
-# [cachyos] repository." On a Franken-Arch install this repo is included because
-# the system already has cachyos-mirrorlist installed (that's how it was detected),
-# but be aware of this trade-off. See: https://wiki.cachyos.org/features/optimized_repos/
-[cachyos]
-Include = /etc/pacman.d/cachyos-mirrorlist
-
-CACHYOS_BLOCK_EOF
-    else
-        echo "Architecture = auto"
-        echo ""
-    fi
-    # ---------------------------------
-
-    cat << 'ARCH_BLOCK_EOF'
-# The testing repositories are disabled by default. To enable, uncomment the
-# repo name header and Include lines. You can add preferred servers immediately
-# after the header, and they will be used before the default mirrors.
 
 #[core-testing]
 #Include = /etc/pacman.d/mirrorlist
@@ -274,7 +190,7 @@ Include = /etc/pacman.d/mirrorlist
 #[custom]
 #SigLevel = Optional TrustAll
 #Server = file:///home/custompkgs
-ARCH_BLOCK_EOF
+EOF
 
 } > "${TMP_FILE}"
 

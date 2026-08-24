@@ -1,24 +1,26 @@
-# Performance Tuning: Removing the USB Tablet Device
+---
+title: "Remove the USB Tablet Device (Windows Delta)"
+tags:
+  - kvm
+  - windows
+  - performance
+  - input
+aliases:
+  - Windows Tablet Stub
+---
 
-In a Windows virtual machine, the default **USB Tablet** input device is often added to allow the mouse cursor to move seamlessly between the host and the guest without "clicking" into the window.
+# Remove the USB Tablet Device (Windows)
 
-However, this device can cause significant performance overhead because it constantly polls the CPU to check the cursor position, even when the system is idle.
+> [!tip] Merged — canonical source
+> **Shared trade + steps + XML + release keys + `rawMouse=yes` lives in [[KVM Setup/VM Creation/06 Guest Integration — Agent, Clipboard & Input#Part C — Input: Tablet vs Mouse (both OSes)]].** This stub retains Windows filename for `[[wikilink]]` stability and Windows note below.
 
-> [!abstract] Performance Impact
-> 
-> Removing the USB Tablet device reduces idle CPU usage and unnecessary context switches. This results in a smoother, more responsive Windows experience.
+## Windows note
 
-### Instructions
+Same trade as Linux: default **USB Tablet** (absolute pointer, seamless capture) polls → extra idle CPU. Remove for **minimum latency/idle** (gaming/passthrough with Looking Glass `rawMouse=yes`); keep for casual desktop.
 
-Follow these steps to remove the device:
+- Shut off VM → **VM Details → Tablet (Input/USB) → Remove → Apply**; XML `<!-- delete: <input type='tablet' bus='usb'/> -->`; keep `<input type='mouse' bus='virtio'/>` + keyboard.
+- After removal: mouse **captured** (`virt-viewer` `Ctrl_L + Alt_L` to release; Looking Glass `F6` / `escapeKey=64` + `rawMouse=yes`).
 
-1. In the left sidebar, locate and click on **Tablet** (usually listed under Input).
-    
-2. Click the **Remove** button at the bottom right of the window.
-    
+> [!warning] Don't remove both pointer devices — keep at least one `mouse`/`keyboard`.
 
-> [!warning] Important: Mouse Behavior Change
-> 
-> Once the Tablet device is removed, your mouse might be "captured" inside the VM window when you click on it.
-> 
-> To release your mouse cursor back to your host Linux system, press the release key combination (usually `Left Ctrl` + `Left Alt` by default).
+See: canonical [[KVM Setup/VM Creation/06 Guest Integration — Agent, Clipboard & Input]], [[Looking Glass]].

@@ -22,6 +22,20 @@ else:
     if str(_fallback) not in sys.path:
         sys.path.insert(0, str(_fallback))
 
+import sys
+from pathlib import Path
+
+_dusky_root = Path.home() / "user_scripts" / "dusky_tui"
+if str(_dusky_root) not in sys.path:
+    sys.path.insert(0, str(_dusky_root))
+
+import sys
+from pathlib import Path
+
+_DUSKY_TUI_ROOT = Path.home() / "user_scripts" / "dusky_tui"
+if str(_DUSKY_TUI_ROOT) not in sys.path:
+    sys.path.insert(0, str(_DUSKY_TUI_ROOT))
+
 from python.frontend.core_types import ConfigItem
 
 # =============================================================================
@@ -144,7 +158,10 @@ if __name__ == "__main__":
     
     # Behavior 1: If executed with no arguments, act like the bash script and launch the TUI
     if not any(vars(args).values()):
-        main_script = Path("~/user_scripts/dusky_tui/main/main.py").expanduser().resolve()
+        main_script = Path("~/user_scripts/dusky_tui/python/main/main.py").expanduser().resolve()
+        if not main_script.exists():
+            main_script = Path("~/user_scripts/dusky_tui/main/main.py").expanduser().resolve()
+
         if main_script.exists():
             os.execvp(sys.executable, [sys.executable, str(main_script), __file__])
         else:

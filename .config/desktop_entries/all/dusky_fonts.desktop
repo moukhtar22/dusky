@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Dusky Fonts
+GenericName=Font Configurator
+Comment=System fonts, typefaces, subpixel rendering and cache manager
+Exec=foot --app-id=dusky_tui python3 /home/dusk/user_scripts/fonts/tui_fonts.py
+Terminal=false
+Categories=Settings;DesktopSettings;System;Utility;
+Keywords=dusky;font;fonts;fontconfig;freetype;typefaces;rendering;antialias;hinting;tui;config;settings;
+Icon=preferences-desktop-font
+StartupNotify=true
+StartupWMClass=dusky_tui

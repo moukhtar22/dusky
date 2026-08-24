@@ -1,9 +1,5 @@
 #!/usr/bin/env bash
-# setup sudoers scripts and binaries for password less execution
-# ==============================================================================
-#  SUDOERS NOPASSWD AUTOMATOR
-#  Target: Arch Linux / Bash 5.3.9+
-# ==============================================================================
+#d: Allow passwordless sudo for select commands
 
 set -o errexit
 set -o nounset
@@ -12,15 +8,26 @@ shopt -s nullglob inherit_errexit
 
 # ==============================================================================
 #  USER CONFIGURATION
-#  Add absolute paths to binaries you want to process automatically.
 # ==============================================================================
+
+# 1. Custom Drop-in Configurations (System-wide Defaults & Policies)
+#    Define modular drop-in configurations deployed to /etc/sudoers.d/.
+#    Format: [DROPIN_NAME]="Content to be written"
+#    Note: Drop-in filenames MUST NOT contain dots (.) or tildes (~).
+declare -Ar DEFAULT_CUSTOM_DROPINS=(
+    ["00-wayland-env"]=$'# Preserves Wayland session socket paths and theming environment for GUI applications under sudo\nDefaults env_keep += "WAYLAND_DISPLAY XDG_RUNTIME_DIR XDG_CURRENT_DESKTOP XDG_DATA_DIRS GTK_THEME QT_QPA_PLATFORMTHEME QT_QUICK_CONTROLS_STYLE"'
+)
+
+# 2. Passwordless Binaries (NOPASSWD)
+#    Add absolute paths to binaries you want to process automatically.
 declare -ar DEFAULT_BINARIES=(
 
 #    "/usr/bin/powertop"
-#    "/usr/bin/papirus-folders"
+    "/usr/bin/papirus-folders"
     "/usr/bin/rfkill"
     "/usr/bin/smartctl"
     "/usr/bin/tlp"
+    "/usr/bin/choom"              # OOM score adjustment for dusky-run + compositor protection (211_systemd_oomd_zram.py)
 #    "~/user_scripts/btrfs_snapshots/cc/04_dusky_snapshot_manager.py"
 #    "~/user_scripts/btrfs_snapshots/cc/bash_wrapper_for_cc.sh"
 )
@@ -589,6 +596,96 @@ process_binary() {
     log_success "Successfully deployed NOPASSWD for ${target_bin##*/}."
 }
 
+validate_dropin_name() {
+    local dropin_name="$1"
+    [[ -n "${dropin_name}" ]] || return 1
+    [[ "${dropin_name}" =~ ^[a-zA-Z0-9_-]+$ ]] || return 1
+    [[ "${dropin_name}" != *.* && "${dropin_name}" != *~* ]] || return 1
+}
+
+process_custom_dropin() {
+    local dropin_name="$1"
+    local dropin_content="$2"
+
+    printf '%s\n' '--------------------------------------------------------------------------------'
+    log_info "Processing custom drop-in: ${dropin_name}"
+
+    if ! validate_dropin_name "${dropin_name}"; then
+        log_error "INVALID DROP-IN NAME: '${dropin_name}' contains invalid characters (dots/tildes/spaces not allowed)."
+        return 1
+    fi
+
+    if [[ -z "${dropin_content//[$' \t\n\r']/}" ]]; then
+        log_error "EMPTY CONTENT: Drop-in '${dropin_name}' has no content."
+        return 1
+    fi
+
+    local target_file="${SUDOERS_DIR}/${dropin_name}"
+    local desired_content
+    printf -v desired_content '%s\n# Drop-in: %s\n%s\n' \
+        "${MANAGED_MARKER}" \
+        "${dropin_name}" \
+        "${dropin_content}"
+
+    local tmp_file
+    tmp_file="$(mktemp --tmpdir="${SUDOERS_DIR}" ".${SCRIPT_NAME}.XXXXXX")" || {
+        log_error "FAILED: Could not create a staging file in ${SUDOERS_DIR}."
+        return 1
+    }
+    TEMP_FILES+=("${tmp_file}")
+
+    printf '%s' "${desired_content}" > "${tmp_file}" || {
+        log_error "FAILED: Could not write the staging sudoers file."
+        return 1
+    }
+
+    log_info "Verifying syntax via visudo..."
+    visudo -cf "${tmp_file}" >/dev/null 2>&1 || {
+        log_error "SYNTAX CHECK FAILED: visudo rejected drop-in '${dropin_name}'. Skipping."
+        return 1
+    }
+
+    if [[ -e "${target_file}" ]]; then
+        local cmp_status=0
+        if cmp -s -- "${tmp_file}" "${target_file}"; then
+            log_success "Rule already up to date for ${dropin_name}."
+            return 0
+        else
+            cmp_status=$?
+            if (( cmp_status > 1 )); then
+                log_error "FAILED: Could not compare staged content with ${target_file}."
+                return 1
+            fi
+        fi
+
+        if ! file_is_managed "${target_file}"; then
+            log_error "REFUSING TO OVERWRITE: ${dropin_name} exists in ${SUDOERS_DIR} but is not managed by this script."
+            return 1
+        fi
+
+        log_info "Updating managed drop-in: ${dropin_name}"
+    else
+        log_info "Deploying new managed drop-in: ${dropin_name}"
+    fi
+
+    chown root:root "${tmp_file}" || {
+        log_error "FAILED: Could not set owner on staging file."
+        return 1
+    }
+
+    chmod 0440 "${tmp_file}" || {
+        log_error "FAILED: Could not set permissions on staging file."
+        return 1
+    }
+
+    mv -fT -- "${tmp_file}" "${target_file}" || {
+        log_error "FAILED: Could not atomically deploy ${dropin_name}."
+        return 1
+    }
+
+    log_success "Successfully deployed custom drop-in ${dropin_name}."
+}
+
 main() {
     parse_cli "$@"
     auto_elevate "$@"
@@ -608,12 +705,27 @@ main() {
     local user_home
     user_home="$(getent passwd "${target_user}" | cut -d: -f6)"
 
+    local -i custom_dropin_failure_count=0
+    local dropin_name
+
+    # 1. Process Custom Drop-ins (System-wide Defaults & Policies)
+    if (( ${#DEFAULT_CUSTOM_DROPINS[@]} > 0 )); then
+        for dropin_name in "${!DEFAULT_CUSTOM_DROPINS[@]}"; do
+            if process_custom_dropin "${dropin_name}" "${DEFAULT_CUSTOM_DROPINS[${dropin_name}]}"; then
+                :
+            else
+                (( custom_dropin_failure_count++ )) || true
+            fi
+        done
+    fi
+
+    # 2. Process Passwordless Binaries (NOPASSWD Rules)
     local -a execution_queue=("${DEFAULT_BINARIES[@]}")
     if (( ${#CLI_BINARIES[@]} > 0 )); then
         execution_queue+=("${CLI_BINARIES[@]}")
     fi
 
-    if (( ${#execution_queue[@]} == 0 )); then
+    if (( ${#execution_queue[@]} == 0 && ${#DEFAULT_CUSTOM_DROPINS[@]} == 0 )); then
         usage
         exit 1
     fi
@@ -656,17 +768,19 @@ main() {
         fi
     done
 
+    local -i total_failures=$(( failure_count + custom_dropin_failure_count ))
+
     printf '%s\n' '--------------------------------------------------------------------------------'
-    if (( failure_count == 0 )); then
+    if (( total_failures == 0 )); then
         if (( skipped_count == 0 )); then
-            log_success "All binaries processed successfully."
+            log_success "All custom drop-ins and binaries processed successfully."
         else
             log_warn "Completed successfully. ${skipped_count} missing binaries were skipped."
         fi
         exit 0
     fi
 
-    log_warn "Processing completed with ${failure_count} error(s) and ${skipped_count} skipped binary/binaries."
+    log_warn "Processing completed with ${total_failures} error(s) and ${skipped_count} skipped binary/binaries."
     exit 1
 }
 

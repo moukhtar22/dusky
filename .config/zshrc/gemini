@@ -1,0 +1,56 @@
+# =============================================================================
+# Antigravity Profile Manager Integration (gemini CLI)
+# =============================================================================
+
+# Main wrapper function
+gemini() {
+  local script_path="$HOME/user_scripts/apps/antigravity/switch_accounts.py"
+  
+  if [[ ! -f "$script_path" ]]; then
+    echo "Error: switch_accounts.py not found at $script_path" >&2
+    return 1
+  fi
+  
+  case "$1" in
+    list|--list|-l)
+      python3 "$script_path" --list
+      ;;
+    next|--next|-n)
+      shift
+      python3 "$script_path" --next "$@"
+      ;;
+    *)
+      python3 "$script_path" "$@"
+      ;;
+  esac
+}
+
+# Dynamic tab-completion for subcommands and profile names
+_gemini_completions() {
+  local -a subcommands
+  subcommands=(
+    'list:List available isolation profiles'
+    'next:Cycle to the next sequential profile'
+  )
+  
+  local -a profiles
+  local script_path="$HOME/user_scripts/apps/antigravity/switch_accounts.py"
+  
+  if [[ -f "$script_path" ]]; then
+    profiles=($(python3 "$script_path" --list 2>/dev/null | grep -E '^│' | awk -F'│' '{print $4}' | sed 's/ //g'))
+  fi
+
+  if (( CURRENT == 2 )); then
+    _describe -t commands "gemini subcommands" subcommands
+    _describe -t profiles "gemini profiles" profiles
+  else
+    local -a flags
+    flags=('-f' '--force' '-h' '--help')
+    _describe -t flags "gemini flags" flags
+  fi
+}
+
+# Register completion if completion system is active
+if (( $+functions[compdef] )); then
+  compdef _gemini_completions gemini
+fi

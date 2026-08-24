@@ -1,8 +1,5 @@
 #!/usr/bin/env bash
-# =============================================================================
-# Target: Arch Linux (Bleeding Edge), Hyprland, Bash 5.4+
-# Description: Synchronous Matugen -> Race-Condition-Free awww -> Hyprctl reload
-# =============================================================================
+#d: Generate color files for the current wallpaper
 
 set -eEuo pipefail
 

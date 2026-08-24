@@ -1,208 +1,143 @@
-# GPU Passthrough Boot Recovery Walkthrough
+---
+title: "Boot Recovery — Black Screen After VFIO"
+tags:
+  - kvm
+  - vfio
+  - recovery
+  - arch
+  - systemd-boot
+---
 
-If you configured GPU passthrough and can no longer boot (black screen, no display), this guide will help you recover.
+# Boot Recovery — Black Screen After VFIO
 
-## The Problem
+> [!abstract] Symptom
+> You isolated your **only** GPU → `vfio-pci` claims it early (`initramfs`), `nvidia`/`amdgpu` never load → DM has no renderer → black.
 
-GPU passthrough isolates a GPU from the host so a VM can use it. If you isolate your ONLY GPU, Linux boots but has no display output because:
+## Prereqs
 
-1. `vfio-pci` driver binds to your GPU early in boot (via initramfs)
-2. The nvidia/amdgpu driver never gets to load
-3. Your display manager starts but has no GPU to render to
+- Live USB (Arch)
+- Know root dev (`/dev/nvme0n1p2`, `/dev/sda2`, …) + ESP (`/dev/nvme0n1p1`)
 
-## Prerequisites
+## 1. Boot Live USB
 
-- Live USB of your distro (or any Arch-based live USB for Arch systems)
-- Know your root partition device (e.g., `/dev/nvme0n1p2`, `/dev/sda2`)
+Live → Terminal
 
-## Step 1: Boot Live USB
+## 2. Mount root
 
-Boot from your live USB and open a terminal.
+### ext4/xfs (non-btrfs)
 
-## Step 2: Mount Your Root Filesystem
-
-### Standard ext4/xfs:
 ```bash
-sudo mount /dev/nvme0n1p2 /mnt # Make sure you change nvme0n1p2 to your hdd or boot drive
+sudo mount /dev/nvme0n1p2 /mnt    # adjust
 ```
 
-### Btrfs with subvolumes:
-```bash
-# First, mount the btrfs root to see subvolumes
-sudo mount /dev/nvme0n1p2 /mnt
-ls /mnt  # Look for @ or similar subvolume names
+### Btrfs (`@` subvol)
 
-# If using @ as root subvolume:
+```bash
+sudo mount /dev/nvme0n1p2 /mnt
+ls /mnt   # look for @, @home, @log, @cache
 sudo umount /mnt
 sudo mount -o subvol=@ /dev/nvme0n1p2 /mnt
 ```
 
-## Step 3: Identify the Problem
-
-Check for vfio configuration:
+## 3. Identify VFIO state
 
 ```bash
-# Check modprobe config
-cat /mnt/etc/modprobe.d/vfio.conf
-# Example output: options vfio-pci ids=10de:2684,10de:22ba
-
-# Check mkinitcpio modules
-grep '^MODULES=' /mnt/etc/mkinitcpio.conf
-# Problematic: MODULES=(vfio_pci vfio_iommu_type1 vfio)
-
-# Check kernel parameters
-grep 'GRUB_CMDLINE_LINUX' /mnt/etc/default/grub
-# Look for: intel_iommu=on iommu=pt vfio-pci.ids=...
+cat /mnt/etc/modprobe.d/arsonix-vfio.conf        # options vfio-pci ids=…
+grep -E '^MODULES=' /mnt/etc/mkinitcpio.conf /mnt/etc/mkinitcpio.conf.d/*.conf 2>/dev/null
+cat /mnt/proc/cmdline 2>/dev/null || cat /mnt/etc/kernel/cmdline 2>/dev/null   # Type2 UKI source
+# GRUB hosts: grep -R vfio /mnt/etc/default/grub /mnt/boot/loader/entries/ 2>/dev/null
+ls /mnt/boot/loader/entries/*.conf
 ```
 
-## Step 4: Remove GPU Isolation
+## 4. Remove isolation
 
-### Option A: Remove all passthrough config (recommended if you have one GPU)
+### A — Full revert (single-GPU host — recommended)
 
 ```bash
-# Remove vfio modprobe config
-sudo rm /mnt/etc/modprobe.d/vfio.conf
-
-# Clear MODULES in mkinitcpio.conf
-sudo sed -i 's/^MODULES=(.*/MODULES=()/' /mnt/etc/mkinitcpio.conf
-
-# Verify
-grep '^MODULES=' /mnt/etc/mkinitcpio.conf
-# Should show: MODULES=()
+sudo rm /mnt/etc/modprobe.d/arsonix-vfio.conf /mnt/etc/modprobe.d/vfio.conf 2>/dev/null || true
+# keep FS modules (btrfs), drop vfio from MODULES
+sudo sed -i -E 's/^(MODULES=\([^)]*) *vfio_pci[^)]*/\1/' /mnt/etc/mkinitcpio.conf
+sudo sed -i -E 's/^(MODULES=\([^)]*) *vfio[^)]*/\1/'     /mnt/etc/mkinitcpio.conf
+sudo sed -i -E 's/^(MODULES=\([^)]*) *vfio_iommu_type1[^)]*/\1/' /mnt/etc/mkinitcpio.conf
+# scrub kernel cmdline of managed keys
+for f in /mnt/boot/loader/entries/*.conf /mnt/etc/kernel/cmdline /mnt/etc/cmdline.d/*.conf; do
+  [ -f "$f" ] || continue
+  sudo sed -i -E 's/ *intel_iommu=on//g; s/ *amd_iommu=[^ ]*//g; s/ *iommu=[^ ]*//g; s/ *vfio-pci\.ids=[^ ]*//g; s/ *module_blacklist=[^ ]*//g' "$f"
+done
 ```
 
-### Option B: Keep passthrough but fix device IDs (if you have 2 GPUs)
-
-Edit `/mnt/etc/modprobe.d/vfio.conf` and remove your primary GPU's IDs, keeping only the GPU you want to pass through.
+### B — Keep passthrough of one card (dual-GPU host)
 
 ```bash
-# Find your GPU IDs
 lspci -nn | grep -i vga
-
-# Edit to only include the passthrough GPU
-sudo nano /mnt/etc/modprobe.d/vfio.conf
+sudo nvim /mnt/etc/modprobe.d/arsonix-vfio.conf   # keep only passthrough IDs, delete primary GPU's pair
 ```
 
-## Step 5: Mount for Chroot
+## 5. Chroot + rebuild
 
-### Standard filesystem:
+### ESP + binds
+
 ```bash
-sudo mount /dev/nvme0n1p1 /mnt/boot/efi  # or /mnt/boot
+sudo mount /dev/nvme0n1p1 /mnt/boot/efi  2>/dev/null || sudo mount /dev/nvme0n1p1 /mnt/boot 2>/dev/null || true
+# btrfs extra mounts (adjust names)
+sudo mount -o subvol=@home  /dev/nvme0n1p2 /mnt/home  2>/dev/null || true
+sudo mount -o subvol=@cache /dev/nvme0n1p2 /mnt/var/cache 2>/dev/null || true
+sudo mount -o subvol=@log   /dev/nvme0n1p2 /mnt/var/log   2>/dev/null || true
 sudo mount --bind /dev /mnt/dev
 sudo mount --bind /proc /mnt/proc
 sudo mount --bind /sys /mnt/sys
 sudo mount --bind /run /mnt/run
 ```
 
-### Btrfs with subvolumes:
-```bash
-# Mount all subvolumes (adjust names as needed)
-sudo mount -o subvol=@home /dev/nvme0n1p2 /mnt/home
-sudo mount -o subvol=@cache /dev/nvme0n1p2 /mnt/var/cache
-sudo mount -o subvol=@log /dev/nvme0n1p2 /mnt/var/log
-sudo mount /dev/nvme0n1p1 /mnt/boot/efi
-```
+### Rebuild
 
-## Step 6: Regenerate Initramfs
-
-### Arch/CachyOS/Manjaro (using arch-chroot):
 ```bash
+# Arch (preferred):
 sudo arch-chroot /mnt mkinitcpio -P
+# manual:
+sudo chroot /mnt bash -c "mkinitcpio -P"
+# Fedora/RHEL dracut: chroot /mnt dracut --force
+# Ubuntu: chroot /mnt update-initramfs -u -k all
 ```
 
-### Manual chroot:
+### Bootloader
+
 ```bash
-sudo chroot /mnt /bin/bash
-mkinitcpio -P
-exit
+# GRUB (only if this host uses GRUB):
+sudo arch-chroot /mnt grub-mkconfig -o /boot/grub/grub.cfg    # Arch
+# sudo chroot /mnt grub2-mkconfig -o /boot/grub2/grub.cfg     # Fedora
+# systemd-boot (Type1/Type2): no extra mkconfig — kernel cmdline + mkinitcpio/kernel-install already rebuilt UKI/entry
+sudo arch-chroot /mnt bootctl is-installed && sudo arch-chroot /mnt bootctl update 2>/dev/null || true
 ```
 
-### Fedora/RHEL:
-```bash
-sudo chroot /mnt /bin/bash
-dracut --force
-exit
-```
-
-### Ubuntu/Debian:
-```bash
-sudo chroot /mnt /bin/bash
-update-initramfs -u -k all
-exit
-```
-
-## Step 7: Regenerate Bootloader Config
-
-### GRUB (Arch):
-```bash
-sudo arch-chroot /mnt grub-mkconfig -o /boot/grub/grub.cfg
-```
-
-### GRUB (Ubuntu/Fedora):
-```bash
-sudo chroot /mnt grub2-mkconfig -o /boot/grub2/grub.cfg
-```
-
-### systemd-boot:
-No regeneration needed unless you modified kernel parameters in the entry files.
-
-## Step 8: Cleanup and Reboot
+## 6. Reboot
 
 ```bash
 sudo umount -R /mnt
 reboot
 ```
 
-## Troubleshooting
+## Troubleshoot
 
-### "failed to detect root filesystem" during mkinitcpio
-This usually means /dev isn't mounted properly. Use `arch-chroot` which handles this automatically, or ensure devtmpfs is mounted:
-```bash
-sudo mount -t devtmpfs devtmpfs /mnt/dev
-```
+| Error | Fix |
+|---|---|
+| `failed to detect root filesystem` during `mkinitcpio` | `/dev` not bound → use `arch-chroot` (handles devtmpfs) or `mount -t devtmpfs devtmpfs /mnt/dev` |
+| `nvidia module not found` warnings | kernel/headers mismatch or `nvidia-dkms` not built for that kernel → boot known-good kernel |
+| Still black | `cat /mnt/etc/modprobe.d/*nouveau*` → nouveau blacklisted → remove; `pacman -Q nvidia` in chroot; temporarily add `nomodeset` to loader entry |
 
-### nvidia module not found errors
-If you see warnings about nvidia modules not found for some kernels, that kernel may not have nvidia-dkms modules built. Boot a kernel that shows successful build.
+## Prevention
 
-### Still no display after fix
-1. Check if nouveau is blacklisted: `cat /mnt/etc/modprobe.d/*nouveau*`
-2. Ensure nvidia driver is installed: `arch-chroot /mnt pacman -Q nvidia`
-3. Try booting with `nomodeset` kernel parameter temporarily
+1. **Looking Glass** — view VM via shm instead of pass-through display
+2. **SSH** — headless host access
+3. **Cheap second GPU** (GT 710) for host
+4. **iGPU** for host (Hybrid, not Discrete MUX)
 
-## Prevention: Proper GPU Passthrough Setup
-
-To do GPU passthrough correctly with a single GPU:
-
-1. **Use Looking Glass** - Lets you see VM display through host
-2. **Use SSH/VNC** - Access host headlessly
-3. **Get a second GPU** - Even a cheap GT 710 works for host display
-4. **Use integrated graphics** - If your CPU has an iGPU, use that for host
-
-## Files Reference
-
-| File | Purpose |
-|------|---------|
-| `/etc/modprobe.d/vfio.conf` | Binds specific PCI devices to vfio-pci |
-| `/etc/mkinitcpio.conf` | Controls which modules load in initramfs |
-| `/etc/default/grub` | Kernel boot parameters |
-| `/etc/dracut.conf.d/*.conf` | Dracut initramfs config (Fedora) |
-
-## Quick Recovery Cheatsheet
+### Minimal cheatsheet (Arch + btrfs `@`)
 
 ```bash
-# Mount
 sudo mount -o subvol=@ /dev/nvme0n1p2 /mnt
-
-# Fix
-sudo rm /mnt/etc/modprobe.d/vfio.conf
-sudo sed -i 's/^MODULES=(.*/MODULES=()/' /mnt/etc/mkinitcpio.conf
-
-# Mount rest and rebuild
+sudo rm /mnt/etc/modprobe.d/arsonix-vfio.conf 2>/dev/null; sudo sed -i -E 's/^(MODULES=\([^)]*) *vfio[^)]*/\1/' /mnt/etc/mkinitcpio.conf
 sudo mount /dev/nvme0n1p1 /mnt/boot/efi
 sudo arch-chroot /mnt mkinitcpio -P
-sudo arch-chroot /mnt grub-mkconfig -o /boot/grub/grub.cfg
-
-# Reboot
-sudo umount -R /mnt
-reboot
+sudo umount -R /mnt; reboot
 ```

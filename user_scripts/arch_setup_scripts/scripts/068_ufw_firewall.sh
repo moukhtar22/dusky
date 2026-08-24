@@ -1,14 +1,6 @@
 #!/usr/bin/env bash
-# configures ufw firewall rules
-# ==============================================================================
-# Script:  060_ufw_setup.sh
-# Purpose: Installs and configures UFW for an Arch Linux workstation.
-#          Optimized for Waydroid, Libvirt, Docker, Tailscale, VPNs, and SSH.
-# Target:  Arch Linux (latest), Wayland/Hyprland
-# Status:  PRODUCTION READY (Auto-Elevating, Strict-Mode Safe, Netfilter-Hardened)
-# ==============================================================================
+#d: Install and configure the UFW firewall
 
-# --- 1. Safety & Path Resolution ---
 set -euo pipefail
 shopt -s inherit_errexit 2>/dev/null || true
 

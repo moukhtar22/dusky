@@ -1,11 +1,5 @@
 #!/usr/bin/env bash
-# =============================================================================
-# Elite Arch Linux ZRAM Configurator
-# Target: Arch Linux Cutting-Edge (Kernel 7.1+, Bash 5.3+, systemd 260+)
-# Scope: Platinum Grade. Maximum Memory Efficiency via pure ZRAM Swap.
-# Updates: Decoupled. Strictly handles ZSWAP annihilation and zram0 swap block.
-#          Integrated 75% Resident Limit and Multi-Algorithm Zstd Recompression.
-# =============================================================================
+#d: Configure ZRAM swap for maximum memory efficiency
 
 set -euo pipefail
 

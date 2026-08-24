@@ -70,7 +70,7 @@
 #     "U | 015_set_thunar_terminal.sh"
 #
 #  2. Sudo script (will halt the whole updater if it fails):
-#     "S | 060_package_installation.sh"
+#     "S | 060_package_installation.py"
 #
 #  3. Sudo script passing arguments (--auto and --force):
 #     "S | 050_pacman_config.sh --auto --force"
@@ -79,7 +79,7 @@
 #     "U | ignore-fail | 150_wallpapers_download.sh --quiet"
 #
 #  5. Sudo script allowed to fail:
-#     "S | ignore-fail | 085_warp.sh --connect"
+#     "S | ignore-fail | 085_warp.py --connect"
 #
 #  6. Legacy format (still supported by the parser):
 #     "U | true 150_wallpapers_download.sh"
@@ -143,7 +143,7 @@ declare -r UPSTREAM_TRACKING_REF="refs/dusky-updater/upstream/${BRANCH}"
 # Example:
 #   "${WORK_TREE}/user_scripts/networking"
 #   Then in UPDATE_SEQUENCE add:
-#     "S | warp_toggle.sh"
+#     "S | warp_toggle.py"
 
 declare -a SCRIPT_SEARCH_DIRS=(
     "${WORK_TREE}/user_scripts/arch_setup_scripts/scripts"
@@ -162,6 +162,7 @@ declare -a SCRIPT_SEARCH_DIRS=(
     "${WORK_TREE}/user_scripts/firefox"
     "${WORK_TREE}/user_scripts/theme_matugen"
     "${WORK_TREE}/user_scripts/waybar"
+    "${WORK_TREE}/user_scripts/starship"
     "${WORK_TREE}/user_scripts/tts_stt/dusky_kokoro"
     "${WORK_TREE}/user_scripts/tts_stt/dusky_parakeet"
 )
@@ -190,7 +191,7 @@ declare -ra UPDATE_SEQUENCE=(
 
 #================= CUSTOM=====================
     "U | backup_hyprlang_files.sh"
-    "U | dusky_commands_before.sh"
+    "U | 480_dusky_commands.py -b"
 #================= Scripts =====================
 
 #    "U | 002_pre_generated_colors.sh"
@@ -198,6 +199,8 @@ declare -ra UPDATE_SEQUENCE=(
     "U | 005_hypr_custom_config_setup.py"
     "U | 006_animation_default.sh"
 #    "U | 005_hypr_custom_config_setup.py --force --workspace_rules"
+    "U | 005_hypr_custom_config_setup.py --force --environment_variables"
+    "U | 005_hypr_custom_config_setup.py --force --autostart"
     "U | 010_package_removal.sh --auto"
 
 
@@ -207,103 +210,85 @@ declare -ra UPDATE_SEQUENCE=(
 #================= Scripts =====================
 
     "U | 015_set_thunar_terminal.py -t foot"
-#    "U | 020_desktop_apps_username_setter.sh"
     "U | 020_desktop_entries.py"
     "U | 025_configure_keyboard.sh"
-#    "U | 035_configure_uwsm_gpu.sh --auto"
 #    "U | 040_long_sleep_timeout.sh"
 #    "S | 045_battery_limiter.sh"
 #    "S | 050_pacman_config.sh --auto"
     "S | 051_pacman_hooks.sh --auto"
 #    "S | 055_pacman_reflector.sh"
-#    "S | 060_package_installation.sh"
-#    "U | 065_enabling_user_services.sh"
+#    "S | 060_package_installation.py"
 #    "S | 070_openssh_setup.sh"
 #    "U | 075_changing_shell_zsh.sh"
 #    "S | 080_aur_paru_fallback_yay.sh"
-#    "S | 085_warp.sh"
+#    "S | 085_warp.py"
 #    "U | 090_paru_packages_optional.sh"
 #    "S | 095_battery_limiter_again_dusk.sh"
 #    "U | 100_paru_packages.sh"
-#    "S | 110_aur_packages_sudo_services.sh"
-#    "U | 115_aur_packages_user_services.sh"
 #    "S | 120_create_mount_directories.sh"
-#    "S | 127_pam_keyring_greetd.sh --mode auto"
-#    "U | 130_copy_service_files.sh --default"
-    "U | 131_dbus_copy_service_files.sh"
-    "U | 132_copy_system_services.sh --default"
+    "S | 127_pam_keyring_greetd.py --mode auto"
+    "U | 130_systemd_dbus_service_manager.py --default"
 #    "U | 135_battery_notify_service.sh"
 #    "U | 137_snapper_isolation_subvolume.sh --auto"
-#    "U | 140_fc_cache_fv.sh"
+#    "U | 140_dusky_font_configurator.py"
     "U | 145_matugen_directories.py"
 #    "U | 150_wallpapers_download.sh"
 #    "U | 155_blur_shadow_opacity.sh"
 #    "U | ignore-fail | 160_theme_ctl.py"
 #    "U | 165_qtct_config.sh"
     "S | 180_udev_usb_notify.sh"
-#    "U | 185_terminal_default.sh"
-#    "S | 190_dusk_fstab.sh"
-#    "S | 195_firefox_symlink_parition.sh"
-#    "S | 200_tlp_config.sh"
+#    "S | 190_dusk_fstab.py"
+#    "S | firefox_symlink_partition.py"
+#    "S | 200_tlp_config.py"
 #    "S | 205_zram_configuration.sh"
 #    "S | 210_zram_optimize_swappiness.sh"
+    "S | 211_systemd_oomd_zram.py"
 #    "S | 215_powerkey_lid_close_behaviour.sh"
 #    "S | 220_logrotate_optimization.sh"
-#    "S | 225_faillock_timeout.sh"
+    "S | 225_faillock_timeout.py --preset lenient -y"
 #    "U | 230_asus_tuf_tweaks.sh"
     "U | 235_file_manager_switch.sh --apply-state"
     "U | 236_browser_switcher.sh --apply-state"
     "U | 237_text_editer_switcher.sh --apply-state"
     "U | 238_terminal_switcher.sh --apply-state"
-#    "U | 240_swaync_dgpu_fix.sh --disable"
 #    "S | 245_asusd_service_fix.sh"
 #    "S | 250_ftp_arch.sh"
 #    "U | 255_tldr_update.sh"
 #    "U | 260_spotify.sh"
 #    "U | 265_mouse_button_reverse.sh --right"
-#    "U | 280_dusk_clipboard_errands_delete.sh --delete"
-#    "S | 290_system_services.sh"
+    "U | 290_dusky_service_toggler.py --default"
 #    "S | 295_initramfs_optimization.py"
 #    "U | 300_git_config.sh"
-#    "U | 305_new_github_repo_to_backup.sh"
-#    "U | 310_reconnect_and_push_new_changes_to_github.sh"
-#    "S | 315_grub_optimization.sh"
+#    "U | user_scripts/git/dusky_backup_manager.py --new"
+#    "U | user_scripts/git/dusky_backup_manager.py --relink"
 #    "S | 320_systemdboot_optimization.py --auto"
 #    "S | 325_hosts_files_block.sh"
 #    "S | 330_gtk_root_symlink.sh"
 #    "S | 335_preload_config.sh"
-#    "U | 340_kokoro_cpu.sh"
-#    "U | 345_faster_whisper_cpu.sh"
 #    "S | 350_dns_systemd_resolve.sh"
-#    "U | 355_hyprexpo_plugin.sh"
-#    "U | 356_dusky_plugin_manager.sh"
 #    "U | 360_obsidian_pensive_vault_configure.sh"
 #    "U | 365_cache_purge.sh"
 #    "S | 370_arch_install_scripts_cleanup.sh"
 #    "U | 375_cursor_theme_bibata_classic_modern.sh"
 #    "S | 380_nvidia_open_source.sh"
+    "U | 383_configure_hyprland_gpu.py --auto"
 #    "S | 385_waydroid_setup.sh"
-#    "U | 390_clipboard_persistance.sh"
+    "U | 390_clipboard_persistance.py --ram --quiet"
 #    "S | 395_intel_media_sdk_check.sh"
-#    "U | 400_firefox_matugen_pywalfox.sh"
-#     "U | 402_gecko_engine_colors_extention.sh"
 #    "U | 405_spicetify_matugen_setup.sh"
 #    "U | 410_waybar_swap_config.py --state"
 #    "U | 415_mpv_setup.sh"
-#    "U | 420_kokoro_gpu_setup.sh"
-#    "U | 425_parakeet_gpu_setup.sh"
 #    "S | 430_btrfs_zstd_compression_stats.sh"
     "U | 434_wayclick_soundpacks_download.sh --auto"
 #    "U | 435_key_sound_wayclick_setup.sh --setup"
 #    "U | 440_config_bat_notify.sh --default"
-#    "U | 450_generate_colorfiles_for_current_wallpaer.sh"
     "U | 455_hyprctl_reload.sh"
 #    "U | 460_switch_clipboard.sh --terminal --force" no longer required!
 #    "S | 465_sddm_setup.sh"
 #    "U | 470_vesktop_matugen.sh"
     "S | 473_add_user_to_group.sh --auto"
 #    "U | 475_reverting_sleep_timeout.sh"
-#    "U | 480_dusky_commands.sh"
+#    "U | 480_dusky_commands.py"
     "S | 485_sudoers_nopassword.sh"
 
 #================= CUSTOM=====================
@@ -312,16 +297,17 @@ declare -ra UPDATE_SEQUENCE=(
     "U | update_checker.sh --num"
 #    "U | cc_restart.sh --quiet"
     "U | wallpaper_selector.py --build-cache"
-    "S | dusky_service_manager.sh"
 #    "U | append_defaults_keybinds_edit_here.sh"
-    "U | ignore-fail | dusky_matugen_config_tui.sh --smart"
-#    "U | ignore-fail | dusky_firefox_tui.sh --sync --all"
+    "U | ignore-fail | tui_matugen.py --smart",
     "U | ignore-fail | hypr_anim.sh --current"
     "U | ignore-fail | theme_ctl.sh refresh"
     "U | ignore-fail | update_counter.sh"
-    "U | dusky_commands_after.sh"
+    "U | tui_starship.py --apply-state"
+    "U | 480_dusky_commands.py -a"
 #    "U | system_update.sh --pacman"
-    "U | reboot_post_lua_update.sh"
+#
+#
+    "S | fix_wayland_session.py"
 )
 
 # ==============================================================================
@@ -1214,72 +1200,11 @@ setup_logging() {
 }
 
 acquire_lock() {
-    exec {LOCK_FD}>>"$LOCK_FILE" || {
-        log ERROR "Cannot open lock file: $LOCK_FILE"
-        return 1
-    }
-
-    if ! flock -n "$LOCK_FD"; then
-        log ERROR "Another instance is already running."
-        local lock_real fd pid cmdline summary=""
-        local -A seen_pids=()
-        lock_real="$(readlink -f -- "$LOCK_FILE" 2>/dev/null || printf '%s' "$LOCK_FILE")"
-        for fd in /proc/[0-9]*/fd/*; do
-            [[ -e "$fd" ]] || continue
-            if [[ "$(readlink -f -- "$fd" 2>/dev/null || true)" == "$lock_real" ]]; then
-                pid="${fd#/proc/}"
-                pid="${pid%%/*}"
-                [[ "$pid" == "$$" ]] && continue # Ignore self
-                [[ -n "${seen_pids[$pid]:-}" ]] && continue
-                seen_pids["$pid"]=1
-                
-                cmdline="$(tr '\0' ' ' < "/proc/${pid}/cmdline" 2>/dev/null || true)"
-                cmdline="${cmdline% }"
-                summary+="    -> PID $pid: ${cmdline:-[unknown]}"$'\n'
-            fi
-        done
-        
-        if [[ -n "$summary" ]]; then
-            log WARN "Processes currently holding the lock:"
-            log RAW "${summary%$'\n'}"
-        else
-            log WARN "No live lock holder could be identified."
-        fi
-
-        if [[ -t 0 && "$OPT_FORCE" != true && "$OPT_DRY_RUN" != true ]]; then
-            local choice=""
-            log INFO "The lock itself can only be safely cleared by acquiring it, not by deleting the path."
-            if ! read -r -p "If you are sure no other instance is still active, retry acquiring the lock now? [y/N]: " choice; then
-                choice="n"
-            fi
-            
-            case "${choice,,}" in
-                y|yes)
-                    log INFO "Waiting up to 2 seconds for lock..."
-                    if flock -w 2 "$LOCK_FD"; then
-                        log WARN "Lock became available after user-confirmed retry."
-                        return 0
-                    fi
-                    log ERROR "Lock is still held by another process."
-                    return 1
-                    ;;
-                *)
-                    return 1
-                    ;;
-            esac
-        fi
-        
-        return 1
-    fi
-
     return 0
 }
 
 release_lock() {
-    if [[ -n "$LOCK_FD" ]]; then
-        exec {LOCK_FD}>&- 2>/dev/null || true
-        LOCK_FD=""
-    fi
+    return 0
 }
 
 check_disk_space() {
@@ -1365,8 +1290,15 @@ run_logged_command() {
     local rc=0
     local timestamp="" arg=""
 
-    if [[ -z "$LOG_FILE" || ! -w "$LOG_FILE" ]]; then
-        # Subshell severs the lock before running unlogged commands
+    local is_interactive=false
+    for arg in "${cmd[@]}"; do
+        if [[ -f "$arg" ]] && grep -q -i -E '^\s*#\s*dusky_interactive\s*=\s*(true|1)\b' "$arg" 2>/dev/null; then
+            is_interactive=true
+            break
+        fi
+    done
+
+    if [[ "$is_interactive" == true || -z "$LOG_FILE" || ! -w "$LOG_FILE" ]]; then
         (
             [[ -n "${LOCK_FD:-}" ]] && exec {LOCK_FD}>&- 2>/dev/null || true
             "${cmd[@]}"
@@ -1932,6 +1864,8 @@ clone_with_retry() {
         if timeout "${CLONE_TIMEOUT}s" \
             "$GIT_BIN" clone --bare --branch "$BRANCH" "$REPO_URL" "$DOTFILES_GIT_DIR" \
             >> "$LOG_FILE" 2>&1; then
+            # Ensure the cloned repository has the standard remote-tracking refspec configured
+            "$GIT_BIN" --git-dir="$DOTFILES_GIT_DIR" config remote.origin.fetch "+refs/heads/*:refs/remotes/origin/*" >> "$LOG_FILE" 2>&1 || true
             return 0
         fi
 
@@ -2955,6 +2889,11 @@ pull_updates() {
 # ==============================================================================
 init_sudo() {
     if [[ -n "$SUDO_PID" ]] && kill -0 "$SUDO_PID" 2>/dev/null; then
+        return 0
+    fi
+
+    if sudo -n true 2>/dev/null; then
+        log INFO "Passwordless sudo detected. Proceeding..."
         return 0
     fi
 

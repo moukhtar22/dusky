@@ -1,7 +1,6 @@
 #!/bin/bash
-# Configures Obsidian
-# 1. Define the vault location relative to the *current* user's home
-#    Bash automatically expands ${HOME} to the current user's home dir.
+#d: Configure the Obsidian vault
+
 VAULT_PATH="${HOME}/Documents/pensive"
 
 # 2. Check if the config already exists to avoid overwriting user changes later

@@ -9,9 +9,10 @@ return {
       "hrsh7th/cmp-buffer",
       "hrsh7th/cmp-path",       -- path completions (files/dirs)
       "hrsh7th/cmp-cmdline",    -- optional: completion in : and / cmdline
-      { 
-        "L3MON4D3/LuaSnip", 
-        build = "make install_jsregexp" 
+      "hrsh7th/cmp-nvim-lsp",   -- FIX: was missing, needed for LSP completions + lsp.lua capabilities
+      {
+        "L3MON4D3/LuaSnip",
+        build = "make install_jsregexp"
       },                        -- snippet engine (optional)
       "saadparwaiz1/cmp_luasnip",
     },
@@ -22,7 +23,8 @@ return {
       local luasnip_ok, luasnip = pcall(require, "luasnip")
       if not luasnip_ok then luasnip = nil end
 
-      vim.o.completeopt = "menuone,noselect"
+      -- FIX: don't clobber global completeopt set in options.lua (menu,menuone,noinsert,noselect,popup,fuzzy); nvim-cmp manages its own
+      -- vim.o.completeopt = "menuone,noselect"
 
       cmp.setup({
         snippet = {
@@ -60,9 +62,10 @@ return {
         }),
 
         sources = cmp.config.sources({
-          { name = "path", option = { trailing_slash = true } }, -- important: path source first
-          { name = "buffer" },
-          { name = "luasnip" },
+          { name = "nvim_lsp", priority = 1000 }, -- FIX: LSP primary source (was missing entirely)
+          { name = "luasnip", priority = 750 },
+          { name = "path", option = { trailing_slash = true }, priority = 500 },
+          { name = "buffer", keyword_length = 3, priority = 250 },
         }),
 
         formatting = {

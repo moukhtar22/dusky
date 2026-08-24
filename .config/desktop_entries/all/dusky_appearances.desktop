@@ -3,7 +3,7 @@ Type=Application
 Name=Dusky Appearance TUI
 GenericName=Theme Configurator
 Comment=Real-time Hyprland appearance and opacity configurator
-Exec=uwsm-app -- foot --app-id=dusky_tui python /home/dusk/user_scripts/dusky_tui/python/main/main.py /home/dusk/user_scripts/hypr/visual/tui_appearance.py
+Exec=foot --app-id=dusky_tui python3 /home/dusk/user_scripts/hypr/visual/tui_appearance.py
 Terminal=false
 Categories=Settings;DesktopSettings;System;Utility;
 Keywords=dusky;hyprland;appearance;theme;tui;config;settings;opacity;blur;shadow;

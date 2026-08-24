@@ -29,7 +29,7 @@
 
 /* WAYBAR_OPAQUE_SWITCH_START */
 
-@define-color glass_bar         @surface;
+@define-color glass_bar         transparent;
 @define-color glass_module      @surface_container;
 @define-color glass_module_dark @surface_container;
 @define-color glass_hover       @surface_container_high;
@@ -62,7 +62,7 @@ window#waybar > box {
   background-color: @glass_bar;
   border-radius: 18px;
   border: none;
-  margin: 4px 0;
+  margin: 0;
 }
 
 /* ─────────────────────────────────────────────────────────────────────────────
@@ -70,10 +70,11 @@ window#waybar > box {
    ───────────────────────────────────────────────────────────────────────────── */
 
 #custom-launcher {
-  padding: 0px 13px 2px 8px;
-  margin: 5px 2px 5px 6px;
+  padding: 0px 10px 0px 8px;
+  margin: 2px 2px 2px 2px;
   border-radius: 10px;
   background-image: linear-gradient(135deg, @primary_container 0%, @primary_fixed_dim 100%);
+  border: none;
   color: @on_primary_container;
   font-size: 19px;
   transition: all 0.2s ease-in-out;
@@ -81,6 +82,7 @@ window#waybar > box {
 
 #custom-launcher:hover {
   background-image: linear-gradient(135deg, @primary_fixed_dim 0%, @primary 30%);
+  border: none;
 }
 
 /* ─────────────────────────────────────────────────────────────────────────────
@@ -89,18 +91,18 @@ window#waybar > box {
 
 #custom-updates, #custom-updates-trigger {
   padding: 0px 10px;
-  margin: 5px 2px;
+  margin: 2px 2px;
   border-radius: 10px;
   background-color: @glass_module_dark;
+  border: 1px solid alpha(@outline_variant, 0.25);
   color: @secondary;
   transition: all 0.2s ease-in-out;
 }
 
 #custom-updates:hover, #custom-updates-trigger:hover {
   background-color: alpha(@surface_container_highest, 0.9);
-  border: 1px solid alpha(@primary, 0.3);
+  border: 1px solid alpha(@primary, 0.45);
   color: @primary;
-  text-shadow: 0 0 4px alpha(@primary, 0.5);
 }
 
 /* ─────────────────────────────────────────────────────────────────────────────
@@ -109,9 +111,10 @@ window#waybar > box {
 
 #clock, #custom-weather {
   padding: 0px 8px 0px 8px;
-  margin: 5px 2px;
+  margin: 2px 2px;
   border-radius: 10px;
   background-color: @glass_module_dark;
+  border: 1px solid alpha(@outline_variant, 0.25);
   color: @on_surface;
   font-weight: 700;
   transition: all 0.2s ease-in-out;
@@ -119,7 +122,7 @@ window#waybar > box {
 
 #clock:hover, #custom-weather:hover {
   background-color: alpha(@surface_container_highest, 0.9);
-  border: 1px solid alpha(@primary, 0.3);
+  border: 1px solid alpha(@primary, 0.45);
 }
 
 /* ─────────────────────────────────────────────────────────────────────────────
@@ -128,9 +131,10 @@ window#waybar > box {
 
 #custom-notification {
   padding: 0px 12px 0px 9px;
-  margin: 5px 2px;
+  margin: 2px 2px;
   border-radius: 10px;
   background-color: @glass_module_dark;
+  border: 1px solid alpha(@outline_variant, 0.25);
   color: @on_surface;
   font-size: 14px;
   transition: all 0.2s ease-in-out;
@@ -146,7 +150,7 @@ window#waybar > box {
 
 #custom-theme-toggle {
   padding: 0 8px;
-  margin: 5px 2px;
+  margin: 2px 2px;
   border-radius: 10px;
   background-color: @glass_module;
   color: @secondary;
@@ -165,16 +169,16 @@ window#waybar > box {
 
 #workspaces {
   padding: 0px 0px 0px 0px;
-  margin: 4px 6px;
+  margin: 2px 6px;
   border-radius: 12px;
   background-color: @glass_module;
   border: 1px solid alpha(@outline_variant, 0.1);
 }
 
 #workspaces button {
-  padding: 0px 8px 0px 8px;
-  margin: 3px 2px;
-  min-width: 20px;
+  padding: 0px 4px;
+  margin: 1px 1px;
+  min-width: 16px;
   border-radius: 8px;
   background-color: alpha(@surface_container_highest, 0);
   color: @on_surface_variant;
@@ -183,8 +187,9 @@ window#waybar > box {
 }
 
 #workspaces button.empty {
-  padding: 0 6px;
-  min-width: 20px;
+  padding: 0 4px;
+  margin: 1px 1px;
+  min-width: 16px;
   background-color: transparent;
   color: alpha(@on_surface_variant, 0.4);
 }
@@ -195,8 +200,8 @@ window#waybar > box {
 }
 
 #workspaces button.active {
-  padding: 0px 1px 0px 1px;
-  min-width: 30px;
+  padding: 0px 4px;
+  min-width: 24px;
   background-image: linear-gradient(135deg, @primary_container 0%, @primary_fixed_dim 100%);
   color: @on_primary_container;
   font-weight: 700;
@@ -229,9 +234,10 @@ window#waybar > box {
 
 #custom-mpris-trigger {
   padding: 0 10px;
-  margin: 5px 2px;
+  margin: 2px 2px;
   border-radius: 10px;
   background-color: @glass_mpris;
+  border: 1px solid alpha(@outline_variant, 0.25);
   color: @secondary;
   font-size: 14px;
   transition: all 0.2s ease-in-out;
@@ -239,25 +245,24 @@ window#waybar > box {
 
 #custom-mpris-trigger:hover {
   background-color: alpha(@secondary_container, 0.5);
-  border: 1px solid alpha(@secondary, 0.3);
+  border: 1px solid alpha(@secondary, 0.45);
   color: @primary;
-  text-shadow: 0 0 4px alpha(@primary, 0.5);
 }
 
 #mpris {
   padding: 0 10px;
-  margin: 5px 2px;
+  margin: 2px 2px;
   border-radius: 10px;
   background-color: @glass_mpris;
   color: @on_secondary_container;
   font-size: 12px;
-  border: 1px solid alpha(@secondary, 0.15);
+  border: 1px solid alpha(@secondary, 0.25);
   transition: all 0.2s ease-in-out;
 }
 
 #mpris:hover {
   background-color: alpha(@secondary_container, 0.5);
-  border: 1px solid alpha(@secondary, 0.3);
+  border: 1px solid alpha(@secondary, 0.45);
 }
 
 #mpris.playing { color: @secondary; }
@@ -277,8 +282,9 @@ window#waybar > box {
 
 #network, #custom-net-speed {
   padding: 0px 8px;
-  margin: 5px 2px;
+  margin: 2px 2px;
   background-color: @glass_module;
+  border: 1px solid alpha(@outline_variant, 0.25);
   border-radius: 8px;
   color: @on_surface;
   font-size: 11px;
@@ -287,6 +293,7 @@ window#waybar > box {
 
 #network:hover, #custom-net-speed:hover {
   background-color: @glass_hover;
+  border: 1px solid alpha(@primary, 0.45);
 }
 
 #custom-net-speed.network-kb { 
@@ -297,7 +304,6 @@ window#waybar > box {
 #custom-net-speed.network-mb {
   color: @primary;
   font-weight: 900;
-  text-shadow: 0 0 5px alpha(@primary, 0.7);
 }
 
 #custom-net-speed.network-disconnected, #network.disconnected { 
@@ -309,15 +315,19 @@ window#waybar > box {
 
 #bluetooth {
   padding: 0px 8px 0px 8px;
-  margin: 5px 2px;
+  margin: 2px 2px;
   background-color: @glass_module;
+  border: 1px solid alpha(@outline_variant, 0.25);
   border-radius: 8px;
   color: @on_surface;
   font-size: 11px;
   transition: all 0.2s ease-in-out;
 }
 
-#bluetooth:hover { background-color: @glass_hover; }
+#bluetooth:hover {
+  background-color: @glass_hover;
+  border: 1px solid alpha(@primary, 0.45);
+}
 #bluetooth.disabled { color: alpha(@on_surface_variant, 0.6); }
 #bluetooth.connected { color: @primary_fixed; }
 
@@ -327,15 +337,19 @@ window#waybar > box {
 
 #pulseaudio.output {
   padding: 0px 12px 0px 9px;
-  margin: 5px 2px;
+  margin: 2px 2px;
   background-color: @glass_module;
+  border: 1px solid alpha(@outline_variant, 0.25);
   border-radius: 8px;
   color: @on_surface;
   font-size: 11px;
   transition: all 0.2s ease-in-out;
 }
 
-#pulseaudio.output:hover { background-color: @glass_hover; }
+#pulseaudio.output:hover {
+  background-color: @glass_hover;
+  border: 1px solid alpha(@primary, 0.45);
+}
 #pulseaudio.output.muted { color: alpha(@on_surface_variant, 0.4); }
 
 /* ─────────────────────────────────────────────────────────────────────────────
@@ -344,15 +358,19 @@ window#waybar > box {
 
 #backlight {
   padding: 0px 13px 0px 8px;
-  margin: 5px 2px;
+  margin: 2px 2px;
   border-radius: 10px;
   background-color: @glass_module;
+  border: 1px solid alpha(@outline_variant, 0.25);
   color: @tertiary;
   font-size: 11px;
   transition: all 0.2s ease-in-out;
 }
 
-#backlight:hover { background-color: @glass_hover; }
+#backlight:hover {
+  background-color: @glass_hover;
+  border: 1px solid alpha(@primary, 0.45);
+}
 
 /* ─────────────────────────────────────────────────────────────────────────────
    CPU
@@ -360,15 +378,19 @@ window#waybar > box {
 
 #cpu {
   padding: 0 8px;
-  margin: 5px 2px;
+  margin: 2px 2px;
   background-color: @glass_module;
+  border: 1px solid alpha(@outline_variant, 0.25);
   border-radius: 8px;
   color: @on_surface_variant;
   font-size: 12px;
   transition: all 0.2s ease-in-out;
 }
 
-#cpu:hover { background-color: @glass_hover; }
+#cpu:hover {
+  background-color: @glass_hover;
+  border: 1px solid alpha(@primary, 0.45);
+}
 #cpu.warning { color: @tertiary; background-color: alpha(@tertiary_container, 0.2); }
 #cpu.critical {
   color: @error;
@@ -382,15 +404,19 @@ window#waybar > box {
 
 #memory {
   padding: 0 8px;
-  margin: 5px 2px;
+  margin: 2px 2px;
   background-color: @glass_module;
+  border: 1px solid alpha(@outline_variant, 0.25);
   border-radius: 8px;
   color: @on_surface_variant;
   font-size: 11px;
   transition: all 0.2s ease-in-out;
 }
 
-#memory:hover { background-color: @glass_hover; }
+#memory:hover {
+  background-color: @glass_hover;
+  border: 1px solid alpha(@primary, 0.45);
+}
 #memory.warning { color: @tertiary; background-color: alpha(@tertiary_container, 0.2); }
 #memory.critical {
   color: @error;
@@ -404,15 +430,19 @@ window#waybar > box {
 
 #battery {
   padding: 0px 5px 0px 5px;
-  margin: 5px 2px;
+  margin: 2px 2px;
   background-color: @glass_module_dark;
+  border: 1px solid alpha(@outline_variant, 0.25);
   border-radius: 8px;
   color: @on_surface;
   font-weight: 700;
   transition: all 0.2s ease-in-out;
 }
 
-#battery:hover { background-color: @glass_hover; }
+#battery:hover {
+  background-color: @glass_hover;
+  border: 1px solid alpha(@primary, 0.45);
+}
 #battery.good { color: @tertiary; }
 #battery.charging, #battery.plugged, #battery.full {
   color: @tertiary;
@@ -442,9 +472,10 @@ window#waybar > box {
 
 #custom-inhibit-suspend {
   padding: 0px 12px 0px 9px;
-  margin: 5px 2px;
+  margin: 2px 2px;
   border-radius: 10px;
   background-color: @glass_module_dark;
+  border: 1px solid alpha(@outline_variant, 0.25);
   color: @on_surface;
   font-size: 14px;
   transition: all 0.2s ease-in-out;
@@ -470,9 +501,10 @@ window#waybar > box {
 
 #custom-power {
   padding: 0px 12px 0px 9px;
-  margin: 5px 6px 5px 2px;
+  margin: 2px 2px 2px 2px;
   border-radius: 10px;
   background-image: linear-gradient(135deg, @primary_container 0%, @primary_fixed_dim 100%);
+  border: none;
   color: @on_primary_container;
   font-size: 14px;
   transition: all 0.2s ease-in-out;
@@ -481,20 +513,34 @@ window#waybar > box {
 #custom-power:hover {
   background-color: @primary;
   background-image: none;
+  border: none;
 }
 
 /* ─────────────────────────────────────────────────────────────────────────────
    TOOLTIPS
    ───────────────────────────────────────────────────────────────────────────── */
 
-tooltip {
-  background-color: @glass_tooltip;
-  border: 1px solid alpha(@outline_variant, 0.5);
-  border-radius: 12px;
+tooltip decoration {
+  background-color: transparent;
+  border: none;
+  box-shadow: none;
 }
 
-tooltip label {
-  padding: 6px 10px;
+tooltip,
+tooltip.background,
+.tooltip {
+  background-color: alpha(@surface_container, 0.57);
+  background: linear-gradient(135deg, alpha(@surface_container, 0.57), alpha(@surface_container_high, 0.57));
+  border: 1px solid alpha(@primary, 0.5);
+  border-radius: 12px;
+  box-shadow: none;
+}
+
+tooltip label,
+.tooltip label {
   color: @on_surface;
+  padding: 8px 12px;
+  font-family: "JetBrainsMono Nerd Font Propo", "JetBrainsMono Nerd Font", monospace;
   font-size: 12px;
+  font-weight: 600;
 }

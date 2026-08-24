@@ -1,12 +1,6 @@
 #!/usr/bin/env bash
-# powerkey and lid behaviour. 
-# -----------------------------------------------------------------------------
-# Script: setup_logind_power.sh
-# Description: Configures systemd-logind for Hyprland/UWSM power management.
-# Author: Elite DevOps (Arch/Hyprland Architect)
-# -----------------------------------------------------------------------------
+#d: Set power key and lid-close behavior
 
-# strict error handling
 set -euo pipefail
 
 # -----------------------------------------------------------------------------

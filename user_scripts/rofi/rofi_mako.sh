@@ -10,16 +10,57 @@ HISTORY=$(makoctl history -j 2>/dev/null || echo "[]")
 BLACKLIST_FILE="${XDG_RUNTIME_DIR:-/tmp}/mako_rofi_blacklist"
 BLACKLIST_RAW=$(cat "$BLACKLIST_FILE" 2>/dev/null || echo "")
 
+IGNORED_APPS_TOML="${HOME}/user_scripts/dusky_system/quickpanal/ignored_apps.toml"
+
+IGNORED_JSON=$(python3 -c '
+import tomllib, json, sys, os
+from pathlib import Path
+
+p = Path(os.path.expanduser(sys.argv[1]))
+if p.is_file():
+    try:
+        with open(p, "rb") as f:
+            d = tomllib.load(f)
+            apps = d.get("ignored", {}).get("apps", [])
+            print(json.dumps(apps))
+            sys.exit(0)
+    except Exception:
+        pass
+print("[]")
+' "$IGNORED_APPS_TOML" 2>/dev/null)
+
+[[ -z "$IGNORED_JSON" ]] && IGNORED_JSON="[]"
+
+if systemctl --user is-enabled --quiet dusky_notif_time.service 2>/dev/null; then
+    TIMES_FILE="${XDG_RUNTIME_DIR:-/tmp}/dusky_notif_times.json"
+    TIMES_RAW=$(cat "$TIMES_FILE" 2>/dev/null || echo "{}")
+    [[ -z "$TIMES_RAW" ]] && TIMES_RAW="{}"
+else
+    TIMES_RAW="{}"
+fi
+
 # 1. Parse JSON: Tag sources, sanitize Pango, and format for Rofi
 MENU_PAYLOAD=$(jq -r -n \
   --argjson active "$ACTIVE" \
   --argjson history "$HISTORY" \
+  --argjson ignored "$IGNORED_JSON" \
+  --argjson times "$TIMES_RAW" \
   --arg bl "$BLACKLIST_RAW" '
   
   # SAFELY define all the apps and modules we want to ignore
-  def is_ignored:
-    . == "OSD" or . == "dusky-recorder" or . ==  "dusky-keys" or . == "dusky-cava" or . == "dusky-cava-alert" or 
-    (type == "string" and startswith("dusky-glance")) or . == "dusky-tlp" or . == "dusky-high-ram-alert" or . == "Spotify" or . == "matugen-theme" or . == "dusky-fav-wal";
+  def is_ignored($list):
+    . as $app |
+    if $app == null or $app == "" then false
+    else
+      ($list | any(
+        . as $pat |
+        if ($pat | endswith("*")) then
+          ($app | startswith($pat[0:-1]))
+        else
+          ($app == $pat)
+        end
+      ))
+    end;
 
   def escape_pango: 
       if type == "string" then 
@@ -34,7 +75,11 @@ MENU_PAYLOAD=$(jq -r -n \
       else 
         "[\(.app_name | escape_pango)] " 
       end;
-      
+
+  def clean_time($t_dict):
+      ($t_dict[.id | tostring]) as $t |
+      if $t == null or $t == "" then "" else " <span alpha=\"50%\" size=\"smaller\">• \($t)</span>" end;
+
   def clean_body:
       if .body == null or .body == "" then
         "\n<span alpha=\"50%\" size=\"smaller\"><i>No additional details</i></span>"
@@ -49,22 +94,21 @@ MENU_PAYLOAD=$(jq -r -n \
   | ($active | map(. + {__source: "active"})) as $a
   | ($history | map(. + {__source: "history"})) as $h
 
-  # Combine, deduplicate (active wins), sort chronologically
   | ($a + $h) 
   | unique_by(.id) 
   | sort_by(.id) 
   | reverse 
   | .[] 
-  | select(.summary != null and .summary != "") 
+  | select(.summary != null and .summary != "" and .summary != "󰎟 Notifications") 
   
   # Apply the ignore filter securely
-  | select(.app_name | is_ignored | not)
+  | select(.app_name | is_ignored($ignored) | not)
   
   # Filter out blacklisted IDs
   | select((.id | tostring) as $id_str | $blacklisted_ids | index($id_str) | not)
   
   # Output Format: ID [TAB] APP [TAB] SOURCE [TAB] UI_STRING [RECORD_SEPARATOR]
-  | "\(.id)\t\(.desktop_entry // .app_name // "" | gsub("\t";" "))\t\(.__source)\t<b>\(clean_app)\(.summary | gsub("<[^>]+>"; "") | escape_pango)</b>\(clean_body)\u001e"
+  | "\(.id)\t\(.desktop_entry // .app_name // "" | gsub("\t";" "))\t\(.__source)\t<b>\(clean_app)\(.summary | gsub("<[^>]+>"; "") | escape_pango)</b>\(clean_time($times))\(clean_body)\u001e"
 ')
 
 if [[ -z "$MENU_PAYLOAD" ]]; then
@@ -134,7 +178,7 @@ case $ROFI_EXIT in
         if systemctl --user is-active --quiet mako.service; then
             systemctl --user restart mako.service
         else
-            pkill -x mako && uwsm app -- mako &
+            pkill -x mako && dusky-run -- mako &
         fi
         ;;
     12)

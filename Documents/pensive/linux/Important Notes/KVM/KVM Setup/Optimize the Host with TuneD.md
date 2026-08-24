@@ -1,56 +1,39 @@
-# Performance Tuning with TuneD
+---
+title: "Host Tuning — TuneD (Arch)"
+tags:
+  - kvm
+  - tuning
+  - arch
+  - latency
+---
 
-**TuneD** is a background service that automatically optimizes your Linux system settings based on how you use your computer. Since we are setting up a KVM Hypervisor (to run Virtual Machines), we need to tell the system to prioritize virtualization performance over power saving or standard desktop behavior.
+# Host Tuning — TuneD
 
-> [!DANGER] CRITICAL WARNING: TLP USERS
-> 
-> Do you have TLP (Linux Advanced Power Management) installed to save battery life?
-> 
-> **TuneD and TLP conflict with one another.** Running both simultaneously will cause system instability and conflicting power settings.
-> 
-> - If you have TLP installed and want to keep it: **SKIP THIS ENTIRE NOTE.**
->     
-> - If you prefer performance for your Virtual Machines over battery life: Uninstall TLP before proceeding.
->     
+> [!info] Scope
+> Optional. `tuned` optimizes kernel scheduling/I/O for KVM host (`virtual-host` profile). Mutually exclusive with **TLP** power manager — pick one. This note reflects current `tuned` on Arch rolling (Aug 2026).
 
-## 1. Installation
+> [!danger] TLP conflict
+> `tuned` and `TLP` both rewrite `sysctl`/`cpufreq`/`usb` autosuspend. Running both = flapping governors, conflicting `udev` rules. **If you use TLP on a laptop → skip this note.**
 
-First, we need to install the TuneD package from the official repositories.
-
-```bash
-sudo pacman -Syu --needed tuned
-```
-
-## 2. Enable the Service
-
-Once installed, we must enable the service so it starts automatically when you turn on your computer, and start it immediately for this session.
+## Install & enable
 
 ```bash
+sudo pacman -S --needed tuned
 sudo systemctl enable --now tuned
+tuned-adm active      # → balanced (default)
+tuned-adm list | grep -E 'virtual-host|throughput'
 ```
 
-## 3. Check Current Status
-
-By default, TuneD usually picks a "balanced" profile. Let's verify what is currently running.
+## Activate `virtual-host`
 
 ```bash
-tuned-adm active
+tuned-adm list   # full catalogue (see callout below)
+sudo tuned-adm profile virtual-host
+tuned-adm active # → Current active profile: virtual-host
+sudo tuned-adm verify   # → Verification succeeded
 ```
 
-_Expected Output: `Current active profile: balanced` (or similar)_
-
-## 4. Selecting the KVM Host Profile
-
-We need to switch the profile to **`virtual-host`**. This profile optimizes the kernel to handle the heavy I/O (Input/Output) and CPU scheduling requirements of running KVM Virtual Machines.
-
-```bash
-tuned-adm list
-```
-
-> [!INFO]- Reference: All Available Profiles
-> 
-> You don't need to memorize these, but here is a list of profiles TuneD offers for different scenarios:
-> 
+> [!example]- Profile catalogue (reference — click to expand)
 > ```
 > - accelerator-performance       - Throughput performance based tuning with disabled higher latency STOP states
 > - atomic-guest                  - Optimize virtual guests based on the Atomic variant
@@ -92,29 +75,17 @@ tuned-adm list
 > - virtual-guest                 - Optimize for running inside a virtual guest
 > - virtual-host                  - Optimize for running KVM guests
 > ```
+> For KVM host, `virtual-host` is tuned for I/O scheduling and dirty/writeback that benefits qcow2/`virtio`. Matches old exhaustive list; kept collapsible so main prose stays succinct.
 
-**Apply the Virtual Host profile:**
-
-```bash
-sudo tuned-adm profile virtual-host
-```
-
-## 5. Verification
-
-Finally, let's confirm the switch was successful and that there are no errors in the configuration.
-
-**Check the active profile:**
-
-```bash
-tuned-adm active
-```
-
-_It should now say: `Current active profile: virtual-host`_
-
-**Verify system settings:**
+## Verify & revert
 
 ```bash
 sudo tuned-adm verify
+systemctl status tuned
+# revert
+sudo tuned-adm profile balanced
+# or on TLP laptops:
+sudo pacman -Rns tuned; sudo systemctl enable --now tlp
 ```
 
-_If everything is correct, this command will return `Verification succeeded`._
+Related: [[+ MOC KVM]], [[KVM Services]] — tuning complements modular idle savings.

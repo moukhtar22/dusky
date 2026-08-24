@@ -10,13 +10,12 @@ return {
   event = { "BufReadPost", "BufNewFile" },
   lazy = vim.fn.argc(-1) == 0, 
   config = function()
-    -- 1. Parser Management (The only remaining role of nvim-treesitter on the main branch)
-    require("nvim-treesitter").install({
-      "bash", "c", "cpp", "css", "dockerfile", "go", "html", "javascript",
-      "json", "lua", "markdown", "markdown_inline", "python", "query",
-      "regex", "rust", "svelte", "typescript", "vim", "vimdoc", "vue", "yaml",
-    })
-
-    -- NOTE: Folding is already correctly configured natively in options.lua!
+    -- 0.12: native highlight uses only parsers shipped with Neovim (c, lua, markdown etc).
+    -- nvim-treesitter on `main` no longer provides highlight itself; it only manages parsers.
+    -- We keep auto-install disabled to avoid startup network churn (seen 2s clone overhead).
+    -- Install extra parsers manually when needed:
+    --   :TSInstall bash python json yaml html css javascript typescript regex
+    --   or uncomment below and restart:
+    -- require("nvim-treesitter").install({ "bash", "python", "json", "yaml", "html", "css", "javascript", "typescript", "regex" })
   end,
 }

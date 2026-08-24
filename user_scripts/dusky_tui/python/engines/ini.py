@@ -95,8 +95,35 @@ class IniConfigEngine(BaseEngine):
             if current_mtime > self.file_mtime:
                 return False, f"File {self.config_path.name} was modified externally. Reload required.", ""
 
-        changes_dict = {(scope, key): val for key, scope, val, _ in changes}
+        # Resolve dynamic scope template placeholders (e.g. app-name="{custom_app_1_target}")
+        resolved_changes = []
+        val_lookup = {k: str(v).strip() for k, s, v, _ in changes}
+        for k, s, v, itype in changes:
+            if isinstance(s, str) and "{" in s and "}" in s:
+                res_scope = s
+                for lookup_k, lookup_v in val_lookup.items():
+                    res_scope = res_scope.replace(f"{{{lookup_k}}}", lookup_v)
+                
+                # Also check cached values if not passed in current batch
+                if "{" in res_scope:
+                    for cache_k, cache_v in self.cache.items():
+                        short_k = cache_k.split("/")[-1]
+                        res_scope = res_scope.replace(f"{{{short_k}}}", str(cache_v).strip())
+                
+                if "{" in res_scope or '=""' in res_scope or "='' " in res_scope:
+                    v = "__DELETE__"
+                s = res_scope
+                
+            resolved_changes.append((k, s, v, itype))
+            
         applied_commits = set()
+        for k, s, v, itype in changes:
+            if isinstance(s, str) and s.startswith("__"):
+                self.cache[f"{s}/{k}"] = v
+                applied_commits.add((s, k))
+
+        changes = resolved_changes
+        changes_dict = {(scope, key): val for key, scope, val, _ in changes}
         out_lines = []
         
         try:
@@ -207,6 +234,9 @@ class IniConfigEngine(BaseEngine):
             
             # Insert bottom-up to prevent array shifting
             for scope in sorted(missing_by_scope.keys(), key=lambda s: scope_end_indices.get(s, 0), reverse=True):
+                if str(scope).startswith("__"):
+                    continue # Skip writing internal UI state fields to INI output
+                
                 insert_idx = scope_end_indices.get(scope, len(out_lines))
                 
                 # Create scope header if it doesn't exist

@@ -129,6 +129,7 @@ if ask_next_step "Configure mkinitcpio (Dynamic Block/LUKS/BTRFS mapping)"; then
 MODULES=(${MODULES_ARRAY})
 BINARIES=(${BINARIES_ARRAY})
 HOOKS=(${HOOKS_ARRAY})
+MODULES_DECOMPRESS="yes"
 EOF
     
     chmod 0644 "$CONF_FILE"

@@ -1,10 +1,5 @@
 #!/usr/bin/env bash
-# -----------------------------------------------------------------------------
-# Name:        Arch Linux Waydroid Setup (Hyprland/UWSM Optimized)
-# Description: Automates Waydroid installation, image setup, and optimization.
-#              Zero-legacy code. Optimized for Bash 5+ & Wayland Native.
-# Version:     5.2 (Production Final - Strict Mode Arithmetic Hardened)
-# -----------------------------------------------------------------------------
+#d: Set up Waydroid for Android apps
 
 set -euo pipefail
 shopt -s inherit_errexit 2>/dev/null || true

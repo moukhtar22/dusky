@@ -80,9 +80,15 @@ die() {
 }
 
 notify() {
+    local title="${1:-Blur ON}"
+    local message="${2:-}"
+    local icon="${3:-display-symbolic}"
+
     command -v notify-send &>/dev/null && notify-send \
+        --app-name=hypr-visuals \
+        --icon="$icon" \
         -h string:x-canonical-private-synchronous:hypr-visuals \
-        -t 1500 "Hyprland" "$1" 2>/dev/null || true
+        -t 1500 "$title" "$message" 2>/dev/null || true
 }
 
 # --- The Architecture: Stream-Optimized Atomic I/O ---
@@ -210,7 +216,8 @@ if [[ "$TARGET_STATE" == "on" ]]; then
     NEW_MAKO_PROGRESS_ALPHA="$MAKO_PROGRESS_ALPHA_ON"
     NEW_MAKO_OSD_BG_ALPHA="$MAKO_OSD_BG_ALPHA_ON"
     
-    NOTIFY_MSG="Visuals: Max (Blur/Shadow ON)"
+    NOTIFY_TITLE="Blur ON"
+    NOTIFY_MSG=""
     STATE_STRING="True"
 else
     NEW_ENABLED="false"
@@ -225,7 +232,8 @@ else
     NEW_MAKO_PROGRESS_ALPHA="$MAKO_PROGRESS_ALPHA_OFF"
     NEW_MAKO_OSD_BG_ALPHA="$MAKO_OSD_BG_ALPHA_OFF"
     
-    NOTIFY_MSG="Visuals: Performance (Blur/Shadow OFF)"
+    NOTIFY_TITLE="Blur OFF"
+    NOTIFY_MSG=""
     STATE_STRING="False"
 fi
 
@@ -300,13 +308,7 @@ fi
 
 # --- Apply Changes at Runtime (Single Batch IPC) ---
 if command -v hyprctl &>/dev/null; then
-    HYPR_BATCH_CMD="keyword decoration:blur:enabled ${NEW_ENABLED}; keyword decoration:shadow:enabled ${NEW_ENABLED}; keyword decoration:active_opacity ${NEW_ACTIVE}; keyword decoration:inactive_opacity ${NEW_INACTIVE}"
-    
-    if ! hyprctl --batch "$HYPR_BATCH_CMD" &>/dev/null; then
-        printf 'Warning: hyprctl batch command failed. Is Hyprland running?\n' >&2
-    fi
-    
-    # Efficiently reload the config to catch the new Lua window rules without flickering monitors
+    hyprctl eval "hl.config({ decoration = { blur = { enabled = ${NEW_ENABLED} }, shadow = { enabled = ${NEW_ENABLED} }, active_opacity = ${NEW_ACTIVE}, inactive_opacity = ${NEW_INACTIVE} } })" &>/dev/null || true
     hyprctl reload config-only &>/dev/null || true
 fi
 
@@ -315,6 +317,6 @@ command -v makoctl &>/dev/null && { makoctl reload &>/dev/null || true; }
 command -v pkill &>/dev/null && { pkill -SIGUSR2 waybar || true; }
 
 # --- User Feedback ---
-notify "$NOTIFY_MSG"
+notify "$NOTIFY_TITLE" "$NOTIFY_MSG" "display-symbolic"
 
 exit 0

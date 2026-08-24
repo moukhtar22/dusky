@@ -143,7 +143,7 @@
     // =========================================================
 
     "custom/launcher": {
-        "format": "󰣇 ",
+        "format": "󰌽 ",
         "tooltip": true,
         "tooltip-format": "Control Center",
         "on-click": "gdbus call --session --dest com.github.dusky.controlcenter --object-path /com/github/dusky/controlcenter --method org.freedesktop.Application.Activate '{}'",
@@ -156,7 +156,7 @@
         "return-type": "json",
         "interval": 5,
         "signal": 9,
-        "on-click": "uwsm-app -- ~/user_scripts/waybar/toggle_hypridle.sh",
+        "on-click": "dusky-run ~/user_scripts/waybar/toggle_hypridle.sh",
         "escape": true
     },
 
@@ -182,29 +182,29 @@
         "return-type": "json",
         "format": "{}",
         "tooltip": true,
-        "on-click": "uwsm-app -- kitty --class system_update.sh --hold -e ~/user_scripts/update_dusky/system_update.sh --all"
+        "on-click": "dusky-run kitty --class system_update.sh --hold -e ~/user_scripts/update_dusky/system_update.sh --all"
     },
 
     "custom/snip": {
         "format": "󰆞",
         "tooltip": true,
         "tooltip-format": "Screenshot",
-        "on-click": "uwsm-app -- ~/user_scripts/images/dusky_screenshot.sh --region --freeze --no-notify --smart",
-        "on-click-right": "uwsm-app -- ~/user_scripts/images/dusky_screenshot.sh --region --freeze --annotate --no-notify --tool arrow --smart"
+        "on-click": "dusky-run ~/user_scripts/images/dusky_screenshot.sh --region --freeze --no-notify --smart",
+        "on-click-right": "dusky-run ~/user_scripts/images/dusky_screenshot.sh --region --freeze --annotate --no-notify --tool arrow --smart"
     },
 
     "custom/clip": {
         "format": "",
         "tooltip": true,
         "tooltip-format": "Clipboard",
-        "on-click": "uwsm-app -- pkill rofi; rofi -modi 'clipboard:~/user_scripts/rofi/rofi_clipboard.sh' -show clipboard"
+        "on-click": "dusky-run pkill rofi; rofi -modi 'clipboard:~/user_scripts/rofi/rofi_clipboard.sh' -show clipboard"
     },
 
     "custom/calculator": {
         "format": "",
         "tooltip": true,
         "tooltip-format": "Calculator",
-        "on-click": "uwsm-app -- pkill rofi; ~/user_scripts/rofi/calculator.sh"
+        "on-click": "dusky-run pkill rofi; ~/user_scripts/rofi/calculator.sh"
     },
 
     "custom/net-speed": {
@@ -231,8 +231,8 @@
         "format-connected": "󰂱 {num_connections}",
         "tooltip-format": "{controller_alias}\n{controller_address}",
         "tooltip-format-connected": "Connected: {num_connections}",
-        "on-click": "uwsm-app -- blueman-manager",
-        "on-click-right": "uwsm-app -- kitty --class bluetui -e bluetui"
+        "on-click": "dusky-run blueman-manager",
+        "on-click-right": "dusky-run kitty --class bluetui -e bluetui"
     },
 
     "tray": {
@@ -255,9 +255,27 @@
 
     "clock": {
         "format": "{:%I:%M}",
-        "tooltip-format": "<big>{:%Y %B}</big>\n<tt><small>{calendar}</small></tt>",
-        "on-click-right": "uwsm-app -- gnome-clocks",
-        "on-click-middle": "uwsm-app -- kitty --class peaclock -e peaclock"
+        "tooltip-format": "<tt>{calendar}</tt>",
+        "calendar": {
+            "mode": "year",
+            "mode-mon-col": 3,
+            "weeks-pos": "right",
+            "on-scroll": 1,
+            "format": {
+                "months": "<span color='#ffb786'><b>{}</b></span>",
+                "days": "<span color='#e2e2e2'>{}</span>",
+                "weeks": "<span color='#c9ca93'>W{}</span>",
+                "weekdays": "<span color='#ffb786'><b>{}</b></span>",
+                "today": "<span color='#131313' background='#ffb786'><b>{}</b></span>"
+            }
+        },
+        "actions": {
+            "on-click-right": "mode",
+            "on-scroll-up": "shift_up",
+            "on-scroll-down": "shift_down"
+        },
+        "on-click-right": "dusky-run gnome-clocks",
+        "on-click-middle": "dusky-run kitty --class peaclock -e peaclock"
     },
 
     "battery": {
@@ -276,7 +294,7 @@
         "device": "intel_backlight",
         "format": "{icon} {percent}%",
         "format-icons": [" ", " "],
-        "on-click": "uwsm-app -- ~/user_scripts/dusky_system/quickpanal/dusky_quickpanal.py",
+        "on-click": "dusky-run ~/user_scripts/dusky_system/quickpanal/dusky_quickpanal.py",
         "on-scroll-up": "brightnessctl s +5%",
         "on-scroll-down": "brightnessctl s 5%-",
         "tooltip-format": "Brightness: {percent}%"
@@ -286,7 +304,7 @@
         "format": "{icon} {volume}%",
         "format-muted": "󰖁",
         "format-icons": { "default": ["󰕿", "󰖀", "󰕾"] },
-        "on-click": "uwsm-app -- pavucontrol",
+        "on-click": "dusky-run pavucontrol",
         "on-scroll-up": "pactl set-sink-volume @DEFAULT_SINK@ +5%",
         "on-scroll-down": "pactl set-sink-volume @DEFAULT_SINK@ -5%",
         "tooltip-format": "Volume: {volume}%\nLMB: Pavucontrol"

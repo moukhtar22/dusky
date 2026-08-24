@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Downloads wayclick soundpacks and copies them to the required directory
+#d: Download WayClick soundpacks
 
 set -euo pipefail
 

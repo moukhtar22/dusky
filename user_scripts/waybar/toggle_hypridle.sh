@@ -12,7 +12,15 @@ set -uo pipefail
 # =============================================================================
 readonly WAYBAR_SIGNAL=9              # Must match "signal" in waybar config
 readonly PROC_NAME="hypridle"
-readonly KILL_TIMEOUT=50              # Iterations (50 × 100ms = 5 seconds)
+readonly KILL_TIMEOUT=50              # Iterations (50 x 100ms = 5 seconds)
+readonly APP_NAME="dusky-hypridle"    # Mako app-name override target
+readonly SYNC_ID="dusky-hypridle"     # Replaces prior popup on rapid toggles
+readonly NOTIFY_TIMEOUT=2200          # ms the popup stays on screen
+
+# Papirus icons (all verified present in Papirus-Dark)
+readonly ICON_ON="system-suspend"     # Suspend armed
+readonly ICON_OFF="chronometer"       # Coffee mode - stay awake
+readonly ICON_ERR="dialog-error"      # Failure
 
 # =============================================================================
 # Helper Functions
@@ -29,7 +37,13 @@ send_notification() {
 
     # Silently skip if notify-send unavailable
     command -v notify-send &>/dev/null || return 0
-    notify-send -u "${urgency}" -t 2000 "${title}" "${body}" -i "${icon}"
+    notify-send \
+        -u "${urgency}" \
+        -t "${NOTIFY_TIMEOUT}" \
+        -a "${APP_NAME}" \
+        -i "${icon}" \
+        -h "string:x-canonical-private-synchronous:${SYNC_ID}" \
+        "${title}" "${body}"
 }
 
 update_waybar() {
@@ -64,14 +78,14 @@ main() {
 
         # Final verification
         if is_running; then
-            send_notification "critical" "Error" \
-                "Failed to stop ${PROC_NAME}" "dialog-error"
+            send_notification "critical" "hypridle error" \
+                "Could not stop ${PROC_NAME}." "${ICON_ERR}"
             exit 1
         fi
 
-        send_notification "low" "Suspend Inhibited" \
-            "Automatic suspend is now OFF (Coffee Mode ☕)." \
-            "dialog-warning"
+        send_notification "low" "Coffee Mode" \
+            "Suspend OFF - screen stays awake." \
+            "${ICON_OFF}"
     else
         # -----------------------------------------------------------------
         # ENABLE hypridle
@@ -79,8 +93,8 @@ main() {
         
         # Verify binary exists
         if ! command -v "${PROC_NAME}" &>/dev/null; then
-            send_notification "critical" "Error" \
-                "${PROC_NAME} not found in PATH" "dialog-error"
+            send_notification "critical" "hypridle error" \
+                "${PROC_NAME} not found in PATH." "${ICON_ERR}"
             exit 1
         fi
 
@@ -93,14 +107,14 @@ main() {
 
         # Verify it started successfully
         if ! is_running; then
-            send_notification "critical" "Error" \
-                "Failed to start ${PROC_NAME}" "dialog-error"
+            send_notification "critical" "hypridle error" \
+                "Failed to start ${PROC_NAME}." "${ICON_ERR}"
             exit 1
         fi
 
-        send_notification "low" "Suspend Enabled" \
-            "Automatic suspend is now ON." \
-            "dialog-information"
+        send_notification "low" "Suspend Armed" \
+            "Auto-sleep & idle protection ON." \
+            "${ICON_ON}"
     fi
 
     # Update Waybar module

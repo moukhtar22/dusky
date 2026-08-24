@@ -1,49 +1,33 @@
-
-Click the `Add Hardware` button at the bottom left to open the Add New Virtual Hardware window, and select `Channel` on the left pannel. . Then, from the drop-down list for `Name` select `org.qemu.guest_agent.0` and click `Finish`
-
-
-The QEMU Guest Agent Channel establishes a private communication channel between the host physical machine and the guest virtual machine. This enables the host machine to issue commands to the guest operating system using libvirt. The guest operating system then responds to those commands asynchronously.
-
-Add a QEMU guest agent channel to the Windows 11 guest virtual machine.
-
-
-
-
-
-
-
-
+---
+title: "QEMU Guest Agent Channel (Windows Delta)"
+tags:
+  - kvm
+  - windows
+  - spice
+  - arch
+aliases:
+  - Windows Agent Stub
 ---
 
-The following is Just for info
+# QEMU Guest Agent Channel (Windows)
 
----
+> [!tip] Merged — canonical source
+> **Shared both-channels + 3-part input model lives in [[KVM Setup/VM Creation/06 Guest Integration — Agent, Clipboard & Input]].** This stub keeps **only Windows install** detail inline.
 
-For example, after creating the Windows 11 guest virtual machine, you can shut it down from the host by issuing the following command:
+## Windows install (after canonical Add Hardware)
 
-```bash
-sudo virsh shutdown Windows-11 --mode=agent
-```
+1. Canonical already did: **Add Hardware → Channel → Name `org.qemu.guest_agent.0`** + `com.redhat.spice.0`. XML:
+   ```xml
+   <channel type="unix"><source mode="bind"/><target type="virtio" name="org.qemu.guest_agent.0"/></channel>
+   <channel type="spicevmc"><target type="virtio" name="com.redhat.spice.0"/></channel>
+   ```
+2. Inside Windows: install **QEMU Guest Agent** via `virtio-win-guest-tools.exe` (CD Drive E:) → set **Services → QEMU Guest Agent → Automatic → Start** + **Spice Agent → Automatic**.
 
-This shutdown method is more reliable than virsh shutdown --mode=acpi because it guarantees to shut down a cooperative guest in a clean state. If the agent is not present, libvirt must rely on injecting an ACPI shutdown event, which some guests ignore and thus do not shut down. You can also use the same syntax to reboot (virsh reboot).
-
-Some of the commands you can try, among many others, are:
-
-### Query the guest operating system's IP address via the guest agent.
-
-```bash
-sudo virsh domifaddr Windows-11 --source agent
-```
-
-### Show a list of mounted filesystems in the running guest.
+Verify host:
 
 ```bash
-sudo virsh domfsinfo Windows-11
+virsh -c qemu:///system qemu-agent-command win11 '{"execute":"guest-info"}' | python3 -m json.tool
+virsh -c qemu:///system shutdown win11 --mode agent   # clean > --mode acpi
 ```
 
-### Instructs the guest to trim its filesystem.
-
-```bash
-sudo virsh domfstrim Windows-11
-```
-
+See: canonical [[KVM Setup/VM Creation/06 Guest Integration — Agent, Clipboard & Input]] (both OSes, Linux `spice-vdagent`/`qemu-guest-agent` via `pacman`), [[Looking Glass]].

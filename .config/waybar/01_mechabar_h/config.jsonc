@@ -2,17 +2,14 @@
 	"position": "top",
 	"modules-left": [
 		"group/user",
-		"custom/right_div#4",
+		"custom/right_div#1",
 		"hyprland/workspaces",
 		"custom/notifications",
 		"custom/right_div#1"
 	],
 	"modules-center": [
 		"custom/left_div#2",
-		"group/updates-drawer",
-		"bluetooth",
-		"network",
-    "group/net-speed-drawer",
+		"custom/weather",
 		"custom/left_div#3",
 		"memory",
 		"custom/left_div#4",
@@ -26,17 +23,18 @@
 		"custom/right_div#3",
 		"clock#date",
 		"custom/right_div#4",
-		"custom/weather",
+		"bluetooth",
+		"network",
+		"group/net-speed-drawer",
+		"group/updates-drawer",
 		"custom/right_div#5"
 	],
 	"modules-right": [
 		"custom/left_div#2",
-		// "group/mpris-drawer",
-		"custom/left_div#3",
 		"group/pulseaudio",
+		"custom/left_div#3",
 		"custom/left_div#4",
 		"group/backlight-drawer",
-		"custom/left_inv#1",
 		"group/power-drawer"
 	],
 
@@ -81,8 +79,8 @@
 			"active": "",
 			"default": ""
 		},
-		"on-scroll-up": "hyprctl dispatch 'hl.dsp.focus({ workspace = \"+1\" })'",
-		"on-scroll-down": "hyprctl dispatch 'hl.dsp.focus({ workspace = \"-1\" })'",
+		"on-scroll-up": "hyprctl dispatch 'hl.dsp.focus({ workspace = \"e-1\" })'",
+		"on-scroll-down": "hyprctl dispatch 'hl.dsp.focus({ workspace = \"e+1\" })'",
 		"cursor": true
 	},
 
@@ -119,8 +117,8 @@
 		"format-off": "󰂲",
 		"format-on": "󰂰",
 		"format-connected": "󰂱",
-		"on-click": "uwsm-app -- blueman-manager",
-		"on-click-right": "uwsm-app -- kitty --class bluetui -e bluetui",
+		"on-click": "dusky-run blueman-manager",
+		"on-click-right": "dusky-run kitty --class bluetui -e bluetui",
 		"tooltip-format": "Device Addr: {device_address}",
 		"tooltip-format-disabled": "Bluetooth Disabled",
 		"tooltip-format-off": "Bluetooth Off",
@@ -136,7 +134,7 @@
 		"format": "󰘚 {percentage}%",
 		"format-warning": "󰀧 {percentage}%",
 		"format-critical": "󰀧 {percentage}%",
-    "on-click": "uwsm-app -- kitty --class io_monitor.sh -e \"$HOME/user_scripts/drives/io_monitor.sh\"",
+    "on-click": "dusky-run kitty --class dusky_disk_monitor_io -e python \"$HOME/user_scripts/drives/dusky_disk_monitor_io.py\"",
 		"states": {
 			"warning": 75,
 			"critical": 90
@@ -157,7 +155,7 @@
 	},
 
 	"custom/distro": {
-		"format": "󰣇",
+		"format": "󰌽",
 		"on-click": "gdbus call --session --dest com.github.dusky.controlcenter --object-path /com/github/dusky/controlcenter --method org.freedesktop.Application.Activate '{}'",
 		"on-click-right": "gdbus call --session --dest org.dusky.quickpanal --object-path /org/dusky/quickpanal --method org.freedesktop.Application.Activate '{}'",
 		"tooltip-format": "Control Center"
@@ -170,20 +168,24 @@
 
 	"clock#date": {
 		"format": "󰸗 {:%m-%d}",
-		"tooltip-format": "{calendar}",
+		"tooltip-format": "<tt>{calendar}</tt>",
 		"calendar": {
-			"mode": "month",
-			"mode-mon-col": 6,
+			"mode": "year",
+			"mode-mon-col": 3,
+			"weeks-pos": "right",
+			"on-scroll": 1,
 			"format": {
-				"months": "<span alpha='100%'><b>{}</b></span>",
-				"days": "<span alpha='90%' font='monospace'>{}</span>",
-				"weekdays": "<span alpha='80%'><i>{}</i></span>",
-				"weeks": "<span alpha='90%' font='monospace'> {} </span>",
-				"today": "<span alpha='100%'><b><u>{}</u></b></span>"
+				"months": "<span color='#ffb786'><b>{}</b></span>",
+				"days": "<span color='#e2e2e2'>{}</span>",
+				"weeks": "<span color='#c9ca93'>W{}</span>",
+				"weekdays": "<span color='#ffb786'><b>{}</b></span>",
+				"today": "<span color='#131313' background='#ffb786'><b>{}</b></span>"
 			}
 		},
 		"actions": {
-			"on-click": "mode"
+			"on-click-right": "mode",
+			"on-scroll-up": "shift_up",
+			"on-scroll-down": "shift_down"
 		}
 	},
 
@@ -200,7 +202,7 @@
 		"return-type": "json",
 		"interval": 5,
 		"signal": 9,
-		"on-click": "uwsm-app -- ~/user_scripts/waybar/toggle_hypridle.sh",
+		"on-click": "dusky-run ~/user_scripts/waybar/toggle_hypridle.sh",
 		"escape": true
 	},
 
@@ -250,7 +252,7 @@
 		"return-type": "json",
 		"format": "{}",
 		"tooltip": true,
-		"on-click": "uwsm-app -- kitty --class system_update.sh --hold -e ~/user_scripts/update_dusky/system_update.sh --all"
+		"on-click": "dusky-run kitty --class system_update.sh --hold -e ~/user_scripts/update_dusky/system_update.sh --all"
 	},
 
   "custom/notifications": {
@@ -282,7 +284,7 @@
 
 /*  "custom/mpris-trigger": {
         "format": "♪",
-        "on-click": "uwsm-app -- pavucontrol",
+        "on-click": "dusky-run pavucontrol",
         "tooltip": false
     },*/
 
@@ -333,8 +335,8 @@
 			"headset": "󰋎",
 			"headset-muted": "󰋐"
 		},
-		"on-click": "uwsm-app -- pavucontrol",
-		"on-click-right": "uwsm-app -- kitty --class cava -e cava",
+		"on-click": "dusky-run pavucontrol",
+		"on-click-right": "dusky-run kitty --class cava -e cava",
 		"on-click-middle": "pactl set-sink-mute @DEFAULT_SINK@ toggle",
 		"on-scroll-up": "pactl set-sink-volume @DEFAULT_SINK@ +5%",
 		"on-scroll-down": "pactl set-sink-volume @DEFAULT_SINK@ -5%",
@@ -356,8 +358,8 @@
 		"format-icons": [
 			"", "", "", "", "", "", "", "", ""
 		],
-		"on-click": "uwsm-app -- ~/user_scripts/dusky_system/quickpanal/dusky_quickpanal.py",
-		"on-click-right": "uwsm-app -- ~/user_scripts/dusky_system/quickpanal/dusky_quickpanal.py",
+		"on-click": "dusky-run ~/user_scripts/dusky_system/quickpanal/dusky_quickpanal.py",
+		"on-click-right": "dusky-run ~/user_scripts/dusky_system/quickpanal/dusky_quickpanal.py",
 		"on-scroll-up": "brightnessctl set +5%",
 		"on-scroll-down": "brightnessctl set 5%-",
 		"tooltip": false
@@ -399,7 +401,7 @@
 
 	"custom/power": {
 		"format": "󰤄",
-		"on-click": "uwsm-app -- ~/user_scripts/wlogout/wlogout_scale.sh",
+		"on-click": "dusky-run ~/user_scripts/wlogout/wlogout_scale.sh",
 		"tooltip-format": "Power Menu"
 	},
 

@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-# appending hooks to initramfs file
-"""
-Arch Linux Mkinitcpio Optimizer (Userspace)
-Architecture: Python 3.10+ | Topology Auto-Detection | Drop-in Compliant
-"""
+#d: Optimize the initramfs with extra hooks
 
 import os
 import sys

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""memtune — master ZRAM / VM / THP / MGLRU / network tuning orchestrator for Arch Linux (kernel 7.0+, systemd 260+, Python 3.14+)."""
+#d: Run the ZRAM, swappiness, and THP optimizers together
 
 from __future__ import annotations
 

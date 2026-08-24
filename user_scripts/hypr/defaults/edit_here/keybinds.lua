@@ -20,24 +20,24 @@
 
 hl.bind(
     "SUPER + Q",
-    hl.dsp.exec_cmd("uwsm-app -- " .. terminal),
+    hl.dsp.exec_cmd("dusky-run " .. terminal),
     { description = "Launch Terminal", submap_universal = true  }
 )
 
 hl.bind(
     "SUPER + W",
-    hl.dsp.exec_cmd("uwsm-app -- " .. browser),
+    hl.dsp.exec_cmd("dusky-run " .. browser),
     { description = "Launch Browser", submap_universal = true  }
 )
 
 hl.bind(
     "SUPER + E",
-    hl.dsp.exec_cmd("uwsm-app -- " .. fileManager),
+    hl.dsp.exec_cmd("dusky-run " .. fileManager),
     { description = "File Manager", submap_universal = true  }
 )
 
 hl.bind(
     "SUPER + R",
-    hl.dsp.exec_cmd("uwsm-app -- " .. textEditor),
+    hl.dsp.exec_cmd("dusky-run " .. textEditor),
     { description = "Open Text Editor", submap_universal = true  }
 )

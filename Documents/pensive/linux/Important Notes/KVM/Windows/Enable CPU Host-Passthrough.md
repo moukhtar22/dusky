@@ -1,34 +1,49 @@
-# CPU Configuration
+---
+title: "CPU Mode — Host-Passthrough (Windows Delta)"
+tags:
+  - kvm
+  - cpu
+  - windows
+  - hyperv
+aliases:
+  - Windows CPU Stub
+---
 
-> [!ABSTRACT] Goal
-> 
-> Configure the Virtual Machine to utilize the full power of your physical processor.
+# CPU Mode — Host-Passthrough (Windows)
 
-### 1. Access Hardware Details
+> [!tip] Merged — canonical source
+> **Shared `host-passthrough` + `cache.mode=passthrough` + topology math lives in [[KVM Setup/VM Creation/05 CPU — Host-Passthrough & Topology]].** Follow that note for **VM → CPUs → Copy host CPU configuration**, XML `mode="host-passthrough" check="none" migratable="off"`, `topology sockets×dies×cores×threads = vcpu`, and why not `host-model`/`qemu64`. This stub keeps **only Windows Hyper-V + clock** delta.
 
-If you are currently looking at the console (screen) or the XML editing tab, you need to switch to the hardware view.
+## Windows delta (on top of canonical)
 
-- Click the **Details** button in the top toolbar of the Virtual Machine window.
-    
+After canonical `host-passthrough` + topology, add:
 
-### 2. specific CPU Settings
+```xml
+<features>
+  <hyperv mode="custom">
+    <relaxed state="on"/><vapic state="on"/><spinlocks state="on" retries="8191"/>
+    <vpindex state="on"/><runtime state="on"/><synic state="on"/>
+    <stimer state="on"><direct state="on"/></stimer><reset state="on"/>
+    <vendor_id state="on" value="Microsoft Hv"/>
+    <frequencies state="on"/><reenlightenment state="on"/><tlbflush state="on"/><ipi state="on"/><evmcs state="on"/>
+  </hyperv>
+  <kvm><hidden state="on"/></kvm>
+  <vmport state="off"/><ioapic driver="kvm"/>
+</features>
+<cpu mode="host-passthrough" check="none" migratable="off">
+  <topology sockets="1" dies="1" cores="6" threads="2"/><cache mode="passthrough"/>
+</cpu>
+<clock offset="localtime">
+  <timer name="rtc" tickpolicy="catchup"/><timer name="pit" tickpolicy="delay"/>
+  <timer name="hpet" present="no"/><timer name="hypervclock" present="yes"/>
+</clock>
+```
 
-- In the left-hand sidebar panel, select **CPUs**.
-    
-- Look for the **Configuration** area.
-    
-- Ensure the **Model** or **Configuration** mode is set to: `host-passthrough`.
-    **Copy host CPU configuration (host-passthrough)**
+- List matches `30_kvm_vm_deploy.py:HYPERV` (`relaxed,vapic,spinlocks,vpindex,synic,stimer,frequencies,reenlightenment,tlbflush,ipi,evmcs`) + `vendor_id=Microsoft Hv` + `kvm.hidden=on` (NVIDIA Error 43) + `vmport off`.
+- Clock `hypervclock=yes` + `hpet=no` pairs with **inside Windows** `bcdedit /set useplatformclock No` (see [[Disable useplatformclock]]) — else stutter.
+- Use `35_cpu_pinning_generator.py` for `cputune` on hybrid CPUs (do not paste i7-12700H example blindly).
 
-> [!TIP] Why host-passthrough?
-> 
-> When the mode is set to host-passthrough, the host CPU's model and features are exactly passed on to the guest virtual machine (the OS you are installing).
-> 
-> - **Performance:** This causes the virtual machine to run close to the host's native speed.
->     
-> - **Recommendation:** This is the default and highly recommended option for best performance.
->     
+> [!info] Linux route
+> Plain `host-passthrough` only — **no** Hyper-V, **no** `vendor_id`, clock `offset="utc"` (not `localtime`), `hpet present=no`, `hypervclock` off. See canonical.
 
-### 3. Save
-
-- Click **Apply** at the bottom right of the window.
+See: canonical [[KVM Setup/VM Creation/05 CPU — Host-Passthrough & Topology]], [[Enable Hyper-V Enlightenments]] (fast paste + cputune), [[Hyper-V Enlightenments]] (upstream ref), [[Hypervisor Features]] (schema), [[Disable useplatformclock]].

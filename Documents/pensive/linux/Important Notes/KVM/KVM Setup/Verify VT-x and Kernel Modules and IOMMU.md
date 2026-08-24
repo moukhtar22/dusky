@@ -1,107 +1,87 @@
-# Hardware Verification & Virtualization Prereqs (Kernel 7.1+)
+---
+title: "Verify VT-x / KVM / IOMMU & ACS"
+tags:
+  - kvm
+  - kernel
+  - iommu
+  - vfio
+  - arch
+---
 
-Before configuring virtualization, we must guarantee your motherboard and the modern Linux kernel (7.1+) are actively cooperating. As of Kernel 7.x, the virtualization stack has entirely deprecated legacy [[VFIO]] Type 1 memory management in favor of **[[IOMMUFD]]**, and heavily relies on hardware-level [[ACS]] (Access Control Services).
+# Verify VT-x / KVM / IOMMU & ACS (Kernel 7.1+, systemd 261+)
 
-## Step 1: UEFI/BIOS Configuration
+> [!abstract] Goal
+> Guarantee firmware and the modern stack (KVM + `IOMMUFD`) are cooperating **before** touching libvirt. This note is the pre-flight gate `05_virtio_iso.py:verify_kvm_capability` and `15_*.py:enumerate_pci` codify.
 
-You must enter your UEFI firmware settings. Modern PCIe passthrough requires far more than just basic CPU virtualization. Locate your **Advanced**, **System Agent**, or **PCIe Subsystem** menus and configure the following:
+## Step 0 — UEFI/BIOS
 
-> [!warning] Essential Settings
-> 
-> 1. **CPU Virtualization:** Enable **Intel VT-x** or **AMD SVM**.
->     
-> 2. **IOMMU / Directed I/O:** Enable **Intel VT-d** or **AMD-Vi**.
->     
-> 3. **Above 4G Decoding:** **ENABLED**. (Mandatory for mapping 16GB+ GPUs into a VM).
->     
-> 4. **Resizable BAR (ReBAR) / SAM:** **ENABLED**. (Required for zero-bottleneck GPU passthrough).
->     
-> 5. **ACS (Access Control Services):** **ENABLED**. (Critical. Ensures the motherboard physically isolates PCIe devices from one another).
->     
-> 6. **SR-IOV:** **ENABLED** (If you intend to use vGPU splitting or split network cards).
->     
+| Setting | Value | Why |
+|---|---|---|
+| VT-x / SVM | **Enabled** | `vmx`/`svm` flags → `/dev/kvm` |
+| VT-d / AMD-Vi | **Enabled** | IOMMU DMA remapping |
+| Above 4G Decoding | **Enabled** | >16 GiB BAR (large dGPU) |
+| ReBAR / SAM | **Enabled** | Zero-bottleneck BAR |
+| ACS | **Enabled** if exposed | Physical PCIe isolation (not all boards expose) |
+| SR-IOV | **Enabled** only if using vGPU | — |
 
-## Step 2: Verification of the Kernel Environment
+## Step 1 — CPU flags
 
-```
-flowchart LR
-    A[1. CPU Flags] --> B[2. IOMMUFD Modules]
-    B --> C[3. Boot Params]
-    C --> D[4. ACS Isolation Map]
-    D --> E[5. Interrupt Remapping]
-```
-
-Once booted into Arch Linux, open your terminal. We will verify the entire chain: CPU features, kernel modules, boot parameters, and hardware isolation.
-
-### 1. Verify CPU Virtualization Support
-
-First, confirm the CPU flags are actively passing to the OS.
-
-```
+```bash
 lscpu | grep -i virtualization
+# Intel: VT-x   AMD: AMD-V
+grep -m1 '^flags' /proc/cpuinfo | tr ' ' '\n' | grep -E '^vmx$|^svm$'
+ls -l /dev/kvm   # crw-rw-rw- 1 root kvm
 ```
 
-> [!check] Expected Output
-> 
-> You should see `VT-x` (for Intel) or `AMD-V` (for AMD).
+## Step 2 — Kernel modules (KVM + IOMMUFD)
 
-### 2. Verify Modern Kernel Modules (KVM & IOMMUFD)
-
-We need to ensure your running Arch Kernel 7.1 was compiled with the modern virtualization stack.
-
-```
+```bash
 zgrep -E "CONFIG_KVM=|CONFIG_VFIO_PCI=|CONFIG_IOMMUFD=" /proc/config.gz
+# y = builtin, m = module (Arch default m, loaded on demand)
+lsmod | grep -iE 'kvm|vfio|iommu'
 ```
 
-> [!example] Understanding the Results
-> 
-> - **`=y`**: Built directly into the kernel (Always active).
->     
-> - **`=m`**: Loadable Module (Arch default, loaded dynamically by QEMU/libvirt).
->     
+> [!info] IOMMUFD vs Type1
+> Since Kernel 7.1, VFIO Type1 is deprecated in favor of **IOMMUFD** for memory management. QEMU 10+ defaults to `iommufd` backend where available. This is guest memory-management future; host isolation steps below unchanged.
 
-### 3. Verify Boot Parameters
+## Step 3 — Boot params
 
-Ensure your bootloader (GRUB or systemd-boot) has the correct IOMMU parameters injected at boot.
-
-```
-cat /proc/cmdline
+```bash
+cat /proc/cmdline | tr ' ' '\n' | grep -E '^(intel_iommu|amd_iommu|iommu|vfio)'
+# Intel expects: intel_iommu=on + iommu=pt
+# AMD expects: iommu=pt only (amd_iommu=on is ignored — see Grub Kernal Parameters)
 ```
 
-> [!tip] Required Flags
-> 
-> Ensure your boot line includes `iommu=pt`. For Intel systems, explicitly adding `intel_iommu=on` is highly recommended even if the kernel defaults it to on.
+## Step 4 — IOMMU groups (the crucial test)
 
-### 4. Verify IOMMU Groups & ACS Isolation (The Crucial Test)
-
-If your IOMMU is working and ACS is functioning, the kernel will physically separate your PCIe devices into distinct numbered groups.
-
-Run this bash script to map out your hardware:
-
-```
-for d in /sys/kernel/iommu_groups/*/devices/*; do 
+```bash
+for d in /sys/kernel/iommu_groups/*/devices/*; do
   n=${d#*/iommu_groups/*}; n=${n%%/*}
   printf 'IOMMU Group %s ' "$n"
   lspci -nns "${d##*/}"
 done
 ```
 
-> [!info] How to Read Your IOMMU Map
-> 
-> Look through the output for the GPU you want to pass through.
-> 
-> **Success:** Your target GPU and its associated Audio Controller are alone in their own isolated `IOMMU Group`.
-> 
-> **Failure:** Your GPU is grouped with essential host devices (like your main NVMe drive). You would need an ACS Override Patch.
+> [!info] How to read
+> - **Success:** target dGPU + its audio/xHCI/UCSI are alone (PCIe bridges in same group are irrelevant).
+> - **Failure:** dGPU shares group with NVMe/SATA/LAN from other slots. Fix: move card to CPU-attached x16 slot or board with real ACS. **Do NOT** apply ACS-override patches on hosts handling data you care about — they fake isolation.
 
-### 5. Verify Interrupt Remapping (Advanced Testing)
+## Step 5 — Interrupt remapping
 
-For modern PCIe passthrough to work cleanly, your hardware must support and enable Interrupt Remapping. If this fails, VMs cannot securely handle device interrupts.
-
-```
-sudo dmesg | grep 'remapping'
+```bash
+sudo dmesg | grep -i -e 'remapping' -e 'DMAR-IR' -e 'AMD-Vi'
+# Intel: DMAR-IR: Enabled IRQ remapping in x2apic mode
+# AMD:   AMD-Vi: Interrupt remapping enabled
 ```
 
-> [!check] Expected Output
-> 
-> You are looking for lines stating `DMAR-IR: Enabled IRQ remapping in x2apic mode` (for Intel) or `AMD-Vi: Interrupt remapping enabled` (for AMD).
+## Flow
+
+```mermaid
+flowchart LR
+  A[CPU flags vmx/svm] --> B[IOMMUFD/KVM modules]
+  B --> C[Boot params iommu=pt]
+  C --> D[ACS groups clean]
+  D --> E[IRQ remap enabled]
+```
+
+On failure, see [[Verify VT-x and Kernel Modules and IOMMU|Troubleshooting]] and [[Host PC  Preparation for GPU isolation]]`:§1.2` for the scripts' `audit_groups`/`audit_id_collisions` panels.

@@ -1,0 +1,13 @@
+[panel]
+width = 420
+position = "right"
+font_size = 13
+autofocus = true
+click_away_dismiss = true
+save_history = true
+
+[llm]
+default_model = "nanbeige:3b"
+temperature = 0.7
+system_prompt = "You are Dusky AI, an intelligent, helpful, and concise desktop AI assistant running locally."
+stream = true

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Dusky Optional Package Installer
+#d: Install optional packages from the AUR
 
 set -euo pipefail
 shopt -s extglob
@@ -38,6 +38,7 @@ Tools       | zellij                | Modern terminal workspace/multiplexer (Rus
 Tools       | tealdeer              | Fast tldr client (simplified man pages)
 Tools       | man-db                | The standard manual pager suite
 Tools       | avahi                 | Service Discovery using mDNS/DNS-SD (compatible with Bonjour)
+Tools       | xdg-desktop-portal-kde | KDE backend for xdg-desktop-portal (file chooser, etc.)
 Tools       | evince                | Document viewer (PDF, PostScript, XPS, djvu, dvi, tiff, cbr, cbz, cb7, cbt)
 Tools       | aria2                 | High-speed download utility (Pair with uget)
 Tools       | uget                  | Download Manager GUI (Pair with aria2)
@@ -74,11 +75,14 @@ Media       | cantarell-fonts       | Humanist sans serif font
 Media       | ttf-bitstream-vera    | Bitstream Vera fonts
 Media       | ttf-dejavu            | Font based on Bitstream Vera (wider range of characters)
 Media       | ttf-liberation        | Font family metric compatibility with Arial, Times New Roman, and Courier New
-Media       | ttf-font-awesome      | Iconic font designed for Bootstrap - woff2 format
+Media       | otf-font-awesome      | Iconic font designed for Bootstrap - otf format
 Media       | woff2-font-awesome    | Iconic font designed for Bootstrap - woff2 format
 Media       | ttf-jetbrains-mono-nerd | Patched font JetBrains Mono from nerd fonts library
+Media       | otf-atkinsonhyperlegiblemono-nerd | Atkinson Hyperlegible Mono Nerd Font
+Media       | ttf-atkinson-hyperlegible | Atkinson Hyperlegible TTF Font
+Media       | otf-atkinson-hyperlegible | Atkinson Hyperlegible OTF Font
 Media       | awesome-terminal-fonts| fonts/icons for powerlines
-Media       | papirus-folders-git   | folder color themeing for file manager
+Media       | papirus-folders       | folder color theming for Papirus (matugen Lab, stable)
 Media       | ttf-opensans          | Sans-serif typeface commissioned by Google
 Media       | ttf-meslo-nerd        | Patched font Meslo LG from nerd fonts library
 Media       | obs-studio            | Software for video recording and live streaming
@@ -680,14 +684,8 @@ detect_aur_helper() {
 }
 
 run_pkg_cmd() {
-    # If not connected to a TTY (like when run via orchestrator), use 'script' to trick paru/pacman into showing the progress bar
-    if ! [[ -t 1 ]] && command -v script >/dev/null 2>&1; then
-        local cmd_str
-        printf -v cmd_str '%q ' "$@"
-        script -q -e -c "$cmd_str" /dev/null
-    else
-        "$@"
-    fi
+    # Run helper command directly without 'script' to avoid block-buffering in pipes
+    "$@"
 }
 
 run_installer() {

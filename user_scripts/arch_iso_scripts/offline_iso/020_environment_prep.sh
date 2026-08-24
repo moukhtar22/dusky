@@ -25,8 +25,6 @@ Usage: 002_environment_prep.sh [OPTIONS]
 Options:
   -a, --auto          Run autonomously with no interactive prompts.
   --cowspace SIZE     Resize Arch ISO cowspace to SIZE (example: 500M, 1G).
-  --arch              Target standard Arch Linux (populates archlinux keys).
-  --cachyos           Target CachyOS (populates archlinux + cachyos keys).
   -h, --help          Show this help.
 
 Environment variables:
@@ -53,7 +51,6 @@ case "$AUTO_MODE" in
 esac
 
 COWSPACE_SIZE="${COWSPACE_SIZE:-}"
-TARGET_OS=""
 
 while (($#)); do
     case "$1" in
@@ -70,10 +67,7 @@ while (($#)); do
             COWSPACE_SIZE="${COWSPACE_SIZE// /}"
             ;;
         --arch)
-            TARGET_OS="arch"
-            ;;
-        --cachyos|--cachy)
-            TARGET_OS="cachyos"
+            # Ignored for backwards compatibility
             ;;
         -h|--help)
             usage
@@ -108,36 +102,9 @@ else
     msg_info "Autonomous mode enabled."
 fi
 
-# --- TARGET OS PROMPT ---
-if [[ -z "$TARGET_OS" ]]; then
-    if (( AUTO_MODE == 1 )); then
-        msg_info "Autonomous mode active: Defaulting Target OS to Arch Linux."
-        TARGET_OS="arch"
-    else
-        printf '\n%b:: Select Target OS for Keyring Setup:%b\n' "$C_BOLD" "$C_RESET"
-        printf '   [1] Arch Linux (Default)\n'
-        printf '   [2] CachyOS\n'
-        
-        OS_REPLY=""
-        read -r -p ":: Enter choice [1 or 2]: " OS_REPLY
-        
-        case "${OS_REPLY// /}" in
-            2)
-                TARGET_OS="cachyos"
-                msg_info "Target OS set to CachyOS."
-                ;;
-            *)
-                TARGET_OS="arch"
-                msg_info "Target OS set to Arch Linux."
-                ;;
-        esac
-        printf '\n'
-    fi
-fi
-
 # 1. Console Font
 msg_info "Setting console font..."
-setfont ter-v28b || setfont latarcyrheb-sun24 || msg_warn "Could not set font. Continuing..."
+setfont ter-v22b || setfont ter-v24b || setfont latarcyrheb-sun24 || msg_warn "Could not set font. Continuing..."
 
 # 2. Battery Threshold
 BAT_DIR=""
@@ -230,9 +197,6 @@ pacman-key --init
 sleep 1
 
 POPULATE_TARGETS="archlinux"
-if [[ "$TARGET_OS" == "cachyos" ]]; then
-    POPULATE_TARGETS+=" cachyos"
-fi
 
 msg_info "2/2: pacman-key --populate $POPULATE_TARGETS"
 # shellcheck disable=SC2086

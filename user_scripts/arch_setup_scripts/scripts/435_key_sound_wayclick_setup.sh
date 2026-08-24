@@ -1,24 +1,5 @@
 #!/usr/bin/env bash
-# ==============================================================================
-# WAYCLICK ELITE - ARCH LINUX / UV OPTIMIZED (GOLDEN EDITION)
-# ==============================================================================
-# "I fear not the man who has practiced 10,000 kicks once,
-#  but I fear the man who has practiced one kick 10,000 times." - Bruce Lee
-# ==============================================================================
-#
-#  ENABLE_TRACKPAD_SOUNDS="true"
-#    → ALL devices with EV_KEY play sounds. No filtering whatsoever.
-#
-#  ENABLE_TRACKPAD_SOUNDS="false" + AUTO_DETECT_TRACKPADS="true"  (default)
-#    → Keyword blacklist filters named devices
-#    → Capability check catches unnamed touchpads (ITE5570, ELAN, etc.)
-#    → Both filters active
-#
-#  ENABLE_TRACKPAD_SOUNDS="false" + AUTO_DETECT_TRACKPADS="false"
-#    → ONLY keyword blacklist is used
-#    → Remove a keyword → that device type is un-blocked
-#    → Full manual control
-#
+#d: Add keyboard sound effects with WayClick
 
 set -euo pipefail
 shopt -s inherit_errexit
@@ -221,7 +202,7 @@ fi
 
 if (( ${#NEEDED_DEPS[@]} > 0 )); then
     if $INTERACTIVE; then
-        clear
+        clear || true
         printf "%b
 ╔════════════════════════════════════════════════════════════════╗
 ║  %bWAYCLICK ELITE%b                                                ║

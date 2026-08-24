@@ -1,10 +1,5 @@
 #!/usr/bin/env bash
-# =============================================================================
-# ELITE HYPRLAND TEXT EDITOR SWITCHER - PLATINUM EDITION (v6.8)
-# =============================================================================
-#
-# BASED ON: Dusky TUI Engine v5.9 (Fully Armored)
-# TARGET:   Arch Linux / Hyprland / UWSM / Wayland
+#d: Switch the default text editor
 
 set -Eeuo pipefail
 shopt -s extglob
@@ -14,8 +9,8 @@ shopt -s extglob
 # =============================================================================
 
 # Catalog Format: "Key|Type|DesktopFile|DisplayName"
-# Type 0 = GUI (exec, uwsm-app $textEditor)
-# Type 1 = Terminal (exec, uwsm-app -- $terminal $textEditor)
+# Type 0 = GUI (exec, dusky-run $textEditor)
+# Type 1 = Terminal (exec, dusky-run -- $terminal $textEditor)
 declare -ra EDITOR_CATALOG=(
     "gnome-text-editor|0|org.gnome.TextEditor.desktop|GNOME Text Editor (GUI)"
     "nvim|1|nvim.desktop|Neovim (Terminal)"
@@ -265,19 +260,19 @@ switch_text_editor() {
     if [[ "$t_type" == "1" ]]; then
         local term_lower="${CURRENT_TERMINAL,,}"
         if [[ "$term_lower" == *"kitty"* ]]; then
-            exec_cmd='"uwsm-app -- " .. terminal .. " --class " .. textEditor .. " " .. textEditor'
+            exec_cmd='"dusky-run " .. terminal .. " --class " .. textEditor .. " " .. textEditor'
         elif [[ "$term_lower" == *"foot"* ]]; then
-            exec_cmd='"uwsm-app -- " .. terminal .. " --app-id=" .. textEditor .. " " .. textEditor'
+            exec_cmd='"dusky-run " .. terminal .. " --app-id=" .. textEditor .. " " .. textEditor'
         elif [[ "$term_lower" == *"alacritty"* ]]; then
-            exec_cmd='"uwsm-app -- " .. terminal .. " --class " .. textEditor .. " -e " .. textEditor'
+            exec_cmd='"dusky-run " .. terminal .. " --class " .. textEditor .. " -e " .. textEditor'
         elif [[ "$term_lower" == *"wezterm"* ]]; then
-            exec_cmd='"uwsm-app -- " .. terminal .. " start --class " .. textEditor .. " -- " .. textEditor'
+            exec_cmd='"dusky-run " .. terminal .. " start --class " .. textEditor .. " -- " .. textEditor'
         else
             # Fallback for unknown terminals
-            exec_cmd='"uwsm-app -- " .. terminal .. " " .. textEditor'
+            exec_cmd='"dusky-run " .. terminal .. " " .. textEditor'
         fi
     else 
-        exec_cmd='"uwsm-app -- " .. textEditor'
+        exec_cmd='"dusky-run " .. textEditor'
     fi
 
     new_binds=$(awk -v new_cmd="$exec_cmd" '

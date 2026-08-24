@@ -4,7 +4,7 @@
     "layer": "top",
     "position": "top",
     "spacing": 0,
-    "height": 30,
+    "height": 32,
     "margin-top": 5,
     "margin-bottom": 5,
     "margin-left": 4,
@@ -26,7 +26,7 @@
     "modules-right": [ 
         "group/audio-drawer",
         "group/battery-drawer",
-        "group/power-drawer"
+        "custom/power"
     ],
 
     // ===================================================================
@@ -96,16 +96,18 @@
         "format": "",
         "on-click": "activate",
         "sort-by": "number",
-        "persistent-workspaces": {}
+        "persistent-workspaces": {},
+        "on-scroll-up": "hyprctl dispatch 'hl.dsp.focus({ workspace = \"e-1\" })'",
+        "on-scroll-down": "hyprctl dispatch 'hl.dsp.focus({ workspace = \"e+1\" })'"
     },
 
     "clock": {
         "format": "{:%I:%M}",
-        "tooltip-format": "<tt><span size='12pt' font='JetBrainsMono Nerd Font'>{calendar}</span></tt>",
-        "on-click": "uwsm-app -- gnome-clocks",
+        "tooltip-format": "<tt>{calendar}</tt>",
+        "on-click": "dusky-run gnome-clocks",
         "interval": 60,
         "calendar": {
-            "mode": "month",
+            "mode": "year",
             "mode-mon-col": 3,
             "weeks-pos": "right",
             "on-scroll": 1,
@@ -116,6 +118,11 @@
                 "weekdays": "<span color='#ffb786'><b>{}</b></span>",
                 "today": "<span color='#131313' background='#ffb786'><b>{}</b></span>"
             }
+        },
+        "actions": {
+            "on-click-right": "mode",
+            "on-scroll-up": "shift_up",
+            "on-scroll-down": "shift_down"
         }
     },
 
@@ -153,13 +160,13 @@
         "return-type": "json",
         "format": "{}",
         "tooltip": true,
-        "on-click": "uwsm-app -- kitty --class system_update.sh --hold -e ~/user_scripts/update_dusky/system_update.sh --all"
+        "on-click": "dusky-run kitty --class system_update.sh --hold -e ~/user_scripts/update_dusky/system_update.sh --all"
     },
 
     "pulseaudio": {
         "format": "{icon} ",
         "format-muted": "󰖁",
-        "on-click": "uwsm-app -- pavucontrol",
+        "on-click": "dusky-run pavucontrol",
         "format-icons": ["", "", ""],
         "tooltip-format": "Volume: {volume}%"
     },
@@ -173,8 +180,8 @@
         "tooltip-format-connected": "{controller_alias}\n\n{device_enumerate}",
         "tooltip-format-enumerate-connected": "󰂱 {device_alias}",
         "tooltip-format-enumerate-connected-battery": "󰂱 {device_alias} ({device_battery_percentage}%)",
-        "on-click": "uwsm-app -- blueman-manager",
-        "on-click-right": "uwsm-app -- kitty --class bluetui -e bluetui"
+        "on-click": "dusky-run blueman-manager",
+        "on-click-right": "dusky-run kitty --class bluetui -e bluetui"
     },
 
     "network": {
@@ -199,7 +206,7 @@
     "cpu": {
         "format": " {usage}",
         "interval": 2,
-        "on-click": "uwsm-app -- kitty --class htop -e htop",
+        "on-click": "dusky-run kitty --class htop -e htop",
         "tooltip-format": "CPU: {usage}%",
         "states": {
             "critical": 80
@@ -209,7 +216,7 @@
     "memory": {
         "format": " {percentage}",
         "interval": 2,
-        "on-click": "uwsm-app -- kitty --class io_monitor.sh -e $HOME/user_scripts/drives/io_monitor.sh",
+        "on-click": "dusky-run kitty --class dusky_disk_monitor_io.py -e $HOME/user_scripts/drives/dusky_disk_monitor_io.py",
         "tooltip-format": "Used: {used}GiB",
         "states": {
             "critical": 80
@@ -217,10 +224,10 @@
     },
 
     "custom/power": {
-        "format": "",
+        "format": "󰐥",
         "tooltip-format": "Power Menu\nRight-click: Control Center",
-        "on-click": "uwsm-app -- ~/user_scripts/wlogout/wlogout_scale.sh",
-        "on-click-right": "uwsm-app -- python3 ~/user_scripts/dusky_system/control_center/dusky_control_center.py"
+        "on-click": "dusky-run ~/user_scripts/wlogout/wlogout_scale.sh",
+        "on-click-right": "dusky-run python3 ~/user_scripts/dusky_system/control_center/dusky_control_center.py"
     },
 
     "custom/inhibit-suspend": {
@@ -229,7 +236,7 @@
         "return-type": "json",
         "interval": 5,
         "signal": 9,
-        "on-click": "uwsm-app -- ~/user_scripts/waybar/toggle_hypridle.sh",
+        "on-click": "dusky-run ~/user_scripts/waybar/toggle_hypridle.sh",
         "escape": true
     }
 }

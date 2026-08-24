@@ -1,10 +1,5 @@
 #!/usr/bin/env bash
-# =============================================================================
-# ELITE HYPRLAND FILE MANAGER SWITCHER - PLATINUM EDITION (v6.8)
-# =============================================================================
-#
-# BASED ON: Dusky TUI Engine v5.9 (Fully Armored)
-# TARGET:   Arch Linux / Hyprland / UWSM / Wayland
+#d: Switch the default file manager
 
 set -Eeuo pipefail
 shopt -s extglob
@@ -253,8 +248,8 @@ switch_file_manager() {
         release_lock "$lock_fd"; return 1
     fi
 
-    if [[ "$t_type" == "1" ]]; then exec_cmd='"uwsm-app -- " .. terminal .. " " .. fileManager'
-    else exec_cmd='"uwsm-app -- " .. fileManager'; fi
+    if [[ "$t_type" == "1" ]]; then exec_cmd='"dusky-run " .. terminal .. " " .. fileManager'
+    else exec_cmd='"dusky-run " .. fileManager'; fi
 
     new_binds=$(awk -v new_cmd="$exec_cmd" '
         { lines[NR] = $0 }

@@ -86,18 +86,17 @@ function scripts() {
             --border=rounded \
             --border-label=" 󰟆 dusky scripts " \
             --border-label-pos=center \
-            --prompt=" " \
-            --marker="󰐕" \
-            --pointer="" \
+            --ghost="Search user scripts..." \
+            --prompt="❯ " \
+            --marker="✔ " \
+            --pointer="❯ " \
             --info=inline-right \
             --tabstop=4 \
             --delimiter="/" \
             --with-nth="3.." \
             --preview='file={}; file="${file%%$(printf "\t")*}"; file="${file/\~/$HOME}"; bat --color=always --style=numbers --line-range=:500 "$file" 2>/dev/null || cat "$file"' \
             --preview-window="right,50%,border-rounded,~3" \
-            --color='bg+:#313244,bg:#1e1e2e,spinner:#f5e0dc,hl:#f38ba8' \
-            --color='fg:#cdd6f4,info:#cba6f7,pointer:#f5e0dc' \
-            --color='marker:#f5e0dc,fg+:#cdd6f4,prompt:#cba6f7,hl+:#f38ba8' \
+            --color="${DUSKY_FZF_COLORS:-bg+:#313244,bg:#1e1e2e,fg:#cdd6f4}" \
             --height=100%
     )
 
@@ -127,10 +126,12 @@ function scripts() {
             --style=minimal \
             --border=rounded \
             --border-label=" 󰢱 Action " \
-            --prompt=" " \
+            --prompt="❯ " \
+            --pointer="❯ " \
+            --marker="✔ " \
             --header=" Target: $script_path " \
             --header-border=horizontal \
-            --color='bg+:#313244,bg:#1e1e2e,hl:#f38ba8,fg+:#cdd6f4,header:#89b4fa' \
+            --color="${DUSKY_FZF_COLORS:-bg+:#313244,bg:#1e1e2e,fg:#cdd6f4}" \
             --info=hidden \
             --height=~40% \
             --layout=reverse

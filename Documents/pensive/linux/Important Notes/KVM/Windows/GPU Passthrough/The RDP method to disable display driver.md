@@ -1,64 +1,82 @@
-The RDP method to disable display driver
-## 🔄 Phase 3: The "Headless" Switch
+---
+title: "RDP Rescue — Disable Emulated Display Adapter"
+tags:
+  - kvm
+  - vfio
+  - rdp
+  - arch
+---
 
+# RDP Rescue — Disable Emulated Display Adapter
 
-Pre requistis, 
-If you have a custom iso for whom remote desktop is ripped out, this rdp method wont work. go back and use the other method, (my custom win 10 iso has it ripped out , for win11 i somereason didnt rip it out. so win11 works. )
-### Remote Desktop (RDP) Configuration
-### 1. you must know your ip address for windows, 
+> [!abstract] Goal
+> Safely hand off rendering from `QXL`/`Microsoft Basic` (emulated) to pass-through NVIDIA via RDP, keeping a live session after the emulated adapter goes dark ([[Looking Glass]] Phase 3.2). Canonical automation: `55_rdp.py` (+ `50_win.py` dispatch).
 
-check taskmanager, 
-*OR*
-Identify IP Address using Open PowerShell and run:
+## Prereqs
 
+- [ ] Custom ISOs: confirm RDP **not** ripped out (your Win10 lite had RDP removed — use Win11 or non-stripped image for this path; else use virt-manager method in [[Looking Glass_old]])
+- [ ] Network virtio: [[Configure Virtual Network Interface]] → `virtio` + **Option 1/3** bridge/NAT per [[Network Bridging for LAN access]]
+- [ ] IP known, user with password, RDP enabled, network **Private**
+
+### 1. IP
+
+Inside VM guest (Task Manager → Performance → Wi-Fi/Ethernet, or PowerShell):
+
+```powershell
+ipconfig   # IPv4, e.g. 192.168.122.9
+Get-NetIPAddress -AddressFamily IPv4 | Where-Object IPAddress -like "192.168.*"
 ```
-ipconfig
+
+From host (lease view): `virsh -c qemu:///system domifaddr <vm> --source lease` or `virsh net-dhcp-leases default`
+
+### 2. User + password
+
+Set a password (blank requires GPO to disable limit):
+
+```powershell
+# PowerShell as Admin → set password for current user via GUI: Settings → Accounts → Sign-in options
+# or enable blank-password remote logon:
+secpol.msc → Local Policies → Security Options → "Accounts: Limit local account use of blank passwords …" → Disabled
+# Home edition (no secpol): reg add "HKLM\SYSTEM\CurrentControlSet\Control\Lsa" /v LimitBlankPasswordUse /t REG_DWORD /d 0 /f
 ```
-Note the IPv4 address (e.g., `192.168.122.29`).
 
-### 2. you must have a password set for the user, and know both your user name and password for windows. (you can also do it without it if you have access t group policy , )
+### 3. Enable RDP
 
-> [!NOTE]
-> **Option B: Allow Blank Passwords (The "I hate passwords" way)**
-> - Press `Win + R`, type `secpol.msc`, and hit Enter.
-> - Go to **Local Policies** -> **Security Options**.
-> - Find: **"Accounts: Limit local account use of blank passwords to console logon only"**.
-> - Double-click it and set it to **Disabled**.
+```powershell
+Settings → System → Remote Desktop → Enable (On)
+# or PowerShell:
+Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name fDenyTSConnections -Value 0
+Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+```
 
-### 3. You must have remote desktop enabled in settings.
-In Windows, go to **Settings > System > Remote Desktop**.
-### 4. you must have your network set to private instead of public. 
+### 4. Network Private (persistent)
 
-### 5. You Must have set option 2 for this to work. [[Network Bridging for LAN access]] (virtio + Option 2 is the best ) 
+```powershell
+Get-NetConnectionProfile   # likely Public
+Set-NetConnectionProfile -NetworkCategory Private   # temporary
+# persist across reboots: secpol.msc → Network List Manager Policies → Unidentified Networks → Location type = Private
+```
 
-This is the most critical step. We must disable the Emulated GPU ("Microsoft Basic Display" or "Red Hat QXL") to force Windows to use the Passthrough NVIDIA GPU.
+## Hand-off (the rescue)
 
-> [!warning] Don't do this inside Virt-Manager!
-> 
-> If you disable the display adapter while looking at it through Virt-Manager, your screen will freeze, and you will lose mouse control. We must use RDP first.
+> [!warning] Never disable the adapter inside virt-manager viewer
+> You lose mouse + video with no live channel back. **Always via RDP**.
 
-### 1. Connect via RDP (The Rescue Line)
-
-1. Get your VM's IP address (check your router or `ipconfig` inside the VM if you can see it). or from network section of the Task manager
-    
-2. Run this command from your Arch terminal:
-    
-### Replace 192.168.122.9 with YOUR VM IP
-### Replace 'dusky' with YOUR Windows Username
 ```bash
+# from Arch host (55_rdp.py probes MAC → leases → ARP; prompts for user/password/IP if not resolved)
+# manual equivalent:
 xfreerdp3 /v:192.168.122.9 /u:dusky /cert:ignore /dynamic-resolution
+# cached in ~/.config/dusky/settings/virt/win_state (rdp_ip/rdp_user)
 ```
 
->[!tip] A new window will open with your vm's screen. 
-### 2. Disable the Basic Adapter
+**Inside RDP:**
 
-**Inside the RDP Session:**
+1. `devmgmt.msc` → **Display adapters**
+2. Right-click **Microsoft Basic Display Adapter** / **Red Hat QXL controller** → **Disable device → Yes**
+   Windows loses emulated output → scans next GPU → **NVIDIA** wakes; RDP stays (independent RDP channel)
+3. Continue in [[Looking Glass]] Phase 3.7 (VDD virtual monitor, `looking-glass-host` capture)
 
-1. Open **Device Manager**.
-    
-2. Expand **Display Adapters**.
-    
-3. Right-click **Microsoft Basic Display Adapter** (or Red Hat QXL).
-    
-4. Select **Disable Device**.
-    
+> [!tip] Troubleshoot
+> `55_rdp.py:print_rdp_troubleshooting` checks WARP/VPN/UFW (host) and gives one-click PowerShell to: `fDenyTSConnections=0`, `UserAuthentication=0`, `LimitBlankPasswordUse=0`, `NetworkCategory Private`, `Enable-NetFirewallRule -DisplayGroup "Remote Desktop"`. Also verifies `xfreerdp3` binary (`freerdp` pkg).
+
+See: `55_rdp.py`, `50_win.py` (`rdp`/`launch` actions, SPICE wait), [[Looking Glass]].

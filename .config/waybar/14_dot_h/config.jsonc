@@ -94,7 +94,7 @@
 
     // --- MODULE CONFIGURATION ---
     "custom/settings": {
-        "format": "󰣇",
+        "format": "󰌽",
         "tooltip": true,
         "tooltip-format": "Control Center",
         "on-click": "python3 ~/user_scripts/dusky_system/control_center/dusky_control_center.py",
@@ -103,9 +103,26 @@
     
     "clock": {
         "format": "{:%I:%M %p}",
-        "format-alt": "{:%A, %B %d, %Y}",
-        "tooltip-format": "<big>{:%Y %B}</big>\n<tt><small>{calendar}</small></tt>",
-        "on-click": "uwsm-app -- gnome-clocks"
+        "tooltip-format": "<tt>{calendar}</tt>",
+        "calendar": {
+            "mode": "month",
+            "mode-mon-col": 3,
+            "weeks-pos": "right",
+            "on-scroll": 1,
+            "format": {
+                "months": "<span color='#ffb786'><b>{}</b></span>",
+                "days": "<span color='#e2e2e2'>{}</span>",
+                "weeks": "<span color='#c9ca93'>W{}</span>",
+                "weekdays": "<span color='#ffb786'><b>{}</b></span>",
+                "today": "<span color='#131313' background='#ffb786'><b>{}</b></span>"
+            }
+        },
+        "actions": {
+            "on-click-right": "mode",
+            "on-scroll-up": "shift_up",
+            "on-scroll-down": "shift_down"
+        },
+        "on-click": "dusky-run gnome-clocks"
     },
 
     "custom/notification": {
@@ -137,7 +154,7 @@
         "return-type": "json",
         "format": "{}",
         "tooltip": true,
-        "on-click": "uwsm-app -- kitty --class system_update.sh --hold -e ~/user_scripts/update_dusky/system_update.sh --all"
+        "on-click": "dusky-run kitty --class system_update.sh --hold -e ~/user_scripts/update_dusky/system_update.sh --all"
     },
 
     "hyprland/workspaces": {
@@ -147,18 +164,20 @@
         "on-click": "activate",
         "persistent-workspaces": {
             "*": 5
-        }
+        },
+        "on-scroll-up": "hyprctl dispatch 'hl.dsp.focus({ workspace = \"e-1\" })'",
+        "on-scroll-down": "hyprctl dispatch 'hl.dsp.focus({ workspace = \"e+1\" })'"
     },
     
     "custom/expand": {
-        "format": "",
+        "format": "󰅂",
         "tooltip": false
     },
     
     "cpu": {
         "interval": 2,
         "format": " {usage}%",
-        "on-click": "uwsm-app -- kitty -e btop"
+        "on-click": "dusky-run kitty -e btop"
     },
     
     "memory": {
@@ -199,7 +218,7 @@
         "format": "",
         "format-connected": " {num_connections}",
         "tooltip-format": "{controller_alias}\n{num_connections} connected",
-        "on-click": "uwsm-app -- blueman-manager"
+        "on-click": "dusky-run blueman-manager"
     },
     
     "battery": {
@@ -220,7 +239,7 @@
 
     "custom/power": {
         "format": "⏻",
-        "on-click": "uwsm-app -- ~/user_scripts/wlogout/wlogout_scale.sh",
+        "on-click": "dusky-run ~/user_scripts/wlogout/wlogout_scale.sh",
         "tooltip-format": "Power Menu"
     },
 
@@ -230,7 +249,7 @@
         "return-type": "json",
         "interval": 5,
         "signal": 9,
-        "on-click": "uwsm-app -- ~/user_scripts/waybar/toggle_hypridle.sh",
+        "on-click": "dusky-run ~/user_scripts/waybar/toggle_hypridle.sh",
         "escape": true
     }
 }

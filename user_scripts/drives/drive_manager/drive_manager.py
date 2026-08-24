@@ -47,6 +47,7 @@ from dataclasses import dataclass
 # ------------------------------------------------------------------------------
 try:
     import keyring
+    import secretstorage
     from rich.console import Console
     from rich.table import Table
     from rich.panel import Panel
@@ -54,11 +55,11 @@ try:
     from rich.align import Align
     from rich.markup import escape
 except ImportError:
-    print("\n[INFO] Missing required Python libraries: 'keyring' and/or 'rich'.")
+    print("\n[INFO] Missing required Python libraries: 'keyring', 'secretstorage', and/or 'rich'.")
     print("[INFO] Attempting to auto-install via pacman...")
     try:
         subprocess.run(
-            ["sudo", "pacman", "-S", "--needed", "--noconfirm", "python-keyring", "python-rich"],
+            ["sudo", "pacman", "-S", "--needed", "--noconfirm", "python-keyring", "python-secretstorage", "python-rich"],
             check=True
         )
         print("[SUCCESS] Dependencies installed. Seamlessly restarting script...\n")
@@ -79,6 +80,7 @@ LOCK_MAX_RETRIES = 5
 KEYRING_SERVICE = "drive_manager"
 
 console = Console()
+err_console = Console(stderr=True)
 lock_fd = None
 
 # ------------------------------------------------------------------------------
@@ -105,7 +107,7 @@ def success(msg: str):
     console.print(f"[bold green]\\[SUCCESS][/] {msg}")
 
 def err(msg: str):
-    console.print(f"[bold red]\\[ERROR][/] {msg}")
+    err_console.print(f"[bold red]\\[ERROR][/] {msg}")
 
 def hint_msg(msg: str):
     console.print(f"[bold yellow]\\[HINT][/] {msg}")
@@ -264,16 +266,86 @@ def get_crypt_mapper_name(outer_uuid: str) -> str | None:
     if res.returncode == 0:
         try:
             data = json.loads(res.stdout)
-            for device in data.get("blockdevices", []):
-                for child in device.get("children", []):
-                    if child.get("type") == "crypt":
-                        return child.get("name")
+            def find_crypt(nodes: list[dict]) -> str | None:
+                for node in nodes:
+                    if node.get("type") == "crypt":
+                        return node.get("name")
+                    if "children" in node:
+                        found = find_crypt(node["children"])
+                        if found:
+                            return found
+                return None
+            return find_crypt(data.get("blockdevices", []))
         except json.JSONDecodeError:
             pass
     return None
 
+def is_gui_available() -> bool:
+    """Checks if a graphical display environment (X11 or Wayland) is active for GUI prompts."""
+    return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+
+def is_keyring_unlocked() -> bool:
+    """Checks if the default keyring collection is unlocked (takes 0.00s and never hangs)."""
+    try:
+        # Check active keyring backend name
+        backend_name = type(keyring.get_keyring()).__name__.lower()
+        
+        # Only perform the lock check if using a D-Bus SecretService/libsecret or Chainer backend
+        if "secretservice" not in backend_name and "libsecret" not in backend_name and "chainer" not in backend_name:
+            return True
+            
+        connection = secretstorage.dbus_init()
+        collection = secretstorage.get_default_collection(connection)
+        return not collection.is_locked()
+    except Exception:
+        return True
+
+def unlock_keyring_if_locked() -> bool:
+    """Checks if the default keyring collection is locked, and if so, requests system unlock.
+    
+    In GUI sessions (X11/Wayland), invokes D-Bus collection.unlock() for native prompt.
+    In headless/TTY sessions, cleanly falls back to manual terminal prompt without GUI errors.
+    
+    Returns True if unlocked (or if backend doesn't support locking/SecretStorage unavailable),
+    False if unlocking failed, was dismissed by user, or if locked in TTY mode.
+    """
+    try:
+        backend_name = type(keyring.get_keyring()).__name__.lower()
+        if "secretservice" not in backend_name and "libsecret" not in backend_name and "chainer" not in backend_name:
+            return True
+            
+        connection = secretstorage.dbus_init()
+        collection = secretstorage.get_default_collection(connection)
+        
+        if collection.is_locked():
+            if not is_gui_available():
+                log("Keyring is locked and no GUI display session detected (TTY/Headless mode).")
+                log("Falling back directly to manual terminal prompt...")
+                return False
+
+            log("Keyring is locked. Prompting to unlock system keyring...")
+            try:
+                dismissed = collection.unlock()
+                if dismissed or collection.is_locked():
+                    log("Keyring unlock prompt was dismissed or cancelled.")
+                    return False
+                else:
+                    success("Keyring successfully unlocked.")
+                    return True
+            except Exception as e:
+                log(f"Keyring unlock prompt unavailable ({e}). Falling back to terminal prompt.")
+                return False
+        return True
+    except Exception as e:
+        log(f"Keyring status check non-critical warning: {e}")
+        return True
+
 def get_keyring_password_with_timeout(service: str, name: str, timeout: int = 60) -> str | None:
     """Attempts keyring lookup with a daemon thread timeout to prevent hanging on exit."""
+    if not unlock_keyring_if_locked():
+        log("Keyring is locked or unlock was cancelled. Falling back to manual password prompt.")
+        return None
+
     result = [None]
     
     def fetch():
@@ -294,6 +366,10 @@ def get_keyring_password_with_timeout(service: str, name: str, timeout: int = 60
 
 def set_keyring_password_with_timeout(service: str, name: str, password: str, timeout: int = 60) -> bool:
     """Saves password to keyring with a daemon thread timeout to prevent hanging on locked keyring."""
+    if not unlock_keyring_if_locked():
+        err("Keyring is locked or unlock was cancelled. Password not saved to keyring.")
+        return False
+
     success_flag = [False]
 
     def store():
@@ -814,15 +890,19 @@ def do_unlock(drive: Drive) -> bool:
 
             base_cmd = ["sudo", "cryptsetup", "open", "--allow-discards"] + crypto_type_args + [outer_dev_path, mapper_name]
             pwd = get_keyring_password_with_timeout(KEYRING_SERVICE, drive.name, timeout=60)
+            pwd_valid = False
             
             if pwd:
                 log("Password found in secure keyring. Supplying to cryptsetup...")
                 cmd = base_cmd + ["--tries", "1", "--key-file", "-"]
-                if not run_cryptsetup_unlock(cmd, pwd):
-                    err("Decryption failed. Keyring password might be incorrect.")
-                    return False
-            else:
-                log("No password in keyring. Falling back to manual terminal prompt.")
+                if run_cryptsetup_unlock(cmd, pwd):
+                    pwd_valid = True
+                else:
+                    err("Decryption failed with stored keyring password. Falling back to manual terminal prompt.")
+
+            if not pwd_valid:
+                if not pwd:
+                    log("No password in keyring. Falling back to manual terminal prompt.")
                 if drive.hint:
                     hint_msg(drive.hint)
                 

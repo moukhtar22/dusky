@@ -10,57 +10,146 @@
 # =============================================================================
 
 [templates.gtk3]
-input_path  = '~/.config/matugen/templates/gtk-colors.css'
+input_path  = '~/.config/matugen/templates/gtk3-colors.css'
 output_path = '~/.config/matugen/generated/gtk-3.css'
 post_hook   = '''
   ln -nfs "$HOME/.config/matugen/generated/gtk-3.css" "$HOME/.config/gtk-3.0/gtk.css"
-  gsettings set org.gnome.desktop.interface gtk-theme "adw-gtk3" || :
+  gsettings set org.gnome.desktop.interface gtk-theme "Adwaita" || :
+  gsettings set org.gnome.desktop.interface gtk-theme "adw-gtk3-dark" || :
 '''
 
 [templates.gtk4]
-input_path  = '~/.config/matugen/templates/gtk-colors.css'
+input_path  = '~/.config/matugen/templates/gtk4-colors.css'
 output_path = '~/.config/matugen/generated/gtk-4.css'
 post_hook   = '''
   ln -nfs "$HOME/.config/matugen/generated/gtk-4.css" "$HOME/.config/gtk-4.0/gtk.css"
-  ln -nfs "/usr/share/themes/adw-gtk3/gtk-4.0/libadwaita.css" "$HOME/.config/gtk-4.0/libadwaita.css"
-  ln -nfs "/usr/share/themes/adw-gtk3/gtk-4.0/libadwaita-tweaks.css" "$HOME/.config/gtk-4.0/libadwaita-tweaks.css"
+  ln -nfs "/usr/share/themes/adw-gtk3-dark/gtk-4.0/libadwaita.css" "$HOME/.config/gtk-4.0/libadwaita.css"
+  ln -nfs "/usr/share/themes/adw-gtk3-dark/gtk-4.0/libadwaita-tweaks.css" "$HOME/.config/gtk-4.0/libadwaita-tweaks.css"
+'''
+
+[templates.gtksourceview]
+input_path  = '~/.config/matugen/templates/gtksourceview.xml'
+output_path = '~/.config/matugen/generated/gtksourceview.xml'
+post_hook   = '''
+  mkdir -p "$HOME/.local/share/gtksourceview-4/styles" "$HOME/.local/share/gtksourceview-3.0/styles" "$HOME/.local/share/gtksourceview-5/styles"
+  ln -nfs "$HOME/.config/matugen/generated/gtksourceview.xml" "$HOME/.local/share/gtksourceview-4/styles/matugen.xml"
+  ln -nfs "$HOME/.config/matugen/generated/gtksourceview.xml" "$HOME/.local/share/gtksourceview-3.0/styles/matugen.xml"
+  ln -nfs "$HOME/.config/matugen/generated/gtksourceview.xml" "$HOME/.local/share/gtksourceview-5/styles/matugen.xml"
 '''
 
 [templates.icon_theme]
 input_path  = '/dev/null'
 output_path = '/dev/null'
 post_hook   = '''
-  gsettings set org.gnome.desktop.interface icon-theme "Papirus" || :
+  gsettings set org.gnome.desktop.interface icon-theme "Papirus-Dark" || :
 '''
 
-# [templates.papirus_icon_theme]
-# input_path  = '~/.config/matugen/templates/papirus'
-# output_path = '~/.config/matugen/generated/papirus'
-# post_hook   = '''
-#   "$HOME/user_scripts/gtk/papirus_folder_colors.sh" || :
-# '''
+[templates.papirus-folders]
+input_path = '~/.config/matugen/templates/papirus-color'
+output_path = '~/.config/matugen/generated/papirus'
+colors_to_compare = [
+    { name = "adwaita",    color = "#93c0ea" },
+    { name = "black",      color = "#4f4f4f" },
+    { name = "blue",       color = "#5294e2" },
+    { name = "bluegrey",   color = "#607d8b" },
+    { name = "breeze",     color = "#57b8ec" },
+    { name = "brown",      color = "#ae8e6c" },
+    { name = "carmine",    color = "#a30002" },
+    { name = "cyan",       color = "#00bcd4" },
+    { name = "darkcyan",   color = "#45abb7" },
+    { name = "deeporange", color = "#eb6637" },
+    { name = "green",      color = "#87b158" },
+    { name = "grey",       color = "#8e8e8e" },
+    { name = "indigo",     color = "#5c6bc0" },
+    { name = "magenta",    color = "#ca71df" },
+    { name = "nordic",     color = "#81a1c1" },
+    { name = "orange",     color = "#ee923a" },
+    { name = "palebrown",  color = "#d1bfae" },
+    { name = "paleorange", color = "#eeca8f" },
+    { name = "pink",       color = "#f06292" },
+    { name = "red",        color = "#e25252" },
+    { name = "teal",       color = "#16a085" },
+    { name = "violet",     color = "#7e57c2" },
+    { name = "white",      color = "#e4e4e4" },
+    { name = "yaru",       color = "#676767" },
+    { name = "yellow",     color = "#f9bd30" },
+]
+compare_to = "{{ colors.primary.default.hex }}"
+post_hook = '''
+  if command -v papirus-folders >/dev/null 2>&1; then
+    nohup sudo -n papirus-folders -C {{ closest_color }} --theme Papirus-Dark -u > /dev/null 2>&1 &
+    sleep 0.35
+    # Refresh icon theme to force file managers to reload (Lab-matched folder color)
+    gsettings set org.gnome.desktop.interface icon-theme "Adwaita" 2>/dev/null || :
+    gsettings set org.gnome.desktop.interface icon-theme "Papirus-Dark" 2>/dev/null || :
+  else
+    echo "[matugen] papirus-folders not installed — install via: paru -S papirus-folders" >&2
+  fi
+'''
 
 [templates.qt5ct]
 input_path  = '~/.config/matugen/templates/qtct-colors.conf'
 output_path = '~/.config/matugen/generated/qt5ct-colors.conf'
+post_hook   = '''
+  mkdir -p "$HOME/.config/qt5ct/colors"
+  ln -nfs "$HOME/.config/matugen/generated/qt5ct-colors.conf" "$HOME/.config/qt5ct/colors/matugen.conf"
+'''
 
 [templates.qt6ct]
 input_path  = '~/.config/matugen/templates/qtct-colors.conf'
 output_path = '~/.config/matugen/generated/qt6ct-colors.conf'
-
-[templates.kvantum_kvconfig]
-input_path  = '~/.config/matugen/templates/kvantum-colors.kvconfig'
-output_path = '~/.config/matugen/generated/kvantum-matugen.kvconfig'
 post_hook   = '''
-  ln -nfs "$HOME/.config/matugen/generated/kvantum-matugen.kvconfig" "$HOME/.config/Kvantum/matugen/matugen.kvconfig"
+  mkdir -p "$HOME/.config/qt6ct/colors"
+  ln -nfs "$HOME/.config/matugen/generated/qt6ct-colors.conf" "$HOME/.config/qt6ct/colors/matugen.conf"
 '''
 
-[templates.kvantum_svg]
-input_path  = '~/.config/matugen/templates/kvantum-colors.svg'
-output_path = '~/.config/matugen/generated/kvantum-matugen.svg'
+[templates.kdeglobals]
+input_path  = '~/.config/matugen/templates/Matugen.colors'
+output_path = '~/.config/matugen/generated/kdeglobals'
 post_hook   = '''
-  ln -nfs "$HOME/.config/matugen/generated/kvantum-matugen.svg" "$HOME/.config/Kvantum/matugen/matugen.svg"
+  mkdir -p "$HOME/.local/share/color-schemes"
+  ln -nfs "$HOME/.config/matugen/generated/kdeglobals" "$HOME/.local/share/color-schemes/Matugen.colors"
+  ln -nfs "$HOME/.config/matugen/generated/kdeglobals" "$HOME/.config/kdeglobals"
+  dbus-send --session --type=signal /KGlobalSettings org.kde.KGlobalSettings.notifyChange int32:0 int32:0 || :
 '''
+
+[templates.kate_syntax]
+input_path  = '~/.config/matugen/templates/kate-syntax.theme'
+output_path = '~/.config/matugen/generated/kate-matugen.theme'
+post_hook   = '''
+  mkdir -p "$HOME/.local/share/org.kde.syntax-highlighting/themes"
+  ln -nfs "$HOME/.config/matugen/generated/kate-matugen.theme" "$HOME/.local/share/org.kde.syntax-highlighting/themes/Matugen.theme"
+'''
+
+[templates.konsole]
+input_path  = '~/.config/matugen/templates/konsole.colorscheme'
+output_path = '~/.config/matugen/generated/konsole-matugen.colorscheme'
+post_hook   = '''
+  mkdir -p "$HOME/.local/share/konsole"
+  ln -nfs "$HOME/.config/matugen/generated/konsole-matugen.colorscheme" "$HOME/.local/share/konsole/Matugen.colorscheme"
+'''
+
+[templates.konsole_profile]
+input_path  = '~/.config/matugen/templates/konsole.profile'
+output_path = '~/.config/matugen/generated/konsole-matugen.profile'
+post_hook   = '''
+  mkdir -p "$HOME/.local/share/konsole"
+  ln -nfs "$HOME/.config/matugen/generated/konsole-matugen.profile" "$HOME/.local/share/konsole/Matugen.profile"
+'''
+
+# [templates.kvantum_kvconfig]
+# input_path  = '~/.config/matugen/templates/kvantum-colors.kvconfig'
+# output_path = '~/.config/matugen/generated/kvantum-matugen.kvconfig'
+# post_hook   = '''
+#   ln -nfs "$HOME/.config/matugen/generated/kvantum-matugen.kvconfig" "$HOME/.config/Kvantum/matugen/matugen.kvconfig"
+# '''
+
+# [templates.kvantum_svg]
+# input_path  = '~/.config/matugen/templates/kvantum-colors.svg'
+# output_path = '~/.config/matugen/generated/kvantum-matugen.svg'
+# post_hook   = '''
+#   ln -nfs "$HOME/.config/matugen/generated/kvantum-matugen.svg" "$HOME/.config/Kvantum/matugen/matugen.svg"
+# '''
 
 
 # =============================================================================
@@ -98,6 +187,10 @@ post_hook   = '''
 input_path  = '~/.config/matugen/templates/rofi-colors.rasi'
 output_path = '~/.config/matugen/generated/rofi-colors.rasi'
 
+[templates.dusky_visualizer_colors]
+input_path  = '~/.config/matugen/templates/dusky_visualizer_colors.json'
+output_path = '~/.config/matugen/generated/dusky_visualizer_colors.json'
+
 
 # =============================================================================
 # 3. Applications (Terminals, Editors, Browsers)
@@ -128,13 +221,13 @@ input_path  = '~/.config/matugen/templates/khal.conf'
 output_path = '~/.config/matugen/generated/khal-config'
 post_hook   = 'ln -nfs "$HOME/.config/matugen/generated/khal-config" "$HOME/.config/khal/config"'
 
-[templates.zellij]
-input_path  = '~/.config/matugen/templates/zellij.kdl'
-output_path = '~/.config/matugen/generated/zellij.kdl'
-post_hook   = '''
-  ln -nfs "$HOME/.config/matugen/generated/zellij.kdl" "$HOME/.config/zellij/themes/matugen.kdl"
-  touch "$HOME/.config/zellij/config.kdl" || :
-'''
+# [templates.zellij]
+# input_path  = '~/.config/matugen/templates/zellij.kdl'
+# output_path = '~/.config/matugen/generated/zellij.kdl'
+# post_hook   = '''
+#   ln -nfs "$HOME/.config/matugen/generated/zellij.kdl" "$HOME/.config/zellij/themes/matugen.kdl"
+#   touch "$HOME/.config/zellij/config.kdl" || :
+# '''
 
 # [templates.opencode]
 # input_path  = '~/.config/matugen/templates/opencode-colors.json'
@@ -218,23 +311,23 @@ post_hook   = '''
   fi
 '''
 
-[templates.obs]
-input_path  = '~/.config/matugen/templates/obs.obt'
-output_path = '~/.config/matugen/generated/obs.obt'
-post_hook   = '''
-  if command -v obs >/dev/null 2>&1; then
-    ln -nfs "$HOME/.config/matugen/generated/obs.obt" "$HOME/.config/obs-studio/themes/matugen.obt"
-  fi
-'''
+# [templates.obs]
+# input_path  = '~/.config/matugen/templates/obs.obt'
+# output_path = '~/.config/matugen/generated/obs.obt'
+# post_hook   = '''
+#   if command -v obs >/dev/null 2>&1; then
+#     ln -nfs "$HOME/.config/matugen/generated/obs.obt" "$HOME/.config/obs-studio/themes/matugen.obt"
+#   fi
+# '''
 
-[templates.vesktop]
-input_path  = '~/.config/matugen/templates/midnight-discord.css'
-output_path = '~/.config/matugen/generated/midnight-discord.css'
-post_hook   = '''
-  if command -v vesktop >/dev/null 2>&1; then
-    ln -nfs "$HOME/.config/matugen/generated/midnight-discord.css" "$HOME/.config/vesktop/themes/midnight-discord.css"
-  fi
-'''
+# [templates.vesktop]
+# input_path  = '~/.config/matugen/templates/midnight-discord.css'
+# output_path = '~/.config/matugen/generated/midnight-discord.css'
+# post_hook   = '''
+#   if command -v vesktop >/dev/null 2>&1; then
+#     ln -nfs "$HOME/.config/matugen/generated/midnight-discord.css" "$HOME/.config/vesktop/themes/midnight-discord.css"
+#   fi
+# '''
 
 # [templates.beeper]
 # input_path  = '~/.config/matugen/templates/beeper.css'
@@ -288,13 +381,16 @@ post_hook   = '''
   fi
 '''
 
-# [templates.firefox_websites]
-# input_path = '~/.config/matugen/templates/firefox_websites.css'
-# output_path = '~/.config/matugen/generated/firefox_websites.css'
-# post_hook = '''
-#     ln -nfs "$HOME/.config/matugen/generated/firefox_websites.css" "$HOME/.config/mozilla/firefox/sw8xyz71.default/chrome/colors.css" || :
-#     ln -nfs "$HOME/.config/matugen/generated/firefox_websites.css" "$HOME/.config/mozilla/firefox/fq2df6j4.default-release/chrome/colors.css" || :
-# '''
+[templates.fastfetch]
+input_path  = '~/.config/matugen/templates/fastfetch.jsonc'
+output_path = '~/.config/matugen/generated/fastfetch.jsonc'
+post_hook   = '''
+  ln -nfs "$HOME/.config/matugen/generated/fastfetch.jsonc" "$HOME/.config/fastfetch/config.jsonc"
+'''
+
+[templates.dusky_sites]
+input_path = '~/.config/matugen/templates/dusky_sites.css'
+output_path = '~/.config/matugen/generated/dusky_sites.css'
 
 #=============================================================================
 # 4. System Services & Daemons (Triggered on theme change )

@@ -21,7 +21,11 @@ _mod_interactive() {
     export LC_ALL=C
 
     # Track State Across Subshells
-    export DUSKY_MOD_STATE_FILE="/tmp/dusky_mod_${$}_state"
+    # Create the state file unpredictably (mode 0600, owned by us) so a local
+    # attacker cannot pre-create/symlink it and inject shell via the fzf binds
+    # that dot-source it.
+    export DUSKY_MOD_STATE_FILE="$(mktemp "${TMPDIR:-/tmp}/dusky_mod.XXXXXX")"
+    trap 'rm -f "$DUSKY_MOD_STATE_FILE"' EXIT
     echo "CURRENT_SORT=\"$init_mode\"; CURRENT_FILTER=\"$init_target\"" > "$DUSKY_MOD_STATE_FILE"
 
     # F1 Help Menu Payload (Contains input flush loop to prevent \eOP escape sequence bleed)

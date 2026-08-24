@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
 # -----------------------------------------------------------------------------
-# Description: Deterministic state manager for Waybar on Hyprland/UWSM.
-#              Supports targeted states (on/off/toggle) and pass-through args.
+# Description: State-of-the-Art Waybar State Manager for Arch Linux (2026).
+#              Supports Dusky Run, systemd transient scopes/units,
+#              SIGUSR1 fast visibility toggle, and deterministic process lifecycle.
 # -----------------------------------------------------------------------------
 
 set -euo pipefail
 
 # --- Configuration & Constants ---
 readonly APP_NAME="waybar"
-readonly TIMEOUT_SEC=5
-readonly LOCK_FILE="${XDG_RUNTIME_DIR:-/tmp}/${APP_NAME}_state.lock"
+readonly TIMEOUT_SEC=3
+readonly LOCK_FILE="${XDG_RUNTIME_DIR:-/tmp}/${APP_NAME}_${UID}_state.lock"
 
 # --- Terminal-Aware Colors ---
 if [[ -t 2 ]]; then
@@ -37,21 +38,23 @@ print_help() {
     cat << EOF
 Usage: $(basename "$0") [OPTIONS] [-- [WAYBAR_ARGS]]
 
-A highly deterministic state manager for Waybar.
+State-of-the-Art Waybar State Manager for Arch Linux.
 
 Options:
-  -t, --toggle    Toggle Waybar on/off (Default behavior)
-  --on            Explicitly start Waybar (No-op if already running)
-  --off           Explicitly stop Waybar (No-op if not running)
-  -h, --help      Show this help message
+  -t, --toggle      Toggle Waybar process on/off (Default behavior)
+  -s, --signal      Fast-toggle Waybar visibility via SIGUSR1 (Zero process overhead)
+  --on              Explicitly start Waybar (No-op if already running)
+  --off             Explicitly stop Waybar (No-op if not running)
+  -h, --help        Show this help message
 
-Any arguments not recognized by this script will be passed directly to Waybar.
-Example: $(basename "$0") --on -c ~/.config/waybar/alt_config.json
+Any additional arguments will be passed directly to Waybar when starting.
+Example: $(basename "$0") --on -- -c ~/.config/waybar/config.json
 EOF
 }
 
 # --- Argument Parsing ---
-ACTION="toggle" # Default action
+ACTION="toggle"
+SIGNAL_MODE=false
 WAYBAR_ARGS=()
 
 while [[ $# -gt 0 ]]; do
@@ -62,6 +65,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         -t|--toggle)
             ACTION="toggle"
+            shift
+            ;;
+        -s|--signal)
+            SIGNAL_MODE=true
             shift
             ;;
         --on)
@@ -78,7 +85,6 @@ while [[ $# -gt 0 ]]; do
             break
             ;;
         -*)
-            # Assume unknown flags (e.g. -c, -s) belong to Waybar
             WAYBAR_ARGS+=("$1")
             shift
             ;;
@@ -91,8 +97,6 @@ done
 
 # --- Core Functions ---
 is_running() {
-    # -u ensures we only see our user's processes.
-    # -x ensures exact binary name match (prevents matching this script).
     pgrep -u "$UID" -x "${APP_NAME}" >/dev/null 2>&1
 }
 
@@ -104,23 +108,28 @@ start_waybar() {
 
     log_info "Starting ${APP_NAME}..."
 
-    # systemd-run strategy for a clean environment
-    if command -v systemd-run >/dev/null 2>&1; then
-        local unit_name="${APP_NAME}-mgr-${EPOCHSECONDS}-$$"
-        
-        # Fixed array expansion bug: "${WAYBAR_ARGS[@]}" correctly evaluates to 0 args if empty
-        # Added --collect to prevent systemd transient unit memory leaks over multiple toggles
-        if systemd-run --user --quiet --collect --unit="${unit_name}" -- "${APP_NAME}" "${WAYBAR_ARGS[@]}" >/dev/null 2>&1; then
-            log_success "${APP_NAME} launched (systemd: ${unit_name})"
+    # Method 1: Dusky Run (Custom System Launcher with OOM Score Elevation & Transient Scopes)
+    # 9>&- prevents the background process from inheriting the lock file descriptor
+    if command -v dusky-run >/dev/null 2>&1; then
+        if dusky-run "${APP_NAME}" "${WAYBAR_ARGS[@]}" 9>&- >/dev/null 2>&1 & then
+            log_success "${APP_NAME} launched (dusky-run)."
             return 0
-        else
-            log_err "systemd-run failed; falling back to setsid."
         fi
     fi
 
-    # Fallback strategy
-    log_info "Attempting fallback launch (setsid)..."
+    # Method 2: systemd-run transient scope/unit (Zero-fork nanosecond naming)
+    if command -v systemd-run >/dev/null 2>&1; then
+        local ts="${EPOCHREALTIME//./}"
+        local unit_name="${APP_NAME}-mgr-${ts:-$$}"
+        if systemd-run --user --quiet --collect --unit="${unit_name}" -- "${APP_NAME}" "${WAYBAR_ARGS[@]}" 9>&- >/dev/null 2>&1; then
+            log_success "${APP_NAME} launched (systemd: ${unit_name})"
+            return 0
+        fi
+    fi
+
+    # Method 3: Fallback detached session via setsid
     (
+        exec 9>&-
         unset XDG_ACTIVATION_TOKEN DESKTOP_STARTUP_ID
         setsid "${APP_NAME}" "${WAYBAR_ARGS[@]}" </dev/null >/dev/null 2>&1 &
     )
@@ -134,22 +143,32 @@ stop_waybar() {
     fi
 
     log_info "Shutting down ${APP_NAME}..."
-    pkill -u "$UID" -x "${APP_NAME}" >/dev/null 2>&1 || true
+    pkill -SIGTERM -u "$UID" -x "${APP_NAME}" >/dev/null 2>&1 || true
 
-    # High-efficiency polling (Checks every 0.1s for fast exit)
-    for (( i = 0; i < TIMEOUT_SEC * 10; i++ )); do
+    # High-precision 50ms polling loop
+    local iterations=$(( TIMEOUT_SEC * 20 ))
+    for (( i = 0; i < iterations; i++ )); do
         if ! is_running; then
             log_success "${APP_NAME} successfully closed."
             return 0
         fi
-        sleep 0.1
+        sleep 0.05
     done
 
-    # Force kill if process is hung
+    # Force kill if hung after grace period
     if is_running; then
-        log_err "Process hung. Sending SIGKILL..."
-        pkill -9 -u "$UID" -x "${APP_NAME}" >/dev/null 2>&1 || true
+        log_err "Process hung after ${TIMEOUT_SEC}s. Sending SIGKILL..."
+        pkill -SIGKILL -u "$UID" -x "${APP_NAME}" >/dev/null 2>&1 || true
         log_success "${APP_NAME} forcefully closed."
+    fi
+}
+
+toggle_signal() {
+    if is_running; then
+        pkill -SIGUSR1 -u "$UID" -x "${APP_NAME}" >/dev/null 2>&1
+        log_success "Sent SIGUSR1 visibility toggle to ${APP_NAME}."
+    else
+        start_waybar
     fi
 }
 
@@ -161,7 +180,12 @@ command -v "${APP_NAME}" >/dev/null 2>&1 || { log_err "${APP_NAME} binary not fo
 exec 9>"${LOCK_FILE}"
 flock -n 9 || { log_err "Another instance is actively managing state. Dropping request."; exit 0; }
 
-# --- Execution State Machine ---
+# --- Execution ---
+if [[ "${SIGNAL_MODE}" == true ]]; then
+    toggle_signal
+    exit 0
+fi
+
 case "$ACTION" in
     on)
         start_waybar

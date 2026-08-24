@@ -13,11 +13,20 @@ readonly XDG_CACHE_HOME="${XDG_CACHE_HOME:-${HOME}/.cache}"
 readonly PINS_DIR="${XDG_DATA_HOME}/rofi-cliphist/pins"
 readonly THUMB_DIR="${XDG_CACHE_HOME}/rofi-cliphist/thumbs"
 
-# --- Persistence Integration ---
+# --- Persistence Integration - FIXED ---
 readonly DB_ENV_FILE="${HOME}/.config/dusky/settings/cliphist_db_env"
+
+# Critical: unset stale inherited value from Hyprland/systemd, then re-source authoritative file
+unset CLIPHIST_DB_PATH 2>/dev/null || true
 if [[ -f "$DB_ENV_FILE" ]]; then
+    # shellcheck source=/dev/null
     source "$DB_ENV_FILE"
 fi
+# Fallback safety: if file missing/empty, use standard cache location
+if [[ -z "${CLIPHIST_DB_PATH:-}" ]]; then
+    export CLIPHIST_DB_PATH="${XDG_CACHE_HOME:-$HOME/.cache}/cliphist/db"
+fi
+export CLIPHIST_DB_PATH
 
 readonly PIN_ICON=" "
 readonly IMG_ICON=" "
@@ -213,7 +222,8 @@ handle_selection() {
                 display_menu
                 ;;
             11) # Alt+Y: Delete from history + cache
-                cliphist delete "${id}" 2>/dev/null
+                # FIX: Force stdin format to prevent the cliphist positional argument bug
+                printf '%s\t\n' "${id}" | cliphist delete 2>/dev/null
                 rm -f "${THUMB_DIR}/${id}.png"
                 display_menu
                 ;;

@@ -275,11 +275,12 @@ while true; do
                     [[ -n "$line" ]] && recent_lines+=("$line")
                 done < "$RECENTS_STATE"
                 
-                declare -a recent_opts=("  Back")
+                declare -a recent_opts=()
                 for entry in "${recent_lines[@]}"; do
                     IFS='|' read -r r_label r_cmd <<< "$entry"
                     recent_opts+=("$r_label")
                 done
+                recent_opts+=("  Back")
                 
                 rchoice=$(printf '%s\n' "${recent_opts[@]}" | "${ROFI_SUB[@]}" -p "Recents") || break
                 [[ "$rchoice" == "  Back" ]] && break
@@ -342,7 +343,7 @@ while true; do
                 IFS='|' read -r selected_card selected_name selected_vendor selected_pstate <<< "${gpu_list[0]}"
             else
                 while true; do
-                    declare -a card_opts=("  Back")
+                    declare -a card_opts=()
                     for entry in "${gpu_list[@]}"; do
                         IFS='|' read -r c_node c_name c_vend c_pstate <<< "$entry"
                         if [[ "$c_pstate" == D3* ]]; then
@@ -351,6 +352,7 @@ while true; do
                             card_opts+=("󰢮  $c_vend (Active)")
                         fi
                     done
+                    card_opts+=("  Back")
                     
                     cardchoice=$(printf '%s\n' "${card_opts[@]}" | "${ROFI_SUB[@]}" -p "Select HUD GPU") || break
                     [[ "$cardchoice" == "  Back" ]] && break
@@ -425,7 +427,7 @@ while true; do
                 if [[ ${#gpu_list[@]} -eq 1 ]]; then
                     IFS='|' read -r selected_card selected_name selected_vendor selected_pstate <<< "${gpu_list[0]}"
                 else
-                    declare -a card_opts=("  Back")
+                    declare -a card_opts=()
                     for entry in "${gpu_list[@]}"; do
                         IFS='|' read -r c_node c_name c_vend c_pstate <<< "$entry"
                         if [[ "$c_pstate" == D3* ]]; then
@@ -434,6 +436,7 @@ while true; do
                             card_opts+=("󰢮  $c_vend (Active)")
                         fi
                     done
+                    card_opts+=("  Back")
                     
                     cardchoice=$(printf '%s\n' "${card_opts[@]}" | "${ROFI_SUB[@]}" -p "GPU") || break
                     [[ "$cardchoice" == "  Back" ]] && break
@@ -454,10 +457,10 @@ while true; do
                 
                 while true; do
                     gpu_opts=(
-                        "  Back"
                         "󱐋  GPU Power (Watts)"
                         "󰢮  GPU Usage"
                         "󰘚  GPU Memory"
+                        "  Back"
                     )
                     gpuchoice=$(printf '%s\n' "${gpu_opts[@]}" | "${ROFI_SUB[@]}" -p "$selected_vendor") || break
                     if [[ "$gpuchoice" == "  Back" ]]; then
@@ -491,7 +494,6 @@ while true; do
         '󰔟  Time & Focus')
             while true; do
                 tf_opts=(
-                    "  Back"
                     "󰥔  Clock (no seconds)"
                     "󰥔  Clock (with seconds)"
                     "󰥔  World Clock"
@@ -499,6 +501,7 @@ while true; do
                     "󰔚  System Uptime"
                     "󱑎  Stopwatch"
                     "󱎫  Pomodoro"
+                    "  Back"
                 )
                 tfchoice=$(printf '%s\n' "${tf_opts[@]}" | "${ROFI_SUB[@]}" -p "Time & Focus") || break
                 [[ "$tfchoice" == "  Back" ]] && break
@@ -517,7 +520,6 @@ while true; do
                     *"World Clock"*)
                         while true; do
                             wc_opts=(
-                                "  Back"
                                 "🇯🇵  Japan (Tokyo)"
                                 "🇺🇸  New York (East)"
                                 "🇺🇸  Chicago (Central)"
@@ -529,6 +531,7 @@ while true; do
                                 "🇦🇪  Dubai"
                                 "🇷🇺  Moscow"
                                 "🇸🇬  Singapore"
+                                "  Back"
                             )
                             wcchoice=$(printf '%s\n' "${wc_opts[@]}" | "${ROFI_SUB[@]}" -p "World Clock") || break
                             [[ "$wcchoice" == "  Back" ]] && break
@@ -598,10 +601,10 @@ while true; do
                             [[ -f "$TIMER_STATE" ]] && last_timer=$(<"$TIMER_STATE")
                             lt_sec=$(parse_timer "$last_timer")
                             t_opts=(
-                                "  Back"
                                 "󰐊  Start Last ($(fmt_t "$lt_sec"))"
                                 "󰒓  Set in Minutes"
                                 "󰒓  Set in Seconds"
+                                "  Back"
                             )
                             tchoice=$(printf '%s\n' "${t_opts[@]}" | "${ROFI_SUB[@]}" -p "Timer") || break
                             [[ "$tchoice" == "  Back" ]] && break
@@ -638,10 +641,10 @@ while true; do
                             [[ -f "$POMO_STATE" ]] && last_pomo=$(<"$POMO_STATE")
                             read -r lw_sec lb_sec <<< "$(parse_pomodoro "$last_pomo")"
                             p_opts=(
-                                "  Back"
                                 "󰐊  Start Last ($(fmt_t "$lw_sec") Work / $(fmt_t "$lb_sec") Break)"
                                 "󰒓  Set in Minutes"
                                 "󰒓  Set in Seconds"
+                                "  Back"
                             )
                             pchoice=$(printf '%s\n' "${p_opts[@]}" | "${ROFI_SUB[@]}" -p "Pomodoro") || break
                             [[ "$pchoice" == "  Back" ]] && break
@@ -684,10 +687,10 @@ while true; do
         '󰋊  Disk Usage')
             while true; do
                 st_opts=(
-                    "  Back"
                     "󰋊  Root Partition (/)"
                     "󰆼  Solid State Drives (SSD)"
                     "󰋊  Hard Disk Drives (HDD)"
+                    "  Back"
                 )
                 stchoice=$(printf '%s\n' "${st_opts[@]}" | "${ROFI_SUB[@]}" -p "Storage Type") || break
                 [[ "$stchoice" == "  Back" ]] && break
@@ -699,7 +702,7 @@ while true; do
                     
                 elif [[ "$stchoice" == *"Solid State Drives"* ]]; then
                     while true; do
-                        declare -a ssd_opts=("  Back")
+                        declare -a ssd_opts=()
                         while IFS=$'\t' read -r name model rota; do
                             [[ "$name" =~ ^(loop|sr|ram|dm|fd) ]] && continue
                             if [[ "$rota" == "0" ]]; then
@@ -707,7 +710,8 @@ while true; do
                             fi
                         done < <(lsblk -d -n -o NAME,MODEL,ROTA | awk '{ r=$NF; n=$1; $1=""; $NF=""; sub(/^[ \t]+/, ""); sub(/[ \t]+$/, ""); print n "\t" $0 "\t" r }')
 
-                        [[ ${#ssd_opts[@]} -eq 1 ]] && ssd_opts+=("󰜺  No SSDs found")
+                        [[ ${#ssd_opts[@]} -eq 0 ]] && ssd_opts+=("󰜺  No SSDs found")
+                        ssd_opts+=("  Back")
                         
                         dchoice=$(printf '%s\n' "${ssd_opts[@]}" | "${ROFI_SUB[@]}" -p "Select SSD") || break
                         [[ "$dchoice" == "  Back" ]] && break
@@ -715,7 +719,7 @@ while true; do
                         
                         dev_name=$(echo "$dchoice" | awk '{print $2}')
                         while true; do
-                            rw_opts=("  Back" "󰑍  Live Read" "󰏫  Live Write" "  Temperature")
+                            rw_opts=("󰑍  Live Read" "󰏫  Live Write" "  Temperature" "  Back")
                             rwchoice=$(printf '%s\n' "${rw_opts[@]}" | "${ROFI_SUB[@]}" -p "/dev/$dev_name") || break
                             [[ "$rwchoice" == "  Back" ]] && break
                             
@@ -737,7 +741,7 @@ while true; do
 
                 elif [[ "$stchoice" == *"Hard Disk Drives"* ]]; then
                     while true; do
-                        declare -a hdd_opts=("  Back")
+                        declare -a hdd_opts=()
                         while IFS=$'\t' read -r name model rota; do
                             [[ "$name" =~ ^(loop|sr|ram|dm|fd) ]] && continue
                             if [[ "$rota" == "1" ]]; then
@@ -745,7 +749,8 @@ while true; do
                             fi
                         done < <(lsblk -d -n -o NAME,MODEL,ROTA | awk '{ r=$NF; n=$1; $1=""; $NF=""; sub(/^[ \t]+/, ""); sub(/[ \t]+$/, ""); print n "\t" $0 "\t" r }')
 
-                        [[ ${#hdd_opts[@]} -eq 1 ]] && hdd_opts+=("󰜺  No HDDs found")
+                        [[ ${#hdd_opts[@]} -eq 0 ]] && hdd_opts+=("󰜺  No HDDs found")
+                        hdd_opts+=("  Back")
                         
                         dchoice=$(printf '%s\n' "${hdd_opts[@]}" | "${ROFI_SUB[@]}" -p "Select HDD") || break
                         [[ "$dchoice" == "  Back" ]] && break
@@ -753,7 +758,7 @@ while true; do
                         
                         dev_name=$(echo "$dchoice" | awk '{print $2}')
                         while true; do
-                            rw_opts=("  Back" "󰑍  Live Read" "󰏫  Live Write" "  Temperature")
+                            rw_opts=("󰑍  Live Read" "󰏫  Live Write" "  Temperature" "  Back")
                             rwchoice=$(printf '%s\n' "${rw_opts[@]}" | "${ROFI_SUB[@]}" -p "/dev/$dev_name") || break
                             [[ "$rwchoice" == "  Back" ]] && break
                             
@@ -780,10 +785,10 @@ while true; do
         '  CPU')
             while true; do
                 cpu_opts=(
-                    "  Back"
                     "󱐋  CPU Power (Watts)"
                     "  CPU Usage"
                     "  CPU Temp"
+                    "  Back"
                 )
                 cpuchoice=$(printf '%s\n' "${cpu_opts[@]}" | "${ROFI_SUB[@]}" -p "CPU") || break
                 [[ "$cpuchoice" == "  Back" ]] && break
@@ -807,7 +812,7 @@ while true; do
 
         '󰘚  Memory (RAM)')
             while true; do
-                m_opts=("  Back" "󰘚  System RAM Usage" "󰘚  RAM Temperature" "󰘚  ZRAM Usage")
+                m_opts=("󰘚  System RAM Usage" "󰘚  RAM Temperature" "󰘚  ZRAM Usage" "  Back")
                 mchoice=$(printf '%s\n' "${m_opts[@]}" | "${ROFI_SUB[@]}" -p "Memory") || break
                 [[ "$mchoice" == "  Back" ]] && break
 
@@ -831,11 +836,11 @@ while true; do
         '󰁹  Battery')
             while true; do
                 b_opts=(
-                    "  Back"
                     "󰁹  Power Draw Only"
                     "󰁹  Percent Only"
                     "󰁹  Time Remaining Only"
                     "󰁹  Standard HUD"
+                    "  Back"
                 )
                 bchoice=$(printf '%s\n' "${b_opts[@]}" | "${ROFI_SUB[@]}" -p "Battery") || break
                 [[ "$bchoice" == "  Back" ]] && break

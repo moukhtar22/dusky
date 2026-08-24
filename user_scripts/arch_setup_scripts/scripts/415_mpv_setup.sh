@@ -1,13 +1,6 @@
 #!/usr/bin/env bash
-# MpV player configurator
+#d: Configure MPV with modern controls
 
-# ==============================================================================
-# Title:        Arch Linux MPV + UOSC + Thumbfast Auto-Config
-# Description:  Automated, idempotent setup for MPV on Hyprland/Wayland.
-# Version:      11.1 (Offline-Capable, Hardened)
-# ==============================================================================
-
-# Strict Mode
 set -euo pipefail
 shopt -s nullglob  # Globs that match nothing expand to nothing
 

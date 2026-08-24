@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# Runs tldr update
+#d: Update the tldr command database
 
-# --- 1. Strict Mode & Safety ---
 set -euo pipefail
 IFS=$'\n\t'
 

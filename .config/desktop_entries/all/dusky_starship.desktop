@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Dusky Starship
+GenericName=Shell Prompt Switcher
+Comment=Switch between Starship prompt styles
+Exec=kitty --app-id=dusky_tui python3 /home/dusk/user_scripts/starship/tui_starship.py
+Terminal=false
+Categories=Settings;DesktopSettings;
+Keywords=dusky;starship;prompt;shell;toggle;switch;
+Icon=utilities-terminal-symbolic
+StartupNotify=true

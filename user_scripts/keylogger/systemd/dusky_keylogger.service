@@ -1,0 +1,65 @@
+# Dusky Keylogger -- always-on keystroke statistics daemon
+# Do not set PrivateDevices=yes -- that hides /dev/input.
+[Unit]
+Description=Dusky Keylogger - always-on keystroke statistics daemon
+Documentation=file://$INSTALL_DIR/README.md
+After=systemd-udevd.service local-fs.target
+Wants=systemd-udevd.service
+
+[Service]
+Type=notify
+NotifyAccess=main
+WatchdogSec=30
+User=$USER
+Group=input
+SupplementaryGroups=input
+Environment=HOME=$HOME
+Environment=DUSKY_KEYLOGGER_DATA_DIR=$DATA_DIR
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONSAFEPATH=1
+ExecStart=$VENV_PYTHON -m dusky_keylogger daemon
+WorkingDirectory=$DATA_DIR
+Restart=on-failure
+RestartSec=3
+TimeoutStartSec=15
+TimeoutStopSec=20
+UMask=0077
+OOMScoreAdjust=150
+LimitNOFILE=1024
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=dusky_keylogger
+
+# --- sandbox (Keep PrivateDevices off; DeviceAllow gates /dev/input) ---
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateNetwork=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=$DATA_DIR $CONFIG_DIR
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+ProcSubset=pid
+LockPersonality=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+RestrictAddressFamilies=AF_UNIX
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @reboot @swap @mount @debug @module @raw-io
+SystemCallErrorNumber=EPERM
+CapabilityBoundingSet=
+AmbientCapabilities=
+DevicePolicy=closed
+DeviceAllow=char-input r
+KeyringMode=private
+RemoveIPC=true
+
+[Install]
+WantedBy=multi-user.target

@@ -78,6 +78,12 @@ add_if_missing() {
     local k="$1" v="$2"
     # Keep first-seen value and ensure the key is a valid bash identifier
     if is_valid_key "$k" && [[ -z ${envmap[$k]+_} ]]; then
+        # Never exfiltrate raw secrets: redact the VALUE of any sensitive-looking
+        # variable (case-insensitive name match) while preserving the name so the
+        # "which vars are set" debug signal is retained.
+        if [[ "${k^^}" =~ (KEY|TOKEN|SECRET|PASS|PASSWD|PASSWORD|CRED|AUTH|API|PRIVATE|SESSION|BEARER) ]]; then
+            v="<redacted>"
+        fi
         envmap["$k"]="$v"
     fi
 }
@@ -231,23 +237,7 @@ generate_env_dump() {
         add_if_missing "${line%%=*}" "${line#*=}"
     done < <(systemctl --user show-environment 2>/dev/null || true)
 
-    # ── 3) /proc/*/environ for every process owned by this user ──
-    local uid owner_uid procdir
-    uid=$(id -u)
-    for procdir in /proc/[0-9]*; do
-        [[ -r "$procdir/environ" ]] || continue
-        
-        # Only process files owned by the current user to avoid unnecessary permission denied errors
-        owner_uid=$(stat -c %u "$procdir" 2>/dev/null || true)
-        [[ -n "$owner_uid" && "$owner_uid" -eq "$uid" ]] || continue
-        
-        while IFS= read -r -d '' entry; do
-            [[ -z "$entry" || "$entry" != *=* ]] && continue
-            add_if_missing "${entry%%=*}" "${entry#*=}"
-        done 2>/dev/null < "$procdir/environ" || true
-    done
-
-    # ── 4) /etc/environment (system defaults) ──
+    # ── 3) /etc/environment (system defaults) ──
     if [[ -r /etc/environment ]]; then
         while IFS= read -r line; do
             [[ -z "$line" || "${line:0:1}" == '#' || "$line" != *=* ]] && continue
@@ -258,7 +248,7 @@ generate_env_dump() {
         done < /etc/environment
     fi
 
-    # ── 5) Write consolidated, cleanly escaped diagnostic file ──
+    # ── 4) Write consolidated, cleanly escaped diagnostic file ──
     {
         printf '# Diagnostic Environment Dump - %s\n' "$(date -u --iso-8601=seconds)"
         local k

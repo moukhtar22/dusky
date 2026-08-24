@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# Engages high-visibility mode by maximizing brightness and toggling visual effects script
+#d: Toggle blur, shadows, and opacity for visibility
 
-# --- 1. Safety & Modern Bash Settings ---
 set -euo pipefail
 
 # --- 2. Constants & Configuration ---

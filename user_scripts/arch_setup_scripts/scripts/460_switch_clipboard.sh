@@ -1,14 +1,5 @@
 #!/usr/bin/env bash
-# ==============================================================================
-# Script: switch_clipboard.sh
-# Purpose: Toggle between Terminal and Rofi clipboard managers for Hyprland.
-#          - Terminal mode: Uncomments/adds the custom clipboard keybind.
-#          - Rofi mode: Comments out the custom keybind (restores default).
-# Config:  ~/.config/hypr/edit_here/source/keybinds.conf
-# System:  Arch Linux (Hyprland/Wayland)
-# Flags:   --terminal, --rofi, --status (mutually exclusive)
-#          --force (modifier: rewrites keybind lines to canonical form)
-# ==============================================================================
+#d: Toggle between terminal and Rofi clipboards
 
 set -euo pipefail
 

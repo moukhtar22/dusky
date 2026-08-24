@@ -1,0 +1,52 @@
+{
+  "manifest_version": 3,
+  "name": "Dusky Sites",
+  "version": "5.2",
+  "description": "Real-time Material You (Matugen) theming for the Firefox chrome and for website content, driven by a local native-messaging daemon.",
+  "homepage_url": "https://github.com/dusklinux/dusky",
+
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "dusky_sites@dusky.com",
+      "strict_min_version": "153.0",
+      "data_collection_permissions": {
+        "required": ["none"]
+      }
+    }
+  },
+
+  "permissions": [
+    "nativeMessaging",
+    "storage",
+    "theme",
+    "tabs",
+    "alarms"
+  ],
+
+  "host_permissions": ["<all_urls>"],
+
+  "background": {
+    "scripts": ["defaults.js", "background.js"]
+  },
+
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_start",
+      "all_frames": true,
+      "match_about_blank": true
+    }
+  ],
+
+  "icons": {
+    "16": "icons/icon.svg",
+    "48": "icons/icon.svg",
+    "128": "icons/icon.svg"
+  },
+
+  "action": {
+    "default_icon": "icons/icon.svg",
+    "default_title": "Dusky Sites"
+  }
+}

@@ -63,8 +63,8 @@ ensure_dependencies()
 ensure_smart_access()
 
 from textual.app import App, ComposeResult
-from textual.containers import VerticalScroll
-from textual.widgets import Header, Footer, Static
+from textual.containers import VerticalScroll, Horizontal
+from textual.widgets import Header, Footer, Static, Button
 from textual import work
 from rich.table import Table
 from rich.text import Text
@@ -504,7 +504,43 @@ class IOMonitorApp(App):
         height: 1;
         background: {MUTED};
         color: {FG};
-        padding: 0 2;
+        padding: 0 1 0 2;
+    }}
+
+    #ram_txt {{
+        width: 1fr;
+        height: 1;
+    }}
+
+    Button#btn_sync {{
+        height: 1;
+        min-width: 10;
+        border: none;
+        background: {ACCENT};
+        color: {BG};
+        text-style: bold;
+        padding: 0 1;
+        margin: 0;
+    }}
+
+    Button#btn_sync:hover {{
+        background: {SUCCESS};
+        color: {BG};
+    }}
+
+    Button#btn_sync:focus {{
+        background: {SUCCESS};
+        color: {BG};
+    }}
+
+    Button#btn_sync.-syncing {{
+        background: {WARNING};
+        color: {BG};
+    }}
+
+    Button#btn_sync.-synced {{
+        background: {SUCCESS};
+        color: {BG};
     }}
 
     #main_scroll {{
@@ -534,6 +570,7 @@ class IOMonitorApp(App):
 
     BINDINGS = [
         ("q", "quit", "Quit"),
+        ("s", "sync", "Sync Disk"),
         ("j", "focus_next", "Focus Next"),
         ("k", "focus_previous", "Focus Prev"),
         ("J", "move_down", "Move Drive Down"),
@@ -548,7 +585,9 @@ class IOMonitorApp(App):
     def compose(self) -> ComposeResult:
         self.title = "Dusky Disk I/O Monitor"
         yield Static("Dusky Disk I/O Monitor", id="custom_header")
-        yield Static(id="ram_bar")
+        with Horizontal(id="ram_bar"):
+            yield Static(id="ram_txt")
+            yield Button("󰚰 Sync", id="btn_sync")
         yield VerticalScroll(id="main_scroll")
         yield Footer()
 
@@ -556,6 +595,47 @@ class IOMonitorApp(App):
         self.refresh_metadata_worker()
         self.set_interval(1.0, self.tick)
         self.set_interval(5.0, self.refresh_metadata_worker)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "btn_sync":
+            self.action_sync()
+
+    def action_sync(self) -> None:
+        self.do_sync()
+
+    @work(thread=True, exclusive=True)
+    def do_sync(self) -> None:
+        """Flushes unwritten dirty pages to disk asynchronously."""
+        self.call_from_thread(self._set_sync_state, "syncing")
+        try:
+            os.sync()
+        except Exception:
+            pass
+        self.call_from_thread(self.tick)
+        self.call_from_thread(self._set_sync_state, "synced")
+        time.sleep(1.8)
+        self.call_from_thread(self._set_sync_state, "idle")
+
+    def _set_sync_state(self, state: str) -> None:
+        try:
+            btn = self.query_one("#btn_sync", Button)
+            if state == "syncing":
+                btn.label = "󱑂 Syncing..."
+                btn.disabled = True
+                btn.add_class("-syncing")
+                btn.remove_class("-synced")
+            elif state == "synced":
+                btn.label = "󰄬 Synced!"
+                btn.disabled = False
+                btn.remove_class("-syncing")
+                btn.add_class("-synced")
+            elif state == "idle":
+                btn.label = "󰚰 Sync"
+                btn.disabled = False
+                btn.remove_class("-syncing")
+                btn.remove_class("-synced")
+        except Exception:
+            pass
 
     @work(thread=True, exclusive=True)
     def refresh_metadata_worker(self):
@@ -588,11 +668,13 @@ class IOMonitorApp(App):
     def tick(self):
         dirty, wb = SysStatParser.get_ram_buffers()
         ram_txt = Text.from_markup(
-            f"[bold {FG}]SYSTEM MEMORY[/]  [{BG}]│[/]  "
             f"[{FG}]Dirty Pages (Wait):[/] [bold {ACCENT}]{dirty:>6.1f} MB[/]  [{BG}]│[/]  "
             f"[{FG}]Writeback (Active):[/] [bold {ERROR}]{wb:>6.1f} MB[/]"
         )
-        self.query_one("#ram_bar", Static).update(ram_txt)
+        try:
+            self.query_one("#ram_txt", Static).update(ram_txt)
+        except Exception:
+            pass
 
         current_drives = []
         try:

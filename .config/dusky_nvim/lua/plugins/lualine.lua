@@ -34,32 +34,33 @@ return {
       end,
     })
 
-    -- 2. SETUP LUALINE
+    -- 2. SETUP LUALINE (WCAG FIX: base0D/E are now light #ffdcc1 after contrast fix, so light-on-light fails. Use dark fg on light bg.)
+    -- Before fix: base0D #6b3b04 dark + base05 #efe0d5 light => 7.2 pass; After fix light-light => fail, so we switch fg to dark base01.
     local custom_theme = {
       normal = {
-        a = { fg = vim.g.base16_gui01, bg = vim.g.base16_gui0D, gui = "bold" },
-        b = { fg = vim.g.base16_gui05, bg = vim.g.base16_gui0E },
+        a = { fg = vim.g.base16_gui01 or "#130d08", bg = vim.g.base16_gui0D or "#ffdcc1", gui = "bold" },
+        b = { fg = vim.g.base16_gui05, bg = vim.g.base16_gui02 },
         c = { fg = vim.g.base16_gui05, bg = vim.g.base16_gui02 },
       },
       insert = {
         a = { fg = vim.g.base16_gui01, bg = vim.g.base16_gui0B, gui = "bold" },
-        b = { fg = vim.g.base16_gui05, bg = vim.g.base16_gui0E },
+        b = { fg = vim.g.base16_gui05, bg = vim.g.base16_gui02 },
         c = { fg = vim.g.base16_gui05, bg = vim.g.base16_gui02 },
       },
       visual = {
         a = { fg = vim.g.base16_gui01, bg = vim.g.base16_gui09, gui = "bold" },
-        b = { fg = vim.g.base16_gui05, bg = vim.g.base16_gui0E },
+        b = { fg = vim.g.base16_gui05, bg = vim.g.base16_gui02 },
         c = { fg = vim.g.base16_gui05, bg = vim.g.base16_gui02 },
       },
       replace = {
         a = { fg = vim.g.base16_gui01, bg = vim.g.base16_gui08, gui = "bold" },
-        b = { fg = vim.g.base16_gui05, bg = vim.g.base16_gui0E },
+        b = { fg = vim.g.base16_gui05, bg = vim.g.base16_gui02 },
         c = { fg = vim.g.base16_gui05, bg = vim.g.base16_gui02 },
       },
       inactive = {
-        a = { fg = vim.g.base16_gui04, bg = vim.g.base16_gui01 },
-        b = { fg = vim.g.base16_gui04, bg = vim.g.base16_gui01 },
-        c = { fg = vim.g.base16_gui04, bg = vim.g.base16_gui01 },
+        a = { fg = vim.g.base16_gui03 or "#9e8e82", bg = vim.g.base16_gui01 },
+        b = { fg = vim.g.base16_gui03 or "#9e8e82", bg = vim.g.base16_gui01 },
+        c = { fg = vim.g.base16_gui03 or "#9e8e82", bg = vim.g.base16_gui01 },
       },
     }
 

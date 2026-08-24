@@ -207,9 +207,10 @@ bash -c "$DUSKY_PKG_PREVIEW" _ "$pkg" | sed -r "s/\x1B\[([0-9]{1,3}(;[0-9]{1,2})
         --no-hscroll \
         --ellipsis='' \
         --highlight-line \
+        --ghost="Filter installed packages..." \
         --prompt="$prompt_str" \
-        --pointer="" \
-        --marker="✓" \
+        --pointer="❯ " \
+        --marker="✔ " \
         --layout=reverse \
         --border=rounded \
         --border-label=" 󰏖 Dusky Package Atlas [F1: Help] " \
@@ -224,10 +225,7 @@ bash -c "$DUSKY_PKG_PREVIEW" _ "$pkg" | sed -r "s/\x1B\[([0-9]{1,3}(;[0-9]{1,2})
         --bind="f1:execute(bash -c \"\$DUSKY_PKG_HELP\")" \
         --bind="alt-c:execute-silent(bash -c \"\$DUSKY_PKG_COPY\" _ {1})+change-prompt(   Copied Info! ❯ )" \
         --bind="result:refresh-preview" \
-        --color="bg+:#1e1e2e,bg:#11111b,spinner:#f5e0dc" \
-        --color="fg:#cdd6f4,fg+:#cdd6f4,header:#89b4fa,info:#cba6f7" \
-        --color="pointer:#a6e3a1,marker:#f5e0dc,prompt:#cba6f7" \
-        --color="hl:#f38ba8,hl+:#f38ba8,border:#585b70,label:#a6e3a1" \
+        --color="${DUSKY_FZF_COLORS:-bg+:#1e1e2e,bg:#11111b,fg:#cdd6f4}" \
         --preview='bash -c "$DUSKY_PKG_PREVIEW" _ {1}' \
         --preview-window="right,50%,border-left,wrap")
 

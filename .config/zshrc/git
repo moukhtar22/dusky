@@ -1,17 +1,160 @@
-# 1. Base Bare Repo Alias
-# (Defined first for logical clarity, though strictly not required by Zsh)
-alias git_dusky='/usr/bin/git --git-dir=$HOME/dusky/ --work-tree=$HOME'
+# 1. Base Bare Repo Function & Alias
+# Functions are globally accessible in subshells, functions, and scripts without relying on interactive alias expansion.
+function git_dusky() {
+    /usr/bin/git --git-dir="$HOME/dusky/" --work-tree="$HOME" "$@"
+}
 
-# 2. Add List Alias (FIXED with Subshell)
-# The ( ) runs this specific command inside $HOME so the paths match,
-# but it DOES NOT change your actual terminal directory.
-alias git_dusky_add_list='(cd $HOME && git_dusky add --pathspec-from-file=.git_dusky_list)'
+# 2. Add List Function (Filters missing files gracefully with warning fallback)
+function git_dusky_add_list() {
+    (
+        cd "$HOME" || return 0
+        if [[ ! -f .git_dusky_list ]]; then
+            printf '\033[33m⚠ Warning: .git_dusky_list not found in %s — skipping manifest staging.\033[0m\n' "$HOME"
+            git_dusky diff HEAD
+            return 0
+        fi
+
+        local missing=()
+        local valid=()
+        local line clean
+
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            clean="${line#"${line%%[![:space:]]*}"}"
+            clean="${clean%"${clean##*[![:space:]]}"}"
+            [[ -z "$clean" || "$clean" == \#* ]] && continue
+
+            if [[ "$clean" == *[\*\?\[]* ]]; then
+                local matches=( $~clean(N) )
+                if (( ${#matches[@]} > 0 )); then
+                    valid+=( "${matches[@]}" )
+                else
+                    missing+=( "$clean" )
+                fi
+            else
+                if [[ -e "$clean" || -L "$clean" ]]; then
+                    valid+=( "$clean" )
+                else
+                    missing+=( "$clean" )
+                fi
+            fi
+        done < .git_dusky_list
+
+        if (( ${#missing[@]} > 0 )); then
+            printf '\033[33m⚠ Warning: %d file(s) in .git_dusky_list missing on disk:\033[0m\n' "${#missing[@]}"
+            for m in "${missing[@]}"; do
+                printf '  \033[90m➔ %s\033[0m\n' "$m"
+            done
+        fi
+
+        if (( ${#valid[@]} > 0 )); then
+            if ! printf '%s\0' "${valid[@]}" | git_dusky add --pathspec-from-file=- --pathspec-file-nul; then
+                printf '\033[31m✖ git add failed for manifest paths\033[0m\n'
+            fi
+        fi
+
+        if ! git_dusky add -u; then
+            printf '\033[31m✖ git add -u failed\033[0m\n'
+        fi
+    )
+    return 0
+}
 
 # 3. Alias for discarding all local changes (both staged and unstaged) and revert the state of tracked files to exactly match the last commit (HEAD), this is a destructive operation. (DANGER ZONE)
 alias git_dusky_restore='echo "git --git-dir=$HOME/dusky/ --work-tree=$HOME reset --hard HEAD" && git_dusky reset --hard HEAD'
 
-# 4. Delta/Diff Alias
-alias gitdelta='git_dusky_add_list && git_dusky diff HEAD'
+# 4. Delta/Diff
+#    gitdelta        -> uncommitted working-tree changes vs HEAD (unchanged habit)
+#    gitdelta <N>    -> Nth-most-recent commit: header, stat, patch (1 = HEAD)
+#    gitdelta list   -> fzf commit browser with live delta preview pane,
+#                       Time-Machine style. [ENTER] full diff · [q/ESC] quit.
+function _gitdelta_show() {
+    git_dusky show \
+        --color=always \
+        --decorate=short \
+        --date=format-local:'%Y-%m-%d %H:%M' \
+        --format='%C(bold blue)󰏖 %h%C(reset) %C(bold green)%an%C(reset) %C(dim)%ad%C(reset)%d%n%C(bold yellow)%s%C(reset)' \
+        --stat \
+        --patch \
+        "$1" \
+        | delta
+}
+
+function _gitdelta_matugen() {
+    # $1 = color key, $2 = fallback hex
+    local mg="$HOME/.config/matugen/generated/dusky_tui.json" v=""
+    if [[ -f "$mg" ]]; then
+        v=$(sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$mg" | head -n1)
+    fi
+    [[ "$v" =~ ^#[0-9A-Fa-f]{6}$ ]] && printf '%s' "$v" || printf '%s' "$2"
+}
+
+function gitdelta() {
+    if (( $# == 0 )); then
+        git_dusky_add_list && git_dusky diff --stat --patch HEAD
+        return $?
+    fi
+
+    if [[ "$1" == "list" ]]; then
+        if ! command -v fzf >/dev/null 2>&1; then
+            echo "fzf is required for 'gitdelta list'."
+            return 1
+        fi
+        if ! git_dusky rev-parse --verify --quiet HEAD >/dev/null; then
+            echo "No commits yet — nothing to list."
+            return 1
+        fi
+
+        local c_bg c_fg c_acc c_mut c_ok preview_cmd sel hash
+        c_bg=$(_gitdelta_matugen bg "#1d100a")
+        c_fg=$(_gitdelta_matugen fg "#f8ddd2")
+        c_acc=$(_gitdelta_matugen accent "#ffb694")
+        c_mut=$(_gitdelta_matugen muted "#55433b")
+        c_ok=$(_gitdelta_matugen success "#f0be79")
+
+        # Runs inside fzf's child shell: no zsh functions there — inline git.
+        preview_cmd='/usr/bin/git --git-dir="$HOME/dusky/" --work-tree="$HOME" show --color=always --decorate=short --date=format-local:"%Y-%m-%d %H:%M" --format="%C(bold blue)󰏖 %h%C(reset) %C(bold green)%an%C(reset) %C(dim)%ad%C(reset)%d%n%C(bold yellow)%s%C(reset)" --stat --patch {1} | delta --paging=never --width=$FZF_PREVIEW_COLUMNS'
+
+        sel=$(git_dusky log --color=always \
+                --date=format-local:'%Y-%m-%d %H:%M' \
+                --format='%h %C(dim)%ad%C(reset) %C(bold green)%an%C(reset) %C(yellow)%s%C(reset)%d' \
+            | fzf --ansi \
+                --no-sort \
+                --tiebreak=index \
+                --prompt='󰏖 commits ❯ ' \
+                --pointer='▶' \
+                --height=100% \
+                --layout=reverse \
+                --border=rounded \
+                --border-label=' 󰏖 dusky commit browser ' \
+                --border-label-pos=2 \
+                --preview-window='right,70%,border-left,wrap' \
+                --preview-label=' commit diff ' \
+                --preview-label-pos=center \
+                --preview="$preview_cmd" \
+                --header='[ENTER] full diff   [q/ESC] quit   filter by hash / author / subject' \
+                --bind='q:abort' \
+                --color="bg:$c_bg,bg+:$c_mut,fg:$c_fg,fg+:$c_fg" \
+                --color="hl:$c_acc,hl+:$c_acc,pointer:$c_ok,marker:$c_ok" \
+                --color="prompt:$c_acc,info:$c_acc,border:$c_mut,label:$c_acc") || return 0
+
+        hash="${${=sel}[1]}"
+        _gitdelta_show "$hash"
+        return $?
+    fi
+
+    local n="${1}"
+    if [[ ! "$n" =~ ^[0-9]+$ ]] || (( n < 1 )); then
+        echo "Usage: gitdelta [N|list]  —  no arg: uncommitted changes · N = Nth-last commit · list = fzf browser"
+        return 1
+    fi
+
+    if ! git_dusky rev-parse --verify --quiet "HEAD~$((n - 1))" >/dev/null; then
+        echo "No commit that far back — history is shorter than ${n}."
+        return 1
+    fi
+
+    _gitdelta_show "HEAD~$((n - 1))"
+}
 
 # 5. Lazygit Bare Repo Alias
 alias lazygit_dusky='lazygit --git-dir=$HOME/dusky/ --work-tree=$HOME'
@@ -32,18 +175,33 @@ function git_dusky_push() {
         return 1
     fi
 
-    echo -n "Commit message for '$rel_path': "
-    read -r msg
-    if [[ -z "$msg" ]]; then
-        echo "Aborted: Commit message is required."
-        return 1
-    fi
-
     (
-        cd "$HOME"
-        git_dusky add "$rel_path"
-        git_dusky commit -m "$msg ($rel_path)"
-        git_dusky push
+        cd "$HOME" || return 1
+
+        if ! git_dusky add "$rel_path"; then
+            echo "Error: git add failed — nothing committed or pushed."
+            return 1
+        fi
+
+        echo -n "Commit message for '$rel_path': "
+        local msg
+        read -r msg
+        if [[ -z "$msg" ]]; then
+            echo "Aborted: Commit message is required."
+            return 1
+        fi
+
+        if ! git_dusky commit -m "$msg ($rel_path)"; then
+            echo "Commit failed — nothing pushed (working tree state untouched)."
+            return 1
+        fi
+
+        if ! git_dusky push; then
+            local br
+            br=$(git_dusky branch --show-current)
+            echo "Plain push failed — retrying with upstream setup (-u origin ${br:-main})..."
+            git_dusky push -u origin "${br:-main}"
+        fi
     )
 }
 

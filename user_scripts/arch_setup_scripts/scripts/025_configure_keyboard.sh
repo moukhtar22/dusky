@@ -1,8 +1,5 @@
 #!/usr/bin/env bash
-# Auto-detects system keyboard layout and patches Hyprland Lua config.
-# Target System: Arch Linux / Hyprland (0.55+) / UWSM
-# Author: Elite DevOps
-# -----------------------------------------------------------------------------------------
+#d: Detect the keyboard layout and apply it to Hyprland
 
 set -euo pipefail
 

@@ -1,17 +1,17 @@
-@import url("../matugen/generated/waybar-colors.css");
+@import url("../../.config/matugen/generated/waybar-colors.css");
 
 /* ─────────────────────────────────────────────────────────────────────────────
    TRANSPARENCY TOGGLE
    ───────────────────────────────────────────────────────────────────────────── */
 
-@define-color glass_surface         alpha(@surface, 0.55);
-@define-color glass_surface_dark    alpha(@surface, 1.0);
-@define-color glass_tooltip         alpha(@surface, 0.55);
+@define-color glass_surface         alpha(@surface, 0.72);
+@define-color glass_module          alpha(@surface_container_high, 0.35);
+@define-color glass_tooltip         alpha(@surface_container, 0.72);
 
 /* WAYBAR_OPAQUE_SWITCH_START */
 
 @define-color glass_surface         @surface;
-@define-color glass_surface_dark    @surface;
+@define-color glass_module          @surface_container;
 @define-color glass_tooltip         @surface;
 
 /* WAYBAR_OPAQUE_SWITCH_END */
@@ -33,27 +33,34 @@ window#waybar {
 }
 
 .modules-center {
-    background: @glass_surface_dark;
+    background: @glass_surface;
     border-radius: 20px;
     padding: 0 6px;
 }
 
-tooltip,
-tooltip.background,
-tooltip decoration,
-.tooltip {
-    background: transparent;
+tooltip decoration {
     background-color: transparent;
     border: none;
     box-shadow: none;
-    border-radius: 0;
 }
 
-tooltip label {
-    color: @primary;
-    background-color: @glass_tooltip;
-    padding: 4px 10px;
+tooltip,
+tooltip.background,
+.tooltip {
+    background-color: alpha(@surface_container, 0.57);
+    background: linear-gradient(135deg, alpha(@surface_container, 0.57), alpha(@surface_container_high, 0.57));
+    border: 1px solid alpha(@primary, 0.5);
     border-radius: 12px;
+    box-shadow: none;
+}
+
+tooltip label,
+.tooltip label {
+    color: @on_surface;
+    padding: 8px 12px;
+    font-family: "JetBrainsMono Nerd Font Propo", "JetBrainsMono Nerd Font", monospace;
+    font-size: 12px;
+    font-weight: 600;
 }
 
 #workspaces {
@@ -65,9 +72,15 @@ tooltip label {
     padding: 0px 2px;
     margin: 0px 2px;
     border-radius: 45px;
-    background-color: @glass_surface;
-    color: alpha(@tertiary, 0.45);
+    background-color: @glass_module;
+    color: alpha(@tertiary, 0.6);
     transition: all 0.3s ease-in-out;
+}
+
+#workspaces button:not(.empty):not(.active) {
+    color: alpha(@on_surface, 0.85);
+    background-color: alpha(@primary, 0.12);
+    border: 1px solid alpha(@primary, 0.2);
 }
 
 #workspaces button.active {
@@ -99,9 +112,9 @@ tooltip label {
 #custom-inhibit-suspend,
 #custom-updates-trigger,
 #custom-updates {
-    background-color: @glass_surface;
-    padding: 0px 6px;
-    margin: 3px 4px;
+    background-color: @glass_module;
+    padding: 0px 8px;
+    margin: 3px 3px;
     border-radius: 45px;
     border: none;
     box-shadow: none;

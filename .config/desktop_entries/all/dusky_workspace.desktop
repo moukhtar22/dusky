@@ -3,7 +3,7 @@ Type=Application
 Name=Dusky Workspace TUI
 GenericName=Layout Configurator
 Comment=Toggle different Layouts
-Exec=uwsm-app -- foot --app-id=dusky_tui python /home/dusk/user_scripts/dusky_tui/python/main/main.py /home/dusk/user_scripts/hypr/workspace/tui_workspace_rules.py
+Exec=foot --app-id=dusky_tui python3 /home/dusk/user_scripts/hypr/workspace/tui_workspace_rules.py
 Terminal=false
 Categories=Settings;DesktopSettings;System;Utility;
 Keywords=dusky;hyprland;layout;workspace;tui;config;settings;scrolling;dwindle;master;

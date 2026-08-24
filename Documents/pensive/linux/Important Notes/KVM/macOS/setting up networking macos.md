@@ -1,157 +1,113 @@
-There are two main ways to set up networking on OS X / macOS, as it does not
-function with what QEMU defaults to for network settings:
+---
+title: "macOS — QEMU Networking (User, Tap, Bridge)"
+tags:
+  - kvm
+  - macos
+  - qemu
+  - networking
+  - arch
+  - legacy
+---
 
------------------------------------
-User Mode Networking (Easier Setup)
------------------------------------
+# macOS — QEMU Networking
 
-By default, QEMU uses user mode networking (SLiRP). This networking mode is the
-slowest and is not visible via the outside network, but requires no host-side
-setup, so it's perfect if you just want internet but don't care about latency
-or about connecting to the VM from an external source.
+> [!info] Context (Aug 2026)
+> `OSX-KVM` boot scripts directly invoke `qemu-system-x86_64` (not libvirt). This note maps QEMU network backends; libvirt-managed `virbr0` (`default` NAT) and `br0` paths from [[Activating Network and Setting it to Autostart]] / [[Network Bridging for LAN access]] apply if you import the macOS VM into libvirt via `macOS-libvirt-*.xml`.
 
-In order to do this, change the line in your qemu-system-x86_64 command (found
-in boot-macOS.sh) to the following:
+## User Mode (`slirp`) — easiest, no host prep
 
--netdev user,id=net0 -device network_adapter,netdev=net0,id=net0,mac=52:54:00:c9:18:27 \
+QEMU default (`-netdev user`). Outbound-only (`10.0.2.15`), no inbound.
 
-Once you set network_adapter to the preferred adapter, no further setup is required; your
-internet should Just Werk™ in your virtual machine!
+```bash
+# in boot-macOS.sh
+-netdev user,id=net0 -device e1000-82545em,netdev=net0,id=net0,mac=52:54:00:c9:18:27
+# or virtio: -device virtio-net-pci / vmxnet3 (macOS 10.11+)
+```
 
-For further information on detailed configuration options, see QEMU's
-documentation on networking ( http://wiki.qemu.org/Documentation/Networking )
+Adapters macOS accepts:
 
-Here is the list of network adapters supported by macOS,
+- `e1000-82545em` — widest compatibility (any macOS)
+- `vmxnet3`, `virtio-net-pci` — paravirt, faster, needs 10.11+
 
-e1000-82545em - The problem that we run into here is that OS X is nitpicky
-about what emulated networking devices it is willing to accept. The
-e1000-82545em is a known adapter that can be used on pretty much any version of
-MacOS.
+Docs: <http://wiki.qemu.org/Documentation/Networking>
 
-To use this adapter, replace network_adapter with e1000-82545em
+### SSH via user mode (port forward)
 
-vmxnet3,virtio-net-pci - An alternative solution to e1000. Instead of emulating
-the e1000, these are paravirtualized NICs, which can allow for better
-performance (in theory). The only catch is that the you need to have a recent
-version of MacOS (10.11 or later).
+```bash
+# macOS guest: System Preferences → Sharing → Remote Login (SSH) → On
+# boot script:
+-netdev user,id=net0,hostfwd=tcp::10022-:22 -device e1000-82545em,netdev=net0,id=net0,mac=52:54:00:c9:18:27
+# host:
+ssh -p 10022 user@localhost   # same for VNC forwards
+```
 
-To use these adapters, replace network_adapter with vmxnet3 or virtio-net-pci.
+```bash
+printf '52:54:00:AB:%02X:%02X\n' $((RANDOM%256)) $((RANDOM%256))   # QEMU mac
+```
 
+## Tap via libvirt `virbr0` — libvirt NAT, host↔guest
 
-SSH access in user mode
------------------------
+If `virt-manager` created `virbr0` (`default` NAT, `dnsmasq`+`nftables`):
 
-Although the IP address of the VM is not visible to the outside, it is possible
-to use port forwarding to access the VM's ports from your host, eg the SSH port.
-To achieve that:
-
-- In MacOS, turn on SSH under System Preferences > Sharing > Remote Login.
-- Modify the startup script to include `-netdev user,id=net0,hostfwd=tcp::10022-:22`
-- Use `ssh localhost -p10022` to get in.
-
-You can use the same for VNC.
-
------------------------------------
-Tap Networking (Better Performance)
------------------------------------
-
-Installing "virt-manager" automagically creates the "virbr0" local private bridge :-)
-
-sudo apt-get install uml-utilities virt-manager
-
+```bash
 sudo ip tuntap add dev tap0 mode tap
 sudo ip link set tap0 up promisc on
 sudo ip link set dev tap0 master virbr0
+sudo ip link set dev virbr0 up
+# boot script:
+-netdev tap,id=net0,ifname=tap0,script=no,downscript=no -device e1000-82545em,netdev=net0,id=net0,mac=52:54:00:c9:18:27
+```
 
-sudo ip link set dev virbr0 up  # as needed
-sudo ip link set dev tap0 master virbr0
+If `virbr0` missing:
 
-Note: If `virbr0` network interface is not present on your system, it may
-have been deactivated. Try enabling it by using the following commands,
+```bash
+sudo virsh -c qemu:///system net-start default
+sudo virsh -c qemu:///system net-autostart default
+```
 
-virsh net-start default
-virsh net-autostart default
+> [!warning] Legacy — Ubuntu `apt` / `uml-utilities`
+> Original did `sudo apt-get install uml-utilities virt-manager` — on Arch: `sudo pacman -S --needed qemu-desktop libvirt virt-manager dnsmasq nftables`.
 
-Add "-netdev tap,id=net0,ifname=tap0,script=no,downscript=no -device e1000-82545em,netdev=net0,id=net0,mac=52:54:00:c9:18:27 \"
-to your qemu-system-x86_64 command.
+### `rc.local` helper
 
-
-Using an rc.local startup script
---------------------------------
-
-I have the following commands present in `/etc/rc.local`.
-
+```bash
+# /etc/rc.local (enable via systemd unit if on Arch — see [[all notes macos]] rc.local section)
 #!/usr/bin/env bash
 sudo ip tuntap add dev tap0 mode tap
 sudo ip link set tap0 up promisc on
 sudo ip link set dev virbr0 up
 sudo ip link set dev tap0 master virbr0
+```
 
-This has been enough for me so far.
+## Bridge helper (`qemu-bridge-helper`) — LAN-visible bridge
 
-Note: You may need to enable the `rc.local` functionality manually on modern
-Ubuntu versions. Check out the [[all notes macos]] included in this repository
-for details.
+For guests that need real LAN IP (e.g. iservices troubleshooting <https://dortania.github.io/OpenCore-Post-Install/universal/iservices.html>):
 
-
-QEMU networking tip
--------------------
-
-# printf '52:54:00:AB:%02X:%02X\n' $((RANDOM%256)) $((RANDOM%256))  # generates QEMU compatible mac addresses!
-
-
-------------------
-Bridged Networking
-------------------
-
-QEMU defaults to using NAT for its guests. It has a built-in DHCP server that
-provides addresses from the 192.168.12x.0 subnet. However, this configuration
-makes file sharing, printer sharing, and other common networking activities
-harder to use in a home network.
-
-Bridged networking allows your QEMU guest to get an address on the same subnet
-as the host computer. For example, many home networks let the wireless router
-handle IP assignment via DHCP. Here are the steps for setting up the bridge.
-
-To setup bridged networking from the command line, refer to this documentation
-at the Ubuntu website. https://help.ubuntu.com/community/KVM/Networking
-
-Ultimately, the script for booting the QEMU guest will need a line similar to
-the following to enable bridged networking in the guest:
-
-    -netdev bridge,id=net0,br=virbr0,"helper=/usr/lib/qemu/qemu-bridge-helper"
-
-On some systems the `qemu-bridge-helper` file has incorrect permissions. For it
-to work, it needs to be setuid root. This can be accomplished with this command:
-
-    $ sudo chmod u+s /usr/lib/qemu/qemu-bridge-helper
-
-Note that this is sometimes viewed as a security hole. Be careful and understand
-what you are doing before running this command.
-
-
------------------------
-Bridged Networking 2023
------------------------
-
-sudo mkdir -p /etc/qemu
-
-sudo cp bridge.conf /etc/qemu
-
-sudo chmod u+s /usr/lib/qemu/qemu-bridge-helper
-
-sudo ip link add name br0 type bridge
-
-sudo ip link set dev br0 up
-
-sudo ip link set enx00e04c680a67 master br0 && sudo dhclient br0
-
-$ brctl show
-bridge name	bridge id		STP enabled	interfaces
-br0		8000.ead0ee60b7c1	yes		enx00e04c680a67
-							tap0
-Use the following network device in scripts:
-
+```bash
+-netdev bridge,id=net0,br=virbr0,"helper=/usr/lib/qemu/qemu-bridge-helper"
+# or br0 after 2023 bridge path:
 -netdev bridge,id=net0,br=br0,"helper=/usr/lib/qemu/qemu-bridge-helper" -device virtio-net-pci,netdev=net0,id=net0,mac=00:16:CB:00:11:34
+# fix helper perms if needed:
+sudo chmod u+s /usr/lib/qemu/qemu-bridge-helper  # setuid — understand risk
+```
 
-Also see https://dortania.github.io/OpenCore-Post-Install/universal/iservices.html to tweak the config.plist file.
+## Bridged (2023 `br0` — Arch `nmcli` variant)
+
+Modern `br0` via NetworkManager (see [[Network Bridging for LAN access]] Option 3):
+
+```bash
+sudo mkdir -p /etc/qemu && sudo cp bridge.conf /etc/qemu
+sudo chmod u+s /usr/lib/qemu/qemu-bridge-helper
+sudo ip link add name br0 type bridge
+sudo ip link set dev br0 up
+sudo ip link set enx00e04c680a67 master br0 && sudo dhclient br0
+brctl show   # or: bridge link / ip link
+# Use: -netdev bridge,id=net0,br=br0,"helper=/usr/lib/qemu/qemu-bridge-helper"
+```
+
+> [!tip] Choose
+> - Disposable macOS lab → **user mode + hostfwd**
+> - Import into libvirt (`virsh define macOS.xml`) → **virbr0 NAT** (host↔guest `192.168.122.x`)
+> - LAN-visible → `br0` bridge (Ethernet only; Wi-Fi bridges need `macvtap`)
+
+See: [[all notes macos]], [[+ MOC macOS]].

@@ -1,11 +1,6 @@
 #!/usr/bin/env bash
-# -----------------------------------------------------------------------------
-# Script: 044_spotify.sh
-# Description: Installs Spotify via Paru/Yay and runs SpotX for ad-blocking.
-#              Optimized for Arch Linux (Bash 5.3+).
-# -----------------------------------------------------------------------------
+#d: Install Spotify with ad-blocking (SpotX)
 
-# --- Strict Error Handling ---
 set -euo pipefail
 IFS=$'\n\t'
 

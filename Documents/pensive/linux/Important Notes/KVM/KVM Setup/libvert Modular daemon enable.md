@@ -1,159 +1,128 @@
-# Enabling Modular Libvirt Daemons
+---
+title: "Modular Libvirt Daemons — Socket Activation (Aug 2026)"
+tags:
+  - kvm
+  - libvirt
+  - systemd
+  - arch
+aliases:
+  - Enabling Modular Libvirt Daemons
+---
 
-In this step, we are configuring the "engine" that runs your virtual machines. We are switching from the old-school "Monolithic" mode to the modern "Modular" mode.
+# Modular Libvirt Daemons — Socket Activation (Aug 2026)
 
-## Why are we doing this?
+> [!info] Canonical
+> `10_virt_modular_daemon.py` — phases: eradicate monolith → enforce socket activation → drop-ins for real perms → daemon conf (fallback) → `libvirt-guests` → arm + verification. Follow the script for idempotent runs; this note teaches *why*.
 
-By default, older setups used a **Monolithic** daemon (`libvirtd`). This is like having one giant manager trying to do everyone's job at once—it handles storage, networks, and the VMs themselves. It works, but it unnecessarily hogs system memory.
+## Why modular
 
-We are switching to **Modular** daemons using **Systemd Socket Activation**. This is like having a team of specialists. Because we are only enabling their _sockets_ (the communication doorways), the actual daemons stay completely asleep. If you aren't touching the network, the network manager uses 0MB of RAM. It only wakes up the microsecond it receives a request, making your system incredibly efficient.
+| Era | Model | Cost |
+|---|---|---|
+| <libvirt 6 | `libvirtd` monolith handles every driver | one giant process, always resident |
+| ≥12.6 (Arch 2026) | per-driver `virt${drv}d` + `virtproxyd` + `virtlogd`/`virtlockd`, **systemd socket-activated** | **0 MB idle** per driver (inactive/dead until first `virsh`/`virt-manager` connect) |
 
-> [!INFO] Service Breakdown: What are we enabling?
-> 
-> Here is exactly what each specialist piece of the puzzle does:
-> 
-> - **`virtqemud`**: The core compute daemon (QEMU/KVM). Manages CPU/RAM allocation.
->     
-> - **`virtnetworkd`**: Creates virtual networks (NAT/Bridging) for VM internet access.
->     
-> - **`virtnodedevd`**: Handles physical hardware passthrough (PCIe/USB/GPU).
->     
-> - **`virtstoraged`**: Manages the virtual hard drives (.qcow2) and storage pools.
->     
-> - **`virtinterfaced`**: Manages physical host network interfaces.
->     
-> - **`virtnwfilterd`**: Acts like a firewall, controlling network traffic rules.
->     
-> - **`virtsecretd`**: Safely stores passwords and encryption keys needed by your VMs.
->     
-> - **`virtproxyd`**: The translator. Routes commands from older tools that still look for the monolithic `libvirtd` socket.
->     
-> - **`virtlogd`**: Extremely critical. Handles console logging. VMs will fail to start if they cannot write logs here.
->     
-> - **`virtlockd`**: Prevents data corruption by locking virtual disks so two VMs don't write to the same file at once.
->     
-> - **`virtlxcd` / `virtvboxd` / `virtchd`**: Alternative hypervisor support (LXC, VirtualBox, Cloud-Hypervisor) that sit entirely asleep until requested.
->     
+Only sockets (`*.socket`) listen; services (`*.service`) wake on demand and auto-idle.
 
-## Step 1: Kill the Monolithic Daemon Securely
+> [!abstract] Drivers
+> - **QEMU/compute:** `virtqemud` — CPU/RAM, the one you care about for VFIO
+> - **Network:** `virtnetworkd` — NAT/bridge, `dnsmasq` + `nftables`
+> - **Node:** `virtnodedevd` — PCIe/USB hostdev
+> - **Storage:** `virtstoraged` — pools/qcow2
+> - **Infra:** `virtinterfaced`, `virtnwfilterd`, `virtsecretd`, `virtproxy` (compat), `virtlogd`, `virtlockd`, `virtlxcd`/`virtvboxd`/`virtchd` (alt hypervisors, idle)
 
-Before starting the modular specialists, we must completely eradicate the old manager and its listening sockets (including TCP/TLS remnants) to prevent port conflicts.
+## Step 1 — Eradicate the monolith
 
-> [!NOTE] Expected Terminal Output
-> 
-> If you see a warning stating `The unit files have no installation config`, or `Unit is masked, ignoring`, this is completely normal and confirms the legacy daemon is effectively dead.
-
-# Stop, disable, and mask the service and ALL legacy sockets
 ```bash
 sudo systemctl stop libvirtd.service libvirtd.socket libvirtd-ro.socket libvirtd-admin.socket libvirtd-tcp.socket libvirtd-tls.socket
 sudo systemctl disable libvirtd.service libvirtd.socket libvirtd-ro.socket libvirtd-admin.socket libvirtd-tcp.socket libvirtd-tls.socket
+# Never mask if hard-RequiredBy libvirt-guests.service — script checks Requires/Requisite/BindsTo
 sudo systemctl mask libvirtd.service libvirtd.socket libvirtd-ro.socket libvirtd-admin.socket libvirtd-tcp.socket libvirtd-tls.socket
+sudo systemctl daemon-reload
 ```
+> Expected noise `The unit files have no installation config` / `masked, ignoring` = monolith dead.
 
-## Step 2: Enable and Start the Modular Sockets
+## Step 2 — Enable sockets only (never `.service`)
 
-We need to enable the connection points (`.socket`) for every driver.
+> [!warning] Critical systemd rule
+> Do **not** `enable --now virtqemud.service`. That makes it resident 24/7. Enable **sockets** only.
 
-> [!WARNING] Critical Systemd Rule
-> 
-> Do **NOT** enable the `.service` units directly. If you enable the services, they will run 24/7. By only enabling the `.socket` units, systemd handles waking them up automatically when a client requests them.
-
-Copy and paste these loops into your terminal. We do this in two batches because logging/locking daemons have a different socket structure than the main drivers.
-
-**First, Enable all sockets to persist across reboots:**
-
-```
-# Enable the primary modular sockets (including alternative hypervisors)
-for drv in qemu interface network nodedev nwfilter secret storage proxy lxc ch vbox; do \
-  sudo systemctl enable virt${drv}d.socket virt${drv}d-ro.socket virt${drv}d-admin.socket; \
+```bash
+# persist
+for drv in qemu interface network nodedev nwfilter secret storage proxy lxc ch vbox; do
+  sudo systemctl enable virt${drv}d.socket virt${drv}d-ro.socket virt${drv}d-admin.socket
 done
+for drv in log lock; do sudo systemctl enable virt${drv}d.socket virt${drv}d-admin.socket; done
 
-# Enable the logging and locking sockets
-for drv in log lock; do \
-  sudo systemctl enable virt${drv}d.socket virt${drv}d-admin.socket; \
+# now
+for drv in qemu interface network nodedev nwfilter secret storage proxy lxc ch vbox; do
+  sudo systemctl start virt${drv}d.socket virt${drv}d-ro.socket virt${drv}d-admin.socket
 done
+for drv in log lock; do sudo systemctl start virt${drv}d.socket virt${drv}d-admin.socket; done
 ```
 
-**Second, Start the sockets for the current session:**
+Disable always-on services + TCP/TLS listeners (script does this):
 
-```
-# Start the primary modular sockets
-for drv in qemu interface network nodedev nwfilter secret storage proxy lxc ch vbox; do \
-  sudo systemctl start virt${drv}d.socket virt${drv}d-ro.socket virt${drv}d-admin.socket; \
-done
-
-# Start the logging and locking sockets
-for drv in log lock; do \
-  sudo systemctl start virt${drv}d.socket virt${drv}d-admin.socket; \
-done
+```bash
+# should be disabled — socket-activated only
+systemctl is-enabled virtqemud.service   # → disabled
+systemctl is-enabled virtqemud-tcp.socket # → masked/disabled
 ```
 
-## Step 3: Enable Graceful VM Shutdowns (Data Safety)
+## Step 3 — Real socket perms (the part most guides get wrong)
 
-To prevent your virtual machines from being brutally hard-killed (which corrupts data) when you shut down or reboot your host computer, you must enable the `libvirt-guests` service. This tells systemd to gracefully pause or shut down your VMs when the host turns off.
+`libvirtd.conf` / `virtqemud.conf` contain verbatim:
 
+> *“This setting is not required or honoured if using systemd socket activation.”* — `unix_sock_group` / `unix_sock_rw_perms` are **inert**.
+
+Real perms come from **systemd drop-ins**:
+
+```bash
+sudo mkdir -p /etc/systemd/system/virtqemud.socket.d
+sudo tee /etc/systemd/system/virtqemud.socket.d/10-arsonix.conf <<'EOF'
+# Managed by Arsonix (Phase 2)
+[Socket]
+SocketUser=root
+SocketGroup=libvirt
+SocketMode=0660
+EOF
+sudo tee /etc/systemd/system/virtqemud-ro.socket.d/10-arsonix.conf <<'EOF'
+[Socket]
+SocketUser=root
+SocketGroup=libvirt
+SocketMode=0666
+EOF
+sudo systemctl daemon-reload
+sudo systemctl restart virtqemud.socket virtqemud-ro.socket
+ls -l /run/libvirt/virtqemud-sock*  # srwxrwx---  root libvirt  0660  ← fact on disk
 ```
+
+The pipeline also writes inert `virtqemud.conf` values (`unix_sock_group="libvirt"` etc.) for manual `--listen` fallback, plus `firewall_backend="nftables"` in `network.conf` and `libvirt-guests` (`URIS='qemu:///system' ON_BOOT=start … SYNC_TIME=1`).
+
+## Step 4 — Graceful shutdown
+
+```bash
 sudo systemctl enable --now libvirt-guests.service
+# /etc/conf.d/libvirt-guests → URIS='qemu:///system' ON_BOOT=start ON_SHUTDOWN=shutdown SHUTDOWN_TIMEOUT=120
 ```
 
-## Step 4: Apply Changes
+## Step 5 — Verify
 
-For systemd to clean up the IPC namespaces and transition to the modular architecture smoothly, reboot your computer.
-
-```
-systemctl reboot
-```
-
-## Step 5: Verify the Configuration
-
-Once your system has rebooted, you can verify that your new modular setup is working flawlessly.
-
-**1. Check if the sockets are listening:**
-
-```
-systemctl list-sockets | grep virt
+```bash
+systemctl list-sockets | grep virt        # LISTEN
+systemctl status virtqemud.service        # inactive (dead) = 0 MB idle — correct
+virsh -c qemu:///system version           # wakes to active, self-terminates after idle timeout
+sudo virsh -c qemu:///system -q uri       # root OK
+sudo -u $USER virsh -c qemu:///system -q uri  # operator OK only after re-login (libvirt group)
 ```
 
-> [!SUCCESS] Expected Output
-> 
-> You should see a long list showing sockets like `virtqemud.socket`, `virtnetworkd.socket`, etc., sitting in the `LISTEN` state. This means the doorways are open and waiting.
+## Undo (to monolith)
 
-**2. Prove the daemons are sleeping:**
-
-```
-systemctl status virtqemud.service
-```
-
-> [!SUCCESS] Expected Output
-> 
-> It should say `Active: inactive (dead)`.
-> 
-> _This is exactly what we want!_ It proves the daemon is using 0MB of RAM. The moment you open your virtual machine manager or run a `virsh` command, systemd will instantly flip this to `active (running)`.
-
-## Appendix: How to Undo (Disable)
-
-> [!WARNING] Reverting
-> 
-> If you ever need to revert to the old monolithic mode, stop and disable all modular sockets first.
-
-**1. Stop the running sockets & services:**
-
-```
-for drv in qemu interface network nodedev nwfilter secret storage proxy lxc ch vbox log lock; do \
-  sudo systemctl stop virt${drv}d.service virt${drv}d.socket virt${drv}d-ro.socket virt${drv}d-admin.socket 2>/dev/null; \
+```bash
+for drv in qemu interface network nodedev nwfilter secret storage proxy lxc ch vbox log lock; do
+  sudo systemctl stop virt${drv}d.service virt${drv}d.socket virt${drv}d-ro.socket virt${drv}d-admin.socket 2>/dev/null || true
+  sudo systemctl disable virt${drv}d.socket virt${drv}d-ro.socket virt${drv}d-admin.socket 2>/dev/null || true
 done
-```
-
-**2. Disable them from starting on boot:**
-
-```
-for drv in qemu interface network nodedev nwfilter secret storage proxy lxc ch vbox log lock; do \
-  sudo systemctl disable virt${drv}d.socket virt${drv}d-ro.socket virt${drv}d-admin.socket 2>/dev/null; \
-done
-```
-
-**3. Unmask the legacy daemon:**
-
-```
 sudo systemctl unmask libvirtd.service libvirtd.socket libvirtd-ro.socket libvirtd-admin.socket libvirtd-tcp.socket libvirtd-tls.socket
 ```
+
+See: [[KVM Services]] (legacy retained), [[All Libvert Daemons]], `10_virt_modular_daemon.py`.

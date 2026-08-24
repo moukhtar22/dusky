@@ -1,15 +1,6 @@
 #!/usr/bin/env bash
-# -----------------------------------------------------------------------------
-# Elite DevOps GPU Driver Installer (v2026.07-Golden)
-# -----------------------------------------------------------------------------
-# Role:       System Architect
-# Objective:  Hardware Detection & Driver Installation ONLY.
-#             (No config modification, no mkinitcpio touches).
-# Context:    Arch Linux (Rolling) / Wayland / Hyprland.
-# Logic:      Sysfs Topology -> Strict lspci Fallback -> Ordered Classification.
-# -----------------------------------------------------------------------------
+#d: Install open-source NVIDIA drivers
 
-# --- 1. STRICT MODE ---
 set -euo pipefail
 shopt -s extglob nullglob
 

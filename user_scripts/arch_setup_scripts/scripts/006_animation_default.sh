@@ -1,9 +1,5 @@
 #!/usr/bin/env bash
-# set Hyprland animation config to dusky (Default)
-# -----------------------------------------------------------------------------
-# Purpose: Copy 'dusky.conf' to 'active.conf' & reload Hyprland
-# Env:     Arch Linux / Hyprland / UWSM
-# -----------------------------------------------------------------------------
+#d: Apply dusky's default Hyprland animations
 
 set -euo pipefail
 

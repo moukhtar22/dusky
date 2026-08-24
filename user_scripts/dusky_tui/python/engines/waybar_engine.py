@@ -6,10 +6,48 @@ import re
 import asyncio
 import subprocess
 import fcntl
+import signal
+import shutil
 from pathlib import Path
 from typing import Any
 
 from python.frontend.core_types import BaseEngine
+
+def _is_pid_running(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+def _get_active_waybar_pids() -> list[int]:
+    pids = []
+    my_pid = os.getpid()
+    my_uid = os.getuid()
+    try:
+        for pid_str in os.listdir("/proc"):
+            if not pid_str.isdigit():
+                continue
+            pid = int(pid_str)
+            if pid == my_pid:
+                continue
+            try:
+                if os.stat(f"/proc/{pid}").st_uid != my_uid:
+                    continue
+                with open(f"/proc/{pid}/stat", "r", encoding="utf-8") as f:
+                    stat_line = f.read()
+                state = stat_line.rpartition(")")[2].strip().split()[0]
+                if state == 'Z':
+                    continue
+                with open(f"/proc/{pid}/comm", "r", encoding="utf-8") as f:
+                    if f.read().strip() == "waybar":
+                        pids.append(pid)
+            except (OSError, IOError, IndexError):
+                pass
+    except OSError:
+        pass
+    return pids
+
 
 # =============================================================================
 # [ WAYBAR ENGINE - v4.8.9 PARITY ]
@@ -159,24 +197,26 @@ class WaybarEngine(BaseEngine):
         self._apply_symlinks_sync(target_dir)
         
         # --- PREVENT DOUBLE WAYBARS CONCURRENCY LOCK ---
-        # Cutting edge: Use Systemd's XDG_RUNTIME_DIR to prevent multi-user collision risks
         runtime_dir = Path(os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}"))
         lock_file = runtime_dir / "dusky_waybar_restart.lock"
         
         fd = open(lock_file, "w")
-        
+        locked = False
         try:
-            # Poll for the lock asynchronously to prevent overlapping restarts
-            while True:
+            # Non-blocking lock attempt with ultra-fast retry
+            for _ in range(5):
                 try:
                     fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    locked = True
                     break
                 except BlockingIOError:
-                    await asyncio.sleep(0.05)
+                    await asyncio.sleep(0.01)
                     
+            if not locked:
+                fd.close()
+                return
+
             # Check if another process (e.g. rapid --next presses) superseded our target symlink
-            # while we were waiting for the lock. If so, abort and let the newer process handle 
-            # the restart to avoid redundant flashing.
             if self.config_path.is_symlink():
                 try:
                     current_symlink = self.config_path.resolve()
@@ -186,37 +226,34 @@ class WaybarEngine(BaseEngine):
                 except OSError:
                     pass
 
-            # 1. Standard Termination
-            try:
-                proc = await asyncio.create_subprocess_exec("pkill", "-x", "waybar", stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
-                await proc.wait()
-            except OSError:
-                pass
-            
-            # 2. Replicate Bash pgreg Verification Loop
-            for _ in range(15):
+            # 1. Fast process termination via /proc scan and OS signals
+            pids = _get_active_waybar_pids()
+            for pid in pids:
                 try:
-                    check_proc = await asyncio.create_subprocess_exec("pgrep", "-x", "waybar", stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                    await check_proc.wait()
-                    if check_proc.returncode != 0:
-                        break
+                    os.kill(pid, signal.SIGTERM)
                 except OSError:
-                    break
-                await asyncio.sleep(0.1)
-                
-            # 3. SIGKILL Failsafe
-            try:
-                proc = await asyncio.create_subprocess_exec("pkill", "-9", "-x", "waybar", stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
-                await proc.wait()
-            except OSError:
-                pass
-                
-            await asyncio.sleep(0.2)
+                    pass
             
-            # 4. Launch Waybar exactly as manual CLI execution
+            if pids:
+                # High-frequency polling (up to 150ms) for graceful SIGTERM termination
+                for _ in range(15):
+                    await asyncio.sleep(0.01)
+                    pids = [p for p in pids if _is_pid_running(p)]
+                    if not pids:
+                        break
+                
+                # SIGKILL fallback for any remaining hung processes
+                for pid in pids:
+                    try:
+                        os.kill(pid, signal.SIGKILL)
+                    except OSError:
+                        pass
+                
+            # 2. Launch Waybar via dusky-run (if available) or fallback to waybar
+            cmd = ["dusky-run", "waybar"] if shutil.which("dusky-run") else ["waybar"]
             try:
                 subprocess.Popen(
-                    ["waybar"],
+                    cmd,
                     start_new_session=set_sid,       
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
@@ -225,19 +262,19 @@ class WaybarEngine(BaseEngine):
             except OSError:
                 pass
 
-            # UI CACHE REFRESH TRIGGER
-            # Pauses slightly to let the UI's write mask expire, then artificially 
-            # bumps the directory mtime. This brilliantly forces the UI to reload the state natively.
-            await asyncio.sleep(0.5)
+            # 3. Touch config root mtime instantly to notify file watcher
             try:
                 os.utime(self.config_root, None)
             except OSError:
                 pass
 
         finally:
-            # Release lock
+            if locked:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                except OSError:
+                    pass
             try:
-                fcntl.flock(fd, fcntl.LOCK_UN)
                 fd.close()
             except OSError:
                 pass
@@ -352,6 +389,18 @@ class WaybarEngine(BaseEngine):
 
         selected_dir = self.theme_dirs[target_idx]
         selected_name = self.theme_names[target_idx]
+        selected_number = target_idx + 1
+
+        self.cache.update({
+            "active_theme_index": target_idx,
+            "active_theme_name": selected_name,
+            "active_theme_number": selected_number,
+            "waybar": selected_number,
+            "DEFAULT/active_theme_index": target_idx,
+            "DEFAULT/active_theme_name": selected_name,
+            "DEFAULT/active_theme_number": selected_number,
+            "DEFAULT/waybar": selected_number,
+        })
 
         if requires_restart:
             # Atomic State Save to prevent corruption

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Strict modern setup for USB notifications (Systemd 260+)
+#d: Show notifications when USB devices are plugged in
+
 set -euo pipefail
 
 readonly RED=$'\033[0;31m'

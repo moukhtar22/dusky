@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
-# add or remove user from groups
-# Fully idempotent, fail-safe user group addition script.
+#d: Add or remove a user from groups
 
-# --- Strict Execution Mode ---
 set -euo pipefail
 
 # ==========================================

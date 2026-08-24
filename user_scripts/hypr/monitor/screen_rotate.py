@@ -334,13 +334,15 @@ def _notify(monitor: str, transform: int, mode: str) -> None:
         4: "0° (flipped)",  5: "90°+flip", 6: "180°+flip", 7: "270°+flip",
     }
     label = _TRANSFORM_NAMES.get(transform, str(transform))
-    body  = f"Monitor: {monitor}\nRotation: {label}\nMode: {mode}"
+    body  = f"{monitor} • {label}"
 
     try:
         subprocess.run(
             [
                 "notify-send",
-                "--app-name=screen_rotate.py",
+                "--app-name=hypr-rotate",
+                "--icon=object-rotate-right",
+                "-t", "1500",
                 "Display Rotated",
                 body,
                 "--hint=string:x-canonical-private-synchronous:display-rotate",

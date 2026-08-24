@@ -1,15 +1,6 @@
 #!/usr/bin/env bash
-# Bibata cursor installer
-# ==============================================================================
-#  BIBATA CURSOR INSTALLER (FINAL OPTIMIZED)
-#  - Auto-detects LATEST version from GitHub
-#  - Installs to XDG_DATA_HOME (standard: ~/.local/share/icons)
-#  - Clean pipe installation (No temp files)
-#  - Generates index.theme for legacy app compatibility
-#  - Updates Hyprland session live
-# ==============================================================================
+#d: Install the Bibata cursor theme
 
-# 1. Safety & Strict Mode
 set -o errexit   # Exit on error
 set -o nounset   # Error on undefined variables
 set -o pipefail  # Error if any command in a pipe fails
@@ -20,7 +11,8 @@ readonly THEME_NAME="Bibata-Modern-Classic"
 readonly CURSOR_SIZE=18
 readonly REPO_URL="https://github.com/ful1e5/Bibata_Cursor"
 # Respect XDG standard, fallback to ~/.local/share
-readonly XDG_DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
+readonly USER_HOME="${HOME:-$(getent passwd "$(id -un)" | cut -d: -f6 || echo ~)}"
+readonly XDG_DATA_HOME="${XDG_DATA_HOME:-${USER_HOME}/.local/share}"
 readonly ICON_DIR="${XDG_DATA_HOME}/icons"
 readonly THEME_PATH="${ICON_DIR}/${THEME_NAME}"
 
@@ -29,7 +21,7 @@ readonly CURL_TIMEOUT=30
 readonly CURL_RETRIES=3
 
 # 3. Colors (Safe & Compact)
-if [[ -t 1 ]]; then
+if [[ -z ${NO_COLOR-} ]] && [[ -n ${TERM-} ]] && [[ -t 1 ]] && command -v tput >/dev/null 2>&1 && [[ $(tput colors 2>/dev/null || echo -1) -ge 8 ]]; then
     BLUE=$(tput setaf 4)
     GREEN=$(tput setaf 2)
     YELLOW=$(tput setaf 3)

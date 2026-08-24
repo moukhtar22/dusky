@@ -1,15 +1,5 @@
 #!/usr/bin/env bash
-# Btrfs comression stats
-# ==============================================================================
-# Script Name:   btrfs_compression_stats.sh (v3.2 - Absolute Savings)
-# Description:   Calculates ZSTD compression savings on Arch Linux.
-#                - CRITICAL FIX: Prevents silent exit on grep failures (set -e).
-#                - CRITICAL FIX: Robust sudo re-execution using realpath.
-#                - AUTO-INSTALL: Installs missing deps via pacman automatically.
-#                - NEW: Calculates absolute space saved (e.g., "14GB").
-#                - Dynamic Discovery: Finds Btrfs mounts automatically.
-#                - Atomic Execution: Runs compsize ONCE to prevent double-counting.
-# ==============================================================================
+#d: Show Btrfs ZSTD compression savings
 
 set -euo pipefail
 # Ensure subshells inherit the strict error handling (Bash 4.4+)

@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-#  Manages backup, restoration, and cleanup of Clipboard (Cliphist) and Errands data.
+#d: Back up, restore, or clear clipboard and errands data
 
-# 1. Strict Error Handling
 set -euo pipefail
 
 # ==============================================================================

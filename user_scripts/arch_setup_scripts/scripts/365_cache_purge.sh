@@ -1,9 +1,6 @@
 #!/usr/bin/env bash
-# ==============================================================================
-#  ARCH LINUX CACHE PURGE & OPTIMIZER
-# ==============================================================================
+#d: Purge package caches to free up space
 
-# --- 1. Safety & Environment ---
 set -o errexit
 set -o nounset
 set -o pipefail

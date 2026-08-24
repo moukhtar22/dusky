@@ -1,14 +1,6 @@
 #!/usr/bin/env bash
-# Enforces specific [Appearance] settings in qt5ct and qt6ct
-# ==============================================================================
-# Script: setup_qt_theme.sh
-# Description: Enforces specific [Appearance] settings in qt5ct and qt6ct.
-# Environment: Arch Linux / Hyprland / UWSM
-# ==============================================================================
+#d: Enforce Qt appearance settings (qt5ct/qt6ct)
 
-# ------------------------------------------------------------------------------
-# 1. Strict Mode & Safety
-# ------------------------------------------------------------------------------
 set -euo pipefail
 IFS=$'\n\t'
 
@@ -39,6 +31,8 @@ trap cleanup EXIT ERR
 # ------------------------------------------------------------------------------
 # 4. Core Logic
 # ------------------------------------------------------------------------------
+HOME="${HOME:-$(getent passwd "$(id -un)" | cut -d: -f6)}"
+
 update_qt_config() {
     local app_name="$1"       # e.g., qt5ct
     local conf_file="$2"      # Full path to config
@@ -47,12 +41,15 @@ update_qt_config() {
 
     log_info "Processing configuration for ${BOLD}${app_name}${RESET}..."
 
-    # Ensure directory exists
-    local config_dir
-    config_dir=$(dirname "$conf_file")
-    if [[ ! -d "$config_dir" ]]; then
-        mkdir -p "$config_dir"
-        log_info "Created directory: $config_dir"
+    # Ensure config and colors directories exist
+    local config_dir="$HOME/.config/$app_name"
+    local colors_dir="$config_dir/colors"
+    mkdir -p "$config_dir" "$colors_dir"
+
+    # Pre-link matugen colors if generated colors already exist
+    local gen_colors="$HOME/.config/matugen/generated/$colors_file"
+    if [[ -f "$gen_colors" ]]; then
+        ln -nfs "$gen_colors" "$colors_dir/matugen.conf"
     fi
 
     # Create a temporary file for atomic writing
@@ -60,28 +57,30 @@ update_qt_config() {
 
     # --------------------------------------------------------------------------
     # STEP A: Generate the enforced header
-    # We use single quotes for the format string to prevent shell expansion,
-    # but pass $HOME as a literal string because the user config requires it.
+    # Dynamically expand $HOME for the current user executing the setup script.
+    # Qt configuration files require absolute paths and do not expand shell variables.
     # --------------------------------------------------------------------------
     {
         printf "[Appearance]\n"
-        printf "color_scheme_path=\$HOME/.config/matugen/generated/%s\n" "$colors_file"
+        printf "color_scheme_path=%s/.config/%s/colors/matugen.conf\n" "$HOME" "$app_name"
         printf "custom_palette=true\n"
+        printf "icon_theme=Papirus-Dark\n"
         printf "standard_dialogs=%s\n" "$dialog_val"
-        printf "style=Fusion\n"
+        printf "style=Fusion\n\n"
     } > "$TEMP_FILE"
 
     # --------------------------------------------------------------------------
-    # STEP B: Filter existing file (if it exists)
-    # We strip out [Appearance] and the specific keys we just wrote to avoid
-    # duplicates. All other sections (Fonts, Interface) are preserved perfectly.
+    # STEP B: Filter existing file or supply defaults
+    # If the file exists, preserve Fonts and Interface sections.
+    # If fresh, write sane default fonts and interface rules.
     # --------------------------------------------------------------------------
-    if [[ -f "$conf_file" ]]; then
+    if [[ -f "$conf_file" && -s "$conf_file" ]]; then
         awk '
             BEGIN { 
                 # Keys to strip from the old file to avoid duplication
                 keys["style"]=1
                 keys["custom_palette"]=1
+                keys["icon_theme"]=1
                 keys["standard_dialogs"]=1
                 keys["color_scheme_path"]=1
             }
@@ -101,7 +100,58 @@ update_qt_config() {
             { print }
         ' "$conf_file" >> "$TEMP_FILE"
     else
-        log_info "File $conf_file did not exist. Creating new."
+        log_info "File $conf_file did not exist. Populating with initial defaults."
+        if [[ "$app_name" == "qt5ct" ]]; then
+            cat << 'EOF' >> "$TEMP_FILE"
+[Fonts]
+fixed="JetBrainsMono Nerd Font Mono,12,-1,5,50,0,0,0,0,0"
+general="Atkinson Hyperlegible,12,-1,5,50,0,0,0,0,0"
+
+[Interface]
+activate_item_on_single_click=1
+buttonbox_layout=0
+cursor_flash_time=1000
+dialog_buttons_have_icons=1
+double_click_interval=400
+gui_effects=@Invalid()
+keyboard_scheme=2
+menus_have_icons=true
+show_shortcuts_in_context_menus=true
+stylesheets=@Invalid()
+toolbutton_style=4
+underline_shortcut=1
+wheel_scroll_lines=3
+
+[Troubleshooting]
+force_raster_widgets=1
+ignored_applications=@Invalid()
+EOF
+        else
+            cat << 'EOF' >> "$TEMP_FILE"
+[Fonts]
+fixed="JetBrainsMono Nerd Font Mono,12,-1,5,400,0,0,0,0,0,0,0,0,0,0,1"
+general="Atkinson Hyperlegible,12,-1,5,400,0,0,0,0,0,0,0,0,0,0,1"
+
+[Interface]
+activate_item_on_single_click=1
+buttonbox_layout=0
+cursor_flash_time=1000
+dialog_buttons_have_icons=1
+double_click_interval=400
+gui_effects=@Invalid()
+keyboard_scheme=2
+menus_have_icons=true
+show_shortcuts_in_context_menus=true
+stylesheets=@Invalid()
+toolbutton_style=4
+underline_shortcut=1
+wheel_scroll_lines=3
+
+[Troubleshooting]
+force_raster_widgets=1
+ignored_applications=@Invalid()
+EOF
+        fi
     fi
 
     # --------------------------------------------------------------------------

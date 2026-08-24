@@ -1,11 +1,6 @@
 #!/usr/bin/env bash
-#          Auto sets up SSH
-#          iptables/nftables), smart IP/Tailscale detection, sshd.socket aware.
-# Target:  Arch Linux (latest), Wayland/Hyprland
-# Usage:   ./setup-ssh.sh [--auto|-a] [--help|-h]
-# ==============================================================================
+#d: Set up OpenSSH with a hardened config
 
-# --- 1. Safety & Path Resolution ---
 set -euo pipefail
 shopt -s inherit_errexit 2>/dev/null || true
 

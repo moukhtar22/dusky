@@ -33,19 +33,19 @@ fi
 # ==============================================================================
 
 declare -ar pkgs_offline=(
-  "intel-ucode" "amd-ucode" "mkinitcpio" "glaze" "python-cssselect" "base" "base-devel" "python-lxml" "python-certifi" "python-charset-normalizer" "python-idna" "python-requests" "python-urllib3" "deno" "yt-dlp" "yt-dlp-ejs" "hunspell" "xf86-input-libinput" "xorg-xauth" "boost-libs" "plymouth"
+  "intel-ucode" "amd-ucode" "mkinitcpio" "glaze" "python-cssselect" "base" "base-devel" "python-lxml" "python-certifi" "python-charset-normalizer" "python-idna" "python-requests" "python-urllib3" "deno" "yt-dlp" "yt-dlp-ejs" "hunspell" "xf86-input-libinput" "xorg-xauth" "boost-libs" "plymouth" "grub" "os-prober" "cryptsetup"
  )
 
 declare -ar pkgs_graphics=(
-  "intel-media-driver" "vpl-gpu-rt" "mesa" "vulkan-intel" "mesa-utils" "intel-gpu-tools" "libva" "libva-utils" "vulkan-icd-loader" "vulkan-tools" "sof-firmware" "linux-firmware" "linux-headers" "acpi_call" "kernel-modules-hook"
+  "intel-media-driver" "vpl-gpu-rt" "mesa" "vulkan-intel" "mesa-utils" "intel-gpu-tools" "libva" "libva-utils" "vulkan-icd-loader" "vulkan-tools" "sof-firmware" "linux-firmware" "linux-headers" "acpi_call" "kernel-modules-hook" "linux-firmware-nvidia" "linux-firmware-amdgpu" "linux-firmware-radeon" "linux-firmware-intel" "linux-firmware-mediatek" "linux-firmware-broadcom" "linux-firmware-atheros" "linux-firmware-realtek" "linux-firmware-cirrus" "linux-firmware-other" "linux-firmware-whence"
 )
 
 declare -ar pkgs_hyprland=(
-  "hyprland" "uwsm" "xorg-xwayland" "xdg-desktop-portal-hyprland" "xdg-desktop-portal-gtk" "localsearch" "polkit" "hyprpolkitagent" "xdg-utils" "socat" "inotify-tools" "libnotify" "mako" "file"
+  "hyprland" "xorg-xwayland" "xdg-desktop-portal-hyprland" "xdg-desktop-portal-gtk" "localsearch" "polkit" "hyprpolkitagent" "xdg-utils" "socat" "inotify-tools" "libnotify" "mako" "file"
 )
 
 declare -ar pkgs_appearance=(
-  "qt5-wayland" "qt6-wayland" "gtk3" "gtk4" "nwg-look" "qt5ct" "qt6ct" "qt6-svg" "qt6-multimedia-ffmpeg" "adw-gtk-theme" "upower" "plocate" "matugen" "ttf-font-awesome" "ttf-jetbrains-mono-nerd" "noto-fonts-emoji" "sassc" "python-packaging" "python" "python-evdev" "python-pyudev" "fontconfig" "papirus-icon-theme" "python-pyquery" "python-textual" "python-rich"
+  "qt5-wayland" "qt6-wayland" "gtk3" "gtk4" "nwg-look" "qt5ct" "qt6ct" "qt6-svg" "qt6-multimedia-ffmpeg" "adw-gtk-theme" "upower" "plocate" "matugen" "otf-font-awesome" "ttf-jetbrains-mono-nerd" "otf-atkinsonhyperlegiblemono-nerd" "ttf-atkinson-hyperlegible" "otf-atkinson-hyperlegible" "noto-fonts-emoji" "sassc" "python-packaging" "python" "python-gobject" "python-cairo" "python-opengl" "gtk-layer-shell" "python-evdev" "python-pyudev" "fontconfig" "papirus-icon-theme" "python-pyquery" "python-textual" "python-rich"
 )
 
 declare -ar pkgs_desktop=(
@@ -53,12 +53,12 @@ declare -ar pkgs_desktop=(
 )
 
 declare -ar pkgs_audio=(
-  "pipewire" "pipewire-alsa" "alsa-utils" "wireplumber" "pipewire-pulse" "playerctl" "bluez" "bluez-utils" "bluez-hid2hci" "bluez-libs" "bluez-obex" "blueman" "bluetui" "pavucontrol" "gst-plugins-base" "gst-libav" "gst-plugins-bad" "gst-plugins-good" "gst-plugins-ugly" "gst-plugin-pipewire" "libcanberra" "songrec" "sox"
+  "pipewire" "pipewire-alsa" "alsa-utils" "wireplumber" "pipewire-pulse" "playerctl" "bluez" "bluez-utils" "bluez-hid2hci" "bluez-libs" "bluez-obex" "blueman" "bluetui" "pavucontrol" "gst-plugins-base" "gst-libav" "gst-plugins-bad" "gst-plugins-good" "gst-plugins-ugly" "gst-plugin-pipewire" "libcanberra" "songrec" "sox" "rnnoise"
 )
 
 declare -ar pkgs_filesystem=(
-  "btrfs-progs" "compsize" "zram-generator" "udisks2" "udiskie" "dosfstools" "ntfs-3g" "xdg-user-dirs" "usbutils" "gnome-disk-utility" "unzip" "zip" "unrar" "7zip" "cpio" "file-roller" "rsync" "nfs-utils" "nilfs-utils" "smartmontools" "dmraid" "hdparm" "hwdetect" "lsscsi" "sg3_utils" "cpupower" "dust" "dkms"
-  "thunar" "thunar-archive-plugin" "file-roller" "thunar-volman" "thunar-media-tags-plugin" "thunar-shares-plugin" "thunar-vcs-plugin" "tumbler" "ffmpegthumbnailer" "webp-pixbuf-loader" "poppler-glib" "libgsf" "libgepub" "libopenraw" "resvg" "gvfs" "gvfs-mtp" "gvfs-nfs" "gvfs-smb" "gvfs-gphoto2" "gvfs-afc" "gvfs-dnssd" "catfish" "gnome-keyring" "meld" "xreader" "imagemagick"
+  "btrfs-progs" "compsize" "zram-generator" "udisks2" "udiskie" "dosfstools" "xdg-user-dirs" "usbutils" "gnome-disk-utility" "unzip" "zip" "unrar" "7zip" "cpio" "file-roller" "rsync" "nfs-utils" "nilfs-utils" "smartmontools" "dmraid" "hdparm" "hwdetect" "lsscsi" "sg3_utils" "cpupower" "dust" "dkms"
+  "thunar" "thunar-archive-plugin" "file-roller" "thunar-volman" "thunar-media-tags-plugin" "thunar-shares-plugin" "thunar-vcs-plugin" "tumbler" "ffmpegthumbnailer" "webp-pixbuf-loader" "poppler-glib" "libgsf" "libgepub" "libopenraw" "resvg" "gvfs" "gvfs-mtp" "gvfs-nfs" "gvfs-smb" "gvfs-gphoto2" "gvfs-afc" "gvfs-dnssd" "catfish" "gnome-keyring" "meld" "xreader" "imagemagick" "kio-admin"
 )
 
 declare -ar pkgs_network=(
@@ -78,7 +78,7 @@ declare -ar pkgs_multimedia=(
 )
 
 declare -ar pkgs_sysadmin=(
-  "btop" "htop" "dgop" "nvtop" "inxi" "sysstat" "sysbench" "logrotate" "acpid" "tlp" "tlp-rdw" "thermald" "powertop" "gdu" "iotop" "iftop" "lshw" "hwinfo" "dmidecode" "wev" "pacman-contrib" "gnome-keyring" "libsecret" "seahorse" "greetd-agreety" "greetd" "greetd-tuigreet" "yad" "dysk" "fwupd" "perl" "accountsservice" "smartmontools" "pkgfile" "rebuild-detector" "accountsservice"
+  "btop" "htop" "dgop" "nvtop" "inxi" "sysstat" "sysbench" "logrotate" "acpid" "tlp" "tlp-rdw" "thermald" "powertop" "gdu" "iotop" "iftop" "lshw" "hwinfo" "dmidecode" "strace" "wev" "pacman-contrib" "gnome-keyring" "libsecret" "seahorse" "greetd-agreety" "greetd" "greetd-tuigreet" "yad" "dysk" "fwupd" "perl" "accountsservice" "smartmontools" "pkgfile" "rebuild-detector" "accountsservice"
 )
 
 declare -ar pkgs_gnome=(

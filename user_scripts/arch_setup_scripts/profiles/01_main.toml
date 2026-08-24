@@ -1,0 +1,151 @@
+[profile]
+name = "Main Setup"
+description = "Full Arch Linux install with all dotfiles"
+schema_version = 2
+post_script_delay = 0
+
+[policy]
+audio = true
+notify = true
+inhibit_sleep = true
+task_timeout = 0
+stop_on_fail = false
+manual = false
+force = false
+
+[git]
+enabled = true
+git_dir = "~/dusky"
+work_tree = "~/"
+remote = "origin"
+
+[search_dirs]
+dirs = [
+    "~/user_scripts/arch_setup_scripts/scripts",
+    "~/user_scripts/arch_setup_scripts",
+    "~/user_scripts/rofi",
+    "~/user_scripts/images",
+    "~/user_scripts/theme_matugen",
+    "~/user_scripts/theme_matugen/config",
+    "~/user_scripts/firefox/theme_matugen",
+    "~/user_scripts/firefox",
+    "~/user_scripts/nvim",
+    "~/user_scripts/mako_osd/dusky_keys",
+    "~/user_scripts/way_layers/visualizer",
+    "~/user_scripts/keylogger",
+]
+
+[conflict_resolutions]
+
+[sequence]
+scripts = [
+    "U | 002_pre_generated_colors.sh",
+    "U | 003_network_connect.sh",
+    # "U | deploy_dotfiles.sh --force",
+    "U | 005_hypr_custom_config_setup.py --force",
+    "U | 007_main_hyprland_lua.py --force",
+    "U | 006_animation_default.sh",
+    "U | 010_package_removal.sh --auto",
+    "U | 013_matugen_state_file_placment.py",
+    "U | 015_set_thunar_terminal.py -t foot",
+    "U | 020_desktop_entries.py",
+    "U | 025_configure_keyboard.sh",
+    "U | 040_long_sleep_timeout.sh --auto",
+    # "S | 045_battery_limiter.sh",
+    "S | 050_pacman_config.sh --auto",
+    "S | 051_pacman_hooks.sh --auto",
+    "S | 055_pacman_reflector.sh",
+    "S | 060_package_installation.py --auto-exit",
+    "S | 068_ufw_firewall.sh",
+    "S | 070_openssh_setup.sh --auto",
+    "U | 075_changing_shell_zsh.sh",
+    "S | 080_aur_paru_fallback_yay.sh --paru",
+    # "S | 085_warp.py",
+    # "U | 090_paru_packages_optional.sh",
+    # "S | 095_battery_limiter_again_dusk.sh",
+    "U | 100_paru_packages.sh",
+    # "S | 120_create_mount_directories.sh",
+    "S | 127_pam_keyring_greetd.py --mode auto",
+    "U | 130_systemd_dbus_service_manager.py --default",
+    "U | 135_battery_notify_service.sh --auto",
+    "U | 137_snapper_isolation_subvolume.sh --auto",
+    "U | 140_dusky_font_configurator.py",
+    "U | tui_matugen.py --smart",
+    "U | 145_matugen_directories.py",
+    # "U | 150_wallpapers_download.sh",
+    "U | 155_blur_shadow_opacity.sh",
+    "U | 160_theme_ctl.py",
+    "U | 165_qtct_config.sh",
+    "S | 180_udev_usb_notify.sh",
+    "U | 185_terminal_default.py -t foot",
+    # "S | 190_dusk_fstab.py",
+    # "S | firefox_symlink_partition.py",
+    # "S | 200_tlp_config.py",
+    "S | 205_zram_configuration.sh",
+    "S | 206_zram_tmpfs_mounts.py --zram",
+    "S | 210_zram_optimize_swappiness.sh",
+    "S | 211_systemd_oomd_zram.py",
+    "S | 212_thp_sysfs_optimizer.sh",
+    "S | 213_systemd_journaling_optimizer.sh",
+    "S | 214_damon_reclaim_optimizer.py",
+    "S | 216_systemd_accounting_optimizer.py --yes",
+    "S | 217_boot_memory_reclaimer.py",
+    # "S | 215_powerkey_lid_close_behaviour.sh",
+    "S | 220_logrotate_optimization.sh",
+    "S | 225_faillock_timeout.py --preset lenient -y",
+    # "U | 230_asus_tuf_tweaks.sh",
+    "U | 235_file_manager_switch.sh --thunar",
+    "U | 236_browser_switcher.sh --firefox",
+    "U | 237_text_editer_switcher.sh --mousepad",
+    "U | 238_terminal_switcher.sh --kitty",
+    "U | 241_thunar_defaults.py",
+    "U | 242_file_manager_bookmarks_sidepane.py",
+    "U | 243_mousepad_defaults.py",
+    # "S | 245_asusd_service_fix.sh",
+    # "S | 250_ftp_arch.sh",
+    # "U | 255_tldr_update.sh",
+    # "U | 260_spotify.sh",
+    # "U | 265_mouse_button_reverse.sh --right",
+    "U | 290_dusky_service_toggler.py --default",
+    # "S | 295_initramfs_optimization.py",
+    "U | 300_git_config.sh",
+    # "U | user_scripts/git/dusky_backup_manager.py --new",
+    # "U | user_scripts/git/dusky_backup_manager.py --relink",
+    # "S | 325_hosts_files_block.sh",
+    "S | 330_gtk_root_symlink.sh",
+    "U | 331_sync_kde_apps.py",
+    # "S | 335_preload_config.sh",
+    "S | 350_dns_systemd_resolve.sh",
+    "U | 360_obsidian_pensive_vault_configure.sh",
+    "U | 365_cache_purge.sh",
+    "S | 370_arch_install_scripts_cleanup.sh --auto",
+    "U | 375_cursor_theme_bibata_classic_modern.sh",
+    "U | 376_generate_colorfiles_for_current_wallpaer.sh",
+    "U | 380_nvidia_open_source.sh --auto",
+    "S | 381_nvidia_services.sh",
+    "U | 383_configure_hyprland_gpu.py --auto",
+    # "S | 385_waydroid_setup.sh",
+    "U | 390_clipboard_persistance.py --ram --quiet",
+    "S | 395_intel_media_sdk_check.sh --auto",
+    "U | dusky_sites_setup.py",
+    # "U | optimize_firefox.py",
+    "U | 410_waybar_swap_config.py --set waybar=15",
+    "U | 415_mpv_setup.sh",
+    # "S | 430_btrfs_zstd_compression_stats.sh",
+    "U | 434_wayclick_soundpacks_download.sh --auto",
+    "U | 435_key_sound_wayclick_setup.sh --setup",
+    "U | dusky_keys.sh --setup",
+    "U | visualizer_daemon.py --setup",
+    "U | 440_config_bat_notify.sh --default",
+    "U | 455_hyprctl_reload.sh",
+    # "U | 460_switch_clipboard.sh --terminal --force",
+    # "S | 465_sddm_setup.sh --auto",
+    # "U | 470_vesktop_matugen.sh --auto",
+    "S | 473_add_user_to_group.sh --auto",
+    "U | 475_reverting_sleep_timeout.sh",
+    "U | 480_dusky_commands.py -s",
+    "S | 485_sudoers_nopassword.sh",
+    "U | wallpaper_selector.py --build-cache",
+    "U | keylogger_installer.py",
+    # "U | dusky_neovim_manager.sh",
+]

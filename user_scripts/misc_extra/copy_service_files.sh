@@ -47,6 +47,11 @@ readonly SERVICES_CONFIG=(
 
     # dusky osd
     "$HOME/user_scripts/mako_osd/osd_router/osd_lock.service | disable"
+    
+    # dusky audio visualizer
+    "$HOME/user_scripts/way_layers/visualizer/dusky_visualizer.service | disable"
+
+
 )
 
 # XDG Standard: ~/.config/systemd/user

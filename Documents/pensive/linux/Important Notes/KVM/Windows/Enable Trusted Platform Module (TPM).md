@@ -1,35 +1,46 @@
-# For Win11 only. 
+---
+title: "Enable TPM 2.0 (Windows 11)"
+tags:
+  - kvm
+  - windows
+  - tpm
+  - swtpm
+---
 
-> [!INFO] Why do we need this?
-> 
-> Trusted Platform Module (TPM) is a technology designed to provide hardware-based, security-related functions. Windows 11 explicitly requires TPM version 2.0 to install and run. Since we are using a Virtual Machine, we will emulate this hardware feature.
+# Enable TPM 2.0 — Windows 11 Only
 
-### Prerequisites
+> [!info] Why
+> Win11 osinfo (`win11`) hard-requires TPM 2.0 + SMM. `30_kvm_vm_deploy.py:build_command` adds `--tpm backend.type=emulator,backend.version=2.0,model=tpm-crb` + `smm.state=on` automatically; this note is manual virt-manager equivalent.
 
-Ensure you have the software TPM emulator installed on your host system. On Arch Linux, this is provided by the `swtpm` package.
+## Prereq (already via `05_virtio_iso.py`)
 
-should already have been installed in one of the previous steps.
 ```bash
 sudo pacman -S --needed swtpm
+pacman -Q swtpm
 ```
 
-### Configuration Steps
+## Manual steps (virt-manager)
 
-1. **Select TPM**: Click on the entry labeled **TPM** (it may appear as `TPM vNone` or simply `TPM`).
-    
-2. **Configure Attributes**:
-    
-    - Locate the **Advanced options** dropdown on the right side.
-        
-    - **Version**: Change this to `2.0`.
-        
-    - **Type**: Ensure this is set to `Emulated`.
-        
-    - **Model**: Ensure this is set to `CRB`.
-        
-3. **Save Changes**: Click **Apply** at the bottom right.
-    
+1. VM Details → `TPM` (or **Add Hardware** → **TPM** if absent)
+2. **Advanced options:**
+   - **Type:** `Emulated`
+   - **Version:** `2.0`
+   - **Model:** `CRB` (or `TIS` — CRB is modern)
+3. **Apply**
 
-> [!SUCCESS] Result
-> 
-> Your Virtual Machine now has a virtualized TPM 2.0 security chip, satisfying the Windows 11 installation requirements.
+XML (`virsh dumpxml win11 | grep -A4 '<tpm'`):
+
+```xml
+<tpm model="tpm-crb">
+  <backend type="emulator" version="2.0"/>
+</tpm>
+<features><smm state="on"/></features>
+```
+
+> [!success] Result
+> VM now satisfies `win11` osinfo → installer no longer blocks on “This PC doesn't meet…”.
+
+> [!note] Skip condition
+> If your ISO has TPM patched out (custom de-bloated/LTSC), you can omit TPM and set osinfo to `win10` instead — but keep `swtpm` installed for future `win11` guests.
+
+See: [[Configure Chipset and Firmware]] (UEFI/SMM), [[Enable Hyper-V Enlightenments]].

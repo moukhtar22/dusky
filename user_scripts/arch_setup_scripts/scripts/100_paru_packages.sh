@@ -1,19 +1,6 @@
 #!/usr/bin/env bash
-# To install AUR packages
-# ==============================================================================
-# Script Name: install_pkg_manifest.sh
-# Description: Autonomous AUR/repo package installer with batch-first fallback.
-# Context:     Arch Linux (Rolling) | Hyprland | UWSM
-# ==============================================================================
+#d: Install AUR packages from the manifest
 
-# ------------------------------------------------------------------------------
-# 1. STRICT SAFETY & SETTINGS
-# ------------------------------------------------------------------------------
-# -u: Treat unset variables as an error
-# -o pipefail: Pipeline fails if any command fails
-#
-# Intentionally not using `set -e` because this script relies on controlled
-# retries, fallbacks, and interactive recovery paths.
 set -uo pipefail
 
 # Global runtime state
@@ -91,11 +78,7 @@ trap 'abort_with_signal SIGTERM 143' TERM
 
 declare -ar PACKAGES=(
   "wlogout"
-  "adwaita-qt6"
-  "adwaita-qt5"
   "adwsteamgtk"
-  "otf-atkinson-hyperlegible-next"
-  "python-pywalfox"
   "hyprshade"
   "peaclock"
   "tray-tui"
@@ -176,13 +159,8 @@ preflight_checks() {
 
 # Progress bar fix: Enforce a TTY using `script` so AUR helpers render properly
 run_aur_cmd() {
-  if ! [[ -t 1 ]] && command -v script >/dev/null 2>&1; then
-    local cmd_str
-    printf -v cmd_str "%q " "$@"
-    script -q -c "${cmd_str}" /dev/null
-  else
-    "$@"
-  fi
+  # Run helper command directly without 'script' to avoid block-buffering in pipes
+  "$@"
 }
 
 aur_full_update() {

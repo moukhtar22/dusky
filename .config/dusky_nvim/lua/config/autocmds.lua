@@ -13,11 +13,8 @@ vim.api.nvim_create_autocmd("BufReadPost", {
     local lcount = vim.api.nvim_buf_line_count(0)
     local ft = vim.bo.filetype
 
-    -- FIX: Use vim.list_contains (0.10+) with fallback for compatibility
-    local contains = vim.list_contains or vim.tbl_contains
-
-    -- OPTIMIZATION: Don't restore cursor for git commit messages
-    if not contains({ "gitcommit", "gitrebase" }, ft)
+    -- OPTIMIZATION: Don't restore cursor for git commit messages (0.12: vim.list_contains is stable)
+    if not vim.list_contains({ "gitcommit", "gitrebase" }, ft)
         and mark[1] > 0
         and mark[1] <= lcount
     then

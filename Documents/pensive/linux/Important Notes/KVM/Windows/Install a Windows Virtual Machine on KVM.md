@@ -1,99 +1,64 @@
-# Windows Installation & VirtIO Drivers
+---
+title: "Windows Install — Load VirtIO Drivers & Guest Tools"
+tags:
+  - kvm
+  - windows
+  - virtio
+  - arch
+---
 
-Now that you have configured the virtual hardware and clicked **Begin Installation**, the Windows 11 setup will launch. You will encounter a step where you must select the installation drive, but the list will likely be empty.
+# Windows Install — Load VirtIO Drivers & Guest Tools
 
-This is expected behavior. You selected the **VirtIO** disk bus for better performance, but Windows does not recognize VirtIO devices natively. We must manually load the drivers from the attached `virtio-win` ISO.
+> [!info] Context
+> You booted the VM after `Customize configuration before install` + `VirtIO` disk/NIC ([[Configure the Storage]] / [[Configure Virtual Network Interface]]) + second CDROM `virtio-win.iso` ([[Mount the VirtIO-Win ISO Image]]). Windows *will* show empty drive list — it has no virtio driver yet.
 
-## 1. Loading the Storage Driver
+## 1. Storage driver (mandatory)
 
-1. On the drive selection screen, click **Load driver**.
-    
-2. Click **Browse**.
-    
-3. Navigate to the **CD Drive (E:)** (This is the VirtIO ISO).
-    
-4. Expand the folders: `Viostor` -> `w10` or `w11` -> `amd64`.
-    
-5. With `amd64` selected, click **OK**.
-    
-6. Select the `Red Hat VirtIO SCSI controller` driver listed and click **Next** to install it.
-    
- 
-## If for some reason you want access to the internet even during the setup process, You need to install the network driver. (Not recomanded to install)
+On **Where do you want to install Windows?** (empty list):
 
-## 2. Loading the Network Driver
+1. **Load driver → Browse** → **CD Drive (E:)** (virtio-win)
+2. Expand **`viostor` → `w10` or `w11` → `amd64`** → **OK**
+3. Select **Red Hat VirtIO SCSI controller** → **Next**
 
-Repeat the procedure above for the network interface:
+Drive appears → select → **Next** (installer copies; auto-reboot).
 
-1. Click **Load driver** again.
-    
-2. Click **Browse**.
-    
-3. Navigate to **CD Drive (E:)**.
-    
-4. Expand the folders: `NetKVM` -> `w10` or `w11` -> `amd64`.
-    
-5. Click **OK**.
-    
-6. Select the driver and install it.
-    
+## 2. Network driver (optional, not recommended during Setup)
 
-Once both the Disk and Network drivers are loaded, your virtual disk should appear. Select it and click **Next** to proceed with the Windows installation.
+Needed only if you need LAN *during* OOBE. Same flow → **`NetKVM` → `w10|w11` → `amd64`** → **OK**.
 
-## 3. Installing VirtIO Guest Tools
+Otherwise skip; Windows Update or later `virtio-win-guest-tools` provides it.
 
-After Windows finishes installing and you boot into the desktop for the first time, you must install the **VirtIO Windows Guest Tools**. This package acts like "Guest Additions" in other hypervisors—it installs the QXL video driver and the SPICE guest agent, enabling features like:
+## 3. Guest Tools (first desktop boot)
 
-- Copy and paste between host and guest. (although more configuration is needed for this)
-    
-- Automatic resolution switching.
-    
-- Improved mouse integration.
-    
+After OOBE login:
 
-### Steps to Install:
+1. **File Explorer → CD Drive (E:)** (virtio-win)
+2. Run **`virtio-win-guest-tools.exe`** (not the per-arch MSI unless debugging).
 
-1. Open **File Explorer** inside the VM.
-    
-2. Navigate to **CD Drive (E:)**.
-    
-3. Double-click the `virtio-win-guest-tools` executable to launch the installer.
-    
+Installs:
+- `qxl`/`virtio-gpu` video (fallback when `virtio` video in Q35)
+- `spice-agent` (clipboard) + `QEMU Guest Agent` + `viostor`/`NetKVM`/`vioinput`/`viofs`
 
-> [!tip] Which file to choose?
-> 
-> Ensure you run the virtio-win-guest-tools package. Do not run the specific x64 or x86 MSI files unless you know exactly what you are doing; the guest tools installer handles everything automatically. if your curson disappears, you can remove the driver using the x64 pacakge. and then reinstall virtio drivers
+> [!tip] Which file?
+> `virtio-win-guest-tools.exe` is the meta-installer. Per-arch MSIs are partial. If cursor vanishes after `vioinput`, uninstall via **Device Manager → Mice → Uninstall** then re-run `virtio-win-guest-tools` (post-reboot).
 
-## 4. Enabling Auto-Resize
+## 4. Auto-resize display
 
-Now that the Guest Tools are installed, you can enable the display to automatically adjust to your window size.
+With Guest Tools installed:
 
-1. In the Virt-Manager window (the viewer window), look at the top menu bar.
-    
-2. Click **View** -> **Scale Display**.
-    
-3. Check the box for **Auto resize VM with window**.
-    
+1. `virt-manager` viewer → **View → Scale Display** → ✅ **Auto resize VM with window**
+2. Resize window → guest resolution snaps.
 
-Try resizing the window now; the Windows 11 resolution should snap to fit perfectly.
+## 5. Cleanup — remove installer ISO
 
-## 5. Cleanup: Removing Installation Media
+Shut off VM:
 
-The installation is complete. Shut down the Windows virtual machine to remove the installation media.
-
-1. In the Virt-Manager main window, ensure the VM is **Shutoff**.
-    
-2. Click the **Lightbulb Icon** (Show virtual hardware details) in the toolbar.
-    
-3. Select the **SATA CDROM 2** (The VirtIO ISO). (recommended to leave it attached, dont remove.)
-    
-4. Click **Remove** (or unmount the ISO).
-    
-5. Select the **SATA CDROM 1** (The Windows Installer ISO).
-    
-6. Click **Disconnect** or remove the ISO path so the drive is empty.
-    
+1. `virt-manager` main → VM **Shutoff**
+2. Lightbulb → **SATA CDROM 1** (Windows ISO) → **Disconnect / remove**
+3. **SATA CDROM 2** (`virtio-win.iso`) → **keep** attached (handy for driver reinstall) or Remove
 
 ![[Pasted image 20250726223648.png]]
 
-You are now ready to use your optimized Windows 11 VM.
+> [!success] Ready — proceed to [[Optimize Windows Performance]] + shared folder / TPM passthrough notes. For scripted labs, `30_kvm_vm_deploy.py` attaches both ISOs via `virt-install --disk path=…,device=cdrom,bus=sata,readonly=on` and boots `uefi,cdrom,hd,menu=on`.
+
+See: [[Configure Windows Virtual Hardware]], [[Enable Trusted Platform Module (TPM)]].

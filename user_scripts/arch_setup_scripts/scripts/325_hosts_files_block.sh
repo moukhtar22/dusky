@@ -1,10 +1,5 @@
 #!/usr/bin/env bash
-# Blocks websites in the host file
-# -----------------------------------------------------------------------------
-# Engine: Dusky TUI v3.9.5 (Strict Port)
-# Target: Arch Linux / Hyprland / UWSM / Wayland
-# Purpose: High-performance /etc/hosts manager for deep work focus.
-# -----------------------------------------------------------------------------
+#d: Block distracting websites via /etc/hosts
 
 set -euo pipefail
 shopt -s extglob

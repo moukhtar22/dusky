@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Dusky Screentime
+GenericName=Screentime Dashboard
+Comment=Real-time application screentime visualization dashboard
+Exec=kitty --class dusky_screentime_tui -e python3 /home/dusk/user_scripts/screentime/screentime_tui.py
+Terminal=false
+Categories=System;Monitor;Utility;
+Keywords=dusky;screentime;dashboard;tui;usage;time;monitor;
+Icon=preferences-system-time
+StartupNotify=true

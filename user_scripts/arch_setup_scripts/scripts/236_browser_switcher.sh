@@ -1,22 +1,5 @@
 #!/usr/bin/env bash
-# =============================================================================
-# ELITE HYPRLAND BROWSER SWITCHER - PLATINUM EDITION (v6.8)
-# =============================================================================
-#
-# TARGET:   Arch Linux / Hyprland / UWSM / Wayland
-#
-# =============================================================================
-# HOW TO ADD NEW BROWSERS
-# =============================================================================
-# 1. Locate the 'BROWSER_CATALOG' array in the USER CONFIGURATION section.
-# 2. Add a new line inside the parentheses following this exact syntax:
-#    "key|type|desktop_file|display_name"
-#
-#    - KEY: The string that will be written to $browser in your config.
-#    - TYPE: '0' for GUI (Direct exec) | '1' for Terminal (Wrapped in terminal).
-#    - DESKTOP_FILE: The filename (e.g., firefox.desktop) for MIME association.
-#    - DISPLAY_NAME: The friendly name shown in the TUI menu.
-# =============================================================================
+#d: Switch the default web browser
 
 set -Eeuo pipefail
 shopt -s extglob
@@ -265,8 +248,8 @@ switch_browser() {
         release_lock "$lock_fd"; return 1
     fi
 
-    if [[ "$t_type" == "1" ]]; then exec_cmd='"uwsm-app -- " .. terminal .. " " .. browser'
-    else exec_cmd='"uwsm-app -- " .. browser'; fi
+    if [[ "$t_type" == "1" ]]; then exec_cmd='"dusky-run " .. terminal .. " " .. browser'
+    else exec_cmd='"dusky-run " .. browser'; fi
 
     new_binds=$(awk -v new_cmd="$exec_cmd" '
         { lines[NR] = $0 }

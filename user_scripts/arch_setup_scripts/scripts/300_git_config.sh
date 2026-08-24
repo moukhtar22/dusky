@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# Configures git config for users
+#d: Configure git identity and settings
 
-# Strict Mode (Fail on error, unset vars, pipe failures)
 set -euo pipefail
 
 # -----------------------------------------------------------------------------

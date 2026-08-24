@@ -1,56 +1,44 @@
-## Mounting the VirtIO Drivers ISO
+---
+title: "Mount virtio-win ISO"
+tags:
+  - kvm
+  - windows
+  - virtio
+  - arch
+---
 
-> [!INFO] What are VirtIO Drivers?
-> 
-> VirtIO drivers are paravirtualized drivers that allow KVM guests (your Virtual Machine) to communicate efficiently with the host hardware.
-> 
-> **The Problem:** unlike Linux, **Microsoft Windows** does not come with these drivers pre-installed. Without them, the VM won't be able to see your hard drive or access the network properly.
-> 
-> **The Solution:** We must mount a "virtual CD" containing these drivers so Windows can install them.
+# Mount virtio-win ISO
 
-### Prerequisites
+> [!abstract] Why
+> Windows has no virtio drivers built-in. Without `virtio-win` the guest cannot see `virtio` disks/NICs at install. We attach the ISO as a second CD-ROM; Windows loads drivers from it.
 
-> [!CHECK] Check your downloads
-> 
-> The virtio-win.iso file should have already been downloaded in one of the earlier steps.
+## Prereq (already staged by `05_virtio_iso.py`)
 
-### Instructions
+```bash
+pacman -Qlq virtio-win | grep '\.iso$'
+ls -l /var/lib/libvirt/images/virtio-win.iso   # symlink → AUR file, or standalone
+# fallback AUR helper:
+paru -S --needed virtio-win
+# manual:
+# sudo curl -L https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/stable-virtio/virtio-win.iso -o /var/lib/libvirt/images/virtio-win.iso
+```
 
-We need to add a **second** CDROM drive to the Virtual Machine. The first one holds the Windows Installer, and this second one will hold the drivers.
+## Virt-manager steps
 
-1. Open your Virtual Machine details view in **Virt-Manager**.
-    
-2. Click the **Add Hardware** button (usually located at the bottom left depending on your version).
-    
-3. In the left sidebar, select **Storage**. (Usually the first option)
-    
-4. Configure the storage settings as follows:
-    
-    - **Device Type:** Change this to `CDROM device`.
-        
-5. Under "Select or create custom storage", click the **Manage...** button.
-    
-6. Locate the `virtio-win.iso` image file.
-    
-    - It is usually listed under the `default` storage pool.
-        
-    - Select the file and click **Choose Volume**.
-        
+1. VM Details (lightbulb) → **Add Hardware** (bottom-left)
+2. **Storage** → **Device type:** `CDROM device`
+3. **Manage…** → select `virtio-win.iso` (under pool that covers target, e.g. `arsonix-…` or `default`) → **Choose Volume**
+4. **Finish** → **Apply**
 
-> [!TIP] Can't find the ISO?
-> 
-> If the file isn't listed in the default pool, you may need to browse for the specific path where paru installed it.
-> 
-> Common locations on Arch Linux include:
-> 
-> - `/var/lib/libvirt/images/`
->     
-> - `/usr/share/virtio-win/`
->     Or download it [[VirtIO win driver iso]]
+You now have:
+- `SATA CDROM 1` → Windows ISO
+- `SATA CDROM 2` → `virtio-win.iso`
 
-7. Once selected, click **Finish**.
-    
+> [!tip] Can't find ISO?
+> - Check `virsh pool-list --all --details` — your pool path is `07_storage_setup.py`-chosen. `virt-manager` only lists volumes under declared pools (`pool-define-as`).
+> - AUR alt location: `/usr/share/virtio/virtio-win.iso` (older `virtio-win` revisions).
+> - CLI add: `virsh attach-disk win11 /var/lib/libvirt/images/virtio-win.iso sdc --type cdrom --mode readonly --config`
 
-You should now see a second CDROM device appear in your hardware list on the left side.
+After install, leave the virtio CD attached or keep the file in pool; guest tools can be reinstalled without re-mount. Next: [[Install a Windows Virtual Machine on KVM]].
 
-8. Click **Apply** to ensure all changes are saved.
+See: `05_virtio_iso.py:stage_virtio` (symlink vs download, 80 MiB floor, Range-resume, sha256).

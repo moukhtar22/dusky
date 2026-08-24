@@ -9,13 +9,14 @@ from pathlib import Path
 
 # --- Prevent Local __pycache__ Generation ---
 # Route all compiled .pyc files to ~/.cache/dusky_tui to keep source folders perfectly clean.
-# Setting this in the environment guarantees the underlying tui_waybars.py script inherits it.
 _cache_home = Path(os.environ.get("XDG_CACHE_HOME", "~/.cache")).expanduser().resolve()
 os.environ["PYTHONPYCACHEPREFIX"] = str(_cache_home / "dusky_tui")
 sys.pycache_prefix = str(_cache_home / "dusky_tui")
 
-# We only need the target script. tui_waybars.py acts as its own 
-# standalone CLI router when arguments are passed to it.
+_dusky_root = Path.home() / "user_scripts" / "dusky_tui"
+if str(_dusky_root) not in sys.path:
+    sys.path.insert(0, str(_dusky_root))
+
 DEFAULT_TARGET_SCRIPT = Path.home() / "user_scripts" / "waybar" / "tui_waybars.py"
 
 
@@ -31,26 +32,6 @@ def normalize_set_value(value: str) -> str:
     if "=" in value:
         return value.split("=", 1)[1]
     return value
-
-
-def build_command(target_script: Path, ns: argparse.Namespace, passthrough: list[str]) -> list[str]:
-    # Bypass main.py and hit the schema script directly for headless execution
-    base = [sys.executable, str(target_script)]
-
-    if ns.set_value is not None:
-        base += ["--apply", normalize_set_value(ns.set_value)]
-    elif ns.next:
-        base += ["--toggle"]
-    elif ns.prev:
-        base += ["--back_toggle"]
-    elif ns.pos:
-        base += ["--toggle-pos"]
-    elif ns.heal:
-        base += ["--heal"]
-    else:
-        base += passthrough
-
-    return base
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -101,21 +82,49 @@ def main(argv: list[str] | None = None) -> int:
 
     target_script = ns.target_script.expanduser().resolve()
 
-    if not target_script.is_file():
-        print(f"[-] Error: missing target schema script: {target_script}", file=sys.stderr)
-        return 1
-
-    cmd = build_command(target_script, ns, passthrough)
-
     try:
-        completed = subprocess.run(cmd, check=True)
-        return completed.returncode
-    except subprocess.CalledProcessError as e:
-        # Silently pass back the exit code without dumping Python stack traces to the terminal
-        return e.returncode
-    except OSError as e:
-        print(f"[-] Error: failed to start command: {e}", file=sys.stderr)
+        from python.engines.waybar_engine import WaybarEngine
+    except ImportError:
+        print("[-] Error: Could not import WaybarEngine. Ensure dusky_tui is installed correctly.", file=sys.stderr)
         return 1
+
+    engine = WaybarEngine("~/.config/waybar")
+    changes = []
+
+    if ns.set_value is not None:
+        changes.append(("active_theme_name", "DEFAULT", normalize_set_value(ns.set_value), "string"))
+    elif ns.next:
+        changes.append(("toggle_forward", "DEFAULT", "true", "bool"))
+    elif ns.prev:
+        changes.append(("toggle_backward", "DEFAULT", "true", "bool"))
+    elif ns.pos:
+        changes.append(("action_invert_pos", "DEFAULT", "true", "bool"))
+    elif ns.heal:
+        changes.append(("action_heal_state", "DEFAULT", "true", "bool"))
+    elif passthrough:
+        if not target_script.is_file():
+            print(f"[-] Error: missing target schema script: {target_script}", file=sys.stderr)
+            return 1
+        cmd = [sys.executable, str(target_script)] + passthrough
+        try:
+            completed = subprocess.run(cmd, check=True)
+            return completed.returncode
+        except subprocess.CalledProcessError as e:
+            return e.returncode
+        except OSError as e:
+            print(f"[-] Error: failed to start command: {e}", file=sys.stderr)
+            return 1
+
+    if changes:
+        success, msg, _ = engine.write_batch(changes)
+        if success:
+            print(f"[OK] {msg}")
+            return 0
+        else:
+            print(f"[-] Failed: {msg}", file=sys.stderr)
+            return 1
+
+    return 0
 
 
 if __name__ == "__main__":

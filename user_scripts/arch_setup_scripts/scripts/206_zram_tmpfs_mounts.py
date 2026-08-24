@@ -1,11 +1,5 @@
 #!/usr/bin/env python3
-# =============================================================================
-# Elite Arch Linux Hybrid Memory Mount Configurator
-# Target: Arch Linux Cutting-Edge (Kernel 7.1+, Python 3.14+, systemd 260+)
-# Scope: Platinum Grade. High-Performance RAM Disks via Tmpfs or ZRAM block.
-# Updates: Decoupled. Strictly handles mount states. Recompression timer 
-#          delegated to standalone global daemon script.
-# =============================================================================
+#d: Set up tmpfs or ZRAM RAM disks
 
 from __future__ import annotations
 

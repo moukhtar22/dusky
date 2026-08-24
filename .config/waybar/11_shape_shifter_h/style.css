@@ -9,24 +9,24 @@
    Tweak the decimals (0.0 to 1.0) here to adjust granular glassiness.
    ───────────────────────────────────────────────────────────────────────────── */
 @define-color glass_bar                       transparent;
-@define-color glass_module                    @surface_container;
-@define-color glass_hover                     @surface_container_highest;
-@define-color glass_theme_toggle_hover        @secondary;
-@define-color glass_tray                      @surface_container;
-@define-color glass_tray_hover                @surface_container_high;
-@define-color glass_tray_needs_attention      @error;
-@define-color glass_workspaces                @surface_container;
-@define-color glass_workspace_btn             @surface_container_highest;
-@define-color glass_workspace_btn_empty       @surface_container_high;
-@define-color glass_workspace_btn_visible     @surface_container_highest;
-@define-color glass_mpris                     @secondary_container;
-@define-color glass_mpris_hover               @secondary_container;
-@define-color glass_inhibit_disabled          @tertiary_container;
-@define-color glass_warning_bg                @tertiary_container;
-@define-color glass_critical_bg               @error_container;
-@define-color glass_battery_charging_bg       @tertiary_container;
-@define-color glass_battery_warning_bg        @primary_container;
-@define-color glass_tooltip                   @surface_container_high;
+@define-color glass_module                    alpha(@surface_container, 0.55);
+@define-color glass_hover                     alpha(@surface_container_highest, 0.55);
+@define-color glass_theme_toggle_hover        alpha(@secondary, 0.55);
+@define-color glass_tray                      alpha(@surface_container, 0.55);
+@define-color glass_tray_hover                alpha(@surface_container_high, 0.55);
+@define-color glass_tray_needs_attention      alpha(@error, 0.55);
+@define-color glass_workspaces                alpha(@surface_container, 0.55);
+@define-color glass_workspace_btn             alpha(@surface_container_highest, 0.55);
+@define-color glass_workspace_btn_empty       alpha(@surface_container_high, 0.55);
+@define-color glass_workspace_btn_visible     alpha(@surface_container_highest, 0.55);
+@define-color glass_mpris                     alpha(@secondary_container, 0.55);
+@define-color glass_mpris_hover               alpha(@secondary_container, 0.55);
+@define-color glass_inhibit_disabled          alpha(@tertiary_container, 0.55);
+@define-color glass_warning_bg                alpha(@tertiary_container, 0.55);
+@define-color glass_critical_bg               alpha(@error_container, 0.55);
+@define-color glass_battery_charging_bg       alpha(@tertiary_container, 0.55);
+@define-color glass_battery_warning_bg        alpha(@primary_container, 0.55);
+@define-color glass_tooltip                   alpha(@surface_container_high, 0.55);
 
 /* ─────────────────────────────────────────────────────────────────────────────
    MASTER OPAQUE SWITCH
@@ -35,33 +35,6 @@
    the block comments. GTK's "last definition wins" rule will instantly 
    overwrite the glassy variables above and hot-reload Waybar.
    ───────────────────────────────────────────────────────────────────────────── */
-
-/* ─────────────────────────────────────────────────────────────────────────────
-   TRANSPARENCY TOGGLE
-   ───────────────────────────────────────────────────────────────────────────── */
-
-/* WAYBAR_OPAQUE_SWITCH_START */
-@define-color glass_bar                       transparent;
-@define-color glass_module                    @surface_container;
-@define-color glass_hover                     @surface_container_highest;
-@define-color glass_theme_toggle_hover        @secondary;
-@define-color glass_tray                      @surface_container;
-@define-color glass_tray_hover                @surface_container_high;
-@define-color glass_tray_needs_attention      @error;
-@define-color glass_workspaces                @surface_container;
-@define-color glass_workspace_btn             @surface_container_highest;
-@define-color glass_workspace_btn_empty       @surface_container_high;
-@define-color glass_workspace_btn_visible     @surface_container_highest;
-@define-color glass_mpris                     @secondary_container;
-@define-color glass_mpris_hover               @secondary_container;
-@define-color glass_inhibit_disabled          @tertiary_container;
-@define-color glass_warning_bg                @tertiary_container;
-@define-color glass_critical_bg               @error_container;
-@define-color glass_battery_charging_bg       @tertiary_container;
-@define-color glass_battery_warning_bg        @primary_container;
-@define-color glass_tooltip                   @surface_container_high;
-
-/* WAYBAR_OPAQUE_SWITCH_END */
 
 /* ─────────────────────────────────────────────────────────────────────────────
    RESET & FOUNDATIONS
@@ -74,13 +47,15 @@
   font-family: "JetBrainsMono Nerd Font", "Symbols Nerd Font", sans-serif;
   font-weight: 600;
   font-size: 13px;
-  /* Nullify implicit GTK3 shadows to prevent compositor blur jaggedness */
+  /* Nullify all GTK3 box, text, and icon shadows */
   box-shadow: none;
   text-shadow: none;
+  -gtk-icon-shadow: none;
 }
 
 window#waybar {
   background: transparent;
+  box-shadow: none;
 }
 
 /* ─────────────────────────────────────────────────────────────────────────────
@@ -105,6 +80,7 @@ window#waybar > box {
 #custom-mpris-trigger:hover, #custom-inhibit-suspend:hover {
   color: @primary;
   background-color: @glass_hover;
+  border: 1px solid alpha(@primary, 0.45);
 }
 
 /* ─────────────────────────────────────────────────────────────────────────────
@@ -112,10 +88,11 @@ window#waybar > box {
    ───────────────────────────────────────────────────────────────────────────── */
 
 #custom-launcher {
-  padding: 0px 13px 2px 8px;
-  margin: 5px 2px 5px 6px;
-  border-radius: 10px;
+  padding: 0px 10px 0px 7px;
+  margin: 4px 1px 5px 6px;
+  border-radius: 100px;
   background-image: linear-gradient(135deg, @primary_container 0%, @primary_fixed_dim 100%);
+  border: none;
   color: @on_primary_container;
   font-size: 19px;
   transition: all 0.2s ease-in-out;
@@ -123,6 +100,7 @@ window#waybar > box {
 
 #custom-launcher:hover {
   background-image: linear-gradient(135deg, @primary_fixed_dim 0%, @primary 100%);
+  border: none;
 }
 
 #clock, #custom-weather, #custom-notification, #custom-inhibit-suspend,
@@ -130,9 +108,10 @@ window#waybar > box {
 #network, #custom-net-speed, #bluetooth, #pulseaudio.output,
 #backlight, #cpu, #memory, #battery {
   padding: 0px 10px;
-  margin: 5px 2px;
-  border-radius: 10px;
+  margin: 3px 2px;
+  border-radius: 100px;
   background-color: @glass_module;
+  border: 1px solid alpha(@outline_variant, 0.25);
   color: @on_surface_variant;
   transition: all 0.2s ease-in-out;
 }
@@ -285,6 +264,7 @@ window#waybar > box {
   padding: 0px 1px 0px 1px;
   min-width: 28px;
   background-image: linear-gradient(135deg, @primary_container 0%, @primary_fixed_dim 100%);
+  border: none;
   color: @on_primary_container;
   font-weight: 700;
 }
@@ -391,9 +371,10 @@ window#waybar > box {
 
 #custom-power {
   padding: 0px 12px 0px 9px;
-  margin: 5px 6px 5px 2px;
-  border-radius: 10px;
+  margin: 3px 6px 3px 0px;
+  border-radius: 100px;
   background-image: linear-gradient(135deg, @primary_container 0%, @primary_fixed_dim 100%);
+  border: none;
   color: @on_primary_container;
   font-size: 14px;
   transition: all 0.2s ease-in-out;
@@ -402,20 +383,94 @@ window#waybar > box {
 #custom-power:hover {
   background-color: @error;
   background-image: none;
+  border: none;
 }
 
 /* ─────────────────────────────────────────────────────────────────────────────
    TOOLTIPS
    ───────────────────────────────────────────────────────────────────────────── */
 
-tooltip {
-  background-color: @glass_tooltip;
-  border: 1px solid alpha(@outline_variant, 0.3);
-  border-radius: 12px;
+tooltip decoration {
+    background-color: transparent;
+    border: none;
+    box-shadow: none;
 }
 
-tooltip label {
-  padding: 6px 10px;
-  color: @on_surface;
-  font-size: 12px;
+tooltip,
+tooltip.background,
+.tooltip {
+    background-color: alpha(@surface_container, 0.57);
+    background: linear-gradient(135deg, alpha(@surface_container, 0.57), alpha(@surface_container_high, 0.57));
+    border: 1px solid alpha(@primary, 0.5);
+    border-radius: 12px;
+    box-shadow: none;
 }
+
+tooltip label,
+.tooltip label {
+    color: @on_surface;
+    padding: 8px 12px;
+    font-family: "JetBrainsMono Nerd Font Propo", "JetBrainsMono Nerd Font", monospace;
+    font-size: 12px;
+    font-weight: 600;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   MASTER OPAQUE SWITCH (Placed at end of stylesheet for CSS cascade priority)
+   ───────────────────────────────────────────────────────────────────────────── */
+
+/* WAYBAR_OPAQUE_SWITCH_START */
+
+@define-color glass_bar                       transparent;
+@define-color glass_module                    @surface_container;
+@define-color glass_hover                     @surface_container_highest;
+@define-color glass_theme_toggle_hover        @secondary;
+@define-color glass_tray                      @surface_container;
+@define-color glass_tray_hover                @surface_container_high;
+@define-color glass_tray_needs_attention      @error;
+@define-color glass_workspaces                @surface_container;
+@define-color glass_workspace_btn             @surface_container_highest;
+@define-color glass_workspace_btn_empty       @surface_container_high;
+@define-color glass_workspace_btn_visible     @surface_container_highest;
+@define-color glass_mpris                     @secondary_container;
+@define-color glass_mpris_hover               @secondary_container;
+@define-color glass_inhibit_disabled          @tertiary_container;
+@define-color glass_warning_bg                @tertiary_container;
+@define-color glass_critical_bg               @error_container;
+@define-color glass_battery_charging_bg       @tertiary_container;
+@define-color glass_battery_warning_bg        @primary_container;
+@define-color glass_tooltip                   @surface_container_high;
+
+window#waybar > box {
+  background-color: transparent;
+  border: none;
+}
+
+#clock, #custom-weather, #custom-notification, #custom-inhibit-suspend,
+#custom-updates-trigger, #custom-updates, #custom-mpris-trigger,
+#network, #custom-net-speed, #bluetooth, #pulseaudio.output,
+#backlight, #cpu, #memory, #battery {
+  border: 2px solid @primary;
+  background-color: @surface_container;
+}
+
+#custom-launcher {
+  border: none;
+}
+
+#custom-power {
+  border: none;
+}
+
+#workspaces button {
+  border-radius: 20px;
+}
+
+#workspaces button.active {
+  border: none;
+  border-radius: 20px;
+  background-image: linear-gradient(135deg, @primary_container 0%, @primary_fixed_dim 100%);
+  color: @on_primary_container;
+}
+
+/* WAYBAR_OPAQUE_SWITCH_END */

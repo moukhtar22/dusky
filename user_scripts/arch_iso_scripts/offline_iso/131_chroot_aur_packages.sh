@@ -13,14 +13,11 @@ declare -ar pkgs_aur=(
   "adwaita-qt6"
   "adwaita-qt5"
   "adwsteamgtk"
-  "otf-atkinson-hyperlegible-next"
-  "python-pywalfox"
   "hyprshade"
   "peaclock"
   "tray-tui"
   "xdg-terminal-exec"
   "paru"
-  "python-pywalfox"
 )
 
 
@@ -65,14 +62,11 @@ fi
 set -Eeuo pipefail
 shopt -s inherit_errexit
 
-TARGET_OS="arch"
-
 parse_args() {
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --cachyos|--cachy) TARGET_OS="cachyos"; shift ;;
-      --arch)            TARGET_OS="arch"; shift ;;
-      *)                 shift ;; # Safely ignore --auto or other unknown flags
+      --arch) shift ;; # Ignored for backward compatibility
+      *)      shift ;; # Safely ignore --auto or other unknown flags
     esac
   done
 }
@@ -199,19 +193,11 @@ run_pacman() {
     tee -- "$stderr_file" <"$stderr_pipe" >&2 &
     tee_pid=$!
 
-    # FIXED: Use 'script' to emulate a TTY so pacman shows progress bars even when piped
-    if ! [[ -t 1 ]] && command -v script >/dev/null 2>&1; then
-      if script -q -c "env LC_ALL=C pacman $*" /dev/null 2>"$stderr_pipe"; then
-        rc=0
-      else
-        rc=$?
-      fi
+    # Run pacman directly without 'script' to avoid block-buffering issues in pipes.
+    if command env LC_ALL=C pacman "$@" 2>"$stderr_pipe"; then
+      rc=0
     else
-      if command env LC_ALL=C pacman "$@" 2>"$stderr_pipe"; then
-        rc=0
-      else
-        rc=$?
-      fi
+      rc=$?
     fi
 
     rm -f -- "$stderr_pipe"
@@ -263,13 +249,8 @@ ensure_keyring() {
   print_warn "Pacman keyring is not initialized. Initializing now..."
   pacman-key --init
 
-  if [[ "${TARGET_OS}" == "cachyos" ]]; then
-      print_info "Populating Arch Linux and CachyOS keyrings..."
-      pacman-key --populate archlinux cachyos
-  else
-      print_info "Populating standard Arch Linux keyring..."
-      pacman-key --populate archlinux
-  fi
+  print_info "Populating standard Arch Linux keyring..."
+  pacman-key --populate archlinux
 
   print_ok "Keyring initialized."
 }

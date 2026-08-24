@@ -1,10 +1,5 @@
 #!/usr/bin/env bash
-# ==============================================================================
-# ASUSCTL BATTERY OPTIMIZATION DEPLOYMENT SCRIPT (V10)
-# Target: ASUS TUF F15 (FX507ZE)
-# Features: Idempotent state-tracking, interactive prompts, and --force override.
-# Fixes: Corrects the --force logic gate to properly override matching states.
-# ==============================================================================
+#d: Apply ASUS TUF F15 battery and ASUSCTL settings
 
 set -o errexit
 set -o nounset

@@ -16,17 +16,32 @@ return {
       require("mason").setup(opts)
       -- Prepend mason path to system PATH so native LSP can spawn them
       vim.env.PATH = vim.fn.stdpath("data") .. "/mason/bin:" .. vim.env.PATH
-      
-      -- Auto install the packages defined in ensure_installed
-      local registry = require("mason-registry")
-      registry.refresh(function()
-        for _, pkg_name in ipairs(opts.ensure_installed) do
-          if not registry.is_installed(pkg_name) then
-            local pkg = registry.get_package(pkg_name)
-            pkg:install()
+
+      -- Auto install missing packages (0.12: registry.refresh is async; handle already-refreshed case)
+      local ok, registry = pcall(require, "mason-registry")
+      if ok then
+        local function ensure()
+          for _, pkg_name in ipairs(opts.ensure_installed) do
+            if not registry.is_installed(pkg_name) then
+              local pkg_ok, pkg = pcall(registry.get_package, pkg_name)
+              if pkg_ok and pkg then
+                pkg:install():once("closed", function()
+                  if pkg:is_installed() then
+                    vim.schedule(function()
+                      vim.notify("Mason: installed " .. pkg_name, vim.log.levels.INFO)
+                    end)
+                  end
+                end)
+              end
+            end
           end
         end
-      end)
+        if registry.has_installed_packages and not registry.refresh then
+          ensure()
+        else
+          registry.refresh(ensure)
+        end
+      end
     end,
   },
   {
@@ -34,12 +49,21 @@ return {
     event = { "BufReadPre", "BufNewFile" },
     dependencies = { "williamboman/mason.nvim" },
     config = function()
-      -- Configure diagnostic display options
+      -- Configure diagnostic display options (0.12: virtual_text as table, signs use new API)
       vim.diagnostic.config({
-        virtual_text = true,
-        signs = true,
+        virtual_text = { spacing = 2, prefix = "●" },
+        signs = {
+          text = {
+            [vim.diagnostic.severity.ERROR] = "",
+            [vim.diagnostic.severity.WARN] = "",
+            [vim.diagnostic.severity.INFO] = "",
+            [vim.diagnostic.severity.HINT] = "",
+          },
+        },
+        underline = true,
         update_in_insert = false,
         severity_sort = true,
+        float = { border = "rounded", source = "if_many" },
       })
 
       -- Global mappings for LSP
@@ -64,10 +88,18 @@ return {
         end,
       })
 
+      -- Capabilities: advertise nvim-cmp for LSP completions (fix missing nvim_lsp source)
+      local capabilities = vim.lsp.protocol.make_client_capabilities()
+      local ok_cmp, cmp_nvim_lsp = pcall(require, "cmp_nvim_lsp")
+      if ok_cmp then
+        capabilities = cmp_nvim_lsp.default_capabilities(capabilities)
+      end
+
       -- Define configurations for preferred language servers
       local servers = {
         -- Lua LSP config
         lua_ls = {
+          capabilities = capabilities,
           settings = {
             Lua = {
               diagnostics = {
@@ -75,19 +107,28 @@ return {
               },
               workspace = {
                 checkThirdParty = false,
-                library = vim.api.nvim_get_runtime_file("", true),
               },
               telemetry = { enable = false },
+              hint = { enable = true },
+              completion = { callSnippet = "Replace" },
             },
           },
         },
         -- Python LSP config
-        pyright = {},
+        pyright = {
+          capabilities = capabilities,
+          settings = {
+            pyright = { disableOrganizeImports = false },
+            python = { analysis = { typeCheckingMode = "basic", autoSearchPaths = true } },
+          },
+        },
         -- Bash LSP config
-        bashls = {},
+        bashls = {
+          capabilities = capabilities,
+        },
       }
 
-      -- Enable each language server natively
+      -- Enable each language server natively (vim.lsp.config + enable is 0.12 idiomatic)
       for name, config in pairs(servers) do
         vim.lsp.config(name, config)
         vim.lsp.enable(name)

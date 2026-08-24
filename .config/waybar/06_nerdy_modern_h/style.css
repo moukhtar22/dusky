@@ -65,17 +65,29 @@ window#waybar.hidden {
     opacity: 0.2;
 }
 
-tooltip {
-    background-color: @bg_tooltip;
-    color: @on_surface;
-    border: 2px solid @outline_variant;
-    border-radius: 12px;
-    padding: 8px 12px;
+tooltip decoration {
+    background-color: transparent;
+    border: none;
+    box-shadow: none;
 }
 
-tooltip label {
+tooltip,
+tooltip.background,
+.tooltip {
+    background-color: alpha(@surface_container, 0.57);
+    background: linear-gradient(135deg, alpha(@surface_container, 0.57), alpha(@surface_container_high, 0.57));
+    border: 1px solid alpha(@primary, 0.5);
+    border-radius: 12px;
+    box-shadow: none;
+}
+
+tooltip label,
+.tooltip label {
     color: @on_surface;
-    padding: 4px;
+    padding: 8px 12px;
+    font-family: "JetBrainsMono Nerd Font Propo", "JetBrainsMono Nerd Font", monospace;
+    font-size: 12px;
+    font-weight: 600;
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -165,23 +177,24 @@ tooltip label {
    ═══════════════════════════════════════════════════════════════════════════ */
 #custom-separator,
 #custom-separator-2 {
-    color: @outline_variant;
-    font-size: 12px;
-    padding: 0 2px;
-    margin: 3px 0;
-    opacity: 0.4;
+    color: @primary;
+    font-weight: 900;
+    font-size: 14px;
+    padding: 0 4px;
+    margin: 2px 0;
+    opacity: 0.9;
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
    LEFT SECTION - LAUNCHER
    ═══════════════════════════════════════════════════════════════════════════ */
 #custom-launcher {
-    font-size: 16px;
+    font-size: 14px;
     color: @primary;
     background-color: @bg_primary_container;
-    border-radius: 10px;
-    margin-left: 2px;
-    margin-right: 2px;
+    border-radius: 8px;
+    margin: 3px 2px;
+    padding: 0 8px;
 }
 
 #custom-launcher:hover {
@@ -193,7 +206,7 @@ tooltip label {
    WORKSPACES
    ═══════════════════════════════════════════════════════════════════════════ */
 #workspaces {
-    background-color: @bg_surface_low;
+    background: transparent;
     padding: 0 4px;
     border-radius: 10px;
 }
@@ -208,6 +221,12 @@ tooltip label {
     min-height: 22px;
     font-size: 11px;
     font-weight: 700;
+}
+
+#workspaces button:not(.empty):not(.active) {
+    color: alpha(@on_surface, 0.85);
+    background-color: alpha(@primary, 0.12);
+    border: 1px solid alpha(@primary, 0.2);
 }
 
 #workspaces button:hover {
@@ -576,8 +595,8 @@ tooltip label {
    ═══════════════════════════════════════════════════════════════════════════ */
 #custom-power {
     font-size: 14px;
-    margin-right: 2px;
-    margin-left: 3px;
+    margin: 3px 2px;
+    padding: 0 8px;
     color: @error;
     background-color: @bg_error_container;
     border-radius: 8px;

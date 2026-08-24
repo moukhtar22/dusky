@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
-# Automates the setup of a secure, LAN-restricted vsftpd server
-# Target: Arch Linux
+#d: Set up a secure LAN-only FTP (vsftpd) server
 
-# 1. Strict Mode & Environment Setup
 set -euo pipefail
 
 # 2. Output Formatting (Visual Feedback)

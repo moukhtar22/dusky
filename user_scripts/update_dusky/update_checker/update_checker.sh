@@ -25,6 +25,9 @@ declare -ri TIMEOUT_SEC=15
 declare -ri TIMEOUT_KILL_SEC=2
 # Covers the worst-case lock hold time: primary fetch + HTTPS fallback fetch.
 declare -ri LOCK_WAIT_SEC=$(( (TIMEOUT_SEC + TIMEOUT_KILL_SEC) * 2 + 1 ))
+# Interactive TUI should not block 35s on a stale lock held by a background job.
+declare -ri LOCK_WAIT_TUI_SEC=3
+declare -ri OFFLINE_CHECK_SEC=3
 declare -r LOCK_BASENAME="dusky_git_fetch.${UID}.lock"
 
 # TUI settings
@@ -60,6 +63,20 @@ _debug() {
 
 _sleep() {
     /usr/bin/sleep "${1:-1}"
+}
+
+# Fast offline probe: 3s max vs 34s fetch timeout. Uses bash /dev/tcp (no ICMP)
+# and falls back to ping if /dev/tcp is blocked. Returns 0 if online.
+_has_network() {
+    # TCP probe to github.com:443 (most reliable, no ICMP filtering) - 2s timeout
+    if /usr/bin/timeout 2 bash -c 'exec 3<>/dev/tcp/github.com/443' 2>/dev/null; then
+        return 0
+    fi
+    # Fallback ICMP probe for environments where /dev/tcp is filtered (2s)
+    if /usr/bin/timeout 2 /usr/bin/ping -q -c1 -W1 1.1.1.1 >/dev/null 2>&1; then
+        return 0
+    fi
+    return 1
 }
 
 _strip_ansi() {
@@ -325,6 +342,15 @@ get_fetch_remote() {
         return 0
     fi
 
+    # No tracking config and no literal 'origin' remote: with exactly one
+    # remote configured there is no ambiguity, so use it instead of erroring.
+    local -a remotes=()
+    mapfile -t remotes < <("${GIT_CMD[@]}" remote 2>/dev/null)
+    if (( ${#remotes[@]} == 1 )) && [[ -n ${remotes[0]} ]]; then
+        printf '%s' "${remotes[0]}"
+        return 0
+    fi
+
     return 1
 }
 
@@ -334,6 +360,18 @@ robust_fetch() {
     local lock_file='' remote_url='' https_url='' redacted_url='' fetch_remote='' fetch_refspec=''
     local lock_fd=-1
     local -i rc=1
+    local _fetch_mode="bg"
+    if [[ ${1:-} == "--tui" ]]; then
+        _fetch_mode="tui"
+        shift
+    fi
+
+    # Fast offline check: fail in ~2-3s instead of blocking 2×17s fetch timeouts.
+    if ! _has_network; then
+        FETCH_INFO="Network unavailable (offline check failed)"
+        _debug "Offline probe failed - skipping fetch"
+        return 1
+    fi
 
     if ! fetch_remote=$(get_fetch_remote); then
         FETCH_INFO="No suitable remote configured"
@@ -365,7 +403,18 @@ robust_fetch() {
         return 1
     fi
 
-    if ! /usr/bin/flock -w "$LOCK_WAIT_SEC" "$lock_fd"; then
+    # TUI uses short wait (3s) so it never blocks 35s on a
+    # background --num job. Background mode keeps full wait to avoid
+    # flapping when two timers race. Explicit --tui flag is preferred;
+    # fallback to tty check for any direct calls.
+    local -i _lock_wait=$LOCK_WAIT_SEC
+    if [[ $_fetch_mode == "tui" ]]; then
+        _lock_wait=$LOCK_WAIT_TUI_SEC
+    elif [[ -t 0 && -t 1 ]]; then
+        _lock_wait=$LOCK_WAIT_TUI_SEC
+    fi
+    _debug "Lock wait: ${_lock_wait}s (mode=${_fetch_mode})"
+    if ! /usr/bin/flock -w "$_lock_wait" "$lock_fd"; then
         FETCH_INFO="Another update check is already running"
         _debug "Could not acquire fetch lock: $lock_file"
         exec {lock_fd}>&-
@@ -382,6 +431,11 @@ robust_fetch() {
         if ! origin_to_https_url "$remote_url" https_url; then
             FETCH_INFO="Primary fetch failed and no HTTPS fallback is available"
             _debug "URL format not recognized"
+        elif [[ $https_url == "$remote_url" ]]; then
+            # Already HTTPS: retrying the identical URL would just burn the
+            # full timeout again for zero benefit.
+            FETCH_INFO="Primary fetch failed"
+            _debug "HTTPS fallback identical to primary URL - skipped"
         else
             _redact_url "$https_url" redacted_url
             _debug "HTTPS URL: $redacted_url"
@@ -427,6 +481,25 @@ get_upstream_ref() {
         fi
     done
 
+    # Single-remote repos whose remote isn't named 'origin': probe the same
+    # candidates under the actual remote name before giving up.
+    local -a remotes=()
+    mapfile -t remotes < <("${GIT_CMD[@]}" remote 2>/dev/null)
+    if (( ${#remotes[@]} == 1 )); then
+        local single=${remotes[0]}
+        if tracking=$("${GIT_CMD[@]}" symbolic-ref -q --short "refs/remotes/${single}/HEAD" 2>/dev/null) &&
+           [[ -n $tracking ]]; then
+            printf '%s' "$tracking"
+            return 0
+        fi
+        for ref in "${single}/main" "${single}/master"; do
+            if "${GIT_CMD[@]}" rev-parse --verify --quiet "$ref" &>/dev/null; then
+                printf '%s' "$ref"
+                return 0
+            fi
+        done
+    fi
+
     return 1
 }
 
@@ -447,41 +520,56 @@ run_background_check() {
     fi
 
     if ! validate_environment; then
-        write_state_file -1
+        _debug "validate_environment failed"
+        if (( have_previous_state )); then
+            _debug "Preserving previous state ${previous_count} (validate failed)"
+        else
+            write_state_file -1 || true
+        fi
         exit 0
     fi
 
     if ! robust_fetch; then
         _debug "Fetch failed: $FETCH_INFO"
-        if [[ $FETCH_INFO == "Another update check is already running" ]]; then
-            _debug "Leaving existing state file unchanged"
-            if (( ! have_previous_state )); then
-                write_state_file -1
-            fi
-            exit 0
+        if (( have_previous_state )); then
+            _debug "Preserving previous state ${previous_count} (fetch failed: $FETCH_INFO)"
+        else
+            write_state_file -1 || true
         fi
-        write_state_file -1
         exit 0
     fi
 
     if ! upstream=$(get_upstream_ref); then
-        _debug "No upstream found, writing -2"
-        write_state_file -2
+        _debug "No upstream found"
+        if (( have_previous_state )); then
+            _debug "Preserving previous state ${previous_count} (no upstream)"
+        else
+            write_state_file -2 || true
+        fi
         exit 0
     fi
     _debug "Upstream: $upstream"
 
     if ! _git_rev_count count "HEAD..${upstream}"; then
-        _debug "Failed to count commits behind, writing -1"
-        write_state_file -1
+        _debug "Failed to count commits behind"
+        if (( have_previous_state )); then
+            _debug "Preserving previous state ${previous_count} (rev-count failed)"
+        else
+            write_state_file -1 || true
+        fi
         exit 0
     fi
     _debug "Commits behind: $count"
 
-    write_state_file "$count"
+    # Failure-tolerant: a broken state file must never abort the run (set -e)
+    # nor suppress the user-facing desktop notification below.
+    write_state_file "$count" || true
 
+    # Notify on every fresh crossing of the threshold. Negative sentinels
+    # (-1 error / -2 no-upstream) count as "not yet alerted" so a recovered
+    # check still alerts instead of staying silent forever.
     if (( count >= NOTIFY_THRESHOLD )) &&
-       (( ! have_previous_state || (previous_count >= 0 && previous_count < NOTIFY_THRESHOLD) )) &&
+       (( ! have_previous_state || previous_count < NOTIFY_THRESHOLD )) &&
        [[ -x /usr/bin/notify-send ]]; then
         /usr/bin/timeout --kill-after=1 2 \
             /usr/bin/notify-send -u normal -t 5000 -i software-update-available \
@@ -640,8 +728,10 @@ load_commits() {
     local -a raw_commits=()
     local line='' hash='' msg='' safe_msg=''
 
+    # Limit log to visible rows: TOTAL_COMMITS is already known via
+    # rev-list count above, so fetching 100s of commits is wasteful.
     mapfile -t raw_commits < <(
-        "${GIT_CMD[@]}" --no-pager log "HEAD..${upstream}" \
+        "${GIT_CMD[@]}" --no-pager log --max-count="$MAX_DISPLAY_ROWS" "HEAD..${upstream}" \
             --no-color --pretty=format:'%h|%s' 2>/dev/null
     ) || true
 
@@ -658,12 +748,20 @@ load_commits() {
         COMMIT_MSGS+=("$msg")
     done
 
-    TOTAL_COMMITS=${#COMMIT_HASHES[@]}
-
-    if (( TOTAL_COMMITS == 0 )); then
+    # Preserve true behind-count for the header, but ensure we have
+    # at least something to display when behind >0.
+    if (( ${#COMMIT_HASHES[@]} == 0 )); then
         COMMIT_HASHES=("WARN")
         COMMIT_MSGS=("Detected $count updates but log was empty")
         TOTAL_COMMITS=1
+    else
+        # If we are behind more than we fetched (log was capped), keep
+        # the true count for the header while hashes hold only the visible slice.
+        if (( count > ${#COMMIT_HASHES[@]} )); then
+            TOTAL_COMMITS=$count
+        else
+            TOTAL_COMMITS=${#COMMIT_HASHES[@]}
+        fi
     fi
 }
 
@@ -818,10 +916,15 @@ nav_step() {
 
 nav_page() {
     local -i d=$1
-    (( TOTAL_COMMITS == 0 )) && return
+    (( TOTAL_COMMITS == 0 )) && return 0
     SELECTED_ROW=$(( SELECTED_ROW + d * MAX_DISPLAY_ROWS ))
-    (( SELECTED_ROW < 0 )) && SELECTED_ROW=0
-    (( SELECTED_ROW >= TOTAL_COMMITS )) && SELECTED_ROW=$(( TOTAL_COMMITS - 1 ))
+    # NOTE: never end on a bare false test - set -e would kill the TUI (rc=1).
+    if (( SELECTED_ROW < 0 )); then
+        SELECTED_ROW=0
+    elif (( SELECTED_ROW >= TOTAL_COMMITS )); then
+        SELECTED_ROW=$(( TOTAL_COMMITS - 1 ))
+    fi
+    return 0
 }
 
 nav_edge() {
@@ -869,13 +972,13 @@ main() {
 
     printf '\n%sFetching updates...%s\n' "$C_CYAN" "$C_RESET"
 
-    if ! robust_fetch; then
+    if ! robust_fetch --tui; then
         printf '%s[WARNING] Fetch failed: %s%s\n' "$C_YELLOW" "$FETCH_INFO" "$C_RESET"
         FETCH_STATUS="FAIL"
-        _sleep 2
+        _sleep 0.5
     else
         printf '%s[OK] %s%s\n' "$C_GREEN" "$FETCH_INFO" "$C_RESET"
-        _sleep 1
+        _sleep 0.25
     fi
 
     load_commits
@@ -886,6 +989,7 @@ main() {
 
     local key='' seq='' ch=''
     local -i ui_ok=0
+    local -i read_rc=0
 
     while true; do
         if terminal_fits_ui; then
@@ -896,7 +1000,16 @@ main() {
             draw_terminal_too_small
         fi
 
-        IFS= read -rsn1 key || break
+        # Poll with a 1s ceiling instead of blocking forever: a read timeout
+        # (rc > 128) loops back so terminal resizes get picked up and repainted.
+        key=''
+        read_rc=0
+        IFS= read -rsn1 -t 1 key || read_rc=$?
+        if (( read_rc > 128 )); then
+            continue
+        elif (( read_rc != 0 )); then
+            break
+        fi
 
         if (( ! ui_ok )); then
             case "$key" in

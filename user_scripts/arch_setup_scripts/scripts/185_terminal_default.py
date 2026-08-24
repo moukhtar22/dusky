@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
-"""
-Advanced XDG Terminal Configurator for Wayland/Hyprland.
-Optimized for Python 3.14 (requires 3.11+).
-
-Author: Systems Architect / Elite DevOps Edition
-"""
+#d: Set the default terminal for apps via XDG
 
 import argparse
 import os

@@ -52,15 +52,14 @@ window#waybar {
 #battery,
 #cpu,
 #memory,
-#custom-power,
 #custom-inhibit-suspend {
     background-color: @glass_module;
     min-width: 20px;
     color: @on_surface;
     border-radius: 100px;
-    margin: 1px 3px; 
+    margin: 1px 3px;
     font-size: 15px;
-    padding: 0px 7px 0px 8px;
+    padding: 0 14px;
     /* Box-shadow removed completely to fix blur bleeding artifact */
     transition: all 0.2s ease;
 }
@@ -70,7 +69,7 @@ window#waybar {
     background-color: @glass_primary;
     color: @on_primary;
     font-size: 13px;
-    padding-right: 8px;
+    padding: 0 14px;
 }
 
 #custom-weather, #custom-updates, #custom-net-speed {
@@ -97,6 +96,11 @@ window#waybar {
     transition: all 0.2s ease;
 }
 
+#workspaces button:not(.empty):not(.active) {
+    color: alpha(@tertiary, 0.9);
+    background-color: alpha(@primary, 0.2);
+}
+
 #workspaces button.active {
     background-color: @primary;
     padding: 0 8px;
@@ -115,7 +119,7 @@ window#waybar {
 /* --- RIGHT SECTION --- */
 #pulseaudio, #battery {
     font-size: 12px; 
-    padding: 0 8px;
+    padding: 0 14px;
 }
 
 #bluetooth, #network {
@@ -146,12 +150,58 @@ window#waybar {
     color: @tertiary;
 }
 
+/* ─────────────────────────────────────────────────────────────────────────────
+   DRAWER & REVEALER SPACING FIXES
+   ───────────────────────────────────────────────────────────────────────────── */
+.drawer,
+#clock-drawer,
+#notif-drawer,
+#audio-drawer,
+#battery-drawer,
+#power-drawer {
+    margin: 0;
+    padding: 0;
+    background: transparent;
+}
+
+revealer {
+    transition: all 0.3s ease;
+}
+
+revealer:not(:checked),
+revealer:not(:checked) *,
+.drawer revealer:not(:checked),
+.drawer revealer:not(:checked) * {
+    min-width: 0;
+    min-height: 0;
+    margin: 0;
+    padding: 0;
+    border: none;
+}
+
 #custom-power {
-    font-size: 16px; 
+    background-color: @glass_module;
+    color: @on_surface;
+    font-size: 14px;
     border-radius: 100px;
-    margin: 3px 1px;
-    padding: 3px 4px 3px 0px;
-    min-width: 26px;
+    margin: 1px 3px;
+    padding: 0 10px 0 20px;
+    min-width: 20px;
+    transition: all 0.2s ease;
+}
+
+#custom-power image {
+    min-width: 0;
+    min-height: 0;
+    margin: 0;
+    padding: 0;
+}
+
+#custom-power label {
+    font-family: "JetBrainsMono Nerd Font", monospace;
+    font-size: 14px;
+    padding: 0;
+    margin: 0;
 }
 
 #custom-power:hover {
@@ -162,18 +212,27 @@ window#waybar {
 /* ─────────────────────────────────────────────────────────────────────────────
    TOOLTIPS
    ───────────────────────────────────────────────────────────────────────────── */
-tooltip {
-    /* Lowered alpha to 0.4 for purely transparent background, letting Hyprland blur handle the rest */
-    background-color: alpha(@surface, 0.4); 
-    border: 1px solid alpha(@outline_variant, 0.4);
-    border-radius: 12px;
-    /* Kill GTK's native shadow and images to completely stop the blur bleed effect */
+tooltip decoration {
+    background-color: transparent;
+    border: none;
     box-shadow: none;
-    background-image: none;
 }
 
-tooltip label {
-    padding: 6px 10px;
+tooltip,
+tooltip.background,
+.tooltip {
+    background-color: alpha(@surface_container, 0.57);
+    background: linear-gradient(135deg, alpha(@surface_container, 0.57), alpha(@surface_container_high, 0.57));
+    border: 1px solid alpha(@primary, 0.5);
+    border-radius: 12px;
+    box-shadow: none;
+}
+
+tooltip label,
+.tooltip label {
     color: @on_surface;
+    padding: 8px 12px;
+    font-family: "JetBrainsMono Nerd Font Propo", "JetBrainsMono Nerd Font", monospace;
     font-size: 12px;
+    font-weight: 600;
 }

@@ -27,41 +27,27 @@ hl.config({
 -- -------------------------------------------------------------------------------------------------
 hl.on("hyprland.start", function()
 
-    -- --- SYSTEM ESSENTIALS ---
-
-    -- Gnome Keyring: Stores passwords for apps (VSCode, Chrome, etc.). (recommanded to enable systemd service instead of auto starting with exec-once)
-    -- hl.exec_cmd("uwsm-app -- /usr/bin/gnome-keyring-daemon --start --components=secrets")
-    -- OR
-    -- replace the exec-once line with:
-    -- hl.exec_cmd("uwsm-app -- systemctl --user start gnome-keyring-daemon.service")
 
     -- XHost: Grants root access to the display (needed for GParted/Synaptic to run).
     -- make sure to install xorg-xhost beofre uncommenting the following line, sudo pacman -S xorg-xhost
-    -- hl.exec_cmd("uwsm-app -- xhost +si:localuser:root")
+    -- hl.exec_cmd("xhost +si:localuser:root")
 
     -- --- BACKGROUND SERVICES ---
-    hl.exec_cmd("uwsm-app -- awww-daemon")           -- Wallpaper engine
+    hl.exec_cmd("awww-daemon")           -- Wallpaper engine
+    -- hl.exec_cmd("python3 $HOME/user_scripts/audio/dusky_audio_studio/dusky_audio_studio.py --autostart") -- Dusky Audio Studio & Voice DSP
+    -- hl.exec_cmd("$HOME/user_scripts/wayclick/dusky_wayclick.sh") -- Wayclick
 
-    -- hypridle has systemd service
-    -- hl.exec_cmd("uwsm-app -- hypridle")              -- Idle manager
-    -- hl.exec_cmd("uwsm-app -- $HOME/user_scripts/hypr/layout_notify.sh") -- Keyboard Layout Notify
-
-    -- --- CLIPBOARD MANAGER ---
-    -- hl.exec_cmd("uwsm-app -- wl-paste --type text --watch cliphist store")
-    -- hl.exec_cmd("uwsm-app -- wl-paste --type image --watch cliphist store")
-
-    hl.exec_cmd("uwsm-app -- sh -c '. $HOME/.config/dusky/settings/cliphist_db_env && exec wl-paste --type text --watch cliphist store'")
-    hl.exec_cmd("uwsm-app -- sh -c '. $HOME/.config/dusky/settings/cliphist_db_env && exec wl-paste --type image --watch cliphist store'")
-
-    hl.exec_cmd("uwsm-app -- wl-clip-persist --clipboard regular")
+    -- ---Background wallpaper audio Visvualizer
+    -- hl.exec_cmd("$HOME/user_scripts/way_layers/visualizer/visualizer_toggle.sh") -- Audio Visualizer
 
     -- --- OPTIONAL / USER INTERFACE ---
-    hl.exec_cmd("uwsm-app -- $HOME/user_scripts/waybar/waybar_toggle.sh")
-    -- hl.exec_cmd("uwsm-app -- $HOME/user_scripts/waybar/toggle_timer_waybar.sh")
-    -- hl.exec_cmd("uwsm-app -- nm-applet")
+    hl.exec_cmd("$HOME/user_scripts/waybar/waybar_toggle.sh")
+    -- hl.exec_cmd("$HOME/user_scripts/waybar/toggle_timer_waybar.sh")
+    -- hl.exec_cmd("nm-applet")
 
-    -- --- Slow app launch fix -- set systemd vars
-    hl.exec_cmd("dbus-update-activation-environment --systemd --all")
+
+    -- hyprpm reload if you have plugins installed --
+    --hl.exec_cmd("hyprpm reload")
 
     -- EG: dusky glance (uncomment only one at a time)
     -- hl.exec_cmd("~/user_scripts/rofi/dusky_glance.sh --cpu")
@@ -92,6 +78,11 @@ hl.on("hyprland.start", function()
     -- hl.exec_cmd("~/user_scripts/rofi/dusky_glance.sh --world-clock America/New_York NY")
     -- hl.exec_cmd("~/user_scripts/rofi/dusky_glance.sh --world-clock Asia/Tokyo Japan")
     -- hl.exec_cmd("~/user_scripts/rofi/dusky_glance.sh --world-clock Europe/London London")
+    --
+    --
 
 end)
 
+-- hl.on("hyprland.shutdown", function()
+--    hl.exec_cmd("systemctl --user stop hyprland-session.target")
+-- end)

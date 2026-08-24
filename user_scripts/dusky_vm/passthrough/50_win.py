@@ -9,12 +9,19 @@ Philosophy: Zero hardcoding, dynamic VM selector, self-learning default cache, e
 import os
 import sys
 import json
+import stat
+import tempfile
 import time
 import socket
 import shutil
 import subprocess
 from pathlib import Path
 import xml.etree.ElementTree as ET
+
+MIN_PY: tuple[int, int, int] = (3, 14, 7)
+if sys.version_info[:3] < MIN_PY:
+    sys.stderr.write(f"\n[FATAL] Python {MIN_PY[0]}.{MIN_PY[1]}.{MIN_PY[2]}+ required; running {sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}.\n\n")
+    raise SystemExit(1)
 
 try:
     from rich.console import Console
@@ -132,16 +139,50 @@ def load_state() -> dict:
 
 
 def save_state(state: dict):
-    """Saves the state dictionary to the state file."""
+    """Atomically saves state via mkstemp+os.replace+fsync (durable, not truncated)."""
     try:
         state_file, uid, gid = get_state_file_info()
         safe_mkdir_and_chown(state_file.parent, uid, gid)
-        state_file.write_text(json.dumps(state, indent=2), encoding="utf-8")
-        if os.geteuid() == 0:
+        payload = json.dumps(state, indent=2, sort_keys=True) + "\n"
+        # Preserve existing mode if file exists, else 0644
+        keep_mode = 0o644
+        if state_file.exists():
             try:
-                os.chown(state_file, uid, gid)
-            except Exception as e:
-                print_warn(f"Failed to chown file {state_file}: {e}")
+                keep_mode = stat.S_IMODE(state_file.stat().st_mode)
+            except OSError:
+                pass
+        state_file.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_name = tempfile.mkstemp(dir=state_file.parent, prefix=f".{state_file.name}.", suffix=".tmp")
+        tmp = Path(tmp_name)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(payload)
+                f.flush()
+                os.fsync(f.fileno())
+            os.chmod(tmp, keep_mode)
+            if os.geteuid() == 0:
+                try:
+                    os.chown(tmp, uid, gid)
+                except Exception as e:
+                    print_warn(f"Failed to chown tmp {tmp}: {e}")
+            os.replace(tmp, state_file)
+            # fsync parent dir for durability
+            try:
+                dir_fd = os.open(state_file.parent, os.O_DIRECTORY)
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
+            except OSError:
+                pass
+            if os.geteuid() == 0:
+                try:
+                    os.chown(state_file, uid, gid)
+                except Exception as e:
+                    print_warn(f"Failed to chown file {state_file}: {e}")
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
     except Exception as e:
         print_warn(f"Failed to write state file: {e}")
 
@@ -204,28 +245,31 @@ def normalize_key(key: str) -> str:
     return k
 
 
-def get_all_vms() -> list[tuple[str, str]]:
-    """Query libvirt dynamically for all configured VMs and their states."""
-    try:
-        res = subprocess.run(
-            ["virsh", "-c", "qemu:///system", "list", "--all"],
-            capture_output=True, text=True, check=True
-        )
-        vms = []
-        for line in res.stdout.strip().splitlines()[2:]:
-            parts = line.split()
-            if len(parts) >= 3:
-                vms.append((parts[1], " ".join(parts[2:])))
-            elif len(parts) == 2:
-                vms.append((parts[0], parts[1]))
-        return vms
-    except subprocess.CalledProcessError:
-        # Fall back to running with sudo if standard user hasn't refreshed group memberships yet
+def _virsh_list_names() -> list[str]:
+    for prefix in ([], ["sudo"]):
         try:
-            res = subprocess.run(
-                ["sudo", "virsh", "-c", "qemu:///system", "list", "--all"],
-                capture_output=True, text=True, check=True
-            )
+            res = subprocess.run([*prefix, "virsh", "-c", "qemu:///system", "list", "--all", "--name"], capture_output=True, text=True, check=True)
+            return [n.strip() for n in res.stdout.split() if n.strip()]
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            continue
+    return []
+
+def _virsh_domstate(name: str) -> str:
+    for prefix in ([], ["sudo"]):
+        try:
+            res = subprocess.run([*prefix, "virsh", "-c", "qemu:///system", "domstate", name], capture_output=True, text=True, check=True)
+            return res.stdout.strip() or "unknown"
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            continue
+    return "unknown"
+
+def get_all_vms() -> list[tuple[str, str]]:
+    """Query libvirt via --name + domstate (robust, no column split)."""
+    names = _virsh_list_names()
+    if not names:
+        # Fallback to legacy table parse if --name yields nothing (empty libvirt)
+        try:
+            res = subprocess.run(["virsh", "-c", "qemu:///system", "list", "--all"], capture_output=True, text=True, check=True)
             vms = []
             for line in res.stdout.strip().splitlines()[2:]:
                 parts = line.split()
@@ -234,12 +278,9 @@ def get_all_vms() -> list[tuple[str, str]]:
                 elif len(parts) == 2:
                     vms.append((parts[0], parts[1]))
             return vms
-        except Exception as e:
-            print_err(f"Failed to query libvirt VMs: {e}")
-            sys.exit(1)
-    except Exception as e:
-        print_err(f"Failed to query libvirt VMs: {e}")
-        sys.exit(1)
+        except Exception:
+            return []
+    return [(n, _virsh_domstate(n)) for n in names]
 
 
 def run_virsh_cmd(cmd_args: list) -> bool:

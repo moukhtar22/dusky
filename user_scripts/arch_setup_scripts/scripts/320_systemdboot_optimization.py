@@ -1,8 +1,5 @@
 #!/usr/bin/env python3
-"""
-Arch Linux Systemd-boot Optimizer
-Architecture: Python 3.10+ | Atomic Writes | AST-style Tokenization | Rich TUI
-"""
+#d: Optimize systemd-boot
 
 import os
 import sys

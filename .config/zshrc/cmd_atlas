@@ -129,9 +129,11 @@ cmd_atlas() {
     fzf_choice=$(print -l "${display_lines[@]}" | fzf --ansi \
         --delimiter='\|' \
         --with-nth=2 \
+        --highlight-line \
+        --ghost="Filter command atlas..." \
         --prompt="   Search ❯ " \
-        --pointer="" \
-        --marker="✓" \
+        --pointer="❯ " \
+        --marker="✔ " \
         --layout=reverse \
         --border=rounded \
         --border-label=" 󰘳 Dusky Command Atlas " \
@@ -141,10 +143,7 @@ cmd_atlas() {
         --info=inline-right \
         --header="$visual_header" \
         --header-first \
-        --color="bg+:#1e1e2e,bg:#11111b,spinner:#f5e0dc,hl:#f38ba8" \
-        --color="fg:#cdd6f4,header:#89b4fa,info:#cba6f7,pointer:#a6e3a1" \
-        --color="marker:#f5e0dc,fg+:#cdd6f4,prompt:#cba6f7,hl+:#f38ba8" \
-        --color="border:#585b70,label:#a6e3a1")
+        --color="${DUSKY_FZF_COLORS:-bg+:#1e1e2e,bg:#11111b,fg:#cdd6f4}")
 
     # 7. Action Router (Buffer Injection)
     # If the user selected an item (didn't press ESC)

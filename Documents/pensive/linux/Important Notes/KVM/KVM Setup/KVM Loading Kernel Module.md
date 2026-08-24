@@ -1,85 +1,63 @@
-# KVM Kernel Modules Setup
+---
+title: "KVM Kernel Modules"
+tags:
+  - kvm
+  - kernel
+  - arch
+---
+
+# KVM Kernel Modules — Autoload vs Manual
 
 > [!abstract] What are we doing?
-> 
-> Before installing tools like QEMU or libvirt, we must ensure your Arch Linux kernel is legally allowed to act as a Hypervisor. We do this by verifying the **[[KVM]] (Kernel-based Virtual Machine)** modules are actively bridging your hardware's virtualization extensions to the OS.
+> Verify the kernel is allowed to act as a hypervisor. On Arch 7.1+ `systemd-udevd` autoloads the correct `kvm` flavour at boot; manual work is rarely needed.
 
-## 1. Verify Existing Modules (Modern Autoload)
+## 1. Check autoload (expected path)
 
-In modern Arch Linux (Kernel 7.1+), the `systemd-udevd` service automatically detects your CPU capabilities during boot and loads the correct KVM modules.
-
-Let's verify that this automatic process succeeded. Open your terminal and check the loaded modules:
-
-```
+```bash
 lsmod | grep -iE kvm
 ```
 
-### Understanding the Output
-
-> [!success] Scenario A: Modules are Loaded
-> 
-> If the system successfully detected your hardware, you will see output similar to this:
-> 
+> [!success] Expected (Intel)
 > ```
-> kvm_intel             401408  0
-> kvm                  1204224  1 kvm_intel
-> irqbypass             16384   1 kvm
+> kvm_intel   401408  0
+> kvm        1204224  1 kvm_intel
+> irqbypass    16384  1 kvm
 > ```
-> 
-> _(Note: AMD users will see `kvm_amd` instead of `kvm_intel`)_.
-> 
-> **Action:** If you see this output, you are done! The modern kernel handled it. You can skip the rest of this note.
+> AMD: `kvm_amd` + `kvm`. `irqbypass` is normal.
 
-> [!failure] Scenario B: No Output
-> 
-> If the command returns nothing (a blank line), the modules are not loaded. This usually means **Virtualization is disabled in your BIOS/UEFI**, or you are running a custom kernel without KVM support. Double-check your firmware settings. If firmware is correct, proceed to Step 2 to force-load them.
+If present → **done**. No file to create.
 
-## 2. Manual Loading (Fallback)
+> [!failure] No output
+> Means `vmx`/`svm` not exposed to kernel. Re-check UEFI: **VT-x/SVM + VT-d/AMD-Vi** enabled, *not* mitigated by `kvm-intel.nested=0`. On custom kernels ensure `CONFIG_KVM=y/m`, `CONFIG_KVM_INTEL`/`CONFIG_KVM_AMD`.
 
-If `udev` failed to load the modules but your BIOS is configured correctly, we can load them manually into the current session.
+## 2. Manual load (current boot only)
 
-Run the command corresponding to your CPU manufacturer:
-
-**For Intel Processors:**
-
-```
+```bash
+# Intel
 sudo modprobe kvm_intel
-```
-
-**For AMD Processors:**
-
-```
+# AMD
 sudo modprobe kvm_amd
+
+lsmod | grep kvm   # verify
+ls -l /dev/kvm     # crw-rw-rw- 1 root kvm
 ```
 
-Verify again with `lsmod | grep kvm`. If it worked, proceed to Step 3 to make it permanent.
+## 3. Persistent autoload (only if udev truly fails)
 
-## 3. Configure Auto-load on Boot (Persistent)
-
-Using `modprobe` only injects the module until your next reboot. To enforce KVM loading every time your machine turns on, we must create a configuration file in `/etc/modules-load.d/`.
-
-Run the command for your specific CPU architecture:
-
-**For Intel:**
-
-```
-echo "kvm_intel" | sudo tee /etc/modules-load.d/kvm.conf
-```
-
-**For AMD:**
-
-```
-echo "kvm_amd" | sudo tee /etc/modules-load.d/kvm.conf
-```
-
-> [!info] What did this command do?
-> 
-> It created a persistent text file named `kvm.conf`. During the boot sequence, `systemd` reads this directory and guarantees the hypervisor modules are injected into the kernel before your graphical desktop even starts.
-
-## 4. Apply Changes
-
-To ensure the persistent configuration hooks in properly, reboot your system.
-
-```
+```bash
+echo "kvm_intel" | sudo tee /etc/modules-load.d/kvm.conf  # or kvm_amd
+cat /etc/modules-load.d/kvm.conf
 systemctl reboot
 ```
+
+> [!info] What this file does
+> `systemd-modules-load.service` reads `/etc/modules-load.d/*.conf` before the graphical session and calls `modprobe`. The pipeline's `05_virtio_iso.py:verify_kvm_capability` checks `/dev/kvm` + `flags: vmx/svm` + `/sys/class/iommu` before proceeding — if those gates pass, this note is already satisfied.
+
+## 4. Quick validate
+
+```bash
+ls -l /dev/kvm
+virt-host-validate | grep -i kvm
+```
+
+Related: [[Verify VT-x and Kernel Modules and IOMMU]] (IOMMUFD/ACS deeper), [[KVM Packages]].

@@ -1,8 +1,5 @@
 #!/usr/bin/env bash
-# Interactive fix for asusd D-Bus 'sudo' group policy (asus systems only)
-# Target OS:   Arch Linux (Hyprland/UWSM environment)
-# Logic:       Root Check -> Service Detection -> User Prompt -> Atomic Fix
-# -----------------------------------------------------------------------------
+#d: Fix asusd's D-Bus sudo group policy
 
 set -euo pipefail
 

@@ -45,36 +45,15 @@ hl.window_rule({
     float = true
 })
 
---- Firefox: YouTube Full Opacity ---
--- Forces 100% opacity (no transparency/dimming) specifically for YouTube
+--- Browsers: Opaque Web Apps (Streaming & Design) ---
+-- Forces 100% full opacity & disables blur for video streaming, media players & design web apps
 hl.window_rule({
-    name = "opaque-firefox-youtube",
+    name = "opaque-browser-webapps",
     match = {
-        class = "^(firefox)$",
-        title = ".*YouTube.*"
+        class = "^(firefox.*|org\\.mozilla\\.firefox|chromium.*|Chromium.*|zen.*|Zen.*|google-chrome.*|Google-chrome.*|brave.*|Brave.*|helium.*|Helium.*|librewolf.*|LibreWolf.*|org\\.mozilla\\.librewolf|microsoft-edge.*|msedge.*|vivaldi.*|qutebrowser.*|org\\.qutebrowser\\.qutebrowser)$",
+        title = ".*(YouTube|Figma|Pixabay|Netflix|Twitch|Rumble|Apple TV|Hulu|HBO|Max|Disney|Prime Video|Spotify|SoundCloud|Canva|Photopea|Unsplash|Pexels|Jellyfin|Plex|Stremio|Kick).*"
     },
-    opaque = true
-})
-
---- Firefox: Figma Full Opacity ---
--- Forces 100% opacity (no transparency/dimming) specifically for Figma (A web based UI Design tool)
-hl.window_rule({
-    name = "opaque-firefox-figma",
-    match = {
-        class = "^(firefox)$",
-        title = ".*Figma.*"
-    },
-    opaque = true
-})
-
---- Firefox: Pixabay Full Opacity ---
--- Forces 100% opacity (no transparency/dimming) specifically for Pixabay
-hl.window_rule({
-    name = "opaque-firefox-pixabay",
-    match = {
-        class = "^(firefox)$",
-        title = ".*Pixabay.*"
-    },
+    opacity = "1.0 override 1.0 override",
     opaque = true
 })
 
@@ -102,8 +81,8 @@ hl.window_rule({
     float = true,
     opaque = true,
     size = {640, 360},      -- Sets a small initial size (approx 360p)
-    center = true           -- Opens in the middle of the screen
-    -- keep_aspect_ratio = true  -- Locks the window frame to the video's aspect ratio
+    center = true,           -- Opens in the middle of the screen
+    keep_aspect_ratio = true  -- Locks the window frame to the video's aspect ratio
 })
 
 -- wine/proton without plasma-workspace for tray icon
@@ -333,7 +312,7 @@ hl.window_rule({
     name = "float-clocks",
     match = { class = "^(org.gnome.clocks)$" },
     float = true,
-    size = {602, 297},  -- Compact landscape for World Clocks/Alarms
+    size = {376, 605}, -- set absolute window size in pixels
     center = true
 })
 
@@ -355,13 +334,14 @@ hl.window_rule({
     center = true
 })
 
---- Blueman Manager ---
+--- Blueman Dialogs ---
 hl.window_rule({
     name = "float-blueman",
-    match = { class = "^(blueman-manager)$" },
+    match = { class = "^(blueman-.*)$" },
     float = true,
     size = {530, 313}, -- Medium size for device lists
-    center = true
+    center = true,
+    pin = true
 })
 
 --- handbrake ---
@@ -521,8 +501,8 @@ hl.window_rule({
 
 --- Dusky system locale ---
 hl.window_rule({
-    name = "locale_tui.sh",
-    match = { class = "^(locale_tui.sh)$" },
+    name = "tui_system_region",
+    match = { class = "^(tui_system_region|locale_tui.sh)$" },
     float = true,
     size = {780, 548},
     center = true
@@ -534,8 +514,25 @@ hl.window_rule({
   name = "dusky_tui",
   match = { class = "^(dusky_tui)$" },
   float = true,
-  size = {815,539},
-  center = true
+  size = {820, 552},
+  center = true,
+  no_blur = false,
+})
+
+--- Dusky Screentime TUI ---
+hl.window_rule({
+  name = "dusky_screentime_tui",
+  match = { class = "^(dusky_screentime_tui|screentime_tui\\.py)$" },
+  float = true,
+  size = {"(monitor_w*0.95)", "(monitor_h*0.95)"},
+  center = true,
+})
+
+--- Foot Terminal Blur ---
+hl.window_rule({
+  name = "foot_blur",
+  match = { class = "^(foot)$" },
+  no_blur = false,
 })
 
 --- Dusky glance_mako_tui.sh ---
@@ -577,8 +574,8 @@ hl.window_rule({
 
 --- Clipbard_persistance ---
 hl.window_rule({
-    name = "390_clipboard_persistance.sh",
-    match = { class = "^(390_clipboard_persistance.sh)$" },
+    name = "390_clipboard_persistance.py",
+    match = { class = "^(390_clipboard_persistance.py)$" },
     float = true,
     size = {805, 323},
     center = true
@@ -621,19 +618,10 @@ hl.window_rule({
     center = true
 })
 
---- New_github_repo ---
+--- Dusky Backup Manager (Setup / Relink) ---
 hl.window_rule({
-    name = "305_new_github_repo_to_backup.sh",
-    match = { class = "^(305_new_github_repo_to_backup.sh)$" },
-    float = true,
-    size = {726, 689},
-    center = true
-})
-
---- relink_github_repo ---
-hl.window_rule({
-    name = "310_reconnect_and_push_new_changes_to_github.sh",
-    match = { class = "^(310_reconnect_and_push_new_changes_to_github.sh)$" },
+    name = "dusky_backup_manager.py",
+    match = { class = "^(dusky_backup_manager\\.py)$" },
     float = true,
     size = {726, 689},
     center = true
@@ -759,9 +747,9 @@ hl.window_rule({
 
 --- dusky gpu env setter ---
 hl.window_rule({
-    name = "000_configure_uwsm_gpu.sh",
+    name = "035_configure_hyprland_gpu.py",
     match = {
-        class = "^(000_configure_uwsm_gpu\\.sh)$"
+        class = "^(035_configure_hyprland_gpu\\.py)$"
         -- title = "^(sh)$"
     },
     float = true,
@@ -818,6 +806,15 @@ hl.window_rule({
     float = true,
     size = {"(monitor_w*0.9)", "(monitor_h*0.9)"},
     move = {"(monitor_w*0.05)", "(monitor_h*0.05)"}
+})
+
+--- Dusky Keybinds Cheatsheet ---
+hl.window_rule({
+    name = "dusky_keybinds_cheatsheet",
+    match = { class = "^(DuskyKeybindsCheatsheet)$" },
+    float = true,
+    size = {"(monitor_w*0.95)", "(monitor_h*0.95)"},
+    center = true
 })
 
 
@@ -934,7 +931,9 @@ hl.window_rule({
     name = "fastfetch",
     match = { class = "^(fastfetch)$" },
     float = true,
-    size = {943, 393},
+    dim_around = true,
+    border_size = 0,
+    size = {750, 500},
     center = true
 })
 
@@ -988,8 +987,8 @@ hl.window_rule({
 
 --- parakeet Setup ---
 hl.window_rule({
-    name = "parakeet_installer.sh",
-    match = { class = "^(parakeet_installer.sh)$" },
+    name = "dusky_installer.py",
+    match = { class = "^(dusky_installer.py)$" },
     float = true,
     pin = true,
     size = {876, 601}
@@ -1172,8 +1171,25 @@ hl.window_rule({
         class = "^(com\\.github\\.dusky\\.controlcenter)$",
     },
     float = true,
-    size = {"monitor_w * 0.3958", "monitor_h * 0.9093"},
-    animation = "slide up"
+    size = {630, "(monitor_h*0.90)"},
+    center = true,
+    animation = "slide up",
+    workspace = "unset",
+    focus_on_activate = true
+})
+
+-- Dusky Audio Studio
+hl.window_rule({
+    name = "dusky_audio_studio",
+    match = {
+        class = "^(dusky_audio_studio\\.py|dusky_audio_studio)$",
+    },
+    float = true,
+    size = {630, "(monitor_h*0.90)"},
+    center = true,
+    animation = "slide up",
+    workspace = "unset",
+    focus_on_activate = true
 })
 
 --- Dusky_QuickPanal Script ---
@@ -1181,14 +1197,15 @@ hl.window_rule({
     name = "dusky_quickpanalpy",
     match = {
         class = "^(dusky_quickpanal\\.py)$",
-        -- title = "^(dusky_quickpanal\\.py)$",
     },
     float = true,
     animation = "slide right",
     no_dim = true,
     rounding = 20,
     move = {"(monitor_w-window_w-20)", "(monitor_h-window_h-20)"},
-    border_size = 0
+    border_size = 0,
+    workspace = "unset",
+    focus_on_activate = true
 })
 
 --- Audio Router Popup ---
@@ -1313,10 +1330,10 @@ hl.window_rule({
     center = true
 })
 
---- 085_warp.sh script ---
+--- 085_warp.py script ---
 hl.window_rule({
-    name = "085_warp.sh",
-    match = { class = "^(085_warp.sh)$" },
+    name = "085_warp.py",
+    match = { class = "^(085_warp.py)$" },
     float = true,
     size = {567, 658},
     center = true
@@ -1340,13 +1357,13 @@ hl.window_rule({
     center = true
 })
 
---- update_dusky.sh script ---
+--- update_dusky.py updater ---
 hl.window_rule({
-    name = "update_dusky.sh",
-    match = { class = "^(update_dusky.sh)$" },
+    name = "update_dusky.py",
+    match = { class = "^(update_dusky.py)$" },
     float = true,
-    size = {1192, 710},
-    center = true
+    size = {"(monitor_w*0.9)", "(monitor_h*0.9)"},
+    move = {"(monitor_w*0.05)", "(monitor_h*0.05)"}
 })
 
 --- system_update.sh script ---
@@ -1404,18 +1421,6 @@ hl.window_rule({
     center = true
 })
 
---- Ollama sidebar script ---
-hl.window_rule({
-    name = "ollama_terminal.sh",
-    match = { class = "^(ollama_terminal.sh)$" },
-    float = true,
-    -- size = {409, 710},
-    -- move = {50, "(monitor_h*0.5 - window_h*0.5)"},
-    size = {"(monitor_w*0.28)", "(monitor_h*0.88)"},
-    animation = "slide left",
-    rounding = 9,
-    move = {"(monitor_w*0.038)", "(monitor_h*0.5 - window_h*0.5)"}
-})
 
 --- dusky_service_toggle.sh script ---
 hl.window_rule({
@@ -1428,12 +1433,13 @@ hl.window_rule({
 
 --- music recognition script ---
 hl.window_rule({
-    name = "music_recognition.sh",
-    match = { class = "^(music_recognition.sh)$" },
+    name = "music_recognition.py",
+    match = { class = "^(music_recognition.py)$" },
     float = true,
-    size = {409, 147},
+    size = {614, 253}, -- set absolute window size in pixels
     center = true
 })
+
 
 --- dusky_hyprlock_switcher.sh script ---
 hl.window_rule({
@@ -1490,11 +1496,71 @@ hl.window_rule({
 
 --- Hyprland Share Picker ---
 hl.window_rule({
-    name = "float-share-picker",
+    name = "share-picker-native",
     match = { class = "^(hyprland-share-picker)$" },
     float = true,
-    size = {500, 300},  -- Small dialog box
-    center = true
+    size = {500, 300},
+    center = true,
+    workspace = "unset",
+    focus_on_activate = true,
+    stay_focused = true
+})
+
+--- GTK File Dialog Portal ---
+hl.window_rule({
+    name = "gtk-portal-fix",
+    match = { class = "^(xdg-desktop-portal-gtk)$" },
+    float = true,
+    center = true,
+    workspace = "unset",
+    focus_on_activate = true,
+    no_initial_focus = false
+})
+
+hl.window_rule({
+    name = "gtk-portal-modal",
+    match = {
+        class = "^(xdg-desktop-portal-gtk)$",
+        modal = true
+    },
+    stay_focused = true,
+    dim_around = true
+})
+
+--- Hyprland Polkit Agent ---
+hl.window_rule({
+    name = "pin-polkit-agent",
+    match = { class = "^(hyprpolkitagent)$" },
+    float = true,
+    center = true,
+    workspace = "unset",
+    focus_on_activate = true,
+    stay_focused = true,
+    dim_around = true
+})
+
+--- GCR / Gnome Keyring Prompter ---
+hl.window_rule({
+    name = "pin-keyring-prompter",
+    match = { class = "^(gcr-prompter|gnome-keyring-prompt)$" },
+    float = true,
+    center = true,
+    workspace = "unset",
+    focus_on_activate = true,
+    stay_focused = true,
+    dim_around = true
+})
+
+--- Pinentry Dialogs (GnuPG Passphrase Prompts) ---
+hl.window_rule({
+    name = "pin-pinentry",
+    match = { class = "^([Pp]inentry.*)$" },
+    float = true,
+    center = true,
+    workspace = "unset",
+    focus_on_activate = true,
+    stay_focused = true,
+    dim_around = true
 })
 
 --- NWG Look (GTK Theming) ---
@@ -1548,7 +1614,8 @@ hl.window_rule({
     match = { class = "^(pavucontrol|org.pulseaudio.pavucontrol)$" },
     float = true,
     size = {643, 422},
-    center = true
+    center = true,
+    pin = true
 })
 
 --- Network Connection Editor ---
@@ -1557,7 +1624,8 @@ hl.window_rule({
     match = { class = "^(nm-connection-editor)$" },
     float = true,
     size = {432, 423},
-    center = true
+    center = true,
+    pin = true
 })
 
 --- Virt-Manager vm window ---
@@ -1593,8 +1661,12 @@ hl.window_rule({
 
     -- 3. Move to Bottom-Right
     -- standard syntax: (screen_width - window_width - margin)
-    move = {"(monitor_w-window_w-20)", "(monitor_h-window_h-20)"},
+    size = {"monitor_w * 0.1617", "monitor_h * 0.1611"},
+    --move = {"monitor_w - window_w - 20", "monitor_h - window_h - 20"},
+    move = {"monitor_w * 0.8258", "monitor_h * 0.8125"},
 
+    no_initial_focus = true,
+    focus_on_activate = false,
     -- Visuals
     no_dim = true,
     opaque = true
@@ -1611,10 +1683,10 @@ hl.window_rule({
 
     -- 2. Visual Distinction (Green Border)
     -- Helps you instantly identify which window is pinned
-    border_color = inverse_primary,
+    border_color = primary,
 
     -- 3. Thicker Border
-    border_size = 2,
+    border_size = 1,
 
     animation = "slide down"
 })
@@ -1768,7 +1840,13 @@ hl.layer_rule({
     ignore_alpha = 0.54
 })
 
-
+-- Dusky Visualizer Layer Rule
+hl.layer_rule({
+    name = "dusky_visualizer_blur",
+    match = { namespace = "dusky-visualizer" },
+    blur = true,
+    ignore_alpha = 0.0
+})
 
 -- SMART GAPS (Disabled / Examples)
 -- -----------------------------------------------------------------------------
@@ -1828,7 +1906,7 @@ hl.config({
         -- REQUIRED: Force new windows to spawn on the *current* workspace.
         -- Without this, the new window might open "behind" or on a different 
         -- workspace (value 0 or 1 or 2), failing to trigger the unfullscreen logic.
-        initial_workspace_tracking = 1,
+        initial_workspace_tracking = 2,
 
         -- OPTIONAL: Useful if the app (like Steam) asks to be focused but Hyprland ignores it.
         focus_on_activate = true
@@ -1859,6 +1937,40 @@ hl.window_rule({
     center = true
 })
 
+--- 470_vesktop_matugen.sh (Vesktop Setup Script & Vesktop GUI - 80% W, 80% H Floating Dynamic) ---
+hl.window_rule({
+    name = "470_vesktop_matugen.sh",
+    match = { class = "^(470_vesktop_matugen\\.sh|vesktop)$" },
+    float = true,
+    size = {"(monitor_w*0.80)", "(monitor_h*0.80)"},
+    center = true
+})
+
 -- =============================================================================
 -- END OF FILE
 -- =============================================================================
+
+--- Dusky LLM Side Panel Script ---
+hl.window_rule({
+    name = "dusky_llm_side_panal",
+    match = {
+        class = "^(dusky_llm_side_panal\\.py)$",
+    },
+    float = true,
+    animation = "slide left",
+    no_dim = true,
+    rounding = 16,
+    move = {"16", "(monitor_h-window_h)/2"},
+    border_size = 0,
+    workspace = "unset",
+    focus_on_activate = true
+})
+
+--- Dusky Keylogger Dashboard (90% — like dusky_keybinds / packages) ---
+hl.window_rule({
+    name = "dusky_keylogger",
+    match = { class = "^(dusky_keylogger)$" },
+    float = true,
+    size = {"(monitor_w*0.9)", "(monitor_h*0.9)"},
+    center = true,
+})

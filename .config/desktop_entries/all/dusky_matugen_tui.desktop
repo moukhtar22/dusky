@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Dusky Matugen TUI
+GenericName=Theme Configurator
+Comment=Customize Matugen color templates and system application theme integrations
+Exec=foot --app-id=dusky_tui python3 /home/dusk/user_scripts/theme_matugen/config/tui_matugen.py
+Terminal=false
+Categories=Settings;DesktopSettings;Theme;Utility;
+Keywords=dusky;matugen;theme;color;templates;config;settings;tui;
+Icon=preferences-desktop-theme
+StartupNotify=true
+StartupWMClass=dusky_tui

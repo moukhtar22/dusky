@@ -1,11 +1,5 @@
 #!/usr/bin/env bash
-# ==============================================================================
-# Script Name: tty_autologin_manager.sh
-# Description: Manages systemd TTY1 autologin for Arch Linux (Hyprland/UWSM).
-#              Surgically idempotent, non-interactive capable, chroot-safe,
-#              safe against sudo stripping, and maintains state for dusky.
-#              Context-aware user targeting (Silent single-user/live fallback).
-# ==============================================================================
+#d: Enable or disable TTY autologin
 
 set -euo pipefail
 

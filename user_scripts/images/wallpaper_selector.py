@@ -18,6 +18,8 @@ import hashlib
 import threading
 import subprocess
 import argparse
+import ctypes
+import gc
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -27,6 +29,34 @@ gi.require_version('Gdk', '3.0')
 gi.require_version('GdkPixbuf', '2.0')
 gi.require_version('Pango', '1.0')
 from gi.repository import Gtk, Gdk, GdkPixbuf, GLib, Gio, Pango
+
+# Libc bindings for active heap compaction
+try:
+    _LIBC = ctypes.CDLL("libc.so.6", use_errno=True)
+    if hasattr(_LIBC, "malloc_trim"):
+        _LIBC.malloc_trim.argtypes = [ctypes.c_size_t]
+        _LIBC.malloc_trim.restype = ctypes.c_int
+except (OSError, AttributeError):
+    _LIBC = None
+
+def _reclaim_idle_memory() -> None:
+    """Active memory compaction & zombie reaping."""
+    try:
+        re.purge()
+        if hasattr(sys, "_clear_internal_caches"):
+            sys._clear_internal_caches()
+        gc.collect()
+        if _LIBC and hasattr(_LIBC, "malloc_trim"):
+            _LIBC.malloc_trim(0)
+    except Exception:
+        pass
+    try:
+        while True:
+            pid, _ = os.waitpid(-1, os.WNOHANG)
+            if pid <= 0:
+                break
+    except OSError:
+        pass
 
 # --- CONSTANTS & PATHS ---
 HOME = Path.home()
@@ -43,6 +73,11 @@ THEME_CTL = HOME / "user_scripts/theme_matugen/theme_ctl.sh"
 APP_SETTINGS_FILE = THEME_DIR / "gtk_wall_settings"
 CACHE_DIR = HOME / ".cache/dusky_images/wallpaper_selector/"
 THUMB_DIR = CACHE_DIR / "thumbs"
+
+# Dynamic Binary Resolution with Fallbacks
+AWWW_BIN = shutil.which("awww") or "awww"
+AWWW_DAEMON_BIN = shutil.which("awww-daemon") or "awww-daemon"
+MAGICK_BIN = shutil.which("magick") or "magick"
 
 THUMB_SIZE = 240
 RENDER_SIZE = 145
@@ -85,6 +120,158 @@ def atomic_write(path: Path, content: str):
             tmp_path.unlink(missing_ok=True)
         except OSError:
             pass
+
+
+def ensure_awww_daemon(timeout: float = 5.0) -> bool:
+    """
+    Ensures that awww-daemon is running and responsive.
+    If awww-daemon is not running or unresponsive, launches it and waits
+    for the Wayland socket to be ready.
+    """
+    try:
+        res = subprocess.run(
+            [AWWW_BIN, "query"],
+            capture_output=True,
+            text=True,
+            timeout=1.5,
+            env=os.environ
+        )
+        if res.returncode == 0:
+            return True
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        pass
+
+    print("awww-daemon is not running or unresponsive. Starting awww-daemon...")
+    try:
+        subprocess.Popen(
+            [AWWW_DAEMON_BIN, "--format", "xrgb"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+            env=os.environ
+        )
+    except Exception as e:
+        print(f"Failed to launch awww-daemon: {e}")
+        return False
+
+    start_time = time.monotonic()
+    while time.monotonic() - start_time < timeout:
+        time.sleep(0.15)
+        try:
+            res = subprocess.run(
+                [AWWW_BIN, "query"],
+                capture_output=True,
+                text=True,
+                timeout=1.0,
+                env=os.environ
+            )
+            if res.returncode == 0:
+                print("awww-daemon started and initialized successfully.")
+                return True
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+            pass
+
+    print(f"Timed out waiting for awww-daemon to initialize after {timeout} seconds.")
+    return False
+
+
+class ThemedErrorDialog(Gtk.Dialog):
+    """
+    Modern, dynamically-themed modal dialog for displaying backend errors
+    with Dusky/Matugen colors, monospace log area, and interactive transitions.
+    """
+    def __init__(self, parent_window, title_text: str, secondary_text: str, err_msg: str = ""):
+        super().__init__(
+            title="",
+            transient_for=parent_window,
+            modal=True,
+            destroy_with_parent=True
+        )
+        self.get_style_context().add_class("themed-error-dialog")
+        self.set_default_size(540, -1)
+        self.set_resizable(False)
+        self.set_position(Gtk.WindowPosition.CENTER_ON_PARENT)
+
+        content_area = self.get_content_area()
+        content_area.set_spacing(0)
+
+        main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
+        main_box.set_margin_start(24)
+        main_box.set_margin_end(24)
+        main_box.set_margin_top(24)
+        main_box.set_margin_bottom(20)
+        main_box.get_style_context().add_class("dialog-main-box")
+
+        # Header Box with Error Icon & Title
+        header_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=14)
+        header_box.set_halign(Gtk.Align.START)
+        header_box.set_valign(Gtk.Align.CENTER)
+
+        icon = Gtk.Image.new_from_icon_name("dialog-error-symbolic", Gtk.IconSize.DIALOG)
+        icon.set_pixel_size(44)
+        icon.get_style_context().add_class("dialog-error-icon")
+        header_box.pack_start(icon, False, False, 0)
+
+        title_lbl = Gtk.Label(label=title_text)
+        title_lbl.get_style_context().add_class("dialog-title")
+        title_lbl.set_halign(Gtk.Align.START)
+        title_lbl.set_valign(Gtk.Align.CENTER)
+        header_box.pack_start(title_lbl, False, False, 0)
+
+        main_box.pack_start(header_box, False, False, 0)
+
+        # Secondary text
+        if secondary_text:
+            sec_lbl = Gtk.Label(label=secondary_text)
+            sec_lbl.get_style_context().add_class("dialog-subtitle")
+            sec_lbl.set_halign(Gtk.Align.START)
+            sec_lbl.set_line_wrap(True)
+            main_box.pack_start(sec_lbl, False, False, 0)
+
+        # Monospace error details container
+        if err_msg:
+            err_scrolled = Gtk.ScrolledWindow()
+            err_scrolled.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+            err_scrolled.set_min_content_height(100)
+            err_scrolled.set_max_content_height(220)
+            err_scrolled.get_style_context().add_class("dialog-error-scroll")
+
+            err_text_view = Gtk.TextView()
+            err_text_view.set_editable(False)
+            err_text_view.set_cursor_visible(False)
+            err_text_view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+            err_text_view.get_style_context().add_class("dialog-error-text")
+
+            buffer = err_text_view.get_buffer()
+            buffer.set_text(err_msg)
+
+            err_scrolled.add(err_text_view)
+            main_box.pack_start(err_scrolled, True, True, 0)
+
+        # Button Box
+        btn_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        btn_box.set_halign(Gtk.Align.END)
+        btn_box.set_margin_top(8)
+
+        ok_btn = Gtk.Button(label="OK")
+        ok_btn.get_style_context().add_class("dialog-ok-btn")
+        ok_btn.set_can_default(True)
+        ok_btn.connect("clicked", lambda b: self.response(Gtk.ResponseType.OK))
+        btn_box.pack_start(ok_btn, False, False, 0)
+
+        main_box.pack_start(btn_box, False, False, 0)
+        content_area.pack_start(main_box, True, True, 0)
+
+        self.connect("key-press-event", self._on_key_press)
+        self.show_all()
+        ok_btn.grab_focus()
+
+    def _on_key_press(self, widget, event):
+        if event.keyval in (Gdk.KEY_Escape, Gdk.KEY_Return, Gdk.KEY_KP_Enter):
+            self.response(Gtk.ResponseType.OK)
+            return True
+        return False
 
 
 # ==============================================================================
@@ -194,7 +381,7 @@ class CacheManager:
             input_arg = f"{escaped_path}[0]"
 
             subprocess.run([
-                "nice", "-n", "19", "magick", 
+                "nice", "-n", "19", MAGICK_BIN, 
                 "-limit", "thread", "1",
                 "-limit", "memory", "256MiB",  # Prevent RAM exhaustion
                 "-limit", "map", "512MiB",     # Prevent map exhaustion
@@ -354,6 +541,10 @@ class WallpaperApp:
         self.GdkPixbuf = GdkPixbuf
         self.GLib = GLib
         self.Pango = Pango
+
+        settings = self.Gtk.Settings.get_default()
+        if settings:
+            settings.set_property('gtk-application-prefer-dark-theme', True)
 
         self.app = self.Gtk.Application(
             application_id='com.dusky.wallpaperselector',
@@ -696,6 +887,7 @@ class WallpaperApp:
 
     def on_app_shutdown(self, application):
         self.executor.shutdown(wait=False, cancel_futures=True)
+        _reclaim_idle_memory()
 
     def _create_empty_state_placeholder(self):
         box = self.Gtk.Box(orientation=self.Gtk.Orientation.VERTICAL, spacing=12)
@@ -899,6 +1091,67 @@ class WallpaperApp:
             border-radius: 6px;
             min-height: 12px;
             background-color: @theme_selected_bg_color;
+        }
+
+        /* GTK DIALOG & ERROR POPUP DYNAMIC THEMING */
+        dialog.themed-error-dialog, window.themed-error-dialog {
+            background-color: alpha(@theme_bg_color, 0.98);
+            border: 1px solid alpha(@theme_fg_color, 0.15);
+            border-radius: 16px;
+            box-shadow: 0 16px 48px rgba(0, 0, 0, 0.7);
+        }
+        messagedialog {
+            background-color: alpha(@theme_bg_color, 0.98);
+            color: @theme_fg_color;
+        }
+        messagedialog .dialog-action-area button {
+            background-color: alpha(@theme_selected_bg_color, 0.15);
+            color: @theme_fg_color;
+            border: 1px solid @theme_selected_bg_color;
+            border-radius: 8px;
+            padding: 8px 24px;
+            font-weight: bold;
+        }
+        .dialog-main-box {
+            background-color: transparent;
+        }
+        .dialog-error-icon {
+            color: #f38ba8;
+        }
+        .dialog-title {
+            font-size: 1.25em;
+            font-weight: 800;
+            color: #f38ba8;
+        }
+        .dialog-subtitle {
+            font-size: 0.95em;
+            color: alpha(@theme_fg_color, 0.85);
+        }
+        .dialog-error-scroll {
+            background-color: alpha(@theme_fg_color, 0.04);
+            border: 1px solid alpha(@theme_fg_color, 0.1);
+            border-radius: 10px;
+            padding: 4px;
+        }
+        .dialog-error-text {
+            font-family: "JetBrainsMono Nerd Font", monospace;
+            font-size: 0.85em;
+            background-color: transparent;
+            color: alpha(@theme_fg_color, 0.9);
+        }
+        .dialog-ok-btn {
+            background-color: alpha(@theme_selected_bg_color, 0.15);
+            color: @theme_fg_color;
+            border: 1px solid @theme_selected_bg_color;
+            border-radius: 10px;
+            padding: 8px 32px;
+            font-weight: 800;
+            font-size: 0.95em;
+            transition: all 0.2s ease;
+        }
+        .dialog-ok-btn:hover {
+            background-color: alpha(@theme_selected_bg_color, 0.35);
+            box-shadow: 0 4px 12px alpha(@theme_selected_bg_color, 0.3);
         }
         """
 
@@ -1257,6 +1510,12 @@ class WallpaperApp:
         is_ctrl = (state & self.Gdk.ModifierType.CONTROL_MASK) != 0
 
         if keyval == self.Gdk.KEY_Escape:
+            if self.search_entry and self.search_entry.is_focus():
+                if self.search_entry.get_text():
+                    self.search_entry.set_text("")
+                else:
+                    self.flowbox.grab_focus()
+                return True
             if self.window:
                 self.window.close()
             return True
@@ -1382,7 +1641,7 @@ class WallpaperApp:
         theme_mode = state.get('THEME_MODE', 'dark')
         self.update_trackers(rel_path, theme_mode)
 
-        awww_cmd = ["uwsm-app", "--", "awww", "img"]
+        awww_cmd = [AWWW_BIN, "img"]
 
         def add_opt(key, flag):
             val = state.get(key, 'disable')
@@ -1403,6 +1662,8 @@ class WallpaperApp:
             success = False
             err_msg = ""
             try:
+                if not ensure_awww_daemon():
+                    raise RuntimeError("Failed to start awww-daemon background service.")
                 subprocess.run(awww_cmd, check=True, capture_output=True, text=True)
                 if regen:
                     subprocess.run(
@@ -1425,15 +1686,12 @@ class WallpaperApp:
             if not success:
                 if self.window:
                     self.window.present()
-                    dialog = self.Gtk.MessageDialog(
-                        transient_for=self.window,
-                        flags=self.Gtk.DialogFlags.MODAL,
-                        message_type=self.Gtk.MessageType.ERROR,
-                        buttons=self.Gtk.ButtonsType.OK,
-                        text="Theme Application Failed"
-                    )
-                    dialog.format_secondary_text(
-                        f"The backend process encountered an error:\n\n{err_msg}"
+                    parent_win = self.window if (hasattr(self.window, 'get_realized') and self.window.get_realized()) else None
+                    dialog = ThemedErrorDialog(
+                        parent_window=parent_win,
+                        title_text="Theme Application Failed",
+                        secondary_text="The backend process encountered an error:",
+                        err_msg=err_msg
                     )
 
                     def on_dialog_response(dlg, response_id):
@@ -1498,7 +1756,7 @@ def apply_fav_wallpaper(rel_path: str):
     atomic_write(track_file, f"{basename}\n")
     atomic_write(FAV_STATE_FILE, f"{basename}\n")
 
-    awww_cmd = ["uwsm-app", "--", "awww", "img"]
+    awww_cmd = [AWWW_BIN, "img"]
     def add_opt(key, flag):
         val = state.get(key, 'disable')
         if val and val != 'disable':
@@ -1513,6 +1771,8 @@ def apply_fav_wallpaper(rel_path: str):
     awww_cmd.append(str(full_path))
 
     try:
+        if not ensure_awww_daemon():
+            raise RuntimeError("Failed to start awww-daemon background service.")
         subprocess.run(awww_cmd, check=True, capture_output=True, text=True)
         subprocess.run(
             [str(THEME_CTL), "refresh"], check=True, capture_output=True, text=True
@@ -1524,8 +1784,8 @@ def apply_fav_wallpaper(rel_path: str):
             "Favorite", basename,
             "-u", "low", "-t", "1200"
         ])
-    except subprocess.CalledProcessError as e:
-        err_msg = e.stderr.strip() if e.stderr else str(e)
+    except Exception as e:
+        err_msg = getattr(e, 'stderr', '').strip() if hasattr(e, 'stderr') and e.stderr else str(e)
         print(f"Backend execution failed: {err_msg}")
         subprocess.run([
             "notify-send", "-a", "dusky-fav-wal", 

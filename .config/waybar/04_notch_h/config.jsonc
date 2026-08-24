@@ -4,15 +4,21 @@
         "reload_style_on_change": true,
         "margin-top": 8,
         "modules-center": [
+            "custom/launcher",
             "clock",
-//            "custom/cava",
-            // "group/mpris-drawer",
             "hyprland/workspaces",
             "group/hide-tray",
             "group/battery-drawer",
             "custom/notification",
             "group/updates-drawer"
         ],
+
+        "custom/launcher": {
+            "format": "󰌽",
+            "on-click": "python3 ~/user_scripts/dusky_system/control_center/dusky_control_center.py",
+            "on-click-right": "gdbus call --session --dest org.dusky.quickpanal --object-path /org/dusky/quickpanal --method org.freedesktop.Application.Activate '{}'",
+            "tooltip-format": "Control Center"
+        },
 
         "custom/cava": {
             "format": "{}",
@@ -42,7 +48,8 @@
                 "default": "",
                 "firefox": "",
                 "mpv": "",
-                "spotify": ""
+                "spotify": "",
+                "zen-bin": "󰗝"
             },
             "status-icons": {
                 "paused": ""
@@ -53,9 +60,9 @@
         "clock": {
             "format": "{:%I:%M %p}",
             "format-alt": "{:%a, %b %d}",
-            "tooltip-format": "<tt><span size='12pt' font='JetBrainsMono Nerd Font'>{calendar}</span></tt>",
+            "tooltip-format": "<tt>{calendar}</tt>",
             "calendar": {
-                "mode": "month",
+                "mode": "year",
                 "mode-mon-col": 3,
                 "weeks-pos": "right",
                 "on-scroll": 1,
@@ -66,6 +73,11 @@
                     "weekdays": "<span color='#ffb786'><b>{}</b></span>",
                     "today": "<span color='#131313' background='#ffb786'><b>{}</b></span>"
                 }
+            },
+            "actions": {
+                "on-click-right": "mode",
+                "on-scroll-up": "shift_up",
+                "on-scroll-down": "shift_down"
             }
         },
 
@@ -81,8 +93,8 @@
                 "*": 4
             },
             "on-click": "activate",
-            "on-scroll-down": "hyprctl dispatch 'hl.dsp.focus({ workspace = \"e+1\" })'",
-            "on-scroll-up": "hyprctl dispatch 'hl.dsp.focus({ workspace = \"e-1\" })'"
+            "on-scroll-up": "hyprctl dispatch 'hl.dsp.focus({ workspace = \"e-1\" })'",
+            "on-scroll-down": "hyprctl dispatch 'hl.dsp.focus({ workspace = \"e+1\" })'"
         },
 
         "group/battery-drawer": {
@@ -113,9 +125,9 @@
         "backlight": {
             "format": "{icon} {percent}",
             "tooltip-format": "Brightness: {percent}%\n\n LMB  Brightness\n RMB  Night Light\n MMB  Shaders",
-            "on-click": "uwsm-app -- ~/user_scripts/dusky_system/quickpanal/dusky_quickpanal.py",
-            "on-click-right": "uwsm-app -- ~/user_scripts/dusky_system/quickpanal/dusky_quickpanal.py",
-            "on-click-middle": "uwsm-app -- ~/user_scripts/rofi/shader_menu.sh",
+            "on-click": "dusky-run ~/user_scripts/dusky_system/quickpanal/dusky_quickpanal.py",
+            "on-click-right": "dusky-run ~/user_scripts/dusky_system/quickpanal/dusky_quickpanal.py",
+            "on-click-middle": "dusky-run ~/user_scripts/rofi/shader_menu.sh",
             "on-scroll-up": "brightnessctl set +5%",
             "on-scroll-down": "brightnessctl set 5%-",
             "format-icons": ["󰃞", "󰃟", "󰃠"]
@@ -130,8 +142,8 @@
             "tooltip-format-connected": "{controller_alias}\n\n{device_enumerate}",
             "tooltip-format-enumerate-connected": "󰂱 {device_alias}",
             "tooltip-format-enumerate-connected-battery": "󰂱 {device_alias} ({device_battery_percentage}%)",
-            "on-click": "uwsm-app -- blueman-manager",
-            "on-click-right": "uwsm-app -- kitty --class bluetui -e bluetui"
+            "on-click": "dusky-run blueman-manager",
+            "on-click-right": "dusky-run kitty --class bluetui -e bluetui"
         },
 
         "pulseaudio": {
@@ -161,7 +173,7 @@
             "return-type": "json",
             "interval": 5,
             "signal": 9,
-            "on-click": "uwsm-app -- ~/user_scripts/waybar/toggle_hypridle.sh",
+            "on-click": "dusky-run ~/user_scripts/waybar/toggle_hypridle.sh",
             "escape": true
         },
 
@@ -226,7 +238,7 @@
             "return-type": "json",
             "format": "{}",
             "tooltip": true,
-            "on-click": "uwsm-app -- kitty --class system_update.sh --hold -e ~/user_scripts/update_dusky/system_update.sh --all"
+            "on-click": "dusky-run kitty --class system_update.sh --hold -e ~/user_scripts/update_dusky/system_update.sh --all"
         }
     }
 ]

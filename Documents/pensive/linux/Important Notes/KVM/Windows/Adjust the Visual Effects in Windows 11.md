@@ -1,3 +1,32 @@
-Many visual effects, such as animations and shadow effects, are included in Windows 11. These are visually appealing, but they can consume additional system resources and slow down your computer.
+---
+title: "Visual Effects — Tune for Speed"
+tags:
+  - kvm
+  - windows
+  - performance
+---
 
-To disable visual effects in Windows, first type performance in the Search box, then select Adjust the appearance and performance of Windows from the list of results.
+# Visual Effects — Tune for Speed
+
+> [!info] Why
+> Transparency, animations, and shadows burn guest GPU/CPU for little benefit in a VM — especially with `virtio`/`QXL` emulated video. Turn them down for snappier UX and lower Looking Glass bandwidth.
+
+## Steps (inside Windows VM)
+
+1. Press `Win` → type `performance` → **Adjust the appearance and performance of Windows**
+
+2. **Visual Effects** tab:
+   - Choose **Adjust for best performance** (disables all), then optionally re-tick:
+     - ☑ *Show thumbnails instead of icons*
+     - ☑ *Smooth edges of screen fonts*
+   - Or pick **Custom** and keep only those two.
+
+3. **Apply** → **OK**
+
+> [!tip] Also trim
+> **Settings → Personalization → Colors** → **Transparency effects → Off**
+> **Settings → Accessibility → Visual effects → Animation effects → Off**
+
+Revert by choosing **Let Windows choose** or **Adjust for best appearance**.
+
+See: [[Optimize Windows Performance]].

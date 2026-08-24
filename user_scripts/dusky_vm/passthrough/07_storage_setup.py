@@ -1,138 +1,572 @@
 #!/usr/bin/env python3
 """
-Phase 1.5: KVM Storage & ACL Provisioning
-Target: Arch Linux (Kernel 7.1.0+), Python 3.14+, systemd 260
-Scope: Storage Provisioning, Idempotent ACL Traversal, JSON State Serialization.
-Philosophy: Zero-Clutter Idempotency, Strict Access Controls.
+Arsonix KVM/VFIO Pipeline -- Phase 1.5 (07_storage_setup.py)
+Storage topology selection + POSIX.1e ACL traversal + cross-phase state.
+
+Target : Arch Linux rolling (Aug 2026) / Linux 7.1.8+ / Python 3.14.7+ / systemd 261+
+Policy : Never hardcode the QEMU identity. Never claim success on a silent setfacl
+         failure. Never persist pipeline state in world-writable /tmp.
 """
 
-import os
-import sys
+import argparse
+import grp
 import json
-import glob
-import readline
+import os
+import pwd
+import re
+import shutil
+import stat
 import subprocess
+import sys
+import tempfile
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import Never
 
-# ==============================================================================
-# BOOTSTRAP: Strict Privilege & Auto-Elevation
-# ==============================================================================
-def require_root() -> None:
-    """Enforce eUID 0. Auto-elevates via sudo if executed as standard user."""
-    if os.geteuid() != 0:
-        print("\n[INFO] Administrative privileges required. Elevating via sudo...")
-        try:
-            os.execvp("sudo", ["sudo", sys.executable] + sys.argv)
-        except OSError as e:
-            print(f"\n[FATAL] Failed to elevate privileges dynamically: {e}")
-            sys.exit(1)
+MIN_PY: tuple[int, int, int] = (3, 14, 7)
+STATE_DIR = Path("/var/lib/arsonix")
+STATE_FILE = STATE_DIR / "state.json"
+STATE_SCHEMA = 2
+QEMU_CONF = Path("/etc/libvirt/qemu.conf")
 
-require_root()
+
+def _hard_exit(msg: str) -> Never:
+    sys.stderr.write(f"\n[FATAL] {msg}\n\n")
+    raise SystemExit(1)
+
+
+def require_python() -> None:
+    if sys.version_info[:3] < MIN_PY:
+        _hard_exit(f"Python {MIN_PY[0]}.{MIN_PY[1]}.{MIN_PY[2]}+ required.")
+
+
+def elevate() -> None:
+    if os.geteuid() == 0:
+        return
+    if os.environ.get("ARSONIX_ELEVATED") == "1":
+        _hard_exit("Re-exec loop detected: sudo did not yield uid 0.")
+    sudo = shutil.which("sudo")
+    if sudo is None:
+        _hard_exit("'sudo' is not in PATH. Re-run this script as root.")
+    try:
+        script = Path(sys.argv[0]).resolve(strict=True)
+    except OSError as exc:
+        _hard_exit(f"Cannot resolve own script path: {exc}")
+    sys.stderr.write("\n[INFO] Elevating via sudo (single re-exec)...\n")
+    os.environ["ARSONIX_ELEVATED"] = "1"
+    os.execv(
+        sudo,
+        [sudo, "--preserve-env=ARSONIX_ELEVATED", "--", sys.executable, str(script), *sys.argv[1:]],
+    )
+
+
+require_python()
+elevate()
 
 try:
     from rich.console import Console
     from rich.panel import Panel
-    from rich.prompt import Prompt
-except ImportError:
-    print("\n[FATAL] 'python-rich' is missing. Please ensure Phase 1 completed successfully.")
-    sys.exit(1)
+    from rich.prompt import Confirm, Prompt
+    from rich.table import Table
+except ModuleNotFoundError:
+    _hard_exit("python-rich is missing. Run Phase 1 (05_virtio_iso.py) first.")
 
-console = Console()
+console = Console(force_terminal=True, force_interactive=True)
+
 
 # ==============================================================================
-# CORE LOGIC
+# SHARED PRIMITIVES
 # ==============================================================================
-def setup_path_autocomplete() -> None:
-    """Binds readline to emulate Bash's 'read -e' path autocompletion natively."""
-    def path_completer(text: str, state: int) -> str | None:
-        expanded = os.path.expanduser(text)
-        matches = glob.glob(expanded + '*')
-        formatted = [m + '/' if os.path.isdir(m) and not m.endswith('/') else m for m in matches]
-        return (formatted + [None])[state]
+@dataclass(frozen=True, slots=True)
+class Cmd:
+    argv: list[str]
+    code: int
+    out: str
+    err: str
 
-    readline.set_completer_delims(' \t\n;')
-    readline.parse_and_bind("tab: complete")
-    readline.set_completer(path_completer)
+    @property
+    def ok(self) -> bool:
+        return self.code == 0
 
-def check_acl_exists(path: Path, target_rule: str) -> bool:
-    """Idempotent check to see if a specific ACL is already bound."""
+
+def run(argv: list[str], *, check: bool = False, timeout: float = 120.0) -> Cmd:
     try:
-        res = subprocess.run(["getfacl", "-e", str(path)], capture_output=True, text=True, check=True)
-        return target_rule in res.stdout
-    except subprocess.CalledProcessError:
-        return False
+        proc = subprocess.run(
+            argv, check=False, timeout=timeout, text=True,
+            capture_output=True, stdin=subprocess.DEVNULL,
+        )
+        res = Cmd(argv, proc.returncode, (proc.stdout or "").strip(), (proc.stderr or "").strip())
+    except subprocess.TimeoutExpired:
+        res = Cmd(argv, 124, "", f"timeout after {timeout}s")
+    except FileNotFoundError:
+        res = Cmd(argv, 127, "", f"executable not found: {argv[0]}")
+    if check and not res.ok:
+        bail(f"Command failed (rc={res.code}): {' '.join(argv)}\n{res.err or res.out}")
+    return res
 
-def apply_acls(target_dir: Path) -> None:
-    """Walks the directory tree granting QEMU execution traversal and strict R/W/X defaults."""
-    console.print("\n[bold blue]==>[/bold blue] [bold]Enforcing QEMU Storage Traversal ACLs...[/bold]")
-    
-    if not target_dir.exists():
-        console.print(f"[cyan]Directory {target_dir} missing. Provisioning...[/cyan]")
-        target_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Walk up the tree ensuring QEMU has execute rights, ignoring root
-    with console.status("[cyan]Validating parent directory traversal rights...", spinner="dots"):
-        for parent in target_dir.parents:
-            if str(parent) != "/":
-                if not check_acl_exists(parent, "user:qemu:--x"):
-                    subprocess.run(["setfacl", "-m", "u:qemu:x", str(parent)], check=False, stderr=subprocess.DEVNULL)
-                
-    # Grant full R/W/X to target directory and set defaults
-    with console.status("[cyan]Applying strict R/W/X controls to target...", spinner="dots"):
-        if not check_acl_exists(target_dir, "user:qemu:rwx"):
-            subprocess.run(["setfacl", "-m", "u:qemu:rwx", str(target_dir)], check=True)
-        if not check_acl_exists(target_dir, "default:user:qemu:rwx"):
-            subprocess.run(["setfacl", "-d", "-m", "u:qemu:rwx", str(target_dir)], check=True)
-            
-    console.print("[bold green]  ✓ ACL Traversal and Inheritance perfectly staged.[/bold green]")
 
-def serialize_state(target_dir: Path) -> None:
-    """Serializes the selected path for Phase 6 VM Deployment."""
-    state_file = Path("/tmp/kvm_storage_state.json")
-    state_data = {"KVM_TARGET_DIR": str(target_dir)}
-    
-    # Atomic write equivalent for JSON state
-    with state_file.open('w', encoding='utf-8') as f:
-        json.dump(state_data, f, indent=4)
-        
-    state_file.chmod(0o644)
-    console.print(f"[bold green]  ✓ Storage state serialized for Phase 6 pipeline: {state_file}[/bold green]")
+def bail(msg: str) -> Never:
+    console.print(Panel(f"[bold red]FATAL[/bold red]\n{msg}", border_style="red"))
+    raise SystemExit(1)
 
-def main() -> None:
-    console.clear()
-    console.print(Panel("[bold green]Phase 1.5: VM Storage Provisioning[/bold green]\nTarget: Arch Linux | Kernel 7.1.0+", expand=False))
-    
+
+def atomic_write(path: Path, content: str, *, mode: int | None = None) -> bool:
+    keep_mode = 0o644 if mode is None else mode
+    uid, gid = 0, 0
+    if path.exists():
+        try:
+            if path.read_text(encoding="utf-8") == content:
+                return False
+        except (UnicodeDecodeError, OSError):
+            pass
+        st = path.stat()
+        keep_mode = stat.S_IMODE(st.st_mode) if mode is None else mode
+        uid, gid = st.st_uid, st.st_gid
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".arsonix")
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(tmp, keep_mode)
+        os.chown(tmp, uid, gid)
+        os.replace(tmp, path)
+        dir_fd = os.open(path.parent, os.O_DIRECTORY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+        return True
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def state_load() -> dict:
+    try:
+        data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {"schema": STATE_SCHEMA}
+    return data if isinstance(data, dict) else {"schema": STATE_SCHEMA}
+
+
+def state_merge(**kv: object) -> None:
+    data = state_load()
+    data.update(kv)
+    data["schema"] = STATE_SCHEMA
+    data["updated"] = datetime.now(UTC).isoformat(timespec="seconds")
+    STATE_DIR.mkdir(parents=True, exist_ok=True, mode=0o755)
+    atomic_write(STATE_FILE, json.dumps(data, indent=2, sort_keys=True) + "\n", mode=0o644)
+
+
+def resolve_operator() -> pwd.struct_passwd:
+    cached = state_load().get("human_user")
+    candidates: list[str] = [str(cached)] if cached else []
+    for env_key in ("SUDO_USER", "DOAS_USER"):
+        val = os.environ.get(env_key, "").strip()
+        if val:
+            candidates.append(val)
+    try:
+        candidates.append(os.getlogin())
+    except OSError:
+        pass
+    for name in candidates:
+        if not name or name == "root":
+            continue
+        try:
+            entry = pwd.getpwnam(name)
+        except KeyError:
+            continue
+        if entry.pw_uid >= 1000:
+            return entry
+    while True:
+        name = Prompt.ask("[bold cyan]Non-root Arch username[/bold cyan]").strip()
+        try:
+            return pwd.getpwnam(name)
+        except KeyError:
+            console.print(f"[red]  x '{name}' is not in the passwd database.[/red]")
+
+
+class PathCompleter:
+    def __init__(self, home: Path) -> None:
+        self.home = home
+
+    def expand(self, text: str) -> str:
+        if text.startswith("~/"):
+            return str(self.home / text[2:])
+        return str(self.home) if text == "~" else text
+
+    def __call__(self, text: str, state: int) -> str | None:
+        base = Path(self.expand(text))
+        parent = base if text.endswith("/") else base.parent
+        pattern = "*" if text.endswith("/") else base.name + "*"
+        try:
+            hits = sorted(str(p) + ("/" if p.is_dir() else "") for p in parent.glob(pattern))
+        except OSError:
+            return None
+        return hits[state] if state < len(hits) else None
+
+    def __enter__(self) -> "PathCompleter":
+        import readline
+
+        self._rl = readline
+        self._prev = readline.get_completer()
+        self._delims = readline.get_completer_delims()
+        readline.set_completer_delims(" \t\n;")
+        readline.parse_and_bind("tab: complete")
+        readline.set_completer(self)
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self._rl.set_completer(self._prev)
+        self._rl.set_completer_delims(self._delims)
+
+
+# ==============================================================================
+# QEMU IDENTITY -- resolved from libvirt, never assumed
+# ==============================================================================
+@dataclass(frozen=True, slots=True)
+class QemuIdentity:
+    user: str
+    group: str
+    uid: int
+    gid: int
+
+    @property
+    def privileged(self) -> bool:
+        return self.uid == 0
+
+
+def _lookup_user(token: str) -> tuple[str, int] | None:
+    token = token.strip().strip('"')
+    try:
+        if token.startswith("+") and token[1:].isdigit():
+            entry = pwd.getpwuid(int(token[1:]))
+        elif token.isdigit():
+            entry = pwd.getpwuid(int(token))
+        else:
+            entry = pwd.getpwnam(token)
+    except (KeyError, ValueError):
+        return None
+    return entry.pw_name, entry.pw_uid
+
+
+def _lookup_group(token: str) -> tuple[str, int] | None:
+    token = token.strip().strip('"')
+    try:
+        if token.startswith("+") and token[1:].isdigit():
+            entry = grp.getgrgid(int(token[1:]))
+        elif token.isdigit():
+            entry = grp.getgrgid(int(token))
+        else:
+            entry = grp.getgrnam(token)
+    except (KeyError, ValueError):
+        return None
+    return entry.gr_name, entry.gr_gid
+
+
+def resolve_qemu_identity() -> QemuIdentity:
+    """
+    Read the ACTIVE (uncommented) user/group from /etc/libvirt/qemu.conf.
+    Arch ships every key commented out; the upstream compiled default on Arch is
+    root:root, i.e. QEMU is privileged and ACLs exist only for the human operator
+    and for hosts that have deliberately de-privileged QEMU.
+    """
+    user_tok = group_tok = None
+    if QEMU_CONF.is_file():
+        for raw in QEMU_CONF.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            match = re.match(r'^(user|group)\s*=\s*"?([^"#\s]+)"?', line)
+            if match:
+                if match.group(1) == "user":
+                    user_tok = match.group(2)
+                else:
+                    group_tok = match.group(2)
+    resolved_user = _lookup_user(user_tok) if user_tok else None
+    resolved_group = _lookup_group(group_tok) if group_tok else None
+    if user_tok and resolved_user is None:
+        bail(f"qemu.conf sets user = {user_tok!r} but that account does not exist.")
+    if group_tok and resolved_group is None:
+        bail(f"qemu.conf sets group = {group_tok!r} but that group does not exist.")
+    name, uid = resolved_user or ("root", 0)
+    gname, gid = resolved_group or ("root", 0)
+    return QemuIdentity(name, gname, uid, gid)
+
+
+# ==============================================================================
+# FILESYSTEM FACTS
+# ==============================================================================
+@dataclass(frozen=True, slots=True)
+class MountFacts:
+    mountpoint: str
+    fstype: str
+    options: str
+    source: str
+
+    @property
+    def volatile(self) -> bool:
+        return self.fstype in {"tmpfs", "ramfs"} or self.source.startswith("/dev/zram")
+
+
+def mount_facts(path: Path) -> MountFacts:
+    """Longest-prefix match against /proc/self/mountinfo (no external tooling)."""
+    best: MountFacts | None = None
+    best_len = -1
+    target = str(path.resolve())
+    for line in Path("/proc/self/mountinfo").read_text(encoding="utf-8").splitlines():
+        try:
+            left, right = line.split(" - ", 1)
+            fields = left.split()
+            mountpoint = fields[4].replace("\\040", " ")
+            opts = fields[5]
+            rfields = right.split()
+            fstype, source = rfields[0], rfields[1]
+        except (ValueError, IndexError):
+            continue
+        if target == mountpoint or target.startswith(mountpoint.rstrip("/") + "/"):
+            if len(mountpoint) > best_len:
+                best_len = len(mountpoint)
+                best = MountFacts(mountpoint, fstype, opts, source)
+    return best or MountFacts("/", "unknown", "", "unknown")
+
+
+# ==============================================================================
+# POSIX.1e ACL PLANE
+# ==============================================================================
+PERM_BITS = {"r": 4, "w": 2, "x": 1}
+
+
+def perm_value(triplet: str) -> int:
+    return sum(PERM_BITS.get(ch, 0) for ch in triplet)
+
+
+def read_acl(path: Path) -> dict[str, str]:
+    """
+    Parse 'getfacl -cEp' into {qualified-key: perms}, e.g.
+      'user:qemu' -> 'r-x',  'default:user:qemu' -> 'rwx'
+    """
+    res = run(["getfacl", "-cEp", "--", str(path)], timeout=30)
+    if not res.ok:
+        bail(f"getfacl failed on {path}: {res.err or res.out}")
+    acl: dict[str, str] = {}
+    for raw in res.out.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split(":")
+        if len(parts) == 4 and parts[0] == "default":
+            acl[f"default:{parts[1]}:{parts[2]}"] = parts[3]
+        elif len(parts) == 3:
+            acl[f"{parts[0]}:{parts[1]}"] = parts[2]
+    return acl
+
+
+def acl_satisfied(path: Path, wanted: dict[str, str]) -> bool:
+    current = read_acl(path)
+    for key, need in wanted.items():
+        have = current.get(key)
+        if have is None:
+            return False
+        if perm_value(have) & perm_value(need) != perm_value(need):
+            return False
+    return True
+
+
+def apply_acl(path: Path, specs: list[str], *, default: bool = False) -> None:
+    argv = ["setfacl"]
+    if default:
+        argv.append("-d")
+    argv += ["-m", ",".join(specs), "--", str(path)]
+    res = run(argv, timeout=30)
+    if not res.ok:
+        detail = res.err or res.out
+        if "Operation not supported" in detail:
+            bail(
+                f"The filesystem backing {path} does not implement POSIX.1e ACLs "
+                f"({mount_facts(path).fstype}). Choose an ext4/xfs/btrfs/tmpfs target."
+            )
+        bail(f"setfacl failed on {path}: {detail}")
+
+
+def provision_acls(target: Path, qemu: QemuIdentity, operator: pwd.struct_passwd) -> list[str]:
+    """
+    Traversal (--x) on every parent, full rwx + inheritable default on the target.
+    Returns a human-readable ledger of what actually changed.
+    """
+    console.print("\n[bold blue]==>[/bold blue] [bold]Enforcing storage ACLs[/bold]")
+    ledger: list[str] = []
+
+    principals: list[tuple[str, str]] = [("u", operator.pw_name)]
+    if not qemu.privileged:
+        principals.append(("u", qemu.user))
+    else:
+        console.print(
+            "[dim]  QEMU runs privileged (root:root per qemu.conf) -- traversal ACLs are "
+            "provisioned for the operator only.[/dim]"
+        )
+
+    traversal_want = {f"user:{name}": "--x" for _, name in principals}
+    for parent in reversed(target.parents):
+        if str(parent) == "/":
+            continue
+        if not parent.exists():
+            continue
+        if acl_satisfied(parent, traversal_want):
+            continue
+        apply_acl(parent, [f"{kind}:{name}:x" for kind, name in principals])
+        ledger.append(f"+x  {parent}")
+
+    full_want: dict[str, str] = {}
+    for _, name in principals:
+        full_want[f"user:{name}"] = "rwx"
+        full_want[f"default:user:{name}"] = "rwx"
+    if not acl_satisfied(target, full_want):
+        apply_acl(target, [f"{kind}:{name}:rwx" for kind, name in principals])
+        apply_acl(target, [f"{kind}:{name}:rwx" for kind, name in principals], default=True)
+        ledger.append(f"rwx + default:rwx  {target}")
+
+    if ledger:
+        for entry in ledger:
+            console.print(f"[green]  ~[/green] {entry}")
+    else:
+        console.print("[bold green]  ok[/bold green] ACL graph already convergent; no writes.")
+    return ledger
+
+
+# ==============================================================================
+# TOPOLOGY SELECTION
+# ==============================================================================
+def choose_target(operator: pwd.struct_passwd, forced: str | None) -> tuple[Path, str]:
+    if forced:
+        path = Path(forced)
+        if not path.is_absolute():
+            bail("--path must be absolute.")
+        return path, "custom"
+
     default_path = Path("/var/lib/libvirt/images")
-    
-    console.print("\n[bold cyan]Select Storage Architecture:[/bold cyan]")
-    console.print(f"  [1] Persistent Storage [dim](Default: {default_path})[/dim]")
-    console.print("  [2] Ephemeral / RAM Disk [dim](e.g., /mnt/zram1)[/dim]")
-    console.print("  [3] Custom Absolute Path\n")
-    
+    console.print("\n[bold cyan]Storage topology[/bold cyan]")
+    console.print(f"  [1] Persistent   [dim]{default_path}[/dim]")
+    console.print("  [2] Ephemeral    [dim]RAM-backed (zram/tmpfs), e.g. /mnt/zram1[/dim]")
+    console.print("  [3] Custom       [dim]absolute path, TAB completion[/dim]")
     choice = Prompt.ask("Selection", choices=["1", "2", "3"], default="1")
-    
+
     match choice:
         case "1":
-            target_dir = default_path
+            return default_path, "persistent"
         case "2":
-            ephemeral = Prompt.ask("Enter ephemeral drive path", default="/mnt/zram1")
-            target_dir = Path(ephemeral)
-        case "3":
-            setup_path_autocomplete()
-            console.print("[cyan]Enter absolute custom directory path (Tab-completion enabled):[/cyan]")
-            custom = input("> ").strip()
-            readline.set_completer(None) # Unbind
-            
-            target_dir = Path(custom)
-            if not target_dir.is_absolute():
-                console.print("[bold red]FATAL: Path must be absolute (starting with '/'). Aborting.[/bold red]")
-                sys.exit(1)
+            raw = Prompt.ask("Ephemeral mount path", default="/mnt/zram1")
+            return Path(raw), "ephemeral"
         case _:
-            sys.exit(1)
+            with PathCompleter(Path(operator.pw_dir)) as completer:
+                while True:
+                    try:
+                        raw = input("absolute path > ").strip().strip("\"'")
+                    except EOFError:
+                        raw = ""
+                    candidate = Path(completer.expand(raw)) if raw else Path()
+                    if candidate.is_absolute():
+                        return candidate, "custom"
+                    console.print("[red]  x Path must be absolute (start with '/').[/red]")
 
-    apply_acls(target_dir)
-    serialize_state(target_dir)
-    console.print("\n[bold green]=== PHASE 1.5 COMPLETE ===[/bold green]\n")
+
+def prepare_directory(target: Path, mode_str: str) -> MountFacts:
+    if not target.exists():
+        console.print(f"[cyan]  Creating {target}[/cyan]")
+        target.mkdir(parents=True, exist_ok=True, mode=0o711)
+    elif not target.is_dir():
+        bail(f"{target} exists and is not a directory.")
+
+    facts = mount_facts(target)
+    if mode_str == "ephemeral" and not facts.volatile:
+        console.print(
+            f"[yellow]  ! {target} is on {facts.fstype} ({facts.source}), which is NOT volatile. "
+            "It will behave as persistent storage.[/yellow]"
+        )
+    if facts.volatile and mode_str != "ephemeral":
+        console.print(
+            f"[yellow]  ! {target} is RAM-backed ({facts.fstype}); every qcow2 there dies on "
+            "reboot.[/yellow]"
+        )
+    if "noexec" in facts.options.split(","):
+        console.print(f"[yellow]  ! {facts.mountpoint} is mounted noexec.[/yellow]")
+    return facts
+
+
+# ==============================================================================
+# MAIN
+# ==============================================================================
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Arsonix Phase 1.5: storage + ACL")
+    parser.add_argument("--path", help="non-interactive absolute target directory")
+    parser.add_argument("--yes", action="store_true", help="assume yes for volatile confirmation")
+    args = parser.parse_args()
+
+    console.clear()
+    console.print(
+        Panel(
+            "[bold green]Arsonix Phase 1.5 -- Storage & ACL Provisioning[/bold green]\n"
+            "POSIX.1e traversal / inheritable defaults / durable state",
+            expand=False,
+            border_style="green",
+        )
+    )
+
+    if shutil.which("setfacl") is None or shutil.which("getfacl") is None:
+        bail("acl utilities missing. Install with:  pacman -S --needed acl")
+
+    operator = resolve_operator()
+    qemu = resolve_qemu_identity()
+    console.print(
+        f"[dim]operator = {operator.pw_name} | qemu identity = {qemu.user}:{qemu.group} "
+        f"({qemu.uid}:{qemu.gid})[/dim]"
+    )
+
+    target, mode_str = choose_target(operator, args.path)
+    facts = prepare_directory(target, mode_str)
+
+    if facts.volatile and not args.yes:
+        if not Confirm.ask(
+            f"[yellow]{target} is volatile ({facts.fstype}). Continue?[/yellow]", default=True
+        ):
+            console.print("[yellow]Aborted by operator.[/yellow]")
+            raise SystemExit(0)
+
+    provision_acls(target, qemu, operator)
+
+    state_merge(
+        storage_dir=str(target),
+        storage_mode=mode_str,
+        storage_fstype=facts.fstype,
+        storage_volatile=facts.volatile,
+        qemu_user=qemu.user,
+        qemu_group=qemu.group,
+        human_user=operator.pw_name,
+        phase_07="complete",
+    )
+
+    table = Table(title="Phase 1.5 -- storage result", header_style="bold magenta")
+    table.add_column("Facet", style="cyan")
+    table.add_column("Value")
+    table.add_row("Target", str(target))
+    table.add_row("Mode", mode_str)
+    table.add_row("Backing", f"{facts.fstype} on {facts.source} @ {facts.mountpoint}")
+    table.add_row("Volatile", "yes" if facts.volatile else "no")
+    table.add_row("QEMU identity", f"{qemu.user}:{qemu.group}")
+    table.add_row("State", str(STATE_FILE))
+    console.print(table)
+
+    console.print("\n[bold green]=== PHASE 1.5 COMPLETE ===[/bold green]")
+    console.print("Next: 10_virt_modular_daemon.py (socket-activated libvirt 12.6+ topology).\n")
+
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        console.print("\n\n[bold red]! Interrupted by operator.[/bold red]\n")
+        raise SystemExit(130) from None

@@ -225,24 +225,6 @@ run_pacman() {
     done
 }
 
-# --- OS DETECTION ---
-detect_cachyos() {
-    # 1. Check OS release identity directly
-    if [[ -r /etc/os-release ]] && grep -iq 'cachyos' /etc/os-release; then
-        return 0
-    fi
-    # 2. Heuristic: Check if pacman is configured with CachyOS repositories
-    if grep -q '\[cachyos-v3\]' /etc/pacman.conf 2>/dev/null; then
-        return 0
-    fi
-    # 3. Heuristic: Check if the mirrorlist software payload is installed locally
-    if pacman -Qq cachyos-mirrorlist &>/dev/null; then
-        return 0
-    fi
-    
-    return 1
-}
-
 # --- SYSTEMD TIMER CONFIGURATION ---
 configure_arch_timer() {
     log_info "Configuring native systemd timer for automated weekly mirror updates..."
@@ -271,50 +253,6 @@ EOF
     else
         log_warn "Failed to enable reflector.timer. Check systemctl status."
     fi
-}
-
-# --- CACHYOS SYNC ---
-sync_cachyos() {
-    log_info "Initializing CachyOS Mirror Sync..."
-
-    local attempt
-    local max_attempts=3
-    local success=0
-
-    if ! command -v cachyos-rate-mirrors &>/dev/null; then
-        log_warn "cachyos-rate-mirrors binary missing. Skipping CachyOS mirror ranking and keeping the current mirror configuration."
-    else
-        for (( attempt = 1; attempt <= max_attempts; attempt++ )); do
-            manage_pacman_lock
-
-            if run_with_spinner "Benchmarking CachyOS mirrors..." cachyos-rate-mirrors; then
-                success=1
-                break
-            fi
-
-            if (( attempt < max_attempts )); then
-                log_warn "Network latency detected. Retrying in 5 seconds (Attempt $(( attempt + 1 ))/${max_attempts})..."
-                sleep 5
-            fi
-        done
-
-        if (( ! success )); then
-            log_err "cachyos-rate-mirrors failed after ${max_attempts} attempts. Continuing with the existing mirror configuration."
-        else
-            log_ok "CachyOS mirrors optimized."
-        fi
-
-        if systemctl list-unit-files --type=timer --no-legend --plain 2>/dev/null | awk '{print $1}' | grep -Fxq 'cachyos-mirrorlist.timer'; then
-            if systemctl enable --now cachyos-mirrorlist.timer &>/dev/null; then
-                log_ok "cachyos-mirrorlist.timer is now active."
-            else
-                log_warn "Failed to enable cachyos-mirrorlist.timer. Check systemctl status."
-            fi
-        fi
-    fi
-
-    log_info "Synchronizing pacman databases..."
-    run_pacman -Syy || log_warn "Pacman database sync returned non-zero, but pipeline will continue."
 }
 
 # --- ARCH LINUX SYNC ---
@@ -390,12 +328,7 @@ main() {
     printf '\n%s:: Commencing Zero-Interaction Mirror Orchestration%s\n' "$B" "$NC"
 
     manage_pacman_lock
-
-    if detect_cachyos; then
-        sync_cachyos
-    else
-        sync_arch
-    fi
+    sync_arch
 
     printf '\n%s:: Orchestration Complete. Yielding execution to next script.%s\n\n' "$G" "$NC"
 }

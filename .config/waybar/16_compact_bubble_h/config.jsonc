@@ -112,8 +112,8 @@
   // --- MODULE CONFIGURATION ---
 
   "custom/launcher": {
-    "format": "󰣇",
-    "on-click": "uwsm-app -- python3 ~/user_scripts/dusky_system/control_center/dusky_control_center.py",
+    "format": "󰌽",
+    "on-click": "dusky-run python3 ~/user_scripts/dusky_system/control_center/dusky_control_center.py",
     "on-click-right": "gdbus call --session --dest org.dusky.quickpanal --object-path /org/dusky/quickpanal --method org.freedesktop.Application.Activate '{}'",
     "tooltip-format": "Control Center"
   },
@@ -131,17 +131,17 @@
     "return-type": "json",
     "format": "{}",
     "tooltip": true,
-    "on-click": "uwsm-app -- kitty --class system_update.sh --hold -e ~/user_scripts/update_dusky/system_update.sh --all"
+    "on-click": "dusky-run kitty --class system_update.sh --hold -e ~/user_scripts/update_dusky/system_update.sh --all"
   },
 
   "clock": {
-    "format": "{:%I:%M}",
+    "format": "{:%I:%M %p}",
     "format-alt": "󰃭 {:%A, %B %d}",
-    "tooltip-format": "<tt><span size='12pt' font='JetBrainsMono Nerd Font'>{calendar}</span></tt>",
-    "on-click-right": "uwsm-app -- gnome-clocks",
-    "on-click-middle": "uwsm-app -- kitty --class peaclock -e peaclock",
+    "tooltip-format": "<tt>{calendar}</tt>",
+    "on-click": "dusky-run gnome-clocks",
+    "on-click-middle": "dusky-run kitty --class peaclock -e peaclock",
     "calendar": {
-      "mode": "month",
+      "mode": "year",
       "mode-mon-col": 3,
       "weeks-pos": "right",
       "on-scroll": 1,
@@ -152,6 +152,11 @@
         "weekdays": "<span color='#ffb786'><b>{}</b></span>",
         "today": "<span color='#131313' background='#ffb786'><b>{}</b></span>"
       }
+    },
+    "actions": {
+      "on-click-right": "mode",
+      "on-scroll-up": "shift_up",
+      "on-scroll-down": "shift_down"
     }
   },
 
@@ -181,9 +186,9 @@
   "custom/theme-toggle": {
     "format": "",
     "tooltip-format": "Theme Controls\n\n LMB  Dark Mode\n RMB  Light Mode\n MMB  Wallpaper",
-    "on-click": "uwsm-app -- ~/user_scripts/theme_matugen/theme_ctl.sh set --mode dark",
-    "on-click-right": "uwsm-app -- ~/user_scripts/theme_matugen/theme_ctl.sh set --mode light",
-    "on-click-middle": "uwsm-app -- ~/user_scripts/images/wallpaper_selector.py"
+    "on-click": "dusky-run ~/user_scripts/theme_matugen/theme_ctl.sh set --mode dark",
+    "on-click-right": "dusky-run ~/user_scripts/theme_matugen/theme_ctl.sh set --mode light",
+    "on-click-middle": "dusky-run ~/user_scripts/images/wallpaper_selector.py"
   },
 
   "hyprland/workspaces": {
@@ -264,8 +269,8 @@
     "tooltip-format-connected": "{controller_alias}\n\n{device_enumerate}",
     "tooltip-format-enumerate-connected": "󰂱 {device_alias}",
     "tooltip-format-enumerate-connected-battery": "󰂱 {device_alias} ({device_battery_percentage}%)",
-    "on-click": "uwsm-app -- blueman-manager",
-    "on-click-right": "uwsm-app -- kitty --class bluetui -e bluetui"
+    "on-click": "dusky-run blueman-manager",
+    "on-click-right": "dusky-run kitty --class bluetui -e bluetui"
   },
 
   "pulseaudio#output": {
@@ -282,8 +287,8 @@
       "car": "",
       "default": ["󰕿", "󰖀", "󰕾"]
     },
-    "on-click": "uwsm-app -- pavucontrol",
-    "on-click-right": "uwsm-app -- kitty --class cava -e cava",
+    "on-click": "dusky-run pavucontrol",
+    "on-click-right": "dusky-run kitty --class cava -e cava",
     "on-click-middle": "pactl set-sink-mute @DEFAULT_SINK@ toggle",
     "on-scroll-up": "pactl set-sink-volume @DEFAULT_SINK@ +5%",
     "on-scroll-down": "pactl set-sink-volume @DEFAULT_SINK@ -5%",
@@ -295,9 +300,9 @@
   "backlight": {
     "format": "{icon} {percent}",
     "tooltip-format": "Brightness: {percent}%\n\n LMB  Brightness\n RMB  Night Light\n MMB  Shaders",
-    "on-click": "uwsm-app -- ~/user_scripts/dusky_system/quickpanal/dusky_quickpanal.py",
-    "on-click-right": "uwsm-app -- ~/user_scripts/dusky_system/quickpanal/dusky_quickpanal.py",
-    "on-click-middle": "uwsm-app -- ~/user_scripts/rofi/shader_menu.sh",
+    "on-click": "dusky-run ~/user_scripts/dusky_system/quickpanal/dusky_quickpanal.py",
+    "on-click-right": "dusky-run ~/user_scripts/dusky_system/quickpanal/dusky_quickpanal.py",
+    "on-click-middle": "dusky-run ~/user_scripts/rofi/shader_menu.sh",
     "on-scroll-up": "brightnessctl set +5%",
     "on-scroll-down": "brightnessctl set 5%-",
     "format-icons": ["󰃞", "󰃟", "󰃠"]
@@ -306,7 +311,7 @@
   "cpu": {
     "interval": 2,
     "format": "󰍛 {usage}%",
-    "on-click": "uwsm-app -- kitty -e btop",
+    "on-click": "dusky-run kitty -e btop",
     "states": {
       "warning": 70,
       "critical": 90
@@ -317,7 +322,7 @@
     "format": "󰍛 {percentage}%",
     "format-alt": "󰍛 {used:0.1f}G",
     "interval": 3,
-    "on-click-right": "uwsm-app -- kitty --class io_monitor.sh -e $HOME/user_scripts/drives/io_monitor.sh",
+    "on-click-right": "dusky-run kitty --class dusky_disk_monitor_io.py -e $HOME/user_scripts/drives/dusky_disk_monitor_io.py",
     "tooltip-format": "RAM: {used:0.2f} GiB / {total:0.2f} GiB ({percentage}%)\nAvailable: {avail:0.2f} GiB\nSwap: {swapUsed:0.2f} GiB / {swapTotal:0.2f} GiB\n\nRMB: I/O Monitor",
     "states": {
       "warning": 70,
@@ -331,8 +336,8 @@
       "warning": 30,
       "critical": 15
     },
-    "on-click": "uwsm-app -- kitty --class power_saver.sh --hold -e $HOME/user_scripts/battery/power_saving/power_saver.sh",
-    "on-click-right": "uwsm-app -- kitty --class dusky_hypridle.sh -e $HOME/user_scripts/hypridle/dusky_hypridle.sh",
+    "on-click": "dusky-run kitty --class power_saver.sh --hold -e $HOME/user_scripts/battery/power_saver.sh --interactive",
+    "on-click-right": "dusky-run kitty --class dusky_hypridle.sh -e $HOME/user_scripts/hypridle/dusky_hypridle.sh",
     "format": "{icon} {capacity}%",
     "format-charging": "󰂄 {capacity}%",
     "format-plugged": "󰚥 {capacity}%",
@@ -347,13 +352,13 @@
     "return-type": "json",
     "interval": 5,
     "signal": 9,
-    "on-click": "uwsm-app -- ~/user_scripts/waybar/toggle_hypridle.sh",
+    "on-click": "dusky-run ~/user_scripts/waybar/toggle_hypridle.sh",
     "escape": true
   },
 
   "custom/power": {
     "format": "⏻",
-    "on-click": "uwsm-app -- ~/user_scripts/wlogout/wlogout_scale.sh",
+    "on-click": "dusky-run ~/user_scripts/wlogout/wlogout_scale.sh",
     "tooltip-format": "Power Menu"
   }
 }

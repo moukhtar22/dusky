@@ -17,17 +17,73 @@
 [[ -o interactive ]] || return
 
 # -----------------------------------------------------------------------------
+# [3] COMPLETION SYSTEM
+# -----------------------------------------------------------------------------
+setopt EXTENDED_GLOB
+
+# 1. zstyle configurations MUST be declared before compinit
+if [[ -z "$LS_COLORS" ]] && command -v dircolors >/dev/null; then
+  eval "$(dircolors -b)"
+fi
+
+zstyle ':completion:*' menu select
+zstyle ':completion:*' list-colors "${(s.:.)LS_COLORS}"
+zstyle ':completion:*:descriptions' format '%B%F{yellow}%d%f%b'
+zstyle ':completion:*' group-name ''
+zstyle ':completion:*' matcher-list 'm:{a-zA-Z}={A-Za-z}' 'r:|=*' 'l:|=* r:|=*'
+
+local cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/zsh"
+[[ -d "$cache_dir" ]] || mkdir -p "$cache_dir"
+zstyle ':completion:*' use-cache on
+zstyle ':completion:*' cache-path "$cache_dir/zcompcache"
+
+# 2. Optimized initialization: Regenerate compdump cache once every 24 hours
+autoload -Uz compinit
+local zcompdump="${ZDOTDIR:-$HOME}/.zcompdump"
+local dump_cache=($zcompdump(#qN.mh-24))
+
+if (( ${#dump_cache} )); then
+  compinit -C
+else
+  compinit
+  touch "$zcompdump"
+fi
+unset cache_dir zcompdump dump_cache
+
+# -----------------------------------------------------------------------------
 # [1] ENVIRONMENT VARIABLES & PATH
 # -----------------------------------------------------------------------------
 export TERMINAL='kitty'
 export EDITOR='nvim'
 export VISUAL='nvim'
 
-# Compilation Optimization: Use ALL available processing units
-export MAKEFLAGS="-j$(nproc)"
+# Compilation Optimization: Moved to ~/.config/pacman/makepkg.conf
 
-# Configure PATH (Uncomment to enable local binaries)
-# export PATH="$HOME/.local/bin:$PATH"
+# Clipboard DB path - dynamic, set by 390_clipboard_persistance.sh toggle
+[ -f "$HOME/.config/dusky/settings/cliphist_db_env" ] && source "$HOME/.config/dusky/settings/cliphist_db_env"
+
+# --- Clipboard DB path auto-reload (live RAM/disk switch) ---
+# Ensures old shells pick up new CLIPHIST_DB_PATH after running 390_clipboard_persistance.py
+# in another terminal, without needing reboot or manual source.
+__clip_db_env_file="$HOME/.config/dusky/settings/cliphist_db_env"
+__clip_db_env_mtime=0
+__reload_clip_env() {
+  [[ -f "$__clip_db_env_file" ]] || return 0
+  local mtime
+  zmodload zsh/stat 2>/dev/null
+  mtime=$(zstat +mtime "$__clip_db_env_file" 2>/dev/null || stat -c %Y "$__clip_db_env_file" 2>/dev/null || echo 0)
+  if (( mtime != __clip_db_env_mtime )); then
+    # shellcheck source=/dev/null
+    source "$__clip_db_env_file" 2>/dev/null && __clip_db_env_mtime=$mtime
+  fi
+}
+autoload -Uz add-zsh-hook 2>/dev/null && add-zsh-hook precmd __reload_clip_env
+
+# Configure PATH - enabled for npm global bins (fixes gemini-cli)
+# Deduped PATH - ensures npm global bins without duplication (Hyprland also sets PATH via systemd)
+if [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
+  export PATH="$HOME/.local/bin:$PATH"
+fi
 
 # -----------------------------------------------------------------------------
 # [2] HISTORY CONFIGURATION
@@ -36,53 +92,17 @@ HISTSIZE=50000
 SAVEHIST=25000
 HISTFILE="$HOME/.zsh_history"
 
-setopt APPEND_HISTORY          # Append new history entries instead of overwriting.
-setopt INC_APPEND_HISTORY      # Write history to file immediately after command execution.
 setopt SHARE_HISTORY           # Share history between all concurrent shell sessions.
 setopt HIST_EXPIRE_DUPS_FIRST  # When trimming history, delete duplicates first.
-setopt HIST_IGNORE_DUPS        # Don't record an entry that was just recorded again.
+setopt HIST_IGNORE_ALL_DUPS    # Delete old recorded entry if new entry is a duplicate.
 setopt HIST_IGNORE_SPACE       # Ignore commands starting with space.
 setopt HIST_VERIFY             # Expand history (!!) into the buffer, don't run immediately.
-
-# -----------------------------------------------------------------------------
-# [3] THE AUTOCOMPLETE ENGINE
-# -----------------------------------------------------------------------------
-setopt EXTENDED_GLOB # Enable extended globbing features (e.g., `^` for negation)
-
-# 1. zstyle configurations MUST be declared before compinit
-if [[ -z "$LS_COLORS" ]] && command -v dircolors >/dev/null; then
-  eval "$(dircolors -b)"
-fi
-
-zstyle ':completion:*' menu select                 # Enable visual menu selection
-zstyle ':completion:*' list-colors "${(s.:.)LS_COLORS}" # Match LS_COLORS
-zstyle ':completion:*:descriptions' format '%B%F{yellow}%d%f%b' # Colored category headers
-zstyle ':completion:*' group-name ''               # Group completions by type
-# Fuzzy matching: Case-insensitive, partial-word, and substring completion
-zstyle ':completion:*' matcher-list 'm:{a-zA-Z}={A-Za-z}' 'r:|=*' 'l:|=* r:|=*'
-
-# Cache heavy completions (like pacman/yay) for instant loading
-local cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/zsh"
-[[ -d "$cache_dir" ]] || mkdir -p "$cache_dir"
-zstyle ':completion:*' use-cache on
-zstyle ':completion:*' cache-path "$cache_dir/zcompcache"
-
-# 2. Optimized initialization: Only regenerate compdump cache once every 24 hours.
-autoload -Uz compinit
-local zcompdump="${ZDOTDIR:-$HOME}/.zcompdump"
-local dump_cache=($zcompdump(#qN.mh-24)) # Array expansion forces glob evaluation without subshells
-
-if (( ${#dump_cache} )); then
-  compinit -C  # Trust the fresh cache, skip checks (Ultra Fast)
-else
-  compinit     # Cache is old or missing, regenerate it (Slow, happens once a day)
-  touch "$zcompdump"
-fi
-unset cache_dir zcompdump dump_cache
+setopt HIST_FCNTL_LOCK         # Better locking for concurrent shells sharing history
 
 # -----------------------------------------------------------------------------
 # [4] KEYBINDINGS & SHELL OPTIONS
 # -----------------------------------------------------------------------------
+
 # --- General Options ---
 setopt INTERACTIVE_COMMENTS # Allow comments (#) in an interactive shell.
 setopt GLOB_DOTS            # Include dotfiles (e.g., .config) in globbing results.
@@ -96,7 +116,7 @@ KEYTIMEOUT=1 # 10ms transition delay (instant mode switching)
 
 # --- Neovim Integration ---
 # Press 'v' in normal mode to edit the current command string in Neovim
-autoload -U edit-command-line
+autoload -Uz edit-command-line
 zle -N edit-command-line
 bindkey -M vicmd v edit-command-line
 
@@ -105,8 +125,7 @@ autoload -U history-search-end
 zle -N history-beginning-search-backward-end history-search-end
 zle -N history-beginning-search-forward-end history-search-end
 
-# Bind Arrow Keys for history search across both vi insert (viins) and normal/command (vicmd) modes.
-# We explicitly bind both application mode (terminfo) and normal mode (standard ESC) sequences.
+# Bind Arrow Keys across both vi insert and command modes
 for keymap in viins vicmd; do
   bindkey -M "$keymap" "${terminfo[kcuu1]:-^[[A}" history-beginning-search-backward-end
   bindkey -M "$keymap" "^[[A" history-beginning-search-backward-end
@@ -127,31 +146,45 @@ alias ln='ln -v'
 alias df='df -hT'
 alias disk_usage='sudo btrfs filesystem usage /'
 alias ncdu='gdu'
-alias unlock='$HOME/user_scripts/drives/drive_manager/drive_manager.py unlock'
-alias lock='$HOME/user_scripts/drives/drive_manager/drive_manager.py lock'
-alias io_drives='~/user_scripts/drives/dusky_disk_monitor_io.py'
+alias unlock="$HOME/user_scripts/drives/drive_manager/drive_manager.py unlock"
+alias lock="$HOME/user_scripts/drives/drive_manager/drive_manager.py lock"
+alias io_drives="$HOME/user_scripts/drives/dusky_disk_monitor_io.py"
 
 # Searching & Differencing
 alias diff='delta --side-by-side'
 alias grep='grep --color=auto'
-alias egrep='egrep --color=auto'
-alias fgrep='fgrep --color=auto'
+alias dusky_replace='python3 ~/user_scripts/tools/sed/dusky_replace.py'
 
 # System & Development Scripts
 alias tui='python ~/user_scripts/dusky_tui/python/main/main.py'
-alias sendlogs='~/user_scripts/arch_setup_scripts/send_logs.sh --auto'
-alias update_dusky='~/user_scripts/update_dusky/update_dusky.sh'
-alias dusky_force_sync_github='~/user_scripts/update_dusky/dusky_force_sync_github.sh'
-alias darkmode='~/user_scripts/theme_matugen/theme_ctl.sh set --mode dark'
-alias lightmode='~/user_scripts/theme_matugen/theme_ctl.sh set --mode light'
-alias run_sysbench='~/user_scripts/performance/sysbench_benchmark.py'
+alias sendlogs="$HOME/user_scripts/arch_setup_scripts/send_logs.sh --auto"
+alias update_dusky="$HOME/user_scripts/update_dusky/python/update_dusky.py"
+alias dusky_force_sync_github="$HOME/user_scripts/update_dusky/dusky_force_sync_github.sh"
+alias darkmode="$HOME/user_scripts/theme_matugen/theme_ctl.sh set --mode dark"
+alias lightmode="$HOME/user_scripts/theme_matugen/theme_ctl.sh set --mode light"
+alias run_sysbench="$HOME/user_scripts/performance/sysbench_benchmark.py"
+
+# Local AI Web Bridge Shortcut
+_ask_func() {
+    local prompt=""
+    if [ $# -eq 0 ]; then
+        read -r "prompt?Prompt: "
+        if [ -z "$prompt" ]; then
+            return 0
+        fi
+    else
+        prompt="$*"
+    fi
+    python3 "$HOME/.config/firefox_extentions/ai_bridge/bridge.py" "$prompt"
+}
+alias ask='noglob _ask_func'
 
 # Memory Optimization
 alias mem_optimize='sudo systemctl start dusky_boot_mem_reclaim.service'
 
 # Networking
-alias iphone_vnc='~/user_scripts/networking/iphone_vnc.sh'
-alias wifi_security='~/user_scripts/networking/airmon_ng.sh'
+alias iphone_vnc="$HOME/user_scripts/networking/iphone_vnc.sh"
+alias wifi_security="$HOME/user_scripts/networking/airmon_ng.sh"
 
 # Eza Integration (Replaces standard ls)
 if command -v eza >/dev/null; then
@@ -169,7 +202,7 @@ fi
 function y() {
     local tmp="$(mktemp -t "yazi-cwd.XXXXXX")" cwd
     yazi "$@" --cwd-file="$tmp"
-    if cwd="$(cat -- "$tmp")" && [ -n "$cwd" ] && [ "$cwd" != "$PWD" ]; then
+    if cwd="$(cat -- "$tmp")" && [ -n "$cwd" ] && [ "$cwd" != "$PWD" ] && [ -d "$cwd" ]; then
         builtin cd -- "$cwd"
     fi
     rm -f -- "$tmp"
@@ -191,7 +224,7 @@ sudo() {
 
 # Utility Function: Make directory and immediately CD into it
 mkcd() {
-  mkdir -p "$1" && cd "$1"
+  mkdir -p -- "$1" && cd -- "$1"
 }
 
 # -----------------------------------------------------------------------------
@@ -202,8 +235,8 @@ mkcd() {
 local conf_dir="$HOME/.config/zshrc"
 local -a my_modules=(
     batstat git kvm lmstudio logs logs_old mon_info
-    pkg res_mon vfio waydroid win10 wthr cmd_atlas
-    sshfile scripts neovim_delta core
+    pkg pkg_search res_mon vfio waydroid win10 wthr cmd_atlas
+    sshfile scripts neovim_delta core gemini stt_dusky
 )
 
 for mod in "${my_modules[@]}"; do
@@ -221,7 +254,7 @@ unset conf_dir my_modules mod
 _starship_cache="$HOME/.starship-init.zsh"
 _starship_bin="$(command -v starship)"
 if [[ -n "$_starship_bin" ]]; then
-  if [[ ! -f "$_starship_cache" || "$_starship_bin" -nt "$_starship_cache" ]]; then
+  if [[ ! -f "$_starship_cache" || "$_starship_bin" -nt "$_starship_cache" || "$HOME/.config/starship.toml" -nt "$_starship_cache" ]]; then
     "$_starship_bin" init zsh --print-full-init >! "$_starship_cache"
   fi
   source "$_starship_cache"
@@ -236,17 +269,38 @@ if [[ -n "$_fzf_bin" ]]; then
       "$_fzf_bin" --zsh >! "$_fzf_cache"
     fi
     source "$_fzf_cache"
-  elif [[ -f "$HOME/.fzf.zsh" ]]; then
-    source "$HOME/.fzf.zsh" # Fallback for older versions
   fi
 fi
+
+# --- Matugen Dynamic FZF Color Integration ---
+_dusky_load_matugen_fzf() {
+  local theme_file="$HOME/.config/matugen/generated/dusky_tui.json"
+  local bg="#1d100a" fg="#f8ddd2" accent="#ffb694" error="#ffb4ab" warning="#efbc94" success="#f0be79" muted="#55433b"
+  if [[ -f "$theme_file" ]]; then
+    typeset -A theme
+    while read -r key val; do
+      theme[$key]="$val"
+    done < <(grep -E '"(bg|fg|accent|error|warning|success|muted)"' "$theme_file" 2>/dev/null | sed -E 's/.*"([^"]+)": *"([^"]+)".*/\1 \2/')
+    bg="${theme[bg]:-$bg}"
+    fg="${theme[fg]:-$fg}"
+    accent="${theme[accent]:-$accent}"
+    error="${theme[error]:-$error}"
+    warning="${theme[warning]:-$warning}"
+    success="${theme[success]:-$success}"
+    muted="${theme[muted]:-$muted}"
+  fi
+  export DUSKY_FZF_COLORS="bg+:${muted},bg:${bg},spinner:${accent},fg:${fg},fg+:${fg},header:${accent},info:${warning},pointer:${success},marker:${success},prompt:${accent},hl:${error},hl+:${error},border:${muted},label:${accent}"
+  export FZF_DEFAULT_OPTS="--color=$DUSKY_FZF_COLORS --pointer='❯ ' --marker='✔ ' --info=inline-right"
+}
+_dusky_load_matugen_fzf
+
 
 # --- Zoxide ---
 _zoxide_cache="$HOME/.zoxide-init.zsh"
 _zoxide_bin="$(command -v zoxide)"
 if [[ -n "$_zoxide_bin" ]]; then
   if [[ ! -f "$_zoxide_cache" || "$_zoxide_bin" -nt "$_zoxide_cache" ]]; then
-    "$_zoxide_bin" init zsh >! "$_zoxide_cache"
+    "$_zoxide_bin" init zsh --cmd cd >! "$_zoxide_cache"
   fi
   source "$_zoxide_cache"
 fi
@@ -272,13 +326,11 @@ if [[ -f /usr/share/zsh/plugins/zsh-syntax-highlighting/zsh-syntax-highlighting.
 fi
 
 # -----------------------------------------------------------------------------
-# [9] TTY AUTO-LOGIN (Hyprland via UWSM)
+# [9] TTY AUTO-LOGIN (Hyprland)
 # -----------------------------------------------------------------------------
 # Native variable check avoids expensive $(tty) subshells
 if [[ -z "$DISPLAY" && -z "$WAYLAND_DISPLAY" && "$TTY" == "/dev/tty1" ]]; then
-  if uwsm check may-start >/dev/null 2>&1; then
-    exec uwsm start hyprland.desktop
-  fi
+  exec start-hyprland
 fi
 
 # =============================================================================

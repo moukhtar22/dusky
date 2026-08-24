@@ -1,0 +1,39 @@
+[Unit]
+Description=Dusky LLM Side Panel Daemon
+After=graphical-session.target
+PartOf=graphical-session.target
+
+StartLimitIntervalSec=10
+StartLimitBurst=50
+
+[Service]
+Type=dbus
+BusName=org.dusky.llm
+
+Environment=PYTHONUNBUFFERED=1 PYTHONOPTIMIZE=2 MALLOC_ARENA_MAX=1
+
+ExecStart=%h/user_scripts/llm/llm_side_panal/dusky_llm.py --gapplication-service
+Slice=app-graphical.slice
+
+Restart=on-failure
+RestartMode=direct
+
+RestartSec=250ms
+RestartSteps=5
+RestartMaxDelaySec=4s
+RestartPreventExitStatus=5
+
+TimeoutStopSec=2s
+TimeoutStopFailureMode=kill
+
+MemoryAccounting=yes
+OOMPolicy=kill
+OOMScoreAdjust=400
+
+MemoryHigh=40M
+MemoryMax=250M
+
+SyslogIdentifier=dusky-llm
+
+[Install]
+WantedBy=graphical-session.target

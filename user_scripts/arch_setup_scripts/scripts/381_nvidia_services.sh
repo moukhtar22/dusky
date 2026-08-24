@@ -1,13 +1,6 @@
 #!/usr/bin/env bash
-# Enables systemd system services for packages
-# ==============================================================================
-# Arch Linux System Service Initializer
-# Context: Hyprland / UWSM / Systemd
-# ==============================================================================
+#d: Enable NVIDIA-related systemd services
 
-# ------------------------------------------------------------------------------
-# 1. Strict Environment & Error Handling
-# ------------------------------------------------------------------------------
 set -euo pipefail
 IFS=$'\n\t'
 
@@ -86,7 +79,7 @@ main() {
 
     # UWSM/Hyprland Note: 
     # System services handle hardware/network. 
-    # User-session services should be handled by 'uwsm app' or systemd --user.
+    # User-session services should be handled by 'dusky-run' or systemd --user.
     
     printf "\n--- Operation Complete ---\n"
 }

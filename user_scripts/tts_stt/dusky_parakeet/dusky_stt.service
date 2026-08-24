@@ -1,0 +1,72 @@
+[Unit]
+Description=Dusky STT isolated Wayland voice typing engine
+Documentation=https://onnxruntime.ai/docs/execution-providers/CUDA-ExecutionProvider.html
+After=graphical-session.target pipewire.service wireplumber.service
+Wants=pipewire.service wireplumber.service
+PartOf=graphical-session.target
+StartLimitIntervalSec=120
+StartLimitBurst=5
+ConditionPathExists=%h/.local/lib/dusky-stt/.venv-main/bin/python
+ConditionPathExists=%h/.local/lib/dusky-stt/dusky_main.py
+
+[Service]
+Type=notify
+NotifyAccess=main
+ExecStart=%h/.local/lib/dusky-stt/.venv-main/bin/python %h/.local/lib/dusky-stt/dusky_main.py --daemon
+WorkingDirectory=%h/.local/lib/dusky-stt
+RuntimeDirectory=dusky-stt
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=no
+UMask=0077
+
+Environment=DUSKY_APP_DIR=%h/.local/lib/dusky-stt
+Environment=HF_HOME=%h/.cache/huggingface
+Environment=HF_HUB_OFFLINE=1
+Environment=HF_HUB_DISABLE_TELEMETRY=1
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=CUDA_VISIBLE_DEVICES=-1
+Environment=CUDA_MODULE_LOADING=LAZY
+
+Restart=on-failure
+RestartSec=2s
+RestartSteps=5
+RestartMaxDelaySec=30s
+TimeoutStartSec=30s
+TimeoutStopSec=20s
+WatchdogSec=30s
+KillMode=control-group
+OOMPolicy=stop
+
+MemoryHigh=6G
+MemoryMax=8G
+MemorySwapMax=1G
+TasksMax=192
+LimitNOFILE=8192
+
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+LockPersonality=yes
+PrivateTmp=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHome=read-only
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectProc=invisible
+ProtectSystem=strict
+ProcSubset=pid
+ReadWritePaths=%h/.local/state/dusky-stt %h/.cache/huggingface
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=dusky-stt
+
+[Install]
+WantedBy=default.target

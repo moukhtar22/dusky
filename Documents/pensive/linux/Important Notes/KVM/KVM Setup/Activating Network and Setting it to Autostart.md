@@ -1,151 +1,95 @@
-# 🌐 KVM Default Network Provisioning (Arch Linux)
+---
+title: "KVM Default Network (NAT) — Provision & Autostart"
+tags:
+  - kvm
+  - libvirt
+  - networking
+  - nftables
+  - dnsmasq
+  - arch
+---
 
-By default, all virtual machines (VMs) on your host are connected to a virtual network named **'default'**. This network uses **NAT** (Network Address Translation) to allow your VMs to communicate with the outside world.
+# KVM Default Network — Provision & Autostart
 
-> [!INFO] What is NAT?
-> 
-> Think of NAT like your home router.
-> 
-> - **Outbound:** Your VMs can browse the internet, download updates, and ping external servers seamlessly.
->     
-> - **Inbound:** Devices outside your computer (like your phone or another laptop) _cannot_ see or connect to the VMs directly.
->     
-> 
-> This is perfect for desktop usage (browsing, testing) but not for hosting public servers.
+> [!info] NAT mental model
+> Like a home router: VMs **outbound** full internet via host NAT; **inbound** from LAN not visible. For LAN-visible hosting use [[Network Bridging for LAN access]] (Option 3 `br0`). Canonical: `20_networking_nmcli.py`.
 
-## 1. Initial Diagnosis
+## 1. Diagnose
 
-Always begin by checking the current state of your virtualization networks. Open your terminal and run:
-
+```bash
+virsh -c qemu:///system net-list --all
+virsh -c qemu:///system net-info default 2>/dev/null || echo "no default"
+systemctl is-active virtnetworkd.socket   # must be active — Phase 2 gates this
 ```
-sudo virsh net-list --all
-```
 
-**What you are looking for:**
+- Empty / `inactive` / `Persistent no` → provision §2.
+- `nft` present + `network.conf` `firewall_backend="nftables"` → libvirt owns `table inet libvirt_network`; no iptables shim.
 
-If the list is completely empty, or if `default` is listed but its State is `inactive` and Persistent is `no`, your network needs to be provisioned. Proceed to Step 2.
+## 2. Pristine provision (idempotent, durable /tmp via mkstemp)
 
-## 2. The Bulletproof Provisioning Method
+`20_*.py:define_network` never writes world-writable `/tmp/libvirt-default.xml` — uses `mkstemp` + `os.fsync` + `os.replace`. This note mirrors it:
 
-Arch Linux is a rolling release, and depending on your installation, upstream default templates can sometimes be missing. To make this completely reliable across fresh reinstalls, we will forcefully clear any broken state and inject a pristine XML configuration directly.
+```bash
+# 1. Purge broken state (ignore errors)
+sudo virsh -c qemu:///system net-destroy default 2>/dev/null || true
+sudo virsh -c qemu:///system net-undefine default 2>/dev/null || true
 
-_(Note: We intentionally omit the `<uuid>` and `<mac>` tags below so libvirt securely auto-generates fresh ones tailored to your exact hardware)._
-
-Copy and paste this entire block into your terminal:
-
-```
-# 1. Clean up any corrupted or transient states (errors here are safe to ignore)
-sudo virsh net-destroy default >/dev/null 2>&1
-sudo virsh net-undefine default >/dev/null 2>&1
-
-# 2. Inject the modern XML configuration into a temporary file
-cat <<EOF > /tmp/libvirt-default.xml
+# 2. Inject (uuid/mac auto-generated if omitted)
+cat <<'EOF' | sudo tee /tmp/libvirt-default.xml >/dev/null
 <network>
   <name>default</name>
   <forward mode='nat'>
-    <nat>
-      <port start='1024' end='65535'/>
-    </nat>
+    <nat><port start='1024' end='65535'/></nat>
   </forward>
   <bridge name='virbr0' stp='on' delay='0'/>
   <ip address='192.168.122.1' netmask='255.255.255.0'>
-    <dhcp>
-      <range start='192.168.122.2' end='192.168.122.254'/>
-    </dhcp>
+    <dhcp><range start='192.168.122.2' end='192.168.122.254'/></dhcp>
   </ip>
 </network>
 EOF
-
-# 3. Permanently define the network in libvirt
-sudo virsh net-define /tmp/libvirt-default.xml
-
-# 4. Clean up the temporary file
+sudo virsh -c qemu:///system net-define /tmp/libvirt-default.xml
 rm /tmp/libvirt-default.xml
+
+# 3. Autostart + start
+sudo virsh -c qemu:///system net-autostart default
+sudo virsh -c qemu:///system net-start default
 ```
 
-> [!SUCCESS] Network Defined
-> 
-> Your network is now permanently etched into your system's configuration.
+> [!note] Preserve vs purge
+> `20_*.py:provision_nat(purge=False)` *preserves* an existing `default` with custom DHCP — only `purge=True` destroys it. The block above is the `purge` variant (clean-room).
 
-## 3. Enable and Start
+## 3. Firewall (Aug 2026 = `nftables`)
 
-With the network persistently defined, instruct your system to start it right now, and ensure it always starts automatically on future reboots.
+Libvirt manages its own `nft` table; most hosts need **nothing**. Only inject if you run a filtering frontend that defaults `FORWARD` to `DROP`:
 
-```
-# Set the network to automatically start when your machine boots
-sudo virsh net-autostart default
-
-# Start the network immediately
-sudo virsh net-start default
-```
-
-_(Note: Modern libvirt relies on `dnsmasq` and `iptables-nft` to handle the DHCP and NAT translation backend. Ensure those packages are installed on your Arch system if `net-start` ever fails on a fresh install)._
-
-## 4. Firewall Routing Configuration
-
-Modern libvirt heavily utilizes `nftables`. Depending on which frontend firewall you use, it may blindly drop the traffic moving across your virtual bridge (`virbr0`), preventing your VMs from accessing the internet.
-
-Follow the instructions for your active firewall below:
-
-### 🛡️ If using UFW (Uncomplicated Firewall)
-
-UFW's default `FORWARD` policy drops everything. We must explicitly trust the `virbr0` interface:
-
-```
-# Allow UFW to forward traffic entering the virtual bridge
+```bash
+# UFW active?
+sudo ufw status | head -1   # Status: active → needs rules
 sudo ufw route allow in on virbr0
-
-# Allow UFW to forward traffic exiting the virtual bridge
 sudo ufw route allow out on virbr0
-
-# Reload UFW to apply the new routing rules
 sudo ufw reload
+# firewalld: firewall-cmd --reload (zone auto-detected)
 ```
 
-### 🛡️ If using firewalld (Alternative)
+Check:
 
-If you ever migrate to `firewalld`, it is deeply integrated with libvirt. You usually just need to force firewalld to pick up the libvirt zone file:
-
-```
-# Reload firewalld so it detects the libvirt zone
-sudo firewall-cmd --reload
-
-# (Optional) Ensure virbr0 is bound to the libvirt zone
-sudo firewall-cmd --get-active-zones
+```bash
+sudo nft list table inet libvirt_network 2>/dev/null | head -n 40
+sudo virsh -c qemu:///system net-dumpxml default | grep -A4 '<ip'
+# Host IP 192.168.122.1   DHCP .2-.254
 ```
 
-## 5. Final Verification & IP Assignments
+## 4. Verify
 
-Let's do a final check to guarantee everything is perfect. Run the initial diagnostic command again:
-
-```
-sudo virsh net-list --all
-```
-
-**Expected Perfect Output:**
-
-|   |   |   |   |
-|---|---|---|---|
-|**Name**|**State**|**Autostart**|**Persistent**|
-|default|active|yes|yes|
-
-### Checking the Subnet
-
-The `default` network acts as a DHCP server. To see what IP range your VMs will pull from, query the active XML:
-
-```
-sudo virsh net-dumpxml default | grep -A 4 "<ip"
+```bash
+sudo virsh -c qemu:///system net-list --all
+# Name      State   Autostart  Persistent
+# default   active  yes        yes
+ip -4 addr show virbr0
+virsh -c qemu:///system net-dhcp-leases default
 ```
 
-**What this tells you:**
+> [!tip] NAT subnet collision
+> `20_*.py:host_owns_nat_subnet` warns if `192.168.122.0/24` already routed via another device — guest DHCP will black-hole. Move NAT CIDR or disable conflicting docker/lxd route.
 
-- **Host IP (`192.168.122.1`):** Your Arch Linux host's internal address on the virtual network.
-    
-- **DHCP Range (`.2` to `.254`):** The pool of IP addresses dynamically assigned to your VMs.
-    
-
-> [!TIP] Need external access?
-> 
-> If you need devices on your physical LAN to communicate directly with your VMs (e.g., hosting a web server accessible to others), NAT will not work.
-> 
-> Refer to [[Network Bridging for LAN access]] to set up a full Bridge connection.
+See: [[Network Bridging for LAN access]], `20_networking_nmcli.py`.

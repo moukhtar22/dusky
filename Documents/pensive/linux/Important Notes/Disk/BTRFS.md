@@ -1,458 +1,285 @@
 # Btrfs Filesystem Management
 
+> [!note] Scope
+> Permanent reference for **CoW/NOCOW policy, subvolumes, snapshots, compression, integrity checks, and modern `fstab`** on Arch Linux. Updated **August 2026** against kernel 7.x (`btrfs-progs 7.1`).
+>
+> Related: [[Storage Stack]] · [[Disk]] · [[Bitlocker]] · [[Fixing Un Mountable NTFS drive]]
+
+> [!info] This machine (verified August 2026)
+> - Single-device Btrfs `DUSKY_ROOT` (120G partition) with a **flat topology**: every mount point is its own top-level subvolume — `@`, `@home`, `@snapshots`, `@home_snapshots`, `@var_log`, `@var_cache`, `@var_tmp`, `@var_lib_machines`, `@var_lib_portables`, `@var_lib_libvirt`, `@var_lib_mysql`, `@var_lib_postgres`, `@swap`
+> - Snapper configs `root` and `home`; snapshot stores are the top-level `@snapshots`/`@home_snapshots` mounted at `/.snapshots` and `/home/.snapshots` (never nested inside `@`)
+> - Daily paired snapshots at 20:00 via `dusky_snapshot.timer`; retention 6; timeline snapshots disabled; quotas disabled; rollback via `~/user_scripts/btrfs_snapshots/cc/dusky_snapshot_manager.py`
+> - Swapfile lives at `/swap/swapfile` on the `@swap` subvolume
+> - fstab still carries legacy `ssd,space_cache=v2` options — harmless, but redundant and safe to drop next time it is edited
+
+---
+
+## Policy
+
 > [!summary]
-> **Recommended policy on modern Arch Linux systems**
-> - Keep **CoW enabled** on general-purpose Btrfs filesystems.
-> - Use **targeted NOCOW** (`chattr +C`) only for paths that genuinely benefit from overwrite-heavy behavior, such as **VM images**, **database data directories**, and some **scratch/cache** workloads.
-> - Put those workloads in a **dedicated directory or subvolume**, and usually **exclude them from snapshot schedules**.
-> - Avoid legacy/obsolete mount options like `ssd` and `space_cache=v2`.
+> - Keep **CoW enabled** filesystem-wide.
+> - Use targeted **NOCOW** (`chattr +C`) only for overwrite-heavy paths: VM images, database dirs, scratch/cache.
+> - Put those in a **dedicated subvolume excluded from snapshots**.
+> - Skip obsolete mount options (`ssd`, `space_cache=v2`).
 > - Prefer `x-gvfs-show` over `comment=x-gvfs-show`.
-> - For NTFS on Arch, prefer the in-kernel **`ntfs3`** driver unless you specifically need `ntfs-3g`.
+> - NTFS volumes: use the in-kernel **`ntfs3`** driver unless `ntfs-3g` is specifically needed.
 
 ---
 
-## CoW and NOCOW on Btrfs
+## CoW and NOCOW
 
-Btrfs uses **Copy-on-Write (CoW)** for file data by default. This is one of the filesystem’s core features and enables:
-
-- data checksumming
-- transparent compression
-- reflinks/clones
-- snapshot-friendly behavior
-- safer crash consistency semantics for many write patterns
-
-For some workloads, especially large files with frequent random overwrites, CoW can add measurable overhead and fragmentation. Typical examples:
-
-- virtual machine disk images
-- database data files
-- high-churn scratch/build/cache directories
-- swapfiles on Btrfs, using the dedicated helper
-
----
-
-## What disabling CoW actually changes
-
-On Btrfs, disabling CoW is commonly called **NOCOW** and is usually applied with the `C` file attribute.
+CoW is what gives Btrfs checksumming, compression, reflinks, snapshots, and crash consistency. It hurts exactly one class of workload: large files with frequent random overwrites — VM disks, database files, high-churn scratch.
 
 ### Effects of NOCOW
 
 | Behavior | CoW file | NOCOW file |
-| --- | --- | --- |
+|---|---|---|
 | Data checksums | Yes | **No** |
 | Compression | Yes | **No** |
-| Reflink/dedupe compatibility | Yes | **No / incompatible** |
-| Snapshot inclusion | Yes | **Yes** |
-| Random overwrite performance | Often worse for large overwrite-heavy files | Often better when extents are exclusive |
-| Metadata CoW/checksums | Yes | **Still yes** |
+| Reflink/dedupe compatible | Yes | **No/incompatible** |
+| Included in snapshots | Yes | **Yes** |
+| Random overwrite performance | Poor for large overwrite-heavy files | Better while extents are unshared |
 
 > [!warning]
-> **NOCOW files are still included in snapshots.**  
-> The common misconception is that `chattr +C` makes files “unsnapshotable.” That is incorrect.  
-> What actually changes is that **file data** loses checksumming and compression, and later writes may lose the NOCOW fast path if snapshots or reflinks make the extents shared.
+> NOCOW files are **still snapshotted**. `chattr +C` does not make anything "invisible to snapshots" — it drops checksumming/compression for that inode's data. And once a snapshot or reflink shares an extent, later writes must CoW again anyway. This is why NOCOW workloads belong in subvolumes excluded from snapshot schedules.
 
-### Important snapshot nuance
+### Rules of `chattr +C`
 
-NOCOW helps most when the file’s extents are **not shared**.
-
-If you snapshot a subvolume containing NOCOW files, the files are still present in the snapshot. Because snapshots share extents, later writes to those files may need to allocate new extents to preserve snapshot semantics. In practice:
-
-- NOCOW still works
-- but the overwrite-in-place advantage is reduced after snapshots/reflinks
-- therefore, VM/database directories are usually best kept in a **separate subvolume excluded from automated snapshots**
-
----
-
-## When to use `chattr +C`
-
-Use `chattr +C` only when you specifically want:
-
-- reduced CoW overhead for overwrite-heavy files
-- no compression on those files
-- no data checksums on those files
-
-### Good candidates
-
-- raw VM images
-- qcow2 images stored on Btrfs, when you accept the tradeoffs
-- database data directories, if the application/vendor supports or recommends it
-- large scratch data rewritten frequently
-
-### Poor candidates
-
-- normal documents and media libraries
-- anything where Btrfs data checksums are a primary benefit
-- paths you snapshot heavily and expect to retain maximum NOCOW benefit
-- workloads where you only want to disable compression, not CoW
-
-> [!note]
-> If your real goal is only to disable compression for a path, use a **compression property** instead of NOCOW:
->
-> ```bash
-> sudo btrfs property set /path/to/dir compression none
-> ```
->
-> This preserves CoW and checksumming while disabling compression for new files created under that path.
-
----
-
-## Applying NOCOW to a directory
-
-### Core rule
-
-Set `+C` **before** the data is written.
-
-- On a **directory**, `+C` affects **newly created files** under that directory.
-- Existing files are **not converted**.
-- Moving files into the directory with `mv` **within the same filesystem** does **not** convert them, because the inode is unchanged.
-
-### Recommended pattern
-
-For VM or database storage, create a dedicated directory or subvolume first, then apply `+C`.
-
-#### Example: dedicated VM directory
+- Set `+C` on an **empty** directory before data lands; it applies to **newly created files only**.
+- Existing files are never converted in place.
+- `mv` **within the same filesystem** renames the inode and preserves its current state — moving a plain file into a `+C` dir does **not** convert it.
+- Exception learned the hard way: if the move crosses a **subvolume boundary**, rename fails (`EXDEV`) and GNU `mv` silently falls back to copy+delete → fresh inode → **it does inherit `+C`**. Same-looking command, different result.
 
 ```bash
-sudo install -d -m 0755 /mnt/browser/vms
-sudo chattr +C /mnt/browser/vms
-lsattr -d /mnt/browser/vms
+sudo btrfs subvolume create /mnt/vms          # dedicated subvolume first
+sudo chattr +C /mnt/vms
+lsattr -d /mnt/vms                            # expect ---------------C------
 ```
 
-Expected output includes a `C` attribute on the directory.
+### Converting Existing Data to NOCOW
 
-#### Example: dedicated subvolume for snapshot isolation
+Rewrite it into a directory that already has `+C`:
 
 ```bash
-sudo btrfs subvolume create /mnt/browser/vms
-sudo chattr +C /mnt/browser/vms
-lsattr -d /mnt/browser/vms
+sudo install -d -m 0755 /srv/vms.nocow
+sudo chattr +C /srv/vms.nocow
+sudo cp -a --reflink=never --sparse=always /srv/vms/. /srv/vms.nocow/
+
+# swap
+sudo mv /srv/vms /srv/vms.old && sudo mv /srv/vms.nocow /srv/vms
 ```
 
-This is often the better design if you use automated snapshots, because the subvolume can be excluded cleanly.
-
-> [!tip]
-> For VM or database data on Btrfs, the best practice is usually:
-> 1. create a dedicated **subvolume**
-> 2. apply `chattr +C`
-> 3. exclude that subvolume from regular snapshots
-
----
-
-## Converting existing data to NOCOW
-
-Setting `+C` on a populated directory does **not** convert its existing files.
-
-To convert existing data, you must **rewrite it into a directory that already has `+C`**.
-
-### Safe migration procedure
-
-1. Stop the application using the data.
-2. Create a new empty destination directory.
-3. Apply `+C` to the destination.
-4. Copy the data with a **real copy**, not a reflink.
-5. Replace the old directory.
-
-#### Example
-
-```bash
-sudo install -d -m 0755 /mnt/browser/vms.nocow
-sudo chattr +C /mnt/browser/vms.nocow
-
-sudo cp -a --reflink=never --sparse=always /mnt/browser/vms/. /mnt/browser/vms.nocow/
-```
-
-Then swap directories:
-
-```bash
-sudo mv /mnt/browser/vms /mnt/browser/vms.old
-sudo mv /mnt/browser/vms.nocow /mnt/browser/vms
-```
-
-Verify:
-
-```bash
-lsattr -d /mnt/browser/vms
-find /mnt/browser/vms -maxdepth 1 -type f -exec lsattr {} +
-```
+Verify: `find /srv/vms -maxdepth 1 -exec lsattr {} +`
 
 > [!warning]
-> `mv` only converts data if it becomes a **copy+delete** operation, which happens across filesystems.  
-> A plain `mv` **within the same Btrfs filesystem** only renames the inode and preserves its current CoW/NOCOW state.
+> `--reflink=never` is mandatory — reflinks share extents and defeat the whole conversion. A plain same-fs `mv` never converts either (see rules above).
 
-> [!warning]
-> Do **not** use reflink cloning for conversion.  
-> Use `cp --reflink=never` or another tool that performs a real data copy.
+Re-enable CoW for future files with `sudo chattr -C /dir`; existing NOCOW files stay NOCOW until rewritten.
 
----
+### Compression Property (per-inode)
 
-## Re-enabling CoW
-
-To stop applying NOCOW to future files in a directory:
+To disable *only* compression while keeping checksums and CoW, use the Btrfs inode property — equivalent to `chattr +m`:
 
 ```bash
-sudo chattr -C /path/to/directory
+sudo btrfs property set /path/to/dir compression none   # sets NOCOMPRESS ('m' flag)
+sudo btrfs property get /path/to/dir compression
+sudo btrfs property set /path/to/dir compression ""     # reset to default
 ```
 
-This only affects **future files** created there.
+Valid values: `zstd`, `zlib`, `lzo`, `none`/`no` (= NOCOMPRESS), empty string (= default). Requires btrfs-progs ≥ 5.18 semantics (current Arch is far past this). Fails with `Invalid argument` on any inode that has `+C`.
 
-Existing NOCOW files are not “repaired” back into normal CoW files automatically. To fully restore normal Btrfs behavior for existing data, rewrite the files into a normal CoW directory.
+### Mount-wide `nodatacow`
 
----
-
-## Mount-wide `nodatacow`
-
-Btrfs also supports the `nodatacow` mount option.
-
-### Use this only when you really mean it
-
-`nodatacow` is rarely the right default for a general-purpose filesystem because it disables core Btrfs benefits for affected data:
-
-- no data checksums
-- no compression
-- reduced reflink usefulness
-
-> [!caution]
-> On Btrfs, many mount options are effectively **filesystem-wide**, not cleanly per-subvolume.  
-> In practice, options such as `compress=...`, `nodatacow`, and several others should be treated as **whole-filesystem policy**.  
-> If the same Btrfs filesystem is mounted in multiple places, the **first mount generally determines the effective policy**.
-
-### Practical guidance
-
-If you truly want a mostly or entirely NOCOW datastore:
-
-- use a **dedicated Btrfs filesystem**
-- or use another filesystem better suited for that workload, such as **XFS** or **ext4**
-
-### Dedicated NOCOW Btrfs filesystem example
+Rarely right: kills checksums + compression for all data. Many "per-subvolume" options (`compress=`, `nodatacow`) are really **whole-filesystem** policy — the first mount wins. If you truly want a bulk-NOCOW store, use a dedicated filesystem or ext4/XFS instead.
 
 ```fstab
-UUID=67a3dcc0-6186-4000-a96a-47f29ab0293e  /mnt/vmstore  btrfs  rw,noatime,nodatacow,discard=async,nofail,x-systemd.automount  0  0
+UUID=<btrfs-uuid>  /mnt/vmstore  btrfs  rw,noatime,nodatacow,nofail,x-systemd.automount  0  0
 ```
 
-> [!warning]
-> Do **not** combine `nodatacow` with `compress=...` and expect compression to apply to that NOCOW data. It will not.
-
 ---
 
-## Modern `fstab` reference
+## Modern `fstab`
 
----
-
-## Btrfs: recommended general-purpose data mount
-
-For a modern SSD/NVMe-backed Btrfs data volume, a good baseline is:
+General-purpose data volume baseline:
 
 ```fstab
-UUID=67a3dcc0-6186-4000-a96a-47f29ab0293e  /mnt/browser  btrfs  rw,compress=zstd:3,discard=async,nofail,x-systemd.automount,x-gvfs-show  0  0
+UUID=<btrfs-uuid>  /mnt/data  btrfs  rw,noatime,compress=zstd:3,discard=async,nofail,x-systemd.automount,x-gvfs-show  0  0
 ```
-
-### Why this is a better 2026 baseline
-
-- keeps CoW enabled globally
-- keeps compression enabled for normal data
-- allows targeted NOCOW directories where needed
-- avoids legacy options that are no longer useful
-
-### Option reference
 
 | Option | Meaning | Recommendation |
-| --- | --- | --- |
-| `rw` | Read-write mount | Normal default |
-| `compress=zstd:3` | Transparent compression using Zstandard level 3 | Good general-purpose default |
-| `discard=async` | Asynchronous online TRIM | Good for SSD/NVMe if the full stack supports discard |
-| `nofail` | Do not block boot if the device is absent | Good for secondary/removable data volumes |
-| `x-systemd.automount` | Create an automount unit and mount on first access | Good for non-root data disks |
-| `x-gvfs-show` | Hint for desktop file managers | Optional but useful on desktop systems |
+|---|---|---|
+| `compress=zstd:3` | transparent zstd level 3 (levels 1–15) | best general default |
+| `compress-force=zstd:3` | skip the "first blocks look incompressible" heuristic | only for known-compressible data (logs, text); wasted CPU elsewhere |
+| `noatime` | no access-time writes | good default; `relatime` also fine |
+| `discard=async` | online TRIM | **default since kernel 6.2** on discard-capable devices — listing it is optional |
+| `nofail` | don't block boot when absent | secondary/removable volumes |
+| `x-systemd.automount` | mount on first access | non-root data disks |
+| `subvol=@data` | select subvolume | always, with flat layouts |
+| `x-gvfs-name=Data` · `x-systemd.idle-timeout=10min` | cosmetic / idle unmount | optional |
 
-### Common optional additions
+Options to omit on modern kernels:
 
-| Option | Use when | Notes |
-| --- | --- | --- |
-| `noatime` | You want to suppress access-time writes entirely | `relatime` is already the default and is fine for most systems |
-| `subvol=@data` | You mount a specific subvolume | Recommended when using subvolume layouts |
-| `x-systemd.idle-timeout=10min` | You want automounted volumes to unmount after inactivity | Optional desktop convenience |
-| `x-gvfs-name=Browser` | You want a custom display name in file managers | Optional |
-
-> [!note]
-> If the device is encrypted with LUKS, ensure the mapper device is unlocked first via `/etc/crypttab`, a systemd-cryptsetup unit, or your chosen unlock mechanism.  
-> The Btrfs mount cannot succeed until the decrypted block device exists.
-
----
-
-## Btrfs mount options to avoid or omit on modern systems
-
-| Option | Status | Why |
-| --- | --- | --- |
-| `ssd` | Usually omit | Btrfs auto-detects non-rotational devices |
-| `space_cache=v2` | Omit | The free-space-tree implementation is standard; explicitly setting this is unnecessary |
-| `comment=x-gvfs-show` | Replace | Use `x-gvfs-show` directly |
-| `nodatacow` on a shared/general filesystem | Avoid | Too blunt; use `chattr +C` for targeted paths instead |
-
-> [!tip]
-> If you do not want continuous online discard, omit `discard=async` and enable periodic TRIM instead:
->
-> ```bash
-> sudo systemctl enable --now fstrim.timer
-> ```
-
----
-
-## NTFS: modern Arch Linux mount example
-
-On current Arch systems, prefer the in-kernel **`ntfs3`** driver for local NTFS volumes unless you specifically need `ntfs-3g`.
-
-### Recommended `fstab` entry
-
-```fstab
-UUID=9C38076638073F30  /mnt/media  ntfs3  uid=1000,gid=1000,dmask=0022,fmask=0133,windows_names,noatime,nofail,x-systemd.automount,x-gvfs-show  0  0
-```
-
-### Why this is better than a plain `umask=0022`
-
-Using `umask=0022` on NTFS-style permission emulation often makes **all files appear executable**.  
-For most media/data volumes, this is undesirable.
-
-A better split is:
-
-- `dmask=0022` → directories behave like `0755`
-- `fmask=0133` → files behave like `0644`
-
-### NTFS option reference
-
-| Option | Meaning |
-| --- | --- |
-| `uid=1000` | Synthetic owner UID for files on the mount |
-| `gid=1000` | Synthetic owner GID for files on the mount |
-| `dmask=0022` | Directory permissions emulate `0755` |
-| `fmask=0133` | File permissions emulate `0644` |
-| `windows_names` | Reject names invalid on Windows |
-| `noatime` | Disable access-time updates |
-| `nofail` | Do not block boot if the device is missing |
-| `x-systemd.automount` | Mount on first access |
-| `x-gvfs-show` | Show the volume in file managers |
-
-> [!warning]
-> Do **not** mount an NTFS volume read-write from Linux if Windows left it in a **hibernated** or **Fast Startup** state.  
-> Disable **Fast Startup** in Windows on dual-boot systems if you want safe routine read-write access from Linux.
+| Option | Why omit |
+|---|---|
+| `ssd` | auto-detected from the rotational flag |
+| `space_cache=v2` | free-space-tree has been the default implementation since kernel 6.2 |
+| `nodatacow` on shared fs | too blunt; use `chattr +C` per path |
+| `autodefrag` on SSDs | burns write cycles for zero physical benefit; HDD-only option (and it breaks reflinks/snapshots of the files it touches) |
 
 > [!note]
-> Replace `1000` with the actual UID/GID of the user who should own the mount:
->
-> ```bash
-> id -u username
-> id -g username
-> ```
+> Because `discard=async` is automatic on Btrfs, this machine's `fstrim.timer` only really serves the **ext4** volumes (`/mnt/media`, the mozilla partition). Keeping both is harmless — redundant on Btrfs, useful everywhere else.
 
----
-
-## Discovering UUIDs and filesystem types
-
-Use these commands before writing `fstab` entries:
-
-```bash
-lsblk -f
-sudo blkid
-```
-
-Example targeted output:
-
-```bash
-findmnt -no TARGET,SOURCE,FSTYPE,OPTIONS /mnt/browser
-findmnt -no TARGET,SOURCE,FSTYPE,OPTIONS /mnt/media
-```
-
----
-
-## Validating `fstab` changes
-
-After editing `/etc/fstab`:
+After editing:
 
 ```bash
 sudo findmnt --verify --verbose
 sudo systemctl daemon-reload
+sudo systemctl start "$(systemd-escape --path --suffix=automount /mnt/data)"
+findmnt -no TARGET,SOURCE,FSTYPE,OPTIONS /mnt/data
 ```
 
-If the entry uses `x-systemd.automount`, start the generated automount unit:
+> [!note]
+> LUKS underneath? The mapper must be unlocked first (`/etc/crypttab` or systemd-cryptsetup) before the Btrfs mount can succeed.
+
+---
+
+## Subvolume Operations
 
 ```bash
-sudo systemctl start "$(systemd-escape --path --suffix=automount /mnt/browser)"
-sudo systemctl start "$(systemd-escape --path --suffix=automount /mnt/media)"
+sudo btrfs subvolume create /path/@name        # create
+sudo btrfs subvolume list /                    # all subvolumes (-a adds ones queued for deletion)
+sudo btrfs subvolume show /path                # id, uuid, flags
+sudo btrfs subvolume delete /path/@name
+sudo btrfs subvolume snapshot /path/@ /path/@new            # writable clone
+sudo btrfs subvolume snapshot -r /path/@ /path/@ro          # read-only (sendable)
+sudo btrfs property set /path/@ ro true                     # flip after the fact
+sudo btrfs subvolume set-default <ID> /mountpoint           # what rootflags/boot pick up
+btrfs subvolume get-default /
 ```
 
-Then trigger the mount by accessing the path:
+Snapshots are **not recursive**: nested subvolumes appear as empty directories inside a snapshot. That is precisely why the flat layout matters — restoring `@` would strand any nested subvolume inside the retired copy and make it undeletable (`ENOTEMPTY`). Keep everything top-level like this machine.
+
+Rollback workflow (paired root/home snapshots, atomic swap): see `~/user_scripts/btrfs_snapshots/cc/dusky_snapshot_manager.py`.
+
+### Send / Receive (incremental backups)
 
 ```bash
-ls /mnt/browser
-ls /mnt/media
+sudo btrfs send -p /.snapshots/42/snapshot /.snapshots/43/snapshot | \
+    sudo btrfs receive /mnt/backup
 ```
 
-To inspect the resulting effective mount options:
+Only the delta since snapshot 42 travels. Requires read-only snapshots; pipe over ssh for off-machine backups.
+
+---
+
+## Integrity & Space
 
 ```bash
-findmnt -no TARGET,SOURCE,FSTYPE,OPTIONS /mnt/browser
-findmnt -no TARGET,SOURCE,FSTYPE,OPTIONS /mnt/media
+sudo btrfs device stats /          # I/O, corruption, generation errors — should be all zero
+sudo btrfs scrub start -B /        # verify every byte against checksums (-B = foreground)
+sudo btrfs scrub status /
+sudo btrfs balance status /
+sudo btrfs filesystem usage /      # allocator truth (df lies here)
+sudo btrfs filesystem du /path     # real per-file usage incl. shared/reflink'd extents
+sudo compsize -x /                 # compression savings breakdown (pacman: compsize)
+```
+
+> [!tip]
+> Run `device stats` after any suspected issue; run a scrub monthly or before trusting old backups. Enable `btrfs-scrub@-.timer` if you want it automatic.
+
+Defragmentation is rarely wanted on SSDs and **breaks reflinks/snapshots** for the files it rewrites:
+
+```bash
+sudo btrfs filesystem defragment -r -czstd /path   # recursive, recompress with zstd
 ```
 
 ---
 
-## Common mistakes
+## Resizing
+
+The order matters — always keep the filesystem smaller than its partition:
+
+```bash
+# GROW: partition first, then filesystem
+sudo sfdisk --no-reread -N 3 /dev/nvme0n1     # feed new "start= …, size= …" on stdin
+sudo partx -u /dev/nvme0n1 && sudo udevadm settle
+sudo btrfs filesystem resize max /
+
+# SHRINK: filesystem first (with headroom!), then partition
+sudo btrfs filesystem resize -20G /
+sudo sfdisk --no-reread -N 3 /dev/nvme0n1     # shrink partition to match
+sudo partx -u /dev/nvme0n1 && sudo udevadm settle
+sudo btrfs filesystem resize max /            # re-fit exactly
+```
+
+Automated, validated version: `~/user_scripts/drives/format/resize_btrfs.py` (checks free space, +500M safety margin, byte-exact sector math).
+
+---
+
+## ENOSPC: When df Says Free But Writes Fail
+
+Btrfs allocates space in fixed chunks, separately for data and metadata. A filesystem can report gigabytes free while refusing writes because **every allocated chunk is already used up and there is no unallocated device space left to allocate new chunks from** — classic on small volumes stuffed with snapshots.
+
+Diagnose:
+
+```bash
+sudo btrfs filesystem usage /    # look at "Device unallocated" → near 0 = trouble
+```
+
+Escape ladder (least invasive first):
+
+1. Delete old snapshots: `sudo snapper -c root list` then `sudo snapper -c root delete 5-10`
+2. Reclaim pinned chunks — iterative data balance from low usage upward:
+
+```bash
+for u in 5 10 20 30 50; do sudo btrfs balance start -dusage=$u / && sync; done
+sudo btrfs balance start -musage=50 /
+```
+
+3. Still stuck: temporarily inject a loop-backed device so the allocator gets raw room, rebalance, then evacuate and remove it:
+
+```bash
+fallocate -l 2G /mnt/other-disk/rescue.img
+LOOP=$(sudo losetup -f --show /mnt/other-disk/rescue.img)   # needs CONFIG_BLK_DEV_LOOP
+sudo btrfs device add -f "$LOOP" /
+sudo btrfs balance start -dusage=0 /
+sudo btrfs device remove "$LOOP" /    # do NOT reboot between add and remove
+```
+
+4. Automated end-to-end rescue: `~/user_scripts/drives/btrfs_fix_enospc_metadata_exaustion.sh`
 
 > [!warning]
-> Avoid these recurring errors:
->
-> - Setting `chattr +C` on a directory and assuming **existing files** were converted
-> - Moving files into a `+C` directory with `mv` and assuming they became NOCOW
-> - Thinking NOCOW files are **excluded from snapshots**
-> - Using `nodatacow` on one subvolume of a shared Btrfs filesystem and expecting it to stay isolated
-> - Keeping legacy options like `ssd` or `space_cache=v2` in modern `fstab`
-> - Using `umask=0022` on NTFS when you really want **non-executable regular files**
+> On this machine's custom kernels `CONFIG_BLK_DEV_LOOP=n`, so step 3 must run from a stock kernel (or use a USB stick as the temporary device). Never reboot while the pool spans a loop device you intend to delete.
 
 ---
 
-## Quick reference
+## Swapfile on Btrfs
 
-### Create a NOCOW directory
-
-```bash
-sudo install -d -m 0755 /mnt/browser/vms
-sudo chattr +C /mnt/browser/vms
-lsattr -d /mnt/browser/vms
-```
-
-### Convert existing directory contents to NOCOW
+Requirements: NOCOW, uncompressed, on a subvolume outside snapshot schedules — exactly what `@swap` is here. The helper sets all of that up (nocow + no-compress) and formats in one step:
 
 ```bash
-sudo install -d -m 0755 /mnt/browser/vms.nocow
-sudo chattr +C /mnt/browser/vms.nocow
-sudo cp -a --reflink=never --sparse=always /mnt/browser/vms/. /mnt/browser/vms.nocow/
+sudo btrfs filesystem mkswapfile --size 8g /swap/swapfile
+sudo swapon /swap/swapfile
 ```
 
-### Recommended Btrfs `fstab` baseline
-
-```fstab
-UUID=<btrfs-uuid>  /mnt/browser  btrfs  rw,compress=zstd:3,discard=async,nofail,x-systemd.automount,x-gvfs-show  0  0
-```
-
-### Dedicated NOCOW Btrfs filesystem
-
-```fstab
-UUID=<btrfs-uuid>  /mnt/vmstore  btrfs  rw,noatime,nodatacow,discard=async,nofail,x-systemd.automount  0  0
-```
-
-### Recommended NTFS3 `fstab` baseline
-
-```fstab
-UUID=<ntfs-uuid>  /mnt/media  ntfs3  uid=<uid>,gid=<gid>,dmask=0022,fmask=0133,windows_names,noatime,nofail,x-systemd.automount,x-gvfs-show  0  0
-```
+fstab: `/swap/swapfile  none  swap  defaults  0  0`
+Resume support needs `resume=/dev/...` + `resume_offset=` (`btrfs inspect-internal map-swapfile -r /swap/swapfile`).
 
 ---
 
-## Bottom line
+## NTFS Volumes
 
-For modern Btrfs systems:
+Prefer the in-kernel **`ntfs3`** driver (module present here) over FUSE `ntfs-3g`:
 
-- **Do not disable CoW filesystem-wide by default**
-- **Keep compression enabled**
-- Use **`chattr +C` selectively**
-- Put NOCOW workloads in **dedicated directories/subvolumes**
-- Exclude those paths from **snapshot schedules** when possible
-- Use current `fstab` syntax and avoid legacy mount options
+```fstab
+UUID=<ntfs-uuid>  /mnt/media  ntfs3  uid=1000,gid=1000,dmask=0022,fmask=0133,windows_names,noatime,nofail,x-systemd.automount,x-gvfs-show  0  0
+```
+
+- `dmask=0022` → dirs `0755`; `fmask=0133` → files `0644`. Plain `umask=0022` makes every file look executable.
+- `windows_names` rejects filenames Windows can't handle.
+- Substitute the real owner: `id -u user && id -g user`.
+
+> [!warning]
+> Never write-mount an NTFS volume that Windows hibernated or left in Fast Startup state. Disable Fast Startup on dual-boot systems. Repair path: [[Fixing Un Mountable NTFS drive]] · encrypted variant: [[Bitlocker]].
+
+Discover UUIDs first: `lsblk -f` or `sudo blkid`.

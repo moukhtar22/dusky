@@ -1,31 +1,56 @@
 #!/usr/bin/env python3
-# desktop entries deployer with sergical edits for the hardcoded username
-"""
-==============================================================================
- DUSKY DESKTOP ENTRY SYNCHRONIZER (Enterprise Atomic Edition)
- Description: Idempotent, zero-trust, hash-based synchronizer.
-              Features true atomic writes, strict XDG compliance, surrogate 
-              escaping, C-optimized file digests, and power-loss safety mechanisms.
- Target:      Arch Linux / Python 3.14+
-==============================================================================
-"""
+#d: Deploy desktop entries with the correct username
 
 import os
 import sys
 import json
 import hashlib
+import pwd
 import re
+import shutil
+import subprocess
 from pathlib import Path
 
 # ------------------------------------------------------------------------------
 # 1. Strict Environment & XDG Configuration
 # ------------------------------------------------------------------------------
-USER = os.environ.get('USER')
-if not USER:
-    print("\033[31m✖ CRITICAL ERROR: USER environment variable is not set.\033[0m", file=sys.stderr)
-    sys.exit(1)
+def resolve_user_context() -> tuple[str, Path]:
+    """Resolves true non-root user and home directory even under sudo/pkexec/chroot."""
+    real_uid = os.getuid()
+    if os.geteuid() == 0:
+        escalation_uid = os.environ.get("SUDO_UID") or os.environ.get("PKEXEC_UID")
+        if escalation_uid and escalation_uid.isdigit():
+            real_uid = int(escalation_uid)
+        elif "DOAS_USER" in os.environ:
+            try:
+                real_uid = pwd.getpwnam(os.environ["DOAS_USER"]).pw_uid
+            except KeyError:
+                pass
+        elif "SUDO_USER" in os.environ and os.environ["SUDO_USER"] != "root":
+            try:
+                real_uid = pwd.getpwnam(os.environ["SUDO_USER"]).pw_uid
+            except KeyError:
+                pass
+        else:
+            try:
+                loginuid_raw = Path("/proc/self/loginuid").read_text(encoding="utf-8").strip()
+                loginuid = int(loginuid_raw)
+                if loginuid != 4294967295:
+                    real_uid = loginuid
+            except (FileNotFoundError, ValueError, OSError):
+                pass
 
-HOME = Path.home()
+    try:
+        pw = pwd.getpwuid(real_uid)
+        return pw.pw_name, Path(pw.pw_dir)
+    except KeyError:
+        pass
+
+    user = os.environ.get('USER') or os.environ.get('LOGNAME') or 'dusk'
+    home = Path(os.environ.get('HOME', f'/home/{user}'))
+    return user, home
+
+USER, HOME = resolve_user_context()
 
 def get_xdg_dir(env_var: str, default: Path) -> Path:
     """
@@ -113,9 +138,14 @@ def get_file_hash(filepath: Path) -> str | None:
         return None
 
 def patch_line(line: str) -> str:
-    """Surgically substitutes username ONLY in valid keys."""
+    """Surgically substitutes username and expands variables/tildes ONLY in valid desktop keys."""
     if PATCH_KEYS_RE.match(line):
-        return USER_PATH_RE.sub(lambda _: f'/home/{USER}/', line)
+        line = USER_PATH_RE.sub(lambda _: f'/home/{USER}/', line)
+        line = line.replace('$HOME', str(HOME)).replace('${HOME}', str(HOME))
+        line = line.replace('$USER', USER).replace('${USER}', USER)
+        line = line.replace('$XDG_DATA_HOME', str(XDG_DATA_HOME)).replace('${XDG_DATA_HOME}', str(XDG_DATA_HOME))
+        line = line.replace('$XDG_CONFIG_HOME', str(XDG_CONFIG_HOME)).replace('${XDG_CONFIG_HOME}', str(XDG_CONFIG_HOME))
+        line = re.sub(r'(?<=[=\s"\'])~/(?=[a-zA-Z0-9_\.])', f'{HOME}/', line)
     return line
 
 def write_atomic(dest: Path, content: str, mode: int | None = None, errors: str = 'strict') -> bool:
@@ -271,6 +301,13 @@ def main():
     # --- Phase 3: Commit State ---
     state["tracked_files"] = new_tracked_files
     write_atomic(STATE_FILE, json.dumps(state, indent=4), errors='strict')
+
+    # Trigger desktop cache update if changes occurred
+    if (updated_count > 0 or removed_count > 0) and shutil.which("update-desktop-database"):
+        try:
+            subprocess.run(["update-desktop-database", str(DEST_DIR)], capture_output=True, check=False)
+        except Exception:
+            pass
 
     # --- Phase 4: Execution Summary Output ---
     print(f"\n{C_BOLD}{C_BLUE}Summary{C_RESET}")

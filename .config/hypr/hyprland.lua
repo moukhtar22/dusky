@@ -34,7 +34,7 @@ dofile(HOME .. "/.config/matugen/generated/hyprland-colors.lua")
 -- =============================================================================
 -- HYPRLAND MAIN CONFIGURATION
 -- User: [dusky]
--- System: UWSM Managed
+-- System: Native (systemd slices)
 -- =============================================================================
 -- NOTE: All files are loaded with require() — NOT dofile().
 -- Hyprland gives each require() call its own error-isolated scope, so a
@@ -51,12 +51,12 @@ dofile(HOME .. "/.config/matugen/generated/hyprland-colors.lua")
 -- 1. MONITORS
 -- Must be first among display config. Everything (workspaces, scaling,
 -- bar positioning) depends on the physical layout being established.
+-- require("source.monitors")
 require("source.monitors")
 
 -- 2. PROGRAMS & ENVIRONMENT
 -- Polkit agents, Hyprland-specific env vars.
--- Note: Most env vars are handled by ~/.config/uwsm/{env,env-hyprland}.
--- Only put vars here that UWSM should NOT see.
+-- Note: Most env vars are handled by environment_variables.lua.
 require("source.permissions")
 
 -- 3. PLUGINS (commented out — enable when needed)
@@ -89,9 +89,8 @@ require("source.window_rules")
 require("source.keybinds")
 
 -- 8. AUTOSTART
--- Uses UWSM: ensure this file calls hl.on("hyprland.start", ...) with
--- uwsm-app where needed. Loaded LATE so monitors, inputs, and window
--- rules are fully applied before apps launch.
+-- Uses dusky-run wrapper: ensure autostarted apps are run under app.slice
+-- so they can be monitored properly by systemd-oomd.
 require("source.autostart")
 
 -- 9. ENVIRONMENT VARIABLES
@@ -99,6 +98,9 @@ require("source.environment_variables")
 
 -- 10. WORKSPACE RULES
 require("source.workspace_rules")
+
+-- 11. GPU env
+pcall(require, "gpu")
 
 -- -----------------------------------------------------
 -- LOCAL OVERRIDES  (git-ignored)

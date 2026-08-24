@@ -1,25 +1,18 @@
 #!/usr/bin/env bash
-# This script installs ALL PACKAGES. Inspect it manually to remove/add anything you want.
-# It installs packages only. It does not enable systemd services automatically.
-# ------------------------------------------------------------------------------
-# Arch Linux / Hyprland / UWSM - Elite System Installer (v5.0 - Golden)
-# ------------------------------------------------------------------------------
+#d: Install all packages from the manifest
 
-# --- 1. CONFIGURATION ---
-
-# Group 1: Graphics & Drivers
 declare -ar pkgs_graphics=(
   "intel-media-driver" "vpl-gpu-rt" "mesa" "vulkan-intel" "mesa-utils" "intel-gpu-tools" "libva" "libva-utils" "vulkan-icd-loader" "vulkan-tools" "sof-firmware" "linux-firmware" "acpi_call" "base" "base-devel" "kernel-modules-hook"
 )
 
 # Group 2: Hyprland Core
 declare -ar pkgs_hyprland=(
-  "hyprland" "uwsm" "xorg-xwayland" "xdg-desktop-portal-hyprland" "xdg-desktop-portal-gtk" "localsearch" "polkit" "hyprpolkitagent" "xdg-utils" "socat" "inotify-tools" "libnotify" "mako" "file"
+  "hyprland" "xorg-xwayland" "xdg-desktop-portal-hyprland" "xdg-desktop-portal-gtk" "localsearch" "polkit" "hyprpolkitagent" "xdg-utils" "socat" "inotify-tools" "libnotify" "mako" "file"
 )
 
 # Group 3: GUI, Toolkits & Fonts
 declare -ar pkgs_appearance=(
-  "qt5-wayland" "qt6-wayland" "gtk3" "gtk4" "nwg-look" "qt5ct" "qt6ct" "qt6-svg" "qt6-multimedia-ffmpeg" "adw-gtk-theme" "upower" "plocate" "matugen" "ttf-font-awesome" "ttf-jetbrains-mono-nerd" "noto-fonts-emoji" "sassc" "python-packaging" "python" "python-evdev" "python-pyudev" "fontconfig" "papirus-icon-theme" "python-pyquery" "python-textual" "python-rich"
+  "qt5-wayland" "qt6-wayland" "gtk3" "gtk4" "nwg-look" "qt5ct" "qt6ct" "qt6-svg" "qt6-multimedia-ffmpeg" "adw-gtk-theme" "upower" "plocate" "matugen" "otf-font-awesome" "ttf-jetbrains-mono-nerd" "otf-atkinsonhyperlegiblemono-nerd" "ttf-atkinson-hyperlegible" "otf-atkinson-hyperlegible" "noto-fonts-emoji" "sassc" "python-packaging" "python" "python-gobject" "python-cairo" "python-opengl" "gtk-layer-shell" "python-evdev" "python-pyudev" "fontconfig" "papirus-icon-theme" "python-pyquery" "python-textual" "python-rich"
 )
 
 # Group 4: Desktop Experience
@@ -29,15 +22,15 @@ declare -ar pkgs_desktop=(
 
 # Group 5: Audio & Bluetooth
 declare -ar pkgs_audio=(
-  "pipewire" "pipewire-alsa" "alsa-utils" "wireplumber" "pipewire-pulse" "playerctl" "bluez" "bluez-utils" "bluez-hid2hci" "bluez-libs" "bluez-obex" "blueman" "bluetui" "pavucontrol" "gst-plugins-base" "gst-libav" "gst-plugins-bad" "gst-plugins-good" "gst-plugins-ugly" "gst-plugin-pipewire" "libcanberra" "songrec" "sox"
+  "pipewire" "pipewire-alsa" "alsa-utils" "wireplumber" "pipewire-pulse" "playerctl" "bluez" "bluez-utils" "bluez-hid2hci" "bluez-libs" "bluez-obex" "blueman" "bluetui" "pavucontrol" "gst-plugins-base" "gst-libav" "gst-plugins-bad" "gst-plugins-good" "gst-plugins-ugly" "gst-plugin-pipewire" "libcanberra" "songrec" "sox" "rnnoise"
 )
 
 # Group 6: Filesystem & Archives
 declare -ar pkgs_filesystem=(
-  "btrfs-progs" "compsize" "zram-generator" "udisks2" "udiskie" "dosfstools" "ntfs-3g" "xdg-user-dirs" "usbutils" "gnome-disk-utility" "unzip" "zip" "unrar" "7zip" "cpio" "file-roller" "rsync" "nfs-utils" "nilfs-utils" "smartmontools" "dmraid" "hdparm" "hwdetect" "lsscsi" "sg3_utils" "cpupower" "dust" "dkms"
+  "btrfs-progs" "compsize" "zram-generator" "udisks2" "udiskie" "dosfstools" "xdg-user-dirs" "usbutils" "gnome-disk-utility" "unzip" "zip" "unrar" "7zip" "cpio" "file-roller" "rsync" "nfs-utils" "nilfs-utils" "smartmontools" "dmraid" "hdparm" "hwdetect" "lsscsi" "sg3_utils" "cpupower" "dust" "dkms"
 
   # thunar
-"thunar" "thunar-archive-plugin" "file-roller" "thunar-volman" "thunar-media-tags-plugin" "thunar-shares-plugin" "thunar-vcs-plugin" "tumbler" "ffmpegthumbnailer" "webp-pixbuf-loader" "poppler-glib" "libgsf" "libgepub" "libopenraw" "resvg" "gvfs" "gvfs-mtp" "gvfs-nfs" "gvfs-smb" "gvfs-gphoto2" "gvfs-afc" "gvfs-dnssd" "catfish" "gnome-keyring" "meld" "xreader" "imagemagick"
+"thunar" "thunar-archive-plugin" "file-roller" "thunar-volman" "thunar-media-tags-plugin" "thunar-shares-plugin" "thunar-vcs-plugin" "tumbler" "ffmpegthumbnailer" "webp-pixbuf-loader" "poppler-glib" "libgsf" "libgepub" "libopenraw" "resvg" "gvfs" "gvfs-mtp" "gvfs-nfs" "gvfs-smb" "gvfs-gphoto2" "gvfs-afc" "gvfs-dnssd" "catfish" "gnome-keyring" "meld" "xreader" "imagemagick" "kio-admin"
 
   # nemo
  # "nemo" "nemo-fileroller" "file-roller" "gvfs" "gvfs-smb" "gvfs-mtp" "gvfs-gphoto2" "gvfs-nfs" "gvfs-afc" "gvfs-dnssd" "ffmpegthumbnailer" "webp-pixbuf-loader" "poppler-glib" "libgsf" "gnome-epub-thumbnailer" "resvg" "nemo-terminal" "nemo-python" "nemo-compare" "meld" "nemo-media-columns" "nemo-audio-tab" "nemo-image-converter" "nemo-emblems" "nemo-repairer" "nemo-share" "python-gobject" "dconf-editor" "xreader" "nemo-pastebin"
@@ -65,7 +58,7 @@ declare -ar pkgs_multimedia=(
 
 # Group 11: Sys Admin
 declare -ar pkgs_sysadmin=(
-  "btop" "htop" "dgop" "nvtop" "inxi" "sysstat" "sysbench" "logrotate" "acpid" "tlp" "tlp-rdw" "thermald" "powertop" "gdu" "iotop" "iftop" "lshw" "hwinfo" "dmidecode" "wev" "pacman-contrib" "gnome-keyring" "libsecret" "seahorse" "greetd-agreety" "greetd" "greetd-tuigreet" "yad" "dysk" "fwupd" "perl" "accountsservice" "smartmontools" "pkgfile" "rebuild-detector" "accountsservice"
+  "btop" "htop" "dgop" "nvtop" "inxi" "sysstat" "sysbench" "logrotate" "acpid" "tlp" "tlp-rdw" "thermald" "powertop" "gdu" "iotop" "iftop" "lshw" "hwinfo" "dmidecode" "strace" "wev" "pacman-contrib" "gnome-keyring" "libsecret" "seahorse" "greetd-agreety" "greetd" "greetd-tuigreet" "yad" "dysk" "fwupd" "perl" "accountsservice" "smartmontools" "pkgfile" "rebuild-detector" "accountsservice"
 )
 
 # Group 12: Gnome Utilities
@@ -155,8 +148,7 @@ TARGET_OS=""
 parse_args() {
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --cachyos|--cachy) TARGET_OS="cachyos"; shift ;;
-      --arch)            TARGET_OS="arch"; shift ;;
+      --cachyos|--cachy|--arch) shift ;; # Ignored for backward compatibility
       *)                 shift ;;
     esac
   done
@@ -171,7 +163,7 @@ RED=''
 CYAN=''
 RESET=''
 
-if [[ -z ${NO_COLOR-} ]] && [[ -n ${TERM-} ]] && [[ -t 1 ]] && command -v tput >/dev/null 2>&1 && tput colors >/dev/null 2>&1; then
+if [[ -z ${NO_COLOR-} ]] && [[ -n ${TERM-} ]] && [[ -t 1 ]] && command -v tput >/dev/null 2>&1 && [[ $(tput colors 2>/dev/null || echo -1) -ge 8 ]]; then
   BOLD=$(tput bold)
   GREEN=$(tput setaf 2)
   YELLOW=$(tput setaf 3)
@@ -326,22 +318,11 @@ run_pacman() {
     tee -- "$stderr_file" <"$stderr_pipe" >&2 &
     tee_pid=$!
 
-    # Utilizes highly strict dynamic array quoting for impenetrable argument passing.
-    # CRITICAL: Added -e flag to script to ensure exact exit codes are passed correctly in headless pipelines.
-    if ! [[ -t 1 ]] && command -v script >/dev/null 2>&1; then
-      local cmd_str
-      printf -v cmd_str '%q ' env LC_ALL=C pacman "$@"
-      if script -q -e -c "$cmd_str" /dev/null 2>"$stderr_pipe"; then
-        rc=0
-      else
-        rc=$?
-      fi
+    # Run pacman directly without 'script' to avoid block-buffering issues in pipes.
+    if command env LC_ALL=C pacman "$@" 2>"$stderr_pipe"; then
+      rc=0
     else
-      if command env LC_ALL=C pacman "$@" 2>"$stderr_pipe"; then
-        rc=0
-      else
-        rc=$?
-      fi
+      rc=$?
     fi
 
     rm -f -- "$stderr_pipe"
@@ -380,23 +361,6 @@ run_pacman() {
   done
 }
 
-determine_os_state() {
-  if [[ -z "${TARGET_OS}" ]]; then
-    print_info "Analyzing system state for keyring requirements..."
-    
-    if grep -qi "ID=cachyos" /etc/os-release 2>/dev/null; then
-       print_info "Pure CachyOS detected."
-       TARGET_OS="cachyos_pure"
-    elif pacman -Qq cachyos-mirrorlist &>/dev/null; then
-       print_ok "Franken-Arch detected (CachyOS packages found on Standard Arch)."
-       TARGET_OS="cachyos"
-    else
-       print_info "Standard Arch Linux detected."
-       TARGET_OS="arch"
-    fi
-  fi
-}
-
 ensure_keyring() {
   local keyring_dir='/etc/pacman.d/gnupg'
 
@@ -409,25 +373,15 @@ ensure_keyring() {
 
   print_warn "Pacman keyring is not initialized. Initializing now..."
   pacman-key --init
-
-  if [[ "${TARGET_OS}" == "cachyos" ]]; then
-      print_info "Populating Arch Linux and CachyOS keyrings..."
-      pacman-key --populate archlinux cachyos
-  else
-      print_info "Populating standard Arch Linux keyring..."
-      pacman-key --populate archlinux
-  fi
+  print_info "Populating standard Arch Linux keyring..."
+  pacman-key --populate archlinux
 
   print_ok "Keyring populated."
 }
 
 refresh_keyring_package() {
   print_info "Refreshing keyring packages..."
-  if [[ "${TARGET_OS}" == "cachyos" ]]; then
-      run_pacman --sync --refresh --needed --noconfirm -- archlinux-keyring cachyos-keyring
-  else
-      run_pacman --sync --refresh --needed --noconfirm -- archlinux-keyring
-  fi
+  run_pacman --sync --refresh --needed --noconfirm -- archlinux-keyring
   print_ok "Keyring packages are current."
 }
 
@@ -544,14 +498,8 @@ main() {
   validate_group_configuration
   acquire_script_lock
   
-  determine_os_state
-  
-  if [[ "${TARGET_OS}" != "cachyos_pure" ]]; then
-    ensure_keyring
-    refresh_keyring_package
-  else
-    print_info "Skipping manual keyring configuration (Managed by CachyOS)."
-  fi
+  ensure_keyring
+  refresh_keyring_package
   
   upgrade_system
 

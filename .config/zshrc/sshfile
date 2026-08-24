@@ -194,7 +194,8 @@ _sshfile_pick_path() {
         echo "$initial_list" |
         fzf --ansi --print-query --expect=ctrl-y,alt-c,enter \
             --prompt="$prompt_str" \
-            --pointer="▶" --marker="✓" \
+            --pointer="❯ " --marker="✔ " \
+            --highlight-line \
             --border=rounded \
             --border-label="$border_label" \
             --border-label-pos=center \
@@ -203,9 +204,9 @@ _sshfile_pick_path() {
             --info=inline-right \
             --height=60% --layout=reverse \
             --delimiter='\t' --with-nth=2.. \
-            --color='bg+:#313244,bg:#1e1e2e,spinner:#f5e0dc,hl:#f38ba8,fg:#cdd6f4,header:#89b4fa,info:#cba6f7,pointer:#f5e0dc,marker:#b4befe,fg+:#cdd6f4,prompt:#a6e3a1,hl+:#f38ba8,border:#f38ba8,label:#f9e2af,query:#cdd6f4' \
+            --color="${DUSKY_FZF_COLORS:-bg+:#313244,bg:#1e1e2e,fg:#cdd6f4}" \
             --bind "tab:transform(\"$SSHFILE_CONFIG_DIR/scripts/tab_transform.sh\" \"$target_type\" \"$host\" \"$socket\" {q} {1} \"$SSHFILE_CONFIG_DIR/data/paths.tsv\" \"$EPOCHSECONDS\")" \
-            --bind "ctrl-r:reload(\"$SSHFILE_CONFIG_DIR/scripts/render_history.sh\" \"$target_type\" \"$host\" \"$SSHFILE_CONFIG_DIR/data/paths.tsv\" \"$EPOCHSECONDS\")+change-query[]"
+            --bind "ctrl-r:reload(\"$SSHFILE_CONFIG_DIR/scripts/render_history.sh\" \"$target_type\" \"$host\" \"$socket\" {q} {1} \"$SSHFILE_CONFIG_DIR/data/paths.tsv\" \"$EPOCHSECONDS\")+change-query[]"
     )
     
     local fzf_exit=$?
@@ -263,7 +264,8 @@ _sshfile_pick_host() {
         ' | sort -t $'\037' -k1,1nr | awk -F $'\037' '!seen[$2]++ {print $2 "\t" $3}' |
         fzf --ansi --scheme=history --print-query --expect=ctrl-y,alt-c,enter \
             --prompt=" 󰒋 Select Host > " \
-            --pointer="▶" --marker="✓" \
+            --pointer="❯ " --marker="✔ " \
+            --highlight-line \
             --border=rounded --border-label=" 󰒋 SSH Hosts " \
             --border-label-pos=center \
             --header=" 💡 ENTER: Select │ ALT-C: Force Typed " \
@@ -271,7 +273,7 @@ _sshfile_pick_host() {
             --info=inline-right \
             --height=50% --layout=reverse \
             --delimiter='\t' --with-nth=2.. \
-            --color='bg+:#313244,bg:#1e1e2e,spinner:#f5e0dc,hl:#f38ba8,fg:#cdd6f4,header:#89b4fa,info:#cba6f7,pointer:#f5e0dc,marker:#b4befe,fg+:#cdd6f4,prompt:#a6e3a1,hl+:#f38ba8,border:#89b4fa,label:#cba6f7,query:#cdd6f4'
+            --color="${DUSKY_FZF_COLORS:-bg+:#313244,bg:#1e1e2e,fg:#cdd6f4}"
     )
     
     local fzf_exit=$?
@@ -492,12 +494,13 @@ sshfile() {
     
     choice=$(printf " PULL  (Fetch file/dir from Remote to Local)\n PUSH  (Send local file/dir to Remote)" | \
         fzf --prompt=" 󰘚 Select Mode > " \
-            --pointer="▶" \
+            --pointer="❯ " \
+            --marker="✔ " \
             --border=rounded \
             --border-label=" sshfile Menu " \
             --border-label-pos=center \
             --height=20% --layout=reverse \
-            --color='bg+:#313244,bg:#1e1e2e,spinner:#f5e0dc,hl:#f38ba8,fg:#cdd6f4,header:#89b4fa,info:#cba6f7,pointer:#f5e0dc,marker:#b4befe,fg+:#cdd6f4,prompt:#a6e3a1,hl+:#f38ba8,border:#89b4fa,label:#cba6f7'
+            --color="${DUSKY_FZF_COLORS:-bg+:#313244,bg:#1e1e2e,fg:#cdd6f4}"
     )
     
     if [[ "$choice" == *"PULL"* ]]; then

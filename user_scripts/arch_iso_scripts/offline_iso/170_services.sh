@@ -15,7 +15,7 @@ IFS=$'\n\t'
 # 2. Configuration
 readonly SERVICES=(
     "NetworkManager.service"
-#    "tlp.service"
+    "sshd.service"
     "udisks2.service"
     "thermald.service"
     "bluetooth.service"
@@ -23,12 +23,9 @@ readonly SERVICES=(
     "fstrim.timer"
     "systemd-timesyncd.service"
     "acpid.service"
-#    "vsftpd.service"
-#    "reflector.timer"
     "systemd-resolved.service"
     "snapper-cleanup.timer"
     "snapper-cleanup.service"
-
 )
 
 # 3. Formatting
@@ -42,6 +39,15 @@ log_info()    { printf "${C_BLUE}[INFO]${C_RESET} %s\n" "$*"; }
 log_success() { printf "${C_GREEN}[OK]${C_RESET} %s\n" "$*"; }
 log_err()     { printf "${C_RED}[ERROR]${C_RESET} %s\n" "$*" >&2; }
 log_warn()    { printf "${C_YELLOW}[WARN]${C_RESET} %s\n" "$*" >&2; }
+
+# Helper: Configure SSH root login
+configure_ssh() {
+    log_info "Configuring SSH root login..."
+    mkdir -p /etc/ssh/sshd_config.d
+    echo "PermitRootLogin yes" > /etc/ssh/sshd_config.d/permit_root.conf
+    chmod 644 /etc/ssh/sshd_config.d/permit_root.conf
+    log_success "Configured /etc/ssh/sshd_config.d/permit_root.conf"
+}
 
 # 4. Helper: Check if Unit Exists
 unit_exists() {
@@ -57,47 +63,38 @@ main() {
         exit 1
     fi
 
+    configure_ssh
+
     local service
     local output
-    # Array to track which services failed
     local -a failed_services=()
 
     for service in "${SERVICES[@]}"; do
-        # 1. Validation: Does the unit file exist?
         if ! unit_exists "$service"; then
-            log_err "Skipping $service: Unit not found (Package not installed?)"
+            log_warn "Skipping $service: Unit not found (Package not installed?)"
             failed_services+=("$service (Missing)")
-            continue # Skip to next iteration
+            continue
         fi
 
-        # 2. Enablement
-        # 'if' suppresses 'set -e' for the command inside it
         if output=$(systemctl enable "$service" --force 2>&1); then
             log_success "Enabled: $service"
         else
             log_err "Failed to enable $service"
             printf "%s\n" "$output" >&2
             failed_services+=("$service (Systemd Error)")
-            # We do NOT exit here; we just continue
         fi
     done
 
-    # 6. Final Summary
-    echo "" # Newline for readability
+    echo ""
     if [ ${#failed_services[@]} -eq 0 ]; then
         log_success "All services enabled successfully."
-        exit 0
     else
-        log_warn "Service activation completed with errors."
-        log_warn "The following services could not be enabled:"
+        log_warn "Service activation completed with optional missing units."
         for fail in "${failed_services[@]}"; do
             printf "  - %s\n" "$fail"
         done
-        
-        # We exit with 1 so the Master script knows it wasn't a perfect run.
-        # If you want the master script to ignore this, handle the exit code there.
-        exit 1
     fi
+    exit 0
 }
 
 main

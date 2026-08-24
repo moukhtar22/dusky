@@ -1,115 +1,81 @@
-# Setting ACLs on the Images Directory
+---
+title: "ACLs on the Image Directory (POSIX.1e)"
+tags:
+  - kvm
+  - storage
+  - acl
+  - arch
+  - libvirt
+---
 
-> [!INFO] Context
-> 
-> By default, KVM/Libvirt stores virtual machine disk images in /var/lib/libvirt/images.
-> 
-> Strict security rules mean **only the root user** owns and can access this directory. As a regular user, this prevents you from creating or managing storage pools without using `sudo` for every single interaction.
+# ACLs on the Image Directory — POSIX.1e
 
-## 1. Verify the Restriction
+> [!abstract] Goal
+> Give the human operator `rwx` on `/var/lib/libvirt/images` (or your custom/ephemeral pool) **without** changing `root:root` ownership, and inherit it for every new qcow2. Canonical: `07_storage_setup.py:provision_acls`.
 
-First, let's confirm the default behavior. If you try to list the contents of the storage directory as your regular user, 
+## Why not `chmod 777` / `chown`?
 
-or add SUDO to it and then run.
-```
-ls -lah /var/lib/libvirt/images/
-```
+- `chmod 777` is world-writable.
+- `chown $USER` fights libvirt defaults and breaks idempotent pipelines that assume `root:root` owner.
+- POSIX ACLs are per-user/per-default entries that coexist with the traditional owner.
 
-if this is what you see, add sudo to it. and run again. 
-> ls: cannot open directory '/var/lib/libvirt/images/': Permission denied
+## What the pipeline does (fact, not guess)
 
-To fix this without breaking the system's default ownership (which should remain `root`), we will use **Access Control Lists (ACLs)**. This allows us to grant your specific user permission to the folder while leaving the rest of the security intact.
+1. **Resolves QEMU identity** — parses **only uncommented** `user=`/`group=` in `/etc/libvirt/qemu.conf` (`07_*:resolve_qemu_identity`). Arch ships them **commented → root:root** (privileged). ACLs then needed **only for operator**; when de-privileged, adds `u:qemu:rwx` too.
+2. **Traversal `--x` on every parent** above pool (e.g. `/`, skipped; `/var`, `/var/lib`, `/var/lib/libvirt`). Each parent gets `setfacl -m u:operator:x` if not already satisfied (checked via `getfacl -cEp` + `perm_value`).
+3. **Full `rwx` + `default:rwx` on pool itself** (`setfacl -m u:operator:rwx` + `setfacl -d -m u:operator:rwx`).
+4. **Validates FS supports ACLs** — if `setfacl` returns `Operation not supported` (e.g. FAT USB), bails with `mount_facts(fstype)` hint: choose `ext4/xfs/btrfs/tmpfs`.
 
-## 2. Clean Existing ACLs
-
-Before applying new rules, it is best practice to strip away any specific Access Control Lists that might already exist to ensure we start with a clean slate.
-
-- `-R`: Recursive (applies to the folder and everything inside it).
-    
-- `-b`: Remove all extended ACL entries.
-    
-
-```bash
-sudo setfacl -R -b /var/lib/libvirt/images
-```
-
-## 3. Grant User Permissions (Current Files)
-
-Now we apply the permissions for your specific user. We will use `$(id -un)` to automatically insert your current username, so you don't have to type it manually.
+## Manual reproduction
 
 ```bash
-sudo setfacl -R -m u:$(id -un):rwX /var/lib/libvirt/images
+TARGET=/var/lib/libvirt/images   # or your 07_*-chosen path
+
+# 1. Verify restriction
+ls -ld "$TARGET"
+ls -l "$TARGET" 2>&1 | head
+
+# 2. Check current ACL graph
+getfacl -cEp -- "$TARGET"
+getfacl -cEp -- /var/lib /var/lib/libvirt  # parents
+
+# 3. Clean only if you intentionally want to reset (pipeline never strips blindly)
+# sudo setfacl -R -b "$TARGET"   # ← removes all extended ACLs; avoid unless resetting
+
+# 4. Traversal on parents (repeat for each parent dir)
+sudo setfacl -m u:"$(id -un)":x /var /var/lib /var/lib/libvirt
+
+# 5. Full + inheritable on pool
+sudo setfacl -m u:"$(id -un)":rwx "$TARGET"
+sudo setfacl -d -m u:"$(id -un)":rwx "$TARGET"
+
+# 6. If QEMU is de-privileged (user="qemu" active), also:
+# sudo setfacl -m u:qemu:rwx "$TARGET" && sudo setfacl -d -m u:qemu:rwx "$TARGET"
+# sudo setfacl -m u:qemu:x /var /var/lib /var/lib/libvirt
+
+# 7. Verify
+getfacl -- "$TARGET"
+# expect:
+# user:<you>:rwx
+# default:user:<you>:rwx
+# (and if unprivileged: user:qemu:rwx / default:user:qemu:rwx)
+
+# 8. Test without sudo
+touch "$TARGET"/test_file && ls -l "$TARGET"/test_file && rm "$TARGET"/test_file
 ```
 
-> [!NOTE] Understanding the Capital 'X'
-> 
-> You will notice we used rwX (capital X) instead of rwx (lowercase x).
-> 
-> - **Lowercase `x`:** Gives execute permission to files and directories unconditionally. This would make every disk image "executable," which is messy.
->     
-> - **Uppercase `X`:** Smart execute. It only gives execute permission to **directories** (so you can enter them) and files that _already_ have execute permission.
->     
-> 
-> This ensures we can browse folders without making text files or disk images executable.
+> [!tip] `rwX` vs `rwx`
+> `X` (capital) = execute only on directories / already-executable files. Pipeline uses explicit `rwx` on the pool directory (always `x` needed for `cd`) and `--x` on parents — no ambiguity.
 
-## 4. Grant Default Permissions (Future Files)
+## Troubleshooting
 
-The previous command fixed the permissions for everything that _currently_ exists. However, if you create a **new** disk image tomorrow, it will default back to root-only permissions.
+| Symptom | Cause | Fix |
+|---|---|---|
+| `setfacl: Operation not supported` | pool on FAT/NTFS/no-ACL fs | move pool to `ext4/xfs/btrfs/tmpfs` |
+| `Permission denied` even after ACL | missing `--x` on an ancestor | audit `getfacl /var /var/lib…`, add `x` |
+| New qcow2 owned `root:root` with no ACL | `default` entry missing | re-add `setfacl -d …` and check `d:u:…` in `getfacl` |
+| `ls -l` shows `+` but no effective perms | `mask::` limited | pipeline re-applies `rwx`; ensure mask `rwx` |
 
-To fix this, we set a **Default ACL**. This tells the directory: _"Any new file created inside here must automatically inherit these permissions."_
+State record: `qemu_user`/`qemu_group` + `storage_dir` in `/var/lib/arsonix/state.json`.
 
-Notice the `d:` at the start of the permissions string—this stands for "default".
-
-```bash
-sudo setfacl -m d:u:$(id -un):rwx /var/lib/libvirt/images
-```
-
-## 5. Verify the Changes
-
-Let's check our work. The `getfacl` command reads the permissions back to us.
-
-```
-getfacl /var/lib/libvirt/images
-```
-
-You should see an output similar to this. Look for the lines containing `user:[your_username]:rwx` and `default:user:[your_username]:rwx`.
-
-```
-# file: var/lib/libvirt/images
-# owner: root
-# group: root
-user::rwx
-user:madhu:rwx      <-- Your specific access
-group::--x
-mask::rwx
-other::--x
-default:user::rwx
-default:user:madhu:rwx  <-- Your default access for new files
-default:group::--x
-default:mask::rwx
-default:other::--x
-```
-
-## 6. Final Test
-
-Now, try to create a file in that directory as your regular user (without `sudo`).
-
-```
-touch /var/lib/libvirt/images/test_file
-```
-
-Check the file permissions:
-
-```
-ls -l /var/lib/libvirt/images/
-```
-
-**Expected Output:**
-
-> total 0
-> 
-> -rw-rw----+ 1 madhu madhu 0 Feb 12 21:34 test_file
-
-> [!SUCCESS] Done!
-> 
-> You now have full read/write access to the /var/lib/libvirt/images directory, and any new VMs you create will automatically be accessible by you.
+See: [[Symbolic link to zram for image file]], `07_storage_setup.py`.

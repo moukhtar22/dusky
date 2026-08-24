@@ -38,15 +38,24 @@ MOUNT_POINT = Path("/mnt")
 # Base packages every system needs
 FINAL_PACKAGES = [
     "base", "base-devel", "linux", "linux-headers", "mkinitcpio",
-    "neovim", "btrfs-progs", "dosfstools", "git", "zsh",
-    "networkmanager", "yazi", "linux-firmware-other"
+    "neovim", "btrfs-progs", "dosfstools", "efibootmgr", "openssh", "git", "zsh",
+    "networkmanager", "yazi", "linux-firmware-other", "otf-atkinsonhyperlegiblemono-nerd",
+    "python", "python-textual", "python-rich"
 ]
 
 def wait_for_pacman_lock():
     lock_file = Path("/var/lib/pacman/db.lck")
     while lock_file.exists():
+        res = subprocess.run(["pgrep", "-x", "pacman"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if res.returncode != 0:
+            try:
+                lock_file.unlink()
+                Log.warn("Removed stale pacman lock file: /var/lib/pacman/db.lck")
+                break
+            except Exception:
+                pass
         Log.warn("Waiting for pacman lock...")
-        time.sleep(3)
+        time.sleep(2)
 
 class HardwareScanner:
     def __init__(self):
@@ -122,8 +131,7 @@ class HardwareScanner:
 def parse_args():
     parser = argparse.ArgumentParser(description="Pacstrap Hardware-Verified Installer")
     parser.add_argument("-a", "--auto", action="store_true", help="Run autonomously (no prompts)")
-    parser.add_argument("--arch", action="store_true", default=True, help="Target standard Arch Linux")
-    parser.add_argument("--cachyos", action="store_true", help="Target CachyOS")
+    parser.add_argument("--arch", action="store_true", help=argparse.SUPPRESS) # Backwards compatibility
     return parser.parse_args()
 
 def package_exists(pkg: str) -> bool:
@@ -205,10 +213,6 @@ def main():
         auto_mode = True
         Log.warn("Non-interactive session detected. Enabling autonomous mode.")
 
-    # 1. CACHYOS PRE-REQUISITE INJECTION
-    if args.cachyos:
-        Log.info("CachyOS architecture selected. Injecting required keyrings and mirrors...")
-        FINAL_PACKAGES.extend(["cachyos-keyring", "cachyos-mirrorlist", "cachyos-rate-mirrors"])
 
     # 2. CPU MICROCODE
     ucode = get_cpu_ucode()
@@ -298,7 +302,7 @@ def main():
     Log.info("Installing...")
     wait_for_pacman_lock()
 
-    pacstrap_cmd = ["pacstrap", "-K", str(MOUNT_POINT)] + deduped_packages + ["--needed"]
+    pacstrap_cmd = ["pacstrap", str(MOUNT_POINT)] + deduped_packages + ["--needed"]
     
     try:
         if auto_mode:

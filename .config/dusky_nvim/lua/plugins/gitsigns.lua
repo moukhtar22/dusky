@@ -28,16 +28,19 @@ return {
 			},
 		},
 	},
-	-- We use the config function to run the setup AND force the highlight overrides
+	-- We use the config function to run the setup AND force WCAG-safe highlight overrides
 	config = function(_, opts)
 		require("gitsigns").setup(opts)
 
-		-- Force every GitSigns highlight group to link to "GitSignsAdd"  (Green/Add color)
-		vim.api.nvim_set_hl(0, "GitSignsChange", { link = "DiagnosticError" })
-		vim.api.nvim_set_hl(0, "GitSignsDelete", { link = "GitSignsAdd" })
-		vim.api.nvim_set_hl(0, "GitSignsTopDelete", { link = "GitSignsAdd" })
-		vim.api.nvim_set_hl(0, "GitSignsChangeDelete", { link = "GitSignsAdd" })
-		vim.api.nvim_set_hl(0, "GitSignsUntracked", { link = "GitSignsAdd" })
+		-- FIX: previous linked all signs to Add (green) except Change->Error (red) which inverts semantics and breaks contrast after our palette fix
+		-- Correct mapping: Add (green/tertiary), Change (yellow/secondary), Delete (red/error)
+		vim.api.nvim_set_hl(0, "GitSignsAdd",            { link = "DiagnosticOk" })
+		vim.api.nvim_set_hl(0, "GitSignsUntracked",      { link = "DiagnosticOk" })
+		vim.api.nvim_set_hl(0, "GitSignsChange",         { link = "DiagnosticWarn" })
+		vim.api.nvim_set_hl(0, "GitSignsChangeDelete",   { link = "DiagnosticWarn" })
+		vim.api.nvim_set_hl(0, "GitSignsDelete",         { link = "DiagnosticError" })
+		vim.api.nvim_set_hl(0, "GitSignsTopDelete",      { link = "DiagnosticError" })
+		vim.api.nvim_set_hl(0, "GitSignsCurrentLineBlame", { link = "NonText", default = true })
 	end,
 }
 -- ==========================================================

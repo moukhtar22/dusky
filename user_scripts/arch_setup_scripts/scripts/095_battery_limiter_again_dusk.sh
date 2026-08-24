@@ -1,10 +1,5 @@
 #!/usr/bin/env bash
-# this is a personal script to reenable battery limiter after installing asusctl from the aur
-# -----------------------------------------------------------------------------
-# Battery Charge Limiter
-# Context: Arch Linux / Hyprland / UWSM
-# Description: Sets battery charge thresholds safely.
-# -----------------------------------------------------------------------------
+#d: Re-apply the battery charge limit after asusctl
 
 set -euo pipefail
 

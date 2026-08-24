@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 import sys
 sys.dont_write_bytecode = True
 import json
@@ -6,6 +7,20 @@ from pathlib import Path
 tui_root = Path(__file__).resolve().parents[2] / "dusky_tui"
 if str(tui_root) not in sys.path:
     sys.path.insert(0, str(tui_root))
+
+import sys
+from pathlib import Path
+
+_dusky_root = Path.home() / "user_scripts" / "dusky_tui"
+if str(_dusky_root) not in sys.path:
+    sys.path.insert(0, str(_dusky_root))
+
+import sys
+from pathlib import Path
+
+_DUSKY_TUI_ROOT = Path.home() / "user_scripts" / "dusky_tui"
+if str(_DUSKY_TUI_ROOT) not in sys.path:
+    sys.path.insert(0, str(_DUSKY_TUI_ROOT))
 
 from python.frontend.core_types import ConfigItem
 

@@ -7,6 +7,20 @@ Target: ~/.config/hypr/edit_here/source/appearance.lua
 Engine: lua
 """
 
+import sys
+from pathlib import Path
+
+_dusky_root = Path.home() / "user_scripts" / "dusky_tui"
+if str(_dusky_root) not in sys.path:
+    sys.path.insert(0, str(_dusky_root))
+
+import sys
+from pathlib import Path
+
+_DUSKY_TUI_ROOT = Path.home() / "user_scripts" / "dusky_tui"
+if str(_DUSKY_TUI_ROOT) not in sys.path:
+    sys.path.insert(0, str(_DUSKY_TUI_ROOT))
+
 from python.frontend.core_types import ConfigItem
 
 # =============================================================================
@@ -71,16 +85,6 @@ SCHEMA = {
     # TAB 0: PRESETS
     # -------------------------------------------------------------------------
     0: [
-        ConfigItem(
-            label="Reset Dusky Defaults",
-            key="preset_factory_reset",
-            scope="DEFAULT",
-            type_="preset",
-            default=None,
-            group="Reset",
-            preset_payload={"__ALL_DEFAULTS__": True},
-            extended_help="**Reset Dusky Defaults**\n\nReverts every single configuration item across all tabs back to its programmed default state."
-        ),
         ConfigItem(
             label="Paper Texture",
             key="pre_paper_texture",
@@ -834,7 +838,7 @@ SCHEMA = {
             key="gaps_in",
             scope="general",
             type_="int",
-            default=3,
+            default=2,
             min_val=0,
             max_val=50,
             step=1,
@@ -846,7 +850,7 @@ SCHEMA = {
             key="gaps_out",
             scope="general",
             type_="int",
-            default=8,
+            default=5,
             min_val=0,
             max_val=50,
             step=1,
@@ -991,7 +995,7 @@ SCHEMA = {
             key="rounding",
             scope="decoration",
             type_="int",
-            default=6,
+            default=2,
             min_val=0,
             max_val=50,
             step=1,
@@ -1151,7 +1155,7 @@ SCHEMA = {
             key="passes",
             scope="decoration/blur",
             type_="int",
-            default=3,
+            default=2,
             min_val=1,
             max_val=10,
             step=1,
@@ -1214,7 +1218,7 @@ SCHEMA = {
             key="brightness",
             scope="decoration/blur",
             type_="float",
-            default=0.8172,
+            default=1.0172,
             min_val=0.0,
             max_val=2.0,
             step=0.1,
@@ -1686,3 +1690,19 @@ SCHEMA = {
         ),
     ]
 }
+
+# =============================================================================
+# DIRECT EXECUTION HANDLER
+# =============================================================================
+if __name__ == "__main__":
+    import sys, subprocess
+    from pathlib import Path
+
+    script_path = Path(__file__).resolve()
+    main_router = Path.home() / "user_scripts" / "dusky_tui" / "python" / "main" / "main.py"
+
+    if main_router.exists():
+        sys.exit(subprocess.run([sys.executable, str(main_router), str(script_path)] + sys.argv[1:]).returncode)
+    else:
+        print(f"[-] Error: Main Dusky TUI router not found at {main_router}", file=sys.stderr)
+        sys.exit(1)

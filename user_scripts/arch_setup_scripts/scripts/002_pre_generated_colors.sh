@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# using pregenerated colors to get rid of hyprland errors
+#d: Use pre-generated color files to fix Hyprland errors
+
 set -euo pipefail
 
 # Define absolute paths using the HOME variable
