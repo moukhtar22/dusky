@@ -1,0 +1,42 @@
+# ==============================================================================
+# Darkwood Profile
+# ==============================================================================
+# Engine: Unity 5.x Mono (Native Linux) with Steam Runtime wrapper.
+# Notes: Native top-down survival horror. Requires runtime/run.sh wrapper.
+
+extends = "base_unity_native"
+
+[meta]
+id = "darkwood"
+name = "Darkwood"
+version = "1.4"
+icon = "applications-games"
+developer = "Acid Wizard Studio"
+genre = "Survival Horror / Adventure"
+description = "Top-down survival horror in a mysterious, procedurally generated forest of the Soviet Bloc. Scavenge by day, hide by night and pray for dawn."
+
+[paths]
+game_dir = "/mnt/media/games/unknown_quality/Darkwood-jc141"
+dwarfs_image = "files/game-root.dwarfs"
+dwarfs_mount = "files/.game-root-mnt"
+overlay_dir = "files/game-root"
+overlay_storage = "files/overlay-storage"
+overlay_work = "files/.game-root-work"
+executable = "runtime/run.sh"
+working_dir = "."
+arguments = ["./Darkwood.x86_64"]
+
+[runtime]
+type = "native"
+
+[graphics]
+gpu = "auto"
+wayland_native = true
+
+[graphics.gamescope]
+enabled = false
+
+[performance]
+gamemode = true
+mangohud = false
+fps_limit = 60

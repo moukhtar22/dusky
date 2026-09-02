@@ -480,7 +480,15 @@ _patch_mkarchiso() {
     shopt -s nullglob
     local all_files=("\${repo_target}/"*.pkg.tar.*)
     local pkg_files=()
-    for f in "\${all_files[@]}"; do [[ "\$f" == *.sig ]] && continue; pkg_files+=("\$f"); done
+    for f in "\${all_files[@]}"; do
+        [[ "\$f" == *.sig ]] && continue
+        if [[ "\$f" == *.zst ]]; then
+            zstd -t -q "\$f" </dev/null &>/dev/null || { echo "[ERR] Corrupt ZST detected during ISO package merge: \${f##*/}" >&2; return 1; }
+        elif [[ "\$f" == *.xz ]]; then
+            xz -t -q "\$f" </dev/null &>/dev/null || { echo "[ERR] Corrupt XZ detected during ISO package merge: \${f##*/}" >&2; return 1; }
+        fi
+        pkg_files+=("\$f")
+    done
     (( _nullglob_state )) || shopt -u nullglob
     
     if (( \${#pkg_files[@]} > 0 )); then

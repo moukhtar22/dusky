@@ -1,0 +1,49 @@
+# ==============================================================================
+# Factorio Profile
+# ==============================================================================
+
+extends = "base_native"
+
+[meta]
+id = "factorio"
+name = "Factorio"
+version = "2.1.14"
+icon = "applications-games"
+developer = "Wube Software"
+genre = "Automation / Strategy"
+description = "Build and maintain automated factories on an alien planet."
+
+[paths]
+game_dir = "/mnt/media/games/good_quality/factorio/Factorio_2.1.14"
+dwarfs_image = "files/game-root.dwarfs"
+dwarfs_mount = "files/.game-root-mnt"
+overlay_dir = "files/game-root"
+overlay_storage = "files/overlay-storage"
+overlay_work = "files/.game-root-work"
+executable = "bin/x64/factorio"
+arguments = []
+
+[runtime]
+type = "native"
+
+[graphics]
+gpu = "auto"
+wayland_native = true
+
+[graphics.gamescope]
+enabled = false
+mode = "embedded"
+allow_tearing = true
+# Was enabled=true with wayland backend, but Factorio was running via gamescope nested (gamescope-0) with 198% CPU + 1715MiB GPU yet not visible as Hyprland client (only 5 clients, no factorio/gamescope).
+# Tested 2026-08-31: pure Wayland (prefer_xwayland=false, gamescope=false) with LD_PRELOAD Wayland fix correctly shows as com.factorio.Factorio on workspace 9, wayland driver, visible.
+
+[performance]
+gamemode = true
+mangohud = false
+fps_limit = 60
+
+[hooks]
+pre_launch = ["bash -c 'if [ ! -f \"$HOME/.factorio/wayland_fix/libEGL.so.1\" ]; then python3 \"$HOME/user_scripts/apps/factorio/use_wayland/fix_run_on_wayland.py\" --game-dir \"/mnt/media/games/good_quality/factorio/Factorio_2.1.14\" --force; fi'"]
+
+[env]
+LD_PRELOAD = "$HOME/.factorio/wayland_fix/libEGL.so.1"

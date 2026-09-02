@@ -1,0 +1,68 @@
+# ==============================================================================
+# Portal Collection [FitGirl Repack] - INSTALLER launcher
+# Purpose: launch setup.exe via Wine through Master Game Runner Engine
+# NOTE: Engine has NO native FitGirl/InnoSetup extraction logic - this profile
+#       simply runs setup.exe as a normal Wine executable with full cgroup/
+#       Wine-prefix/DXVK supervision. Install destination must be chosen
+#       manually inside the installer UI.
+# Source dir: /mnt/zram1/Portal Collection [FitGirl Repack]  (contains setup.exe + fg-0*.bin)
+# ==============================================================================
+extends = "base_wine_dxvk"
+
+[meta]
+id = "portal_collection_install"
+name = "Portal Collection - FitGirl Installer"
+version = "1.0"
+icon = "applications-games"
+developer = "Valve / FitGirl Repack"
+genre = "Puzzle / FPS"
+description = "Temporary runner profile to execute FitGirl setup.exe for Portal Collection. NOT a game profile - delete after install and scaffold real game with `init`."
+
+[paths]
+game_dir = "/mnt/zram1/Portal Collection [FitGirl Repack]"
+executable = "setup.exe"
+working_dir = ""
+# No DwarFS - this is a loose FitGirl repack (fg-*.bin + setup.exe)
+# Do not set dwarfs_image / overlay_dir here
+
+[paths.arguments]
+# FitGirl installer args are interactive; leave empty. Add "/SILENT" only for unattended testing.
+
+[runtime]
+type = "wine"
+
+[runtime.wine]
+wine_binary = "wine"
+# Keep prefix OUTSIDE /mnt/zram1 (zram is volatile). Uses $HOME expansion via expand_str.
+prefix_dir = "$HOME/.local/share/wineprefixes/portal-collection-fitgirl"
+arch = "win64"
+sync_mode = "auto"
+debug = "fixme-all"
+large_address_aware = true
+dxvk = true
+vkd3d = false
+dxvk_nvapi = false
+disable_menubuilder = true
+dll_overrides = { "winemenubuilder.exe" = "d", "mshtml" = "d", "dxgi" = "n,b", "d3d11" = "n,b", "d3d12" = "n,b", "d3d9" = "n,b" }
+redistributables = []
+winetricks = []
+
+[graphics]
+gpu = "auto"
+wayland_native = true
+prefer_xwayland = false
+vulkan_icd = "auto"
+
+[performance]
+gamemode = true
+mangohud = false
+
+[runner]
+auto_mount = false
+auto_unmount_on_exit = false
+use_systemd_scope = true
+inhibit_idle = true
+inhibit_sleep = true
+
+[sandbox]
+enabled = false

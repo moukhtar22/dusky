@@ -1,0 +1,49 @@
+# ==============================================================================
+# Base Wine + DXVK Preset
+# Standard configuration for Windows games running under Wine-Staging with DXVK.
+# ==============================================================================
+
+[runtime]
+type = "wine"
+
+[runtime.wine]
+wine_binary = "wine"
+arch = "win64"
+sync_mode = "auto"
+large_address_aware = true
+dxvk = true
+vkd3d = true
+dxvk_nvapi = false
+disable_menubuilder = true
+debug = "fixme-all"
+dll_overrides = { "winemenubuilder.exe" = "d", "mshtml" = "d", "dxgi" = "n,b", "d3d11" = "n,b", "d3d12" = "n,b", "d3d9" = "n,b" }
+
+[graphics]
+gpu = "discrete"
+wayland_native = true
+prefer_xwayland = false
+vulkan_icd = "auto"
+gl_threaded = true
+
+[performance]
+gamemode = true
+mangohud = false
+fps_limit = 0
+
+[audio]
+driver = "pipewire"
+quantum = 1024
+rate = 48000
+
+[storage]
+dwarfs_cache_percent = 25
+dwarfs_tidy_interval = "5m"
+dwarfs_tidy_max_age = "10m"
+auto_clean_workdir = true
+
+[runner]
+auto_mount = true
+auto_unmount_on_exit = true
+use_systemd_scope = true
+inhibit_idle = true
+inhibit_sleep = true

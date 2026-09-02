@@ -221,8 +221,11 @@ class TomlEngine(BaseEngine):
         # Print table header if we are inside a nested scope
         if parent_keys:
             header = ".".join(TomlEngine._quote_key(k) for k in parent_keys)
-            # Garbage Collection: Do not print empty table headers unless it is forced
-            if scalars or tables:
+            # Only emit header when the table actually holds scalars; pure
+            # intermediate tables (only subtables, no direct keys) are
+            # implied by their children (e.g. [runtime.wine] implies
+            # [runtime]) and an empty [runtime] header would be redundant.
+            if scalars:
                 lines.append(f"[{header}]")
 
         # Print inline key-value pairs

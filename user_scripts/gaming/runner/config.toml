@@ -1,0 +1,84 @@
+# ==============================================================================
+# Master Game Runner Engine - Global Configuration
+# ==============================================================================
+
+schema = 3
+
+[runner]
+auto_mount = true
+auto_unmount_on_exit = true
+mount_timeout_s = 20.0
+use_systemd_scope = true
+scope_slice = "app-games.slice"
+inhibit_idle = true
+inhibit_sleep = true
+notifications = true
+kill_grace_s = 8.0
+
+[storage]
+dwarfs_cache_percent = 25
+dwarfs_workers = 0
+dwarfs_tidy_strategy = "time"
+dwarfs_tidy_interval = "5m"
+dwarfs_tidy_max_age = "10m"
+auto_clean_workdir = true
+union_backend = "fuse-overlayfs"
+
+[graphics]
+gpu = "auto"
+prefer_xwayland = false
+gl_threaded = true
+vsync = "default"
+hdr = false
+shader_cache = true
+shader_cache_size_gb = 12
+
+[graphics.gamescope]
+enabled = false
+backend = "wayland"
+mode = "borderless"
+width = 0
+height = 0
+output_width = 0
+output_height = 0
+refresh_rate = 0
+fsr_sharpness = 5
+adaptive_sync = false
+immediate_flips = false
+realtime = true
+hdr = false
+expose_wayland = true
+mangoapp = true
+extra_args = []
+
+[performance]
+gamemode = true
+mangohud = false
+fps_limit = 0
+cpu_affinity = ""
+
+[audio]
+driver = "pipewire"
+quantum = 1024
+rate = 48000
+openal_driver = "pipewire"
+
+[runtime.wine]
+wine_binary = "wine"
+arch = "win64"
+sync_mode = "auto"
+large_address_aware = true
+dxvk = true
+vkd3d = true
+dxvk_nvapi = false
+disable_menubuilder = true
+debug = "fixme-all"
+dll_overrides = { "winemenubuilder.exe" = "d", "mshtml" = "d", "dxgi" = "n,b", "d3d11" = "n,b", "d3d12" = "n,b", "d3d9" = "n,b" }
+
+[sandbox]
+enabled = false
+isolate_home = true
+bind_gpu = true
+bind_audio = true
+bind_wayland = true
+bind_network = false

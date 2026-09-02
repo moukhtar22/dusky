@@ -219,34 +219,56 @@ def remove_if_present(path: Path) -> str:
     return "removed"
 
 def reload_user_manager() -> None:
+    users: list[tuple[int, str]] = []
     sudo_user = os.environ.get("SUDO_USER")
-    if not sudo_user:
+    if sudo_user:
+        try:
+            pw = pwd.getpwnam(sudo_user)
+            users.append((pw.pw_uid, sudo_user))
+        except KeyError:
+            pass
+    # Discover all active logged-in users with active systemd user instances
+    run_user_dir = Path("/run/user")
+    if run_user_dir.is_dir():
+        for p in run_user_dir.iterdir():
+            if p.is_dir() and p.name.isdigit():
+                uid = int(p.name)
+                if uid >= 1000:
+                    try:
+                        uname = pwd.getpwuid(uid).pw_name
+                        if (uid, uname) not in users:
+                            users.append((uid, uname))
+                    except KeyError:
+                        pass
+
+    if not users:
         subprocess.run(["systemctl", "--user", "daemon-reload"], check=False,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         return
-    try:
-        pw = pwd.getpwnam(sudo_user)
-        uid = pw.pw_uid
-        runtime = f"/run/user/{uid}"
-        if not Path(runtime).is_dir():
-            console.print(f"[yellow]No runtime dir {runtime}, skip user reload[/]")
-            return
-        env = {
-            "XDG_RUNTIME_DIR": runtime,
-            "DBUS_SESSION_BUS_ADDRESS": f"unix:path={runtime}/bus",
-        }
-        if shutil.which("run0"):
-            cmd = ["run0", f"--user={sudo_user}", "systemctl", "--user", "daemon-reload"]
-            result = subprocess.run(cmd, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
-            if result.returncode != 0:
-                console.print(f"[yellow]run0 reload failed: {result.stderr.strip()}[/]")
-            return
-        subprocess.run(["runuser", "-u", sudo_user, "-w", "XDG_RUNTIME_DIR,DBUS_SESSION_BUS_ADDRESS", "--",
-                        "systemctl", "--user", "daemon-reload"],
-                       env={**os.environ, **env}, check=False,
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except Exception as e:
-        console.print(f"[yellow]user manager reload skipped: {e}[/]")
+
+    for uid, username in users:
+        try:
+            runtime = f"/run/user/{uid}"
+            if not Path(runtime).is_dir():
+                continue
+            env = {
+                "XDG_RUNTIME_DIR": runtime,
+                "DBUS_SESSION_BUS_ADDRESS": f"unix:path={runtime}/bus",
+            }
+            reloaded = False
+            if shutil.which("run0"):
+                cmd = ["run0", f"--user={username}", "systemctl", "--user", "daemon-reload"]
+                result = subprocess.run(cmd, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                if result.returncode == 0:
+                    reloaded = True
+            if not reloaded:
+                subprocess.run(
+                    ["runuser", "-u", username, "-w", "XDG_RUNTIME_DIR,DBUS_SESSION_BUS_ADDRESS", "--",
+                     "systemctl", "--user", "daemon-reload"],
+                    env={**os.environ, **env}, check=False,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception as e:
+            console.print(f"[yellow]user manager reload skipped for {username}: {e}[/]")
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Deploy Hyprland OOM config (Arch latest, systemd 261+)")
@@ -301,7 +323,7 @@ def main() -> None:
         ["systemctl", "daemon-reload"],
         ["systemctl", "unmask", "systemd-oomd"],
         ["systemctl", "enable", "--now", "systemd-oomd"],
-        ["systemctl", "try-restart", "systemd-oomd"],
+        ["systemctl", "restart", "systemd-oomd"],
     ]
     for c in cmds:
         subprocess.run(c, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)

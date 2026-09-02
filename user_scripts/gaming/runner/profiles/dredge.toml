@@ -1,0 +1,55 @@
+# ==============================================================================
+# DREDGE Profile
+# ==============================================================================
+# Engine: Unity Mono (Windows) via ColdClientLoader. Uses x86 loader.
+
+extends = "base_wine_dxvk"
+
+[meta]
+id = "dredge"
+name = "DREDGE"
+version = "1.0"
+icon = "applications-games"
+developer = "Black Salt Games"
+genre = "Adventure / Horror / Fishing"
+description = "Single-player fishing adventure with a sinister undercurrent. Sell your catch, upgrade your boat, and dredge the depths for long-buried secrets across a mysterious archipelago."
+
+[paths]
+game_dir = "/mnt/media/games/unknown_quality/DREDGE-jc141"
+dwarfs_image = "files/game-root.dwarfs"
+dwarfs_mount = "files/.game-root-mnt"
+overlay_dir = "files/game-root"
+overlay_storage = "files/overlay-storage"
+overlay_work = "files/.game-root-work"
+executable = "DREDGE.exe"
+arguments = []
+
+[runtime]
+type = "wine"
+
+[runtime.wine]
+prefix_dir = "files/wine-prefix-ew"
+arch = "win64"
+sync_mode = "fsync"
+dxvk = true
+vkd3d = true
+
+[runtime.wine.dll_overrides]
+"winemenubuilder.exe" = "d"
+mshtml = "d"
+dxgi = "n,b"
+d3d11 = "n,b"
+d3d12 = "n,b"
+d3d9 = "n,b"
+
+[graphics]
+gpu = "discrete"
+wayland_native = true
+
+[graphics.gamescope]
+enabled = false
+
+[performance]
+gamemode = true
+mangohud = false
+fps_limit = 60

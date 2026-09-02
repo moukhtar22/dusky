@@ -190,6 +190,15 @@ def detect() -> List[Gpu]:
     real = [c for c in raw if c.is_real]
     return sorted(real if real else raw, key=lambda c: c.pci)
 
+def is_display_capable(gpu: Gpu) -> bool:
+    """True if GPU has at least one DRM connector (display-capable).
+    Compute-only GPUs (e.g., Baffin on Precision 7520) have zero connectors under /sys/class/drm/cardN-* and must be excluded from AQ_DRM_DEVICES to avoid BOCO hotplug crash."""
+    try:
+        name = Path(gpu.dev_node).name
+        return len(glob.glob(f"/sys/class/drm/{name}-*")) > 0
+    except Exception:
+        return True
+
 def default_gpu(cards: List[Gpu]):
     boots = [c for c in cards if c.boot_vga == 1]
     if not boots: return cards[0], "No boot_vga, lowest PCI"
@@ -452,8 +461,18 @@ def main():
     check_hyprland_version()     # warn if Hyprland < 0.55 (no Lua config support)
 
     cards = detect()
-    primary, mode = select_gpu(cards, args.auto)
-    ordered = [primary] + [c for c in cards if c.dev_node != primary.dev_node]
+    # Filter to display-capable GPUs for AQ_DRM_DEVICES — compute-only (zero connectors) stays available via DRI_PRIME/renderD but must not be enumerated as display
+    display_cards = [c for c in cards if is_display_capable(c)]
+    if not display_cards:
+        console.print("[yellow][WARN] No display-capable GPUs detected — falling back to all cards[/]")
+        display_cards = cards
+    primary, mode = select_gpu(display_cards, args.auto)
+    ordered = [primary] + [c for c in display_cards if c.dev_node != primary.dev_node]
+    # Inform about compute-only GPUs excluded (empirical: Baffin has 0 connectors)
+    compute_only = [c for c in cards if c not in display_cards]
+    if compute_only:
+        for c in compute_only:
+            console.print(f"[dim]Compute-only GPU excluded from AQ_DRM_DEVICES (still via DRI_PRIME/render): {c.dev_node} {c.vendor_label} {c.name} {c.pci}[/]")
     lua = gen_lua(primary, ordered, mode)
     atomic_write(out, lua)
 

@@ -89,7 +89,7 @@ USER_SERVICES: Final[list[ServiceConfig]] = [
     ServiceConfig("pipewire-pulse.socket", True, "PipeWire PulseAudio emulation socket"),
     ServiceConfig("wireplumber.service", True, "PipeWire session manager daemon"),
     ServiceConfig("hypridle.service", True, "Hyprland idle management daemon"),
-    ServiceConfig("hyprpolkitagent.service", True, "Hyprland PolicyKit authentication agent"),
+    ServiceConfig("dusky_polkit.service", True, "Dusky PolicyKit authentication agent"),
     ServiceConfig("fumon.service", True, "File/Folder monitoring service"),
     ServiceConfig("gnome-keyring-daemon.service", True, "GNOME Keyring secret storage daemon"),
     ServiceConfig("gnome-keyring-daemon.socket", True, "GNOME Keyring control socket"),

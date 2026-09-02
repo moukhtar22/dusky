@@ -1,87 +1,184 @@
 #!/usr/bin/env python3
 """
-🦊 Dusky Template Generator — Setup & Installer Script
-======================================================
-Provisions native messaging manifests to browser profiles and
-prepares the WebExtension for instant Firefox loading.
+🦊 Dusky Template Generator - native host installer.
+
+    python3 setup.py              install or repair (safe to re-run any time)
+    python3 setup.py --uninstall  remove the host manifests again (or --purge)
+
+What it does:
+  1. byte-compiles host/dusky_template_host.py to catch syntax errors early
+  2. marks host/dusky_template_host.py executable for its owner
+  3. writes <browser root>/native-messaging-hosts/dusky_template_generator.json
+     atomically - always for ~/.mozilla (Firefox, Dev Edition, Nightly), and for
+     LibreWolf / Zen / Waterfox / Floorp only when that browser's profile root
+     already exists (no empty dot-directories are ever created)
+  4. ensures the templates directory exists (~/.config/dusky_sites)
+  5. runs the host once over the real stdio protocol, exec'd exactly the way
+     Firefox will exec it, and refuses to report success unless it answers correctly
+
+It never touches ~/.config/dusky_sites/*.css, extensions.json or browser profiles.
 """
 
 from __future__ import annotations
 
-import sys
-import os
 import json
-import shutil
+import os
 import stat
+import struct
+import subprocess
+import sys
 from pathlib import Path
 
-C_CYAN = "\033[0;36m"
-C_GREEN = "\033[0;32m"
-C_YELLOW = "\033[1;33m"
-C_RED = "\033[0;31m"
-C_RESET = "\033[0m"
+HOST_NAME = "dusky_template_generator"
+EXTENSION_ID = "dusky_template_generator@dusk.com"
+HERE = Path(__file__).resolve().parent
+HOST_SCRIPT = HERE / "host" / "dusky_template_host.py"
+LOCAL_MANIFEST = HERE / "host" / f"{HOST_NAME}.json"
+HOME = Path.home()
 
-MANIFEST_NAME = "dusky_template_generator.json"
+# (profile root, always install?)  Firefox-family browsers read <root>/native-messaging-hosts/.
+BROWSER_ROOTS = [
+    (HOME / ".mozilla", True),
+    (HOME / ".librewolf", False),
+    (HOME / ".zen", False),
+    (HOME / ".waterfox", False),
+    (HOME / ".floorp", False),
+]
 
-def main() -> None:
-    print(f"\n{C_CYAN}================================================================={C_RESET}")
-    print(f"{C_CYAN}  🦊 Dusky Template Generator Setup Script{C_RESET}")
-    print(f"{C_CYAN}================================================================={C_RESET}\n")
+TTY = sys.stdout.isatty()
+OK = "\033[32m+\033[0m" if TTY else "+"
+WARN = "\033[33m!\033[0m" if TTY else "!"
+BAD = "\033[31mx\033[0m" if TTY else "x"
+BOLD = "\033[1m" if TTY else ""
+DIM = "\033[2m" if TTY else ""
+RESET = "\033[0m" if TTY else ""
 
-    base_dir = Path(__file__).parent.resolve()
-    host_script = base_dir / "host" / "dusky_template_host.py"
-    manifest_src = base_dir / "host" / MANIFEST_NAME
 
-    if not host_script.is_file():
-        print(f"{C_RED}❌ Error:{C_RESET} Host script not found at {host_script}")
-        sys.exit(1)
-
-    # 1. Make host script executable
-    try:
-        current_mode = host_script.stat().st_mode
-        host_script.chmod(current_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-        print(f"{C_GREEN}✓{C_RESET} Made host script executable: {host_script}")
-    except Exception as e:
-        print(f"{C_YELLOW}⚠ Could not set executable mode on {host_script}: {e}{C_RESET}")
-
-    # 2. Update host path inside dusky_template_generator.json
-    manifest_payload = {
-        "name": "dusky_template_generator",
-        "description": "Dusky Sites Template Generator Native Host",
-        "path": str(host_script),
+def manifest_text() -> str:
+    payload = {
+        "name": HOST_NAME,
+        "description": "Dusky Template Generator - writes ~/.config/dusky_sites/<domain>.css",
+        "path": str(HOST_SCRIPT),
         "type": "stdio",
-        "allowed_extensions": ["dusky_template_generator@dusk.com"]
+        "allowed_extensions": [EXTENSION_ID],
     }
-    manifest_src.write_text(json.dumps(manifest_payload, indent=2) + "\n", encoding="utf-8")
-    print(f"{C_GREEN}✓{C_RESET} Manifest updated with exact path: {manifest_src}")
+    return json.dumps(payload, indent=2) + "\n"
 
-    # 3. Install manifest into browser native-messaging-hosts directories
-    home = Path.home()
-    browser_dirs = [
-        home / ".mozilla" / "native-messaging-hosts",
-        home / ".config" / "mozilla" / "native-messaging-hosts",
-        home / ".librewolf" / "native-messaging-hosts",
-        home / ".zen" / "native-messaging-hosts",
-        home / ".waterfox" / "native-messaging-hosts",
-        home / ".floorp" / "native-messaging-hosts",
-    ]
 
-    installed_count = 0
-    for target_dir in browser_dirs:
+def write_atomic(path: Path, text: str) -> bool:
+    """Write text to path via rename. Returns False when the file already had this content."""
+    if path.is_file() and path.read_text(encoding="utf-8") == text:
+        return False
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
+    return True
+
+
+def target_dirs(existing_only: bool) -> list[Path]:
+    dirs = []
+    for root, always in BROWSER_ROOTS:
+        if root.is_dir() or (always and not existing_only):
+            dirs.append(root / "native-messaging-hosts")
+    return dirs
+
+
+def probe_host() -> dict:
+    """Send one 'ping' frame to the host, exec'ing it via its shebang like Firefox does."""
+    body = json.dumps({"type": "ping"}).encode("utf-8")
+    proc = subprocess.run(
+        [str(HOST_SCRIPT)],
+        input=struct.pack("=I", len(body)) + body,
+        capture_output=True,
+        timeout=15,
+        check=False,
+    )
+    out = proc.stdout
+    if len(out) < 4:
+        err = proc.stderr.decode("utf-8", "replace").strip()
+        raise RuntimeError(err or f"host exited with status {proc.returncode} and no reply")
+    (length,) = struct.unpack("=I", out[:4])
+    return json.loads(out[4:4 + length].decode("utf-8"))
+
+
+def install() -> int:
+    print(f"\n{BOLD}🦊 Dusky Template Generator - host setup{RESET}\n")
+    if not HOST_SCRIPT.is_file():
+        print(f"{BAD} host script missing: {HOST_SCRIPT}")
+        return 1
+
+    try:
+        compile(HOST_SCRIPT.read_text(encoding="utf-8"), str(HOST_SCRIPT), "exec")
+    except SyntaxError as exc:
+        print(f"{BAD} host does not compile: {exc}")
+        return 1
+    print(f"{OK} host compiles      {HOST_SCRIPT}")
+
+    mode = HOST_SCRIPT.stat().st_mode
+    if not (mode & stat.S_IXUSR):
+        HOST_SCRIPT.chmod(mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    print(f"{OK} host executable   {HOST_SCRIPT}")
+
+    text = manifest_text()
+    write_atomic(LOCAL_MANIFEST, text)
+
+    for d in target_dirs(existing_only=False):
         try:
-            target_dir.mkdir(parents=True, exist_ok=True)
-            target_manifest = target_dir / MANIFEST_NAME
-            target_manifest.write_text(json.dumps(manifest_payload, indent=2) + "\n", encoding="utf-8")
-            print(f"{C_GREEN}✓{C_RESET} Installed host manifest in {target_dir.parent.name} → {target_manifest}")
-            installed_count += 1
-        except Exception as e:
-            print(f"{C_YELLOW}⚠ Skipped {target_dir}: {e}{C_RESET}")
+            changed = write_atomic(d / f"{HOST_NAME}.json", text)
+            print(f"{OK} manifest {'written  ' if changed else 'unchanged'} {d / (HOST_NAME + '.json')}")
+        except OSError as exc:
+            print(f"{WARN} skipped {d}: {exc}")
 
-    print(f"\n{C_GREEN}✅ Setup Complete!{C_RESET}")
-    print(f"To load the extension into Firefox:")
-    print(f"  1. Open Firefox and go to {C_CYAN}about:debugging#/runtime/this-firefox{C_RESET}")
-    print(f"  2. Click {C_CYAN}'Load Temporary Add-on...'{C_RESET}")
-    print(f"  3. Select: {C_CYAN}{base_dir / 'manifest.json'}{C_RESET}\n")
+    try:
+        reply = probe_host()
+    except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired) as exc:
+        print(f"\n{BAD} the host does not answer when exec'd like Firefox will exec it:\n   {exc}")
+        print("   Check: is python3 on PATH? is the extension folder on a filesystem mounted 'noexec'?")
+        print(f"   Debug: {DIM}python3 {HOST_SCRIPT} --selftest{RESET}")
+        return 1
+    if not reply.get("ok"):
+        print(f"\n{BAD} host replied with an error: {reply}")
+        return 1
+    templates = Path(reply["dir"])
+    templates.mkdir(parents=True, exist_ok=True)
+    print(f"{OK} host answers      version {reply.get('version')} on python {reply.get('python')}")
+    print(f"{OK} templates dir     {templates}")
+
+    print(f"\n{BOLD}Load the extension in Firefox:{RESET}")
+    print(f"  1. Go to {BOLD}about:debugging#/runtime/this-firefox{RESET}")
+    print(f"  2. Click {BOLD}'Load Temporary Add-on...'{RESET}")
+    print(f"  3. Select: {BOLD}{HERE / 'manifest.json'}{RESET}")
+    print(f"  4. Open any site, click the toolbar icon or press {BOLD}Alt+Shift+P{RESET} to start visual picking.")
+    print(f"\n{DIM}Re-run this script after moving the folder. Remove with: python3 setup.py --uninstall{RESET}\n")
+    return 0
+
+
+def uninstall() -> int:
+    removed = 0
+    for d in target_dirs(existing_only=True):
+        manifest = d / f"{HOST_NAME}.json"
+        if manifest.is_file():
+            try:
+                data = json.loads(manifest.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                data = {}
+            if data.get("allowed_extensions") == [EXTENSION_ID]:
+                manifest.unlink()
+                removed += 1
+                print(f"{OK} removed {manifest}")
+    print(f"\n{OK} done - {removed} manifest(s) removed; your templates in ~/.config/dusky_sites were left untouched.\n")
+    return 0
+
+
+def main(argv: list[str]) -> int:
+    if argv and argv[0] in ("--uninstall", "--purge"):
+        return uninstall()
+    if argv and argv[0] in ("-h", "--help"):
+        print(__doc__.strip())
+        return 0
+    return install()
+
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main(sys.argv[1:]))

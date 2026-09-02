@@ -1,66 +1,187 @@
-#-- LM- Studio--
+#!/usr/bin/env zsh
+# =============================================================================
+# LM Studio Launcher — ~/.config/zshrc/lmstudio
+# =============================================================================
+
 llm() {
-  local dir="/mnt/media/downloads/llm/lmstudio/"
-  
-  # 1. Safely evaluate the glob and store the result in an array
-  # (N)  = Null globbing: if no file matches, return empty without errors
-  # (.)  = Match ONLY regular files (safeguards against matching directories)
-  # (om) = Order by modification time (newest first)
-  local matches=("$dir"/LM-Studio*(N.om))
+  emulate -L zsh
+  setopt localoptions extendedglob nullglob
+  unsetopt nocaseglob nomatch globdots
 
-  # 2. Check if any files actually matched
-  if (( ${#matches[@]} == 0 )); then
-    printf "\e[1;31m Error:\e[0m No LM-Studio AppImage found in %s.\n" "$dir" >&2
-    return 1
-  fi
+  local dir="${LM_STUDIO_DIR:-/mnt/media/downloads/llm/lmstudio}"
+  dir="${dir%/}"
 
-  # 3. Interactive Selection via fzf
-  local app_name
-  # ${matches[@]:t} extracts just the basenames (the 'tail') for a cleaner UI
-  app_name=$(printf "%s\n" "${matches[@]:t}" | fzf -1 \
-    --layout=reverse \
-    --height=~50% \
-    --border=rounded \
-    --ghost="Select version..." \
-    --border-label=" 󰚩 LM-Studio Versions " \
-    --border-label-pos=center \
-    --info=inline-right \
-    --prompt=" 󰚩  " \
-    --pointer="❯ " \
-    --marker="✔ " \
-    --color="${DUSKY_FZF_COLORS:-border:#89b4fa,label:#a6e3a1,prompt:#f9e2af,pointer:#f38ba8}")
+  # ---------------------------------------------------------------------------
+  # CLI Options
+  # ---------------------------------------------------------------------------
+  local skip_fzf=0
+  local -a app_args=()
 
-  # 4. Handle user cancellation (e.g., pressing ESC)
-  if [[ -z "$app_name" ]]; then
-    printf "\e[1;33m Canceled:\e[0m No AppImage selected.\n" >&2
-    return 1
-  fi
+  case "$1" in
+    -h|--help)
+      printf '\e[1;34m󰚩 \e[1mllm\e[0m — LM Studio AppImage Launcher\n\n'
+      printf '\e[1mUSAGE:\e[0m\n'
+      printf '  llm [OPTIONS] [APPIMAGE_ARGS...]\n\n'
+      printf '\e[1mOPTIONS:\e[0m\n'
+      printf '  -h, --help       Show this help message\n'
+      printf '  -l, --list       List available AppImages with size & date\n'
+      printf '  -n, --newest     Launch newest AppImage (skip interactive picker)\n\n'
+      printf '\e[1mENVIRONMENT:\e[0m\n'
+      printf '  LM_STUDIO_DIR    Custom directory (default: /mnt/media/downloads/llm/lmstudio)\n'
+      return 0
+      ;;
+    -l|--list)
+      ;;
+    -n|--newest)
+      skip_fzf=1
+      shift
+      app_args=("$@")
+      ;;
+    *)
+      app_args=("$@")
+      ;;
+  esac
 
-  # 5. Reconstruct the absolute path
-  local app="$dir/$app_name"
-
-  # 6. Check if the selected file lacks executable permission
-  if [[ ! -x "$app" ]]; then
-    printf "\e[1;33m Executable permission missing on:\e[0m %s\n" "$app_name"
-    printf "\e[1;34m Fixing permissions...\e[0m\n"
-
-    # Smart Permission Grant
-    if ! chmod +x "$app" 2>/dev/null; then
-        printf "\e[1;33m Sudo required to change permissions for this file.\e[0m\n"
-        sudo chmod +x "$app" || {
-            printf "\e[1;31m Error:\e[0m Failed to grant executable permissions.\n" >&2
-            return 1
-        }
+  # ---------------------------------------------------------------------------
+  # Directory Validation
+  # ---------------------------------------------------------------------------
+  if [[ ! -d "$dir" ]]; then
+    printf '\e[1;31m Error:\e[0m Directory not found: %s\n' "$dir" >&2
+    if [[ "$dir" == /mnt/media* ]]; then
+      printf '\e[1;33m Hint:\e[0m Ensure /mnt/media is unlocked and mounted (\e[2mdrive_status\e[0m or \e[2munlock\e[0m).\n' >&2
     fi
-    printf "\e[1;32m Permissions granted!\e[0m\n"
+    return 1
   fi
 
-  # 7. Execute the AppImage, passing any additional arguments ("$@") safely
-  "$app" "$@"
+  # ---------------------------------------------------------------------------
+  # AppImage Discovery (Native Zsh Globbing, Case-Insensitive, Mtime-Sorted)
+  # ---------------------------------------------------------------------------
+  typeset -U -a matches=(
+    $dir/(#i)lm-studio*.appimage(N.om)
+    $dir/(#i)lm-studio*(N.om)
+  )
+
+  if (( ${#matches[@]} == 0 )); then
+    printf '\e[1;31m Error:\e[0m No LM-Studio AppImage found in %s.\n' "$dir" >&2
+    return 1
+  fi
+
+  # ---------------------------------------------------------------------------
+  # Handle --list / -l
+  # ---------------------------------------------------------------------------
+  if [[ "$1" == "-l" || "$1" == "--list" ]]; then
+    zmodload -F zsh/stat b:zstat 2>/dev/null
+    printf '\e[1;34m󰚩 \e[1mFound %d LM Studio AppImage(s) in %s:\e[0m\n' "${#matches[@]}" "$dir"
+    local i=1 f
+    local -A st
+    for f in "${matches[@]}"; do
+      zstat -F "%Y-%m-%d %H:%M" -H st "$f" 2>/dev/null
+      local bytes=${st[size]:-0}
+      local size_str
+      if (( bytes >= 1073741824 )); then
+        size_str="$(printf "%.2f GiB" $(( bytes / 1073741824.0 )))"
+      elif (( bytes >= 1048576 )); then
+        size_str="$(printf "%.1f MiB" $(( bytes / 1048576.0 )))"
+      elif (( bytes >= 1024 )); then
+        size_str="$(printf "%.1f KiB" $(( bytes / 1024.0 )))"
+      else
+        size_str="${bytes} B"
+      fi
+      local date_str="${st[mtime]:-unknown}"
+      printf '  \e[1;32m%2d.\e[0m %-36s \e[2m[%s | %9s]\e[0m\n' "$i" "${f:t}" "$date_str" "$size_str"
+      ((i++))
+    done
+    return 0
+  fi
+
+  # ---------------------------------------------------------------------------
+  # Selection (Single match -> auto, Multiple -> fzf picker or newest)
+  # ---------------------------------------------------------------------------
+  local app=""
+  if (( ${#matches[@]} == 1 )); then
+    app="${matches[1]}"
+  elif (( skip_fzf )) || [[ ! -t 0 || ! -t 1 ]] || ! command -v fzf >/dev/null 2>&1; then
+    app="${matches[1]}"
+  else
+    local app_name
+    local fzf_colors="${DUSKY_FZF_COLORS:-border:#89b4fa,label:#a6e3a1,prompt:#f9e2af,pointer:#f38ba8}"
+    app_name=$(printf '%s\n' "${matches[@]:t}" | fzf -1 \
+      --layout=reverse \
+      --height=~50% \
+      --border=rounded \
+      --border-label=" 󰚩 LM-Studio Versions " \
+      --border-label-pos=center \
+      --info=inline-right \
+      --prompt=" 󰚩  " \
+      --pointer="❯ " \
+      --marker="✔ " \
+      --color="$fzf_colors")
+
+    if [[ -z "$app_name" ]]; then
+      printf '\e[1;33m Canceled:\e[0m No AppImage selected.\n' >&2
+      return 1
+    fi
+    app="$dir/$app_name"
+  fi
+
+  # ---------------------------------------------------------------------------
+  # Validation & Permissions Check
+  # ---------------------------------------------------------------------------
+  if [[ ! -f "$app" ]]; then
+    printf '\e[1;31m Error:\e[0m AppImage not found: %s\n' "$app" >&2
+    return 1
+  fi
+
+  if [[ ! -s "$app" ]]; then
+    printf '\e[1;31m Error:\e[0m AppImage is empty (0 bytes): %s\n' "$app" >&2
+    return 1
+  fi
+
+  if [[ ! -x "$app" ]]; then
+    printf '\e[1;33m Executable permission missing on:\e[0m %s\n' "${app:t}"
+    printf '\e[1;34m Fixing permissions...\e[0m\n'
+    if ! chmod +x "$app" 2>/dev/null; then
+      printf '\e[1;33m Sudo required to change permissions for this file.\e[0m\n'
+      if ! sudo chmod +x "$app"; then
+        printf '\e[1;31m Error:\e[0m Failed to grant executable permissions.\n' >&2
+        return 1
+      fi
+    fi
+    printf '\e[1;32m Permissions granted!\e[0m\n'
+  fi
+
+  # ---------------------------------------------------------------------------
+  # Execution
+  # ---------------------------------------------------------------------------
+  "$app" "${app_args[@]}"
+  local ec=$?
+  if (( ec == 126 || ec == 127 )); then
+    printf '\e[1;33m Hint:\e[0m If the AppImage fails to launch, check FUSE availability (e.g. \e[2msudo modprobe fuse\e[0m or install \e[2mfuse2\e[0m).\n' >&2
+  fi
+  return $ec
 }
 
-# --- Functions ---
-# Creates a directory and changes into it.
-mkcd() {
-  mkdir -p "$1" && cd "$1"
+# -----------------------------------------------------------------------------
+# Completions
+# -----------------------------------------------------------------------------
+_llm_completions() {
+  local -a flags
+  flags=(
+    "-h[Show help message]"
+    "--help[Show help message]"
+    "-l[List available AppImages with size & date]"
+    "--list[List available AppImages with size & date]"
+    "-n[Launch newest AppImage without interactive picker]"
+    "--newest[Launch newest AppImage without interactive picker]"
+  )
+  _describe -t flags "llm options" flags
 }
+
+if (( $+functions[compdef] )); then
+  compdef _llm_completions llm
+fi
+
+# Auto-execute if run directly as a script (not sourced into shell)
+if [[ "$ZSH_EVAL_CONTEXT" == "toplevel" ]] && [[ ! -o interactive ]]; then
+  llm "$@"
+fi

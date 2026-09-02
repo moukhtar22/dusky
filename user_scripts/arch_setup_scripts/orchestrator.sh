@@ -53,35 +53,40 @@ bootstrap_packages() {
 }
 
 check_internet() {
+    # 1. Native NM connectivity check if available
+    if command -v nmcli >/dev/null 2>&1; then
+        local nm_state
+        nm_state="$(nmcli -t networking connectivity 2>/dev/null || true)"
+        if [[ "$nm_state" == "full" ]]; then
+            return 0
+        fi
+    fi
+
+    # 2. Fast ICMP ping check (1.1.1.1, 8.8.8.8)
+    if command -v ping >/dev/null 2>&1; then
+        if ping -n -q -c 1 -W 1 1.1.1.1 >/dev/null 2>&1 || ping -n -q -c 1 -W 1 8.8.8.8 >/dev/null 2>&1; then
+            return 0
+        fi
+    fi
+
+    # 3. HTTP / DNS checks with short timeouts
     local url
     local -a urls=(
         "https://archlinux.org"
         "https://geo.mirror.pkgbuild.com"
-        "https://mirror.pkgbuild.com"
+        "http://cpcheck.gstatic.com/generate_204"
     )
 
     if command -v curl >/dev/null 2>&1; then
         for url in "${urls[@]}"; do
-            if curl -fsS --max-time 6 "${url}" >/dev/null 2>&1; then
+            if curl -fsS --connect-timeout 2 --max-time 3 "${url}" >/dev/null 2>&1; then
                 return 0
             fi
         done
     fi
 
     if command -v getent >/dev/null 2>&1; then
-        if getent hosts archlinux.org >/dev/null 2>&1; then
-            return 0
-        fi
-    fi
-
-    if command -v resolvectl >/dev/null 2>&1; then
-        if resolvectl query archlinux.org >/dev/null 2>&1; then
-            return 0
-        fi
-    fi
-
-    if command -v ping >/dev/null 2>&1; then
-        if ping -n -q -c 1 -W 2 1.1.1.1 >/dev/null 2>&1; then
+        if timeout 2 getent hosts archlinux.org >/dev/null 2>&1; then
             return 0
         fi
     fi
@@ -90,12 +95,21 @@ check_internet() {
 }
 
 require_internet() {
-    if check_internet; then
-        log SUCCESS "Internet connection verified."
-        return 0
-    fi
+    local attempt=1
+    local max_attempts=5
+    while (( attempt <= max_attempts )); do
+        if check_internet; then
+            log SUCCESS "Internet connection verified."
+            return 0
+        fi
+        if (( attempt == 1 )); then
+            log INFO "Waiting for network connectivity to initialize..."
+        fi
+        sleep 1
+        ((attempt++))
+    done
 
-    log WARN "No internet connection detected."
+    log WARN "No active internet connection detected after initial probe."
     if [[ -x "$NETWORK_SCRIPT" ]]; then
         log RUN "Launching network configuration script..."
         "$NETWORK_SCRIPT" || true

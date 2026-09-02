@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import json
 import sys
+import subprocess
 from pathlib import Path
 
 _DUSKY_TUI_ROOT = Path.home() / "user_scripts" / "dusky_tui"
@@ -16,22 +17,42 @@ DEFAULT_MODE = "auto"
 THEME_FILE = "~/.config/matugen/generated/dusky_tui.json"
 ENABLE_USER_PRESETS = False
 
-TABS = ["Networks", "Saved", "Status", "Speed Test", "Hotspot"]
+TABS = ["Networks", "Saved", "Status", "Devices", "Speed Test", "Hotspot"]
 
-SCHEMA = {0: [], 1: [], 2: [], 3: [], 4: []}
+SCHEMA = {0: [], 1: [], 2: [], 3: [], 4: [], 5: []}
 
 # ============================================================================
 #  Tab 0: Networks (populated from cache for instant startup)
 # ============================================================================
+# Immediate Wi-Fi radio toggle - available on first page (no need to visit Status)
+def _radio_enabled_sync() -> bool:
+    try:
+        r = subprocess.run(["nmcli", "radio", "wifi"], capture_output=True, text=True, timeout=1)
+        return r.stdout.strip() == "enabled"
+    except Exception:
+        return True
+
+_radio_initial = _radio_enabled_sync()
+
 SCHEMA[0].append(ConfigItem(
-    label="⟳ Rescan Networks",
+    label="Wi-Fi Radio",
+    key="wifi_radio",
+    scope="status",
+    type_="bool",
+    default=_radio_initial,
+    group="Hardware",
+    extended_help="Toggle Wi-Fi radio on/off."
+))
+
+SCHEMA[0].append(ConfigItem(
+    label="Rescan",
     key="rescan",
     scope="network",
     type_="bool",
     default=False,
     group="Actions",
     options=["trigger"],
-    extended_help="Triggers a new wireless network scan in the background."
+    extended_help="Scan for nearby Wi-Fi networks."
 ))
 
 cache_path = Path.home() / ".cache" / "dusky_tui" / "wifi_cache.json"
@@ -43,19 +64,24 @@ if cache_path.exists():
     except Exception:
         _scans = []
 
-if not _scans:
+if not _scans and _radio_initial:
     try:
         p = subprocess.run(
             ["nmcli", "-t", "-f", "IN-USE,SSID,SECURITY,SIGNAL", "device", "wifi", "list", "--rescan", "no"],
             capture_output=True, text=True, timeout=2
         )
         seen = set()
+        # Use regex split handling escaped colons like engine's _split_nmcli_line
+        import re as _re
+        _split = _re.compile(r'(?<!\\):')
         for line in p.stdout.splitlines():
             if not line:
                 continue
-            parts = line.split(":")
+            # Split by unescaped colon, then unescape
+            parts = [f.replace("\\:", ":") for f in _split.split(line)]
             if len(parts) >= 4:
                 in_use = parts[0].strip() == "*"
+                # parts[1] may contain colon-escaped SSID, already unescaped above
                 ssid = parts[1].strip()
                 if ssid and ssid not in seen:
                     seen.add(ssid)
@@ -72,58 +98,70 @@ if not _scans:
     except Exception:
         pass
 
-for _net in _scans:
-    _ssid = _net.get("ssid", "")
-    _signal = _net.get("signal", 0)
-    _security = _net.get("security", "Open")
-    _in_use = _net.get("in_use", False)
+# Only populate cached networks when radio is on — keeps first page clean when Wi-Fi is off
+if _radio_initial:
+    for _net in _scans:
+        _ssid = _net.get("ssid", "")
+        _signal = _net.get("signal", 0)
+        _security = _net.get("security", "Open")
+        _in_use = _net.get("in_use", False)
 
-    def _bar(s):
-        if s >= 80: return "▂▄▆█"
-        if s >= 60: return "▂▄▆_"
-        if s >= 40: return "▂▄__"
-        if s >= 20: return "▂___"
-        return "____"
+        def _bar(s):
+            if s >= 80: return "▂▄▆█"
+            if s >= 60: return "▂▄▆_"
+            if s >= 40: return "▂▄__"
+            if s >= 20: return "▂___"
+            return "____"
 
-    _icon = "●" if _in_use else "○"
-    _status = "Active" if _in_use else "New"
-    _label = f"{_icon} {_status:<6} {_ssid:<24} {_security:<10} {_signal}% {_bar(_signal)}"
-    _pkey = f"net__{_ssid}"
+        _icon = "●" if _in_use else "○"
+        _status = "Active" if _in_use else "New"
+        _label = f"{_icon} {_status:<6} {_ssid:<24} {_security:<10} {_signal}% {_bar(_signal)}"
+        _pkey = f"net__{_ssid}"
 
-    _item = ConfigItem(
-        label=_label,
-        key=_pkey,
-        scope="network",
-        type_="menu",
-        default=None,
-        is_parent=True,
-        expanded=_in_use,
-        group="Available Networks"
-    )
-    _item.exists_in_target = True
-    _item._initial_loaded = True
-    SCHEMA[0].append(_item)
+        _item = ConfigItem(
+            label=_label,
+            key=_pkey,
+            scope="network",
+            type_="menu",
+            default=None,
+            is_parent=True,
+            expanded=_in_use,
+            group="Networks"
+        )
+        _item.exists_in_target = True
+        _item._initial_loaded = True
+        SCHEMA[0].append(_item)
 
-if len(SCHEMA[0]) <= 1:
-    SCHEMA[0].append(ConfigItem(
-        label="  ⟳  Scanning available networks...",
-        key="loading_networks",
-        scope="network",
-        type_="action",
-        default=":",
-        group="Available Networks"
-    ))
+if len(SCHEMA[0]) <= 2:
+    if not _radio_initial:
+        SCHEMA[0].append(ConfigItem(
+            label="Wi-Fi Off",
+            key="wifi_off_notice",
+            scope="network",
+            type_="action",
+            default=":",
+            group="Networks"
+        ))
+    elif not _scans:
+        SCHEMA[0].append(ConfigItem(
+            label="Scanning...",
+            key="loading_networks",
+            scope="network",
+            type_="action",
+            default=":",
+            group="Networks"
+        ))
 
 # ============================================================================
 #  Tab 1: Saved Connections
 # ============================================================================
 SCHEMA[1].append(ConfigItem(
-    label="  ⟳  Loading saved profiles...",
+    label="Loading...",
     key="loading_saved",
     scope="saved",
     type_="action",
     default=":",
-    group="Saved Connections"
+    group="Saved"
 ))
 
 # ============================================================================
@@ -131,13 +169,13 @@ SCHEMA[1].append(ConfigItem(
 # ============================================================================
 SCHEMA[2].extend([
     ConfigItem(
-        label="Wi-Fi Radio Switch",
+        label="Wi-Fi Radio",
         key="wifi_radio",
         scope="status",
         type_="bool",
         default=True,
-        group="Hardware Control",
-        extended_help="Enable or disable the wireless radio hardware interface."
+        group="Hardware",
+        extended_help="Toggle Wi-Fi radio on/off."
     ),
     ConfigItem(
         label="Connection:   Disconnected",
@@ -146,25 +184,25 @@ SCHEMA[2].extend([
         type_="bool",
         default=False,
         options=["copy"],
-        group="Connection Information"
+        group="Info"
     ),
     ConfigItem(
-        label="SSID / Name:  None",
+        label="SSID:  None",
         key="status_ssid",
         scope="clipboard",
         type_="bool",
         default=False,
         options=["copy"],
-        group="Connection Information"
+        group="Info"
     ),
     ConfigItem(
-        label="IP Address:   N/A",
+        label="IP:   N/A",
         key="status_ip",
         scope="clipboard",
         type_="bool",
         default=False,
         options=["copy"],
-        group="Connection Information"
+        group="Info"
     ),
     ConfigItem(
         label="Gateway:      N/A",
@@ -173,147 +211,147 @@ SCHEMA[2].extend([
         type_="bool",
         default=False,
         options=["copy"],
-        group="Connection Information"
+        group="Info"
     ),
     ConfigItem(
-        label="Link Detail:  N/A",
+        label="Link:  N/A",
         key="status_detail",
         scope="clipboard",
         type_="bool",
         default=False,
         options=["copy"],
-        group="Connection Information"
+        group="Info"
     ),
     ConfigItem(
-        label="Interface:    N/A",
+        label="Iface:    N/A",
         key="status_device",
         scope="clipboard",
         type_="bool",
         default=False,
         options=["copy"],
-        group="Connection Information"
+        group="Info"
     ),
     ConfigItem(
-        label="Download Rate: ↓ 0 B/s",
+        label="Down: ↓ 0 B/s",
         key="throughput_down",
         scope="clipboard",
         type_="bool",
         default=False,
         options=["copy"],
-        group="Live Throughput"
+        group="Throughput"
     ),
     ConfigItem(
-        label="Upload Rate:   ↑ 0 B/s",
+        label="Up:   ↑ 0 B/s",
         key="throughput_up",
         scope="clipboard",
         type_="bool",
         default=False,
         options=["copy"],
-        group="Live Throughput"
+        group="Throughput"
     ),
     ConfigItem(
-        label="Total Received: 0 B",
+        label="RX Total: 0 B",
         key="throughput_rx_total",
         scope="clipboard",
         type_="bool",
         default=False,
         options=["copy"],
-        group="Live Throughput"
+        group="Throughput"
     ),
     ConfigItem(
-        label="Total Sent:     0 B",
+        label="TX Total: 0 B",
         key="throughput_tx_total",
         scope="clipboard",
         type_="bool",
         default=False,
         options=["copy"],
-        group="Live Throughput"
+        group="Throughput"
     ),
     ConfigItem(
-        label="Router Gateway Ping: N/A",
+        label="Router Ping: N/A",
         key="ping_router",
         scope="clipboard",
         type_="bool",
         default=False,
         options=["copy"],
-        group="Latency & Packet Loss"
+        group="Latency"
     ),
     ConfigItem(
-        label="Internet Ping (1.1.1.1): N/A",
+        label="Internet Ping: N/A",
         key="ping_internet",
         scope="clipboard",
         type_="bool",
         default=False,
         options=["copy"],
-        group="Latency & Packet Loss"
+        group="Latency"
     ),
     ConfigItem(
-        label="Packet Loss:         0%",
+        label="Loss: 0%",
         key="ping_packet_loss",
         scope="clipboard",
         type_="bool",
         default=False,
-        group="Latency & Packet Loss"
+        group="Latency"
     ),
     ConfigItem(
-        label="✕ Disconnect Current Connection",
+        label="Disconnect",
         key="disconnect",
         scope="status_action",
         type_="bool",
         default=False,
         options=["trigger"],
         group="Actions",
-        extended_help="Disconnects the current active WiFi network profile."
+        extended_help="Disconnect current Wi-Fi."
     ),
     ConfigItem(
-        label="⟳ Reconnect Active Connection",
+        label="Reconnect",
         key="reconnect",
         scope="status_action",
         type_="bool",
         default=False,
         options=["trigger"],
         group="Actions",
-        extended_help="Disconnects and immediately reconnects the current active Wi-Fi connection."
+        extended_help="Reconnect current Wi-Fi."
     ),
     ConfigItem(
-        label="󰐳 Share Active Wi-Fi via QR Code",
+        label="Share QR",
         key="qr_active",
         scope="status_action",
         type_="bool",
         default=False,
         options=["trigger"],
         group="Actions",
-        extended_help="Displays an interactive QR code to share the active Wi-Fi network with mobile devices."
+        extended_help="Show QR for active Wi-Fi."
     ),
     ConfigItem(
-        label="Wi-Fi Band: Auto",
+        label="Band: Auto",
         key="wifi_band",
         scope="status_action",
         type_="cycle",
         default="Auto",
         options=["Auto", "2.4 GHz", "5 GHz", "6 GHz"],
         group="Actions",
-        extended_help="Pins the active Wi-Fi connection to a specific frequency band (2.4, 5, or 6 GHz) with auto-rollback on failure."
+        extended_help="Pin band with auto-rollback."
     ),
     ConfigItem(
-        label="Restart NetworkManager Service",
+        label="Restart NM",
         key="restart_nm",
         scope="status_action",
         type_="bool",
         default=False,
         options=["trigger"],
         group="Actions",
-        extended_help="Restarts systemd NetworkManager daemon in case of hangs."
+        extended_help="Restart NetworkManager."
     ),
     ConfigItem(
-        label="⟳ Force Wireless Interface Rescan",
+        label="Force Rescan",
         key="rescan",
         scope="status_action",
         type_="bool",
         default=False,
         options=["trigger"],
         group="Actions",
-        extended_help="Forces NetworkManager to perform an immediate rescan."
+        extended_help="Force Wi-Fi rescan."
     )
 ])
 
@@ -363,7 +401,6 @@ def render_network_dashboard_view(app):
         ping = dict(getattr(eng, "_ping_state", {}))
         dns_provider = getattr(eng, "_dns_provider", "DHCP")
 
-    # Connection details
     conn_type = verb.get("type", "wifi").upper()
     ssid = verb.get("ssid", "None")
     ip = verb.get("ip", "N/A")
@@ -382,11 +419,9 @@ def render_network_dashboard_view(app):
     bitrate = verb.get("bitrate", "")
     link_detail = (f"{freq} MHz" if freq else "N/A") + (f" ({bitrate})" if bitrate else "")
 
-    # Icons
     is_wifi = conn_type == "WIFI"
     conn_icon = "󰤨" if is_wifi else "󰈀"
 
-    # Throughput
     dl_rate_val = tp.get("download_rate", 0)
     ul_rate_val = tp.get("upload_rate", 0)
 
@@ -405,7 +440,6 @@ def render_network_dashboard_view(app):
     rx_total = format_bytes(rx_raw)
     tx_total = format_bytes(tx_raw)
 
-    # Pings
     r_lat = ping.get("router_ping_latency")
     if r_lat is None and verb.get("router_ping_ms"):
         try: r_lat = float(verb["router_ping_ms"])
@@ -420,37 +454,34 @@ def render_network_dashboard_view(app):
     internet_ping = format_ping_latency(i_lat)
     packet_loss = format_packet_loss(ping.get("internet_ping_packet_loss", 0))
 
-    # Panel 1: Connection Info
     t_conn = Table(show_header=False, box=None, padding=(0, 1))
     t_conn.add_column(style="dim", justify="right")
     t_conn.add_column(style="bold white", justify="left")
     t_conn.add_row("Connection:", f"{conn_icon} {conn_type} ({ssid})")
-    t_conn.add_row("SSID / Name:", ssid)
-    t_conn.add_row("IP Address:", ip)
+    t_conn.add_row("SSID:", ssid)
+    t_conn.add_row("IP:", ip)
     t_conn.add_row("Gateway:", gw)
-    t_conn.add_row("Interface:", iface_str)
-    t_conn.add_row("Link Detail:", link_detail)
-    p_conn = Panel(t_conn, title="[bold cyan] 󰤨 CONNECTION INFORMATION [/bold cyan]", border_style="cyan", expand=True)
+    t_conn.add_row("Iface:", iface_str)
+    t_conn.add_row("Link:", link_detail)
+    p_conn = Panel(t_conn, title="[bold cyan] 󰤨 CONNECTION [/bold cyan]", border_style="cyan", expand=True)
 
-    # Panel 2: Live Throughput
     t_tp = Table(show_header=False, box=None, padding=(0, 1))
     t_tp.add_column(style="dim", justify="right")
     t_tp.add_column(style="bold green", justify="left")
-    t_tp.add_row("Download Rate:", f"↓ {dl_rate}")
-    t_tp.add_row("Upload Rate:", f"↑ {ul_rate}")
-    t_tp.add_row("Total Received:", rx_total)
-    t_tp.add_row("Total Sent:", tx_total)
-    p_tp = Panel(t_tp, title="[bold green] 󰓅 LIVE THROUGHPUT [/bold green]", border_style="green", expand=True)
+    t_tp.add_row("Down:", f"↓ {dl_rate}")
+    t_tp.add_row("Up:", f"↑ {ul_rate}")
+    t_tp.add_row("RX Total:", rx_total)
+    t_tp.add_row("TX Total:", tx_total)
+    p_tp = Panel(t_tp, title="[bold green] 󰓅 THROUGHPUT [/bold green]", border_style="green", expand=True)
 
-    # Panel 3: Latency & Security
     t_ping = Table(show_header=False, box=None, padding=(0, 1))
     t_ping.add_column(style="dim", justify="right")
     t_ping.add_column(style="bold yellow", justify="left")
-    t_ping.add_row("Router Gateway Ping:", router_ping)
-    t_ping.add_row("Internet Ping (1.1.1.1):", internet_ping)
-    t_ping.add_row("Packet Loss:", packet_loss)
-    t_ping.add_row("Active DNS Provider:", dns_provider)
-    p_ping = Panel(t_ping, title="[bold yellow] 󰛳 LATENCY & METRICS [/bold yellow]", border_style="yellow", expand=True)
+    t_ping.add_row("Router Ping:", router_ping)
+    t_ping.add_row("Internet Ping:", internet_ping)
+    t_ping.add_row("Loss:", packet_loss)
+    t_ping.add_row("DNS:", dns_provider)
+    p_ping = Panel(t_ping, title="[bold yellow] 󰛳 LATENCY [/bold yellow]", border_style="yellow", expand=True)
 
     right_group = Group(p_tp, p_ping)
 
@@ -462,44 +493,145 @@ def render_network_dashboard_view(app):
     return grid
 
 
+# ============================================================================
+#  Devices Dashboard (Tab 3) — nmcli device status filtered view
+# ============================================================================
+def render_devices_dashboard_view(app):
+    from rich.panel import Panel
+    from rich.table import Table
+    from rich.text import Text
+    from python.engines.network_manager import NetworkManagerEngine
+
+    devices = []
+    details_map = {}
+    eng = getattr(NetworkManagerEngine, "_instance", None)
+    if not eng and app and hasattr(app, "engine_pool"):
+        for e in list(app.engine_pool.values()):
+            if isinstance(e, NetworkManagerEngine):
+                eng = e
+                break
+    if eng:
+        devices = list(getattr(eng, "_devices_cache", []))
+        details_map = dict(getattr(eng, "_device_details", {}))
+        if not devices:
+            try:
+                devices = eng._get_nmcli_devices()
+                details_map = eng._get_device_details_map()
+            except Exception:
+                pass
+
+    if not devices:
+        t = Table(show_header=False, box=None, padding=(0, 1))
+        t.add_column(justify="center")
+        t.add_row(Text("No devices found", style="dim italic"))
+        return Panel(t, title="[bold cyan] DEVICES [/bold cyan]", border_style="cyan")
+
+    # Main device table
+    tbl = Table(show_header=True, header_style="bold cyan", box=None, padding=(0, 1), expand=True)
+    tbl.add_column("Device", style="bold white", no_wrap=True)
+    tbl.add_column("Type", style="dim", no_wrap=True)
+    tbl.add_column("State", justify="left")
+    tbl.add_column("Connection", style="white", overflow="fold")
+    tbl.add_column("IP / Details", style="dim", overflow="fold")
+
+    for d in devices:
+        dev = d.get("device", "")
+        dtype = d.get("type", "")
+        state = d.get("state", "")
+        conn = d.get("connection", "") or "--"
+        det = details_map.get(dev, {})
+        ip = det.get("IP4.ADDRESS[1]", "") or det.get("IP4.ADDRESS", "") or d.get("ip", "")
+        if not ip:
+            ip = det.get("IP4.GATEWAY", "") or ""
+            if ip:
+                ip = f"gw {ip}"
+            else:
+                # fallback to hwaddr for identification
+                hw = det.get("GENERAL.HWADDR", "")
+                ip = hw if hw and hw != "(unknown)" else "--"
+
+        # Icons & colors by state
+        if "connected" in state.lower():
+            state_txt = Text(state, style="bold green")
+            icon = "●"
+        elif "disconnected" in state.lower():
+            state_txt = Text(state, style="yellow")
+            icon = "○"
+        elif "unavailable" in state.lower():
+            state_txt = Text(state, style="dim")
+            icon = "◯"
+        else:
+            state_txt = Text(state, style="dim")
+            icon = "·"
+
+        dev_txt = Text(f"{icon} {dev}", style="bold white")
+        tbl.add_row(dev_txt, dtype, state_txt, conn, ip)
+
+    panel = Panel(tbl, title="[bold cyan] 󰈀 DEVICES — nmcli device status [/bold cyan]", border_style="cyan", expand=True)
+
+    # Optional detail grid for selected/connected devices
+    # Add summary footer
+    footer = Text(f"{len(devices)} devices • filtered view • see list below for details", style="dim italic")
+    from rich.console import Group
+    return Group(panel, footer)
+
+
 CUSTOM_VIEWS = {
     2: {
         "view": render_network_dashboard_view,
         "interval": 1.0
+    },
+    3: {
+        "view": render_devices_dashboard_view,
+        "interval": 2.0
     }
 }
 
 # ============================================================================
-#  Tab 3: Speed Test — Fast.com speed test integration
+#  Tab 3 (index 3): Devices — details populated by engine
 # ============================================================================
 SCHEMA[3].extend([
     ConfigItem(
-        label="▶ Run Full Speed Test",
+        label="Loading...",
+        key="loading_devices",
+        scope="devices",
+        type_="action",
+        default=":",
+        group="Devices"
+    )
+])
+
+# ============================================================================
+#  Tab 4: Speed Test — Fast.com speed test integration
+# ============================================================================
+SCHEMA[4].extend([
+    ConfigItem(
+        label="Run All",
         key="speedtest_full",
         scope="speedtest_action",
         type_="bool",
         default=False,
         options=["trigger"],
-        group="Run Test",
-        extended_help="Executes download & upload speed test measurements."
+        group="Run",
+        extended_help="Run download & upload test."
     ),
     ConfigItem(
-        label="▶ Run Download Test",
+        label="Download",
         key="speedtest_down",
         scope="speedtest_action",
         type_="bool",
         default=False,
         options=["trigger"],
-        group="Run Test"
+        group="Run"
     ),
     ConfigItem(
-        label="▶ Run Upload Test",
+        label="Upload",
         key="speedtest_up",
         scope="speedtest_action",
         type_="bool",
         default=False,
         options=["trigger"],
-        group="Run Test"
+        group="Run"
     ),
     ConfigItem(
         label="Status: Ready",
@@ -507,89 +639,89 @@ SCHEMA[3].extend([
         scope="speedtest_info",
         type_="action",
         default=":",
-        group="Test Status & Results"
+        group="Results"
     ),
     ConfigItem(
-        label="Download Speed: --",
+        label="Down: --",
         key="speedtest_down_result",
         scope="clipboard",
         type_="bool",
         default=False,
         options=["copy"],
-        group="Test Status & Results"
+        group="Results"
     ),
     ConfigItem(
-        label="Upload Speed:   --",
+        label="Up: --",
         key="speedtest_up_result",
         scope="clipboard",
         type_="bool",
         default=False,
         options=["copy"],
-        group="Test Status & Results"
+        group="Results"
     ),
 ])
 
 # ============================================================================
-#  Tab 4: Hotspot
+#  Tab 5: Hotspot
 # ============================================================================
-SCHEMA[4].extend([
+SCHEMA[5].extend([
     ConfigItem(
-        label="Hotspot SSID",
+        label="SSID",
         key="hotspot_ssid",
         scope="hotspot",
         type_="string",
         default="MyHotspot",
-        group="Hotspot Configuration",
-        extended_help="Set the SSID/Name for the broadcasted Wi-Fi Hotspot."
+        group="Config",
+        extended_help="Hotspot name."
     ),
     ConfigItem(
-        label="Hotspot Password",
+        label="Password",
         key="hotspot_password",
         scope="hotspot",
         type_="string",
         default="",
-        group="Hotspot Configuration",
-        extended_help="Password for the hotspot (minimum 8 characters). Leave empty for an open network."
+        group="Config",
+        extended_help="Min 8 chars; empty = open."
     ),
     ConfigItem(
-        label="Start Hotspot (2.4 GHz)",
+        label="Start 2.4 GHz",
         key="start_hotspot_24",
         scope="hotspot",
         type_="bool",
         default=False,
         options=["trigger"],
-        group="Hotspot Actions",
-        extended_help="Broadcasts a 2.4 GHz Access Point using the configured SSID and Password."
+        group="Actions",
+        extended_help="Start 2.4 GHz hotspot."
     ),
     ConfigItem(
-        label="Start Hotspot (5 GHz)",
+        label="Start 5 GHz",
         key="start_hotspot_5",
         scope="hotspot",
         type_="bool",
         default=False,
         options=["trigger"],
-        group="Hotspot Actions",
-        extended_help="Broadcasts a 5 GHz Access Point using the configured SSID and Password."
+        group="Actions",
+        extended_help="Start 5 GHz hotspot."
     ),
     ConfigItem(
-        label="Stop Hotspot",
+        label="Stop",
         key="stop_hotspot",
         scope="hotspot",
         type_="bool",
         default=False,
         options=["trigger"],
-        group="Hotspot Actions",
-        extended_help="Stops the active broadcast on the wireless adapter."
+        group="Actions",
+        extended_help="Stop hotspot."
     ),
     ConfigItem(
-        label="󰐳 Share Hotspot via QR Code",
+        label="Share QR",
         key="qr_hotspot",
         scope="hotspot",
         type_="bool",
         default=False,
         options=["trigger"],
-        group="Hotspot Actions",
-        extended_help="Displays an interactive QR code for mobile devices to join the hotspot."
+        group="Actions",
+        extended_help="Show QR for hotspot."
     ),
     ConfigItem(
         label="Status: Inactive",
@@ -597,15 +729,15 @@ SCHEMA[4].extend([
         scope="hotspot",
         type_="action",
         default=":",
-        group="Hotspot Status"
+        group="Status"
     ),
     ConfigItem(
-        label="Connected Clients: N/A",
+        label="Clients: N/A",
         key="hotspot_clients_info",
         scope="hotspot",
         type_="action",
         default=":",
-        group="Hotspot Status"
+        group="Status"
     )
 ])
 

@@ -348,8 +348,8 @@ SCHEMA = {
             key="embeddedbitmap",
             scope="DEFAULT",
             type_="bool",
-            default=False,
-            extended_help="Controls whether fonts with embedded bitmap glyphs display bitmaps at small sizes. Disabling forces scalable vector glyphs, preventing pixelated text rendering."
+            default=True,
+            extended_help="Controls whether fonts with embedded bitmap glyphs display bitmaps at small sizes. Must be enabled for color emoji fonts (e.g. Noto Color Emoji) which are bitmap-only (CBDT/CBLC) and have no scalable outlines to fall back to — disabling this breaks emoji rendering entirely."
         )
     ],
 
@@ -441,7 +441,7 @@ SCHEMA = {
                 "hintstyle": "hintslight",
                 "rgba": "rgb",
                 "lcdfilter": "lcddefault",
-                "embeddedbitmap": False
+                "embeddedbitmap": True
             },
             extended_help="**Modern Sharp UI**\n\nApplies highly modern, crisp fonts with standard RGB subpixel rendering and slight hinting. Ideal for high-resolution standard monitors."
         ),
@@ -460,7 +460,7 @@ SCHEMA = {
                 "antialias": True,
                 "hinting": True,
                 "hintstyle": "hintslight",
-                "embeddedbitmap": False
+                "embeddedbitmap": True
             },
             extended_help="**Accessibility Focus**\n\nPrioritizes character distinction using Atkinson Hyperlegible (Braille Institute) to prevent visual confusion between similar characters like '1', 'l', and 'I'."
         ),
@@ -481,7 +481,7 @@ SCHEMA = {
                 "hintstyle": "hintnone",
                 "rgba": "none",
                 "lcdfilter": "lcdnone",
-                "embeddedbitmap": False
+                "embeddedbitmap": True
             },
             extended_help="**High-DPI / 4K Clean Profile**\n\nOptimized for 4K and Retina-class displays. Disables subpixel LCD geometry (`rgba=none`) and pixel grid alignment (`hintstyle=hintnone`) for ultra-clean pure vector outline rendering."
         ),
@@ -500,7 +500,7 @@ SCHEMA = {
                 "antialias": True,
                 "hinting": True,
                 "hintstyle": "hintfull",
-                "embeddedbitmap": False
+                "embeddedbitmap": True
             },
             extended_help="**Legacy Linux Config**\n\nRestores the classic open-source desktop appearance using metric-compatible Liberation/Free fonts alongside strict/full hinting pixel alignment."
         ),

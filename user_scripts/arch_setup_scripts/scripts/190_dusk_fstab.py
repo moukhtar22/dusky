@@ -27,7 +27,7 @@ FSTAB_CONTENT = """
 UUID=848a215e8a214e4c	/mnt/windows	ntfs	defaults,noatime,uid=1000,gid=1000,umask=002,windows_names,iocharset=utf8,prealloc,nofail,user,comment=x-gvfs-show	0 0
 
 # SSD Ext4 (Browser)
-UUID=b982f02e-32f6-40cd-86de-964c90676cc2	/home/dusk/.config/mozilla	ext4	defaults,noatime,lazytime,nofail,user,comment=x-gvfs-show	0 2
+UUID=b982f02e-32f6-40cd-86de-964c90676cc2	/home/new/.config/mozilla	ext4	defaults,noatime,lazytime,nofail,user,comment=x-gvfs-show	0 2
 
 # SSD Ext4 (Media)
 UUID=a7230e67-34e8-4cd2-981d-ea02d1253539	/mnt/media	ext4	defaults,noatime,lazytime,nofail,user,comment=x-gvfs-show	0 2

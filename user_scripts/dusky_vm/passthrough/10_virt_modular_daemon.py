@@ -1,15 +1,12 @@
 #!/usr/bin/env python3
 """
 Arsonix KVM/VFIO Pipeline -- Phase 2 (10_virt_modular_daemon.py)
-libvirt 12.6+ modular daemon topology: monolith eradication, socket activation,
-and REAL socket permissions (systemd drop-ins, not the ignored conf keys).
+libvirt 12.6+ modular daemon topology: monolith eradication, systemd socket activation,
+Polkit-native RBAC, and on-demand zero-RSS idle hypervisor lifecycle.
 
-Target : Arch Linux rolling (Aug 2026) / libvirt 12.6+ / systemd 261+
-Upstream fact (libvirtd.conf / virtqemud.conf verbatim):
-    "This setting is not required or honoured if using systemd socket activation."
-    -> unix_sock_group / unix_sock_rw_perms are INERT under .socket activation.
-       The listening socket's owner, group and mode come from the systemd unit:
-       [Socket] SocketGroup= / SocketMode=.
+Target : Arch Linux rolling (Aug 2026) / libvirt 12.6+ / systemd 261+ / Polkit 127+
+Policy : Pure socket activation. Modular daemons (virtqemud, virtproxyd, virtnetworkd, etc.).
+         Zero idle RAM. Dynamic Polkit authorization for libvirt/wheel groups.
 """
 
 import argparse
@@ -286,15 +283,14 @@ def enforce_socket_activation(fleet: Fleet) -> None:
 
 
 # ==============================================================================
-# STAGE 3 -- the permission fix that actually works
+# STAGE 3 -- modern Polkit authorization & socket permission drop-ins
 # ==============================================================================
 DROPIN_RW = """# Managed by Arsonix (Phase 2). Do not edit.
-# unix_sock_group / unix_sock_rw_perms in *.conf are ignored under socket
-# activation; the listening socket inherits these unit settings instead.
+# Modern libvirt 12.6+ / systemd socket activation with Polkit authorization.
 [Socket]
 SocketUser=root
 SocketGroup=libvirt
-SocketMode=0660
+SocketMode=0666
 """
 
 DROPIN_RO = """# Managed by Arsonix (Phase 2). Do not edit.
@@ -303,6 +299,39 @@ SocketUser=root
 SocketGroup=libvirt
 SocketMode=0666
 """
+
+DROPIN_ADMIN = """# Managed by Arsonix (Phase 2). Do not edit.
+[Socket]
+SocketUser=root
+SocketGroup=root
+SocketMode=0600
+"""
+
+POLKIT_DIR = Path("/etc/polkit-1/rules.d")
+POLKIT_RULE_PATH = POLKIT_DIR / "50-arsonix-libvirt.rules"
+POLKIT_RULE_PAYLOAD = """// Managed by Arsonix (Phase 2).
+// Grants full unprivileged management permissions to members of libvirt and wheel groups
+// without requiring interactive password prompts.
+polkit.addRule(function(action, subject) {
+    if (action.id.indexOf("org.libvirt.unix.") === 0 &&
+        (subject.isInGroup("libvirt") || subject.isInGroup("wheel"))) {
+        return polkit.Result.YES;
+    }
+});
+"""
+
+
+def install_polkit_rules() -> bool:
+    console.print("\n[bold blue]==>[/bold blue] [bold]Installing Polkit authorization rules[/bold]")
+    changed = False
+    POLKIT_DIR.mkdir(parents=True, exist_ok=True, mode=0o755)
+    if atomic_write(POLKIT_RULE_PATH, POLKIT_RULE_PAYLOAD, mode=0o644):
+        changed = True
+        console.print(f"[green]  ~[/green] {POLKIT_RULE_PATH}")
+        console.print("[bold green]  ok[/bold green] Polkit rule written and armed.")
+    else:
+        console.print("[bold green]  ok[/bold green] Polkit rule already present.")
+    return changed
 
 
 def install_socket_dropins(fleet: Fleet) -> bool:
@@ -313,9 +342,11 @@ def install_socket_dropins(fleet: Fleet) -> bool:
         bail("Group 'libvirt' does not exist. The libvirt package did not install its sysusers.")
 
     changed = False
-    for unit, payload in [(u, DROPIN_RW) for u in fleet.sockets_rw] + [
-        (u, DROPIN_RO) for u in fleet.sockets_ro
-    ]:
+    for unit, payload in (
+        [(u, DROPIN_RW) for u in fleet.sockets_rw]
+        + [(u, DROPIN_RO) for u in fleet.sockets_ro]
+        + [(u, DROPIN_ADMIN) for u in fleet.sockets_admin]
+    ):
         path = DROPIN_ROOT / f"{unit}.d" / DROPIN_NAME
         if atomic_write(path, payload, mode=0o644):
             changed = True
@@ -358,12 +389,20 @@ def enforce_kv_config(path: Path, targets: dict[str, str], banner: str) -> bool:
 
 def configure_daemon_conf() -> bool:
     console.print("\n[bold blue]==>[/bold blue] [bold]Daemon configuration[/bold]")
-    touched = enforce_kv_config(
-        LIBVIRT_ETC / "virtqemud.conf",
-        {"unix_sock_group": '"libvirt"', "unix_sock_rw_perms": '"0770"',
-         "unix_sock_ro_perms": '"0777"', "auth_unix_rw": '"none"', "auth_unix_ro": '"none"'},
-        "Arsonix: only honoured when virtqemud is launched without socket activation",
-    )
+    touched = False
+    targets = {
+        "unix_sock_group": '"libvirt"',
+        "unix_sock_rw_perms": '"0770"',
+        "unix_sock_ro_perms": '"0777"',
+        "auth_unix_rw": '"polkit"',
+        "auth_unix_ro": '"none"',
+    }
+    for conf_path in sorted(LIBVIRT_ETC.glob("virt*d.conf")):
+        touched |= enforce_kv_config(
+            conf_path,
+            targets,
+            "Arsonix: modern socket activation & polkit authorization",
+        )
     # libvirt >= 10.3 selects its packet-filter backend explicitly. nftables is the
     # only backend on a 2026 Arch host (iptables-nft shim is not installed).
     if (LIBVIRT_ETC / "network.conf").is_file():
@@ -438,7 +477,7 @@ def socket_facts(unit: str) -> str:
     except KeyError:
         group = str(st.st_gid)
     mode = stat.S_IMODE(st.st_mode)
-    colour = "green" if group == "libvirt" and mode in (0o660, 0o666) else "yellow"
+    colour = "green" if mode in (0o660, 0o666, 0o600) else "yellow"
     return f"[{colour}]{group} {mode:04o}[/{colour}]"
 
 
@@ -475,7 +514,7 @@ def verification_table(fleet: Fleet) -> None:
 
 def connectivity_test() -> None:
     operator = state_load().get("human_user") or os.environ.get("SUDO_USER") or ""
-    console.print("\n[bold blue]==>[/bold blue] [bold]Live IPC test[/bold]")
+    console.print("\n[bold blue]==>[/bold blue] [bold]Live IPC & Authorization test[/bold]")
     root_probe = run(["virsh", "-c", "qemu:///system", "-q", "version"], timeout=60)
     if root_probe.ok:
         console.print(f"[bold green]  ok[/bold green] root -> qemu:///system\n[dim]{root_probe.out}[/dim]")
@@ -494,13 +533,11 @@ def connectivity_test() -> None:
             console.print(f"[bold green]  ok[/bold green] {operator} -> {user_probe.out}")
         else:
             console.print(
-                f"[yellow]  ! {operator} cannot reach qemu:///system yet.\n"
-                f"    {user_probe.err or user_probe.out}\n"
-                f"    This is expected until '{operator}' re-logs in and gains the "
-                "'libvirt' supplementary group.[/yellow]"
+                f"[yellow]  ! {operator} cannot reach qemu:///system:\n"
+                f"    {user_probe.err or user_probe.out}[/yellow]"
             )
     console.print(
-        "[dim]  virtqemud is now running because we just connected; it self-terminates "
+        "[dim]  virtqemud is socket-activated on demand; it self-terminates "
         "after its idle timeout, returning the host to 0 RSS.[/dim]"
     )
 
@@ -517,7 +554,7 @@ def main() -> None:
     console.print(
         Panel(
             "[bold green]Arsonix Phase 2 -- Modular Daemon & IPC Plane[/bold green]\n"
-            "libvirt 12.6+ / systemd 261 socket activation / zero idle RSS",
+            "libvirt 12.6+ / systemd 261 socket activation / zero idle RSS / Polkit RBAC",
             expand=False,
             border_style="green",
         )
@@ -535,9 +572,10 @@ def main() -> None:
     console.print(f"[dim]discovered drivers: {', '.join(fleet.drivers)}[/dim]")
 
     enforce_socket_activation(fleet)
+    polkit_changed = install_polkit_rules()
     dropins_changed = install_socket_dropins(fleet)
     conf_changed = configure_daemon_conf()
-    activate_sockets(fleet, restart=dropins_changed or conf_changed)
+    activate_sockets(fleet, restart=dropins_changed or conf_changed or polkit_changed)
     if not args.no_guests:
         configure_libvirt_guests()
 

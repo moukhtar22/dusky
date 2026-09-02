@@ -1,0 +1,39 @@
+# ==============================================================================
+# Nophenia Profile
+# ==============================================================================
+
+extends = "base_native"
+
+[meta]
+id = "nophenia"
+name = "nophenia"
+version = "1.0"
+icon = "applications-games"
+developer = "Unknown"
+genre = "Action / Adventure"
+description = "Fast-paced native Linux action adventure - immersive world with Godot-driven gameplay and Steam integration."
+
+[paths]
+game_dir = "/mnt/media/games/unknown_quality/nophenia-jc141"
+dwarfs_image = "files/game-root.dwarfs"
+dwarfs_mount = "files/.game-root-mnt"
+overlay_dir = "files/game-root"
+overlay_storage = "files/overlay-storage"
+overlay_work = "files/.game-root-work"
+executable = "nophenia.x86_64"
+arguments = []
+
+[runtime]
+type = "native"
+
+[graphics]
+gpu = "auto"
+wayland_native = true
+
+[graphics.gamescope]
+enabled = false
+
+[performance]
+gamemode = true
+mangohud = false
+fps_limit = 60

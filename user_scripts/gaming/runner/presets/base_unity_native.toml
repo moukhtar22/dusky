@@ -1,0 +1,15 @@
+# ==============================================================================
+# Base Unity Native Linux Preset
+# Optimized for Unity Engine titles on modern Linux / Wayland.
+# ==============================================================================
+
+extends = "base_native"
+
+[runtime]
+type = "native"
+
+[graphics]
+gl_threaded = true
+
+[env]
+UNITY_DISABLE_AUTOREDUCE = "1"

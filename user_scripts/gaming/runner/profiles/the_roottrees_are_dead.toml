@@ -1,0 +1,39 @@
+# ==============================================================================
+# The Roottrees are Dead Profile
+# ==============================================================================
+
+extends = "base_native"
+
+[meta]
+id = "the_roottrees_are_dead"
+name = "The Roottrees are Dead"
+version = "1.0"
+icon = "applications-games"
+developer = "Robin Ward"
+genre = "Puzzle / Mystery"
+description = "Genealogy mystery puzzle - untangle the sprawling Roottree family tree using scattered evidence and historical records."
+
+[paths]
+game_dir = "/mnt/media/games/unknown_quality/The.Roottrees.are.Dead-jc141"
+dwarfs_image = "files/game-root.dwarfs"
+dwarfs_mount = "files/.game-root-mnt"
+overlay_dir = "files/game-root"
+overlay_storage = "files/overlay-storage"
+overlay_work = "files/.game-root-work"
+executable = "roottrees"
+arguments = []
+
+[runtime]
+type = "native"
+
+[graphics]
+gpu = "auto"
+wayland_native = true
+
+[graphics.gamescope]
+enabled = false
+
+[performance]
+gamemode = true
+mangohud = false
+fps_limit = 60

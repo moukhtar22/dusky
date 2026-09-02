@@ -1,0 +1,57 @@
+# ==============================================================================
+# FAITH: The Unholy Trinity Profile
+# ==============================================================================
+# Engine: GameMaker Studio (Windows) via ColdClientLoader.
+# Notes: Contains three language root mounts. Default to english&japanese subdir.
+# Start scripts: start.e-w.english&japanese.sh -> GAMEROOT = files/game-root/english&japanese
+
+extends = "base_wine_dxvk"
+
+[meta]
+id = "faith_the_unholy_trinity"
+name = "FAITH: The Unholy Trinity"
+version = "1.0"
+icon = "applications-games"
+developer = "Airdorf Games"
+genre = "Horror / Adventure"
+description = "Mortal obsession and demonic paranoia collide in this 8-bit Atari-styled horror trilogy inspired by the satanic panic of the 1980s."
+
+[paths]
+game_dir = "/mnt/media/games/unknown_quality/FAITH.The.Unholy.Trinity-jc141"
+dwarfs_image = "files/game-root.dwarfs"
+dwarfs_mount = "files/.game-root-mnt"
+overlay_dir = "files/game-root"
+overlay_storage = "files/overlay-storage"
+overlay_work = "files/.game-root-work"
+executable = "english&japanese/steamclient_loader_x64.exe"
+arguments = []
+
+[runtime]
+type = "wine"
+
+[runtime.wine]
+prefix_dir = "files/wine-prefix-ew"
+arch = "win64"
+sync_mode = "fsync"
+dxvk = true
+vkd3d = true
+
+[runtime.wine.dll_overrides]
+"winemenubuilder.exe" = "d"
+mshtml = "d"
+dxgi = "n,b"
+d3d11 = "n,b"
+d3d12 = "n,b"
+d3d9 = "n,b"
+
+[graphics]
+gpu = "auto"
+wayland_native = true
+
+[graphics.gamescope]
+enabled = false
+
+[performance]
+gamemode = true
+mangohud = false
+fps_limit = 60

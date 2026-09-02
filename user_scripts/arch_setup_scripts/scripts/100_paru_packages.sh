@@ -83,6 +83,7 @@ declare -ar PACKAGES=(
   "peaclock"
   "tray-tui"
   "xdg-terminal-exec"
+  "papirus-folders"
 )
 
 # Delay before auto-retrying

@@ -71,6 +71,9 @@ CHECK_CMDS: dict[str, str] = {
     "kate_syntax": "kate",
     "konsole": "konsole",
     "konsole_profile": "konsole",
+    "kvantum_kvconfig": "kvantummanager",
+    "kvantum_svg": "kvantummanager",
+    "gimp": "gimp",
 }
 
 # Track all explicitly registered keys for auto-discovery
@@ -173,6 +176,15 @@ SCHEMA: dict[int, list[ConfigItem]] = {
             default=False,
             group="Kvantum",
             extended_help="**Kvantum Matugen Theme SVG Assets**\n\nGenerates dynamic SVG assets for Kvantum."
+        ),
+        ConfigItem(
+            label="GIMP Theme",
+            key="gimp",
+            scope="DEFAULT",
+            type_="bool",
+            default=False,
+            group="GIMP",
+            extended_help="**GIMP 3.x Theme**\n\nGenerates Matugen colors for GIMP (separate from GTK). Creates `~/.config/GIMP/3.0|3.2/themes/Matugen/gimp.css` and personal `gimp.css` override. Only enabled via --smart if `gimp` is installed."
         ),
     ],
 
@@ -278,15 +290,6 @@ SCHEMA: dict[int, list[ConfigItem]] = {
             default=True,
             group="Dusky Services",
             extended_help="**Dusky Visualizer Colors**\n\nGenerates palette variables for desktop audio visualizer."
-        ),
-        ConfigItem(
-            label="Hyprpolkit",
-            key="hyprpolkitagent",
-            scope="DEFAULT",
-            type_="bool",
-            default=True,
-            group="Authentication",
-            extended_help="**Hyprland Polkit Agent**\n\nRestarts `hyprpolkitagent` user service on theme updates."
         ),
     ],
 
@@ -579,7 +582,7 @@ SCHEMA: dict[int, list[ConfigItem]] = {
             type_="preset",
             default=None,
             group="Built-in Presets",
-            confirm_message="Reset **all** 51 templates to their factory defaults?",
+            confirm_message="Reset **all** 52 templates to their factory defaults?",
             preset_payload={"__ALL_DEFAULTS__": True},
             extended_help="**Factory Reset**\n\nReverts every template toggle to its `default` (true → enabled, false → disabled). Uses `{\"__ALL_DEFAULTS__\": True}` so omitted keys are correctly handled and the match ratio tracks defaults."
         ),
@@ -597,9 +600,10 @@ SCHEMA: dict[int, list[ConfigItem]] = {
                 "dusky_sites": True, "dusky_tui": True, "dusky_visualizer_colors": True,
                 "fastfetch": True, "foot": True, "gtk3": True, "gtk4": True,
                 "gtksourceview": True, "hyprland": True, "hyprlock": True,
-                "hyprpolkitagent": True, "icon_theme": True, "kate_syntax": True,
+                "icon_theme": True, "kate_syntax": True,
                 "kdeglobals": True, "khal": False, "kitty": True, "konsole": True,
                 "konsole_profile": True, "kvantum_kvconfig": False, "kvantum_svg": False,
+                "gimp": False,
                 "mako": True, "master_dump": False, "neovim": True, "obs": False,
                 "obsidian": False, "opencode": False, "papirus-folders": True,
                 "pywalfox": True, "qt5ct": True, "qt6ct": True, "rofi": True,
@@ -608,7 +612,7 @@ SCHEMA: dict[int, list[ConfigItem]] = {
                 "vscode": False, "waybar": True, "wlogout": True, "yazi": True,
                 "zathura": False, "zed": False, "zellij": False
             },
-            extended_help="**Standard Workstation**\n\nCurated Dusky suite: GTK 3/4, Icons, Qt5/6, KDE (kdeglobals + kate_syntax + konsole), Hyprland stack (hyprland, hyprlock, waybar, wlogout, rofi, mako), theme_notify, hyprpolkitagent, dusky_tui/visualizer, kitty/foot, neovim/yazi, cava/btop/fastfetch, pywalfox/dusky_sites/papirus-folders, standalone_commands. All 51 keys listed explicitly so strict-snapshot semantics are predictable."
+            extended_help="**Standard Workstation**\n\nCurated Dusky suite: GTK 3/4, Icons, Qt5/6, KDE (kdeglobals + kate_syntax + konsole), Hyprland stack (hyprland, hyprlock, waybar, wlogout, rofi, mako), theme_notify, dusky_tui/visualizer, kitty/foot, neovim/yazi, cava/btop/fastfetch, pywalfox/dusky_sites/papirus-folders, standalone_commands. All 51 keys listed explicitly so strict-snapshot semantics are predictable."
         ),
         ConfigItem(
             label="Minimal — Core Only",
@@ -624,9 +628,10 @@ SCHEMA: dict[int, list[ConfigItem]] = {
                 "dusky_sites": False, "dusky_tui": True, "dusky_visualizer_colors": False,
                 "fastfetch": False, "foot": True, "gtk3": False, "gtk4": False,
                 "gtksourceview": False, "hyprland": True, "hyprlock": False,
-                "hyprpolkitagent": False, "icon_theme": False, "kate_syntax": False,
+                "icon_theme": False, "kate_syntax": False,
                 "kdeglobals": False, "khal": False, "kitty": True, "konsole": False,
                 "konsole_profile": False, "kvantum_kvconfig": False, "kvantum_svg": False,
+                "gimp": False,
                 "mako": True, "master_dump": False, "neovim": False, "obs": False,
                 "obsidian": False, "opencode": False, "papirus-folders": False,
                 "pywalfox": False, "qt5ct": False, "qt6ct": False, "rofi": True,
@@ -635,7 +640,7 @@ SCHEMA: dict[int, list[ConfigItem]] = {
                 "vscode": False, "waybar": True, "wlogout": False, "yazi": False,
                 "zathura": False, "zed": False, "zellij": False
             },
-            extended_help="**Minimal Core**\n\nUltra-light profile for performance or debugging: only `hyprland`, `waybar`, `kitty`/`foot`, `rofi`, `mako`, and `dusky_tui` stay enabled; everything else is disabled. Full 51-key strict snapshot."
+            extended_help="**Minimal Core**\n\nUltra-light profile for performance or debugging: only `hyprland`, `waybar`, `kitty`/`foot`, `rofi`, `mako`, and `dusky_tui` stay enabled; everything else is disabled. Full 52-key strict snapshot."
         ),
         ConfigItem(
             label="Enable All Templates",
@@ -644,25 +649,26 @@ SCHEMA: dict[int, list[ConfigItem]] = {
             type_="preset",
             default=None,
             group="Built-in Presets",
-            confirm_message="Enable **all** 51 templates? This will uncomment every `[templates.*]` block.",
+            confirm_message="Enable **all** 52 templates? This will uncomment every `[templates.*]` block.",
             preset_payload={
                 "alacritty": True, "beeper": True, "btop": True, "cava": True,
                 "dusky_control_center": True, "dusky_quickpanal": True,
                 "dusky_sites": True, "dusky_tui": True, "dusky_visualizer_colors": True,
                 "fastfetch": True, "foot": True, "gtk3": True, "gtk4": True,
                 "gtksourceview": True, "hyprland": True, "hyprlock": True,
-                "hyprpolkitagent": True, "icon_theme": True, "kate_syntax": True,
+                "icon_theme": True, "kate_syntax": True,
                 "kdeglobals": True, "khal": True, "kitty": True, "konsole": True,
                 "konsole_profile": True, "kvantum_kvconfig": True, "kvantum_svg": True,
+                "gimp": True,
                 "mako": True, "master_dump": True, "neovim": True, "obs": True,
                 "obsidian": True, "opencode": True, "papirus-folders": True,
                 "pywalfox": True, "qt5ct": True, "qt6ct": True, "rofi": True,
                 "spicetify": True, "standalone_commands": True, "starship": True,
                 "steam": True, "theme_notify": True, "tmux": True, "vesktop": True,
                 "vscode": True, "waybar": True, "wlogout": True, "yazi": True,
-                "zathura": True, "zed": True, "zellij": True
+                "zathura": True, "zed": True, "zellij": True, "gimp": True
             },
-            extended_help="**Enable Everything**\n\nTurns **on** every known template block (all 51 keys → `true`)."
+            extended_help="**Enable Everything**\n\nTurns **on** every known template block (all 52 keys → `true`)."
         ),
     ]
 }

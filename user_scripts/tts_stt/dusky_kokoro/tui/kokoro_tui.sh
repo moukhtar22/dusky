@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # -----------------------------------------------------------------------------
-# Dusky Kokoro TUI Engine - Master v5.0.2 (Defaults & Parser Fix)
+# Dusky Kokoro TUI Engine - Master v5.2.0 (Full TOML & Voices Matrix)
 # -----------------------------------------------------------------------------
-# Target: Python Globals Editor & Daemon Manager
+# Target: TOML Config Editor & Daemon Manager
 # -----------------------------------------------------------------------------
 
 set -euo pipefail
@@ -12,11 +12,13 @@ shopt -s extglob
 # ▼ USER CONFIGURATION & TARGETS ▼
 # =============================================================================
 
-declare -r CONFIG_FILE="${HOME}/contained_apps/uv/dusky_kokoro/dusky_main.py"
+declare -r CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/dusky-kokoro"
+declare -r CONFIG_FILE="${CONFIG_DIR}/config.toml"
+declare -r CONTAINED_DIR="${HOME}/contained_apps/uv/dusky_kokoro"
 declare -r TRIGGER_SCRIPT="${HOME}/user_scripts/tts_stt/dusky_kokoro/trigger.sh"
 
-declare -r APP_TITLE="Kokoro TTS Setup"
-declare -r APP_VERSION="v5.0.2"
+declare -r APP_TITLE="Dusky Kokoro TTS Setup"
+declare -r APP_VERSION="v5.2.0"
 
 # Dimensions & Layout
 declare -ri MAX_DISPLAY_ROWS=14
@@ -28,39 +30,53 @@ declare -ri HEADER_ROWS=4
 declare -ri TAB_ROW=3
 declare -ri ITEM_START_ROW=$(( HEADER_ROWS + 1 ))
 
-declare -ra TABS=("Playback" "Engine" "Buffer")
+declare -ra TABS=("Voices" "Speed & Timing" "Playback" "Engine & GPU")
 
 # Item Registration
 register_items() {
-    local all_voices='"af_heart","af_alloy","af_aoede","af_bella","af_jessica","af_kore","af_nicole","af_nova","af_river","af_sarah","af_sky","am_adam","am_echo","am_eric","am_fenrir","am_liam","am_michael","am_onyx","am_puck","am_santa","bf_alice","bf_emma","bf_isabella","bf_lily","bm_daniel","bm_fable","bm_george","bm_lewis","jf_alpha","jf_gongitsune","jf_nezumi","jf_tebukuro","jm_kumo","zf_xiaobei","zf_xiaoni","zf_xiaoxiao","zf_xiaoyi","zm_yunjian","zm_yunxi","zm_yunxia","zm_yunyang","ef_dora","em_alex","em_santa","ff_siwis","hf_alpha","hf_beta","hm_omega","hm_psi","if_sara","im_nicola","pf_dora","pm_alex","pm_santa"'
+    # All 54 official Kokoro voices grouped by quality & language
+    local all_voices='"af_heart","af_bella","af_nicole","af_aoede","af_kore","af_sarah","af_alloy","af_nova","af_sky","af_jessica","af_river","am_michael","am_fenrir","am_puck","am_echo","am_eric","am_liam","am_onyx","am_adam","am_santa","bf_emma","bf_isabella","bf_alice","bf_lily","bm_george","bm_fable","bm_daniel","bm_lewis","jf_alpha","jf_gongitsune","jf_nezumi","jf_tebukuro","jm_kumo","zf_xiaobei","zf_xiaoni","zf_xiaoxiao","zf_xiaoyi","zm_yunjian","zm_yunxi","zm_yunxia","zm_yunyang","ef_dora","em_alex","em_santa","ff_siwis","hf_alpha","hf_beta","hm_omega","hm_psi","if_sara","im_nicola","pf_dora","pm_alex","pm_santa"'
+    local v3_voices='"none",'${all_voices}
 
-    # Tab 0: Playback
-    register 0 "Blend Voices"           'BLEND_VOICES|bool||||' "True"
-    register 0 "Primary Voice"          'VOICE_1|cycle||'"${all_voices}"'||' '"af_heart"'
-    register 0 "Primary Voice Weight"   'VOICE_1_WEIGHT|float||0.1|0.9|0.1' "0.4"
-    register 0 "Secondary Voice"        'VOICE_2|cycle||'"${all_voices}"'||' '"af_bella"'
-    register 0 "Speech Speed"           'SPEED|float||0.5|2.0|0.1' "1.0"
-    register 0 "MPV Playback Speed"     'MPV_SPEED|float||0.5|2.0|0.1' "1.0"
+    # Tab 0: Voices & Speech
+    register 0 "Blend Voices"            'blend|bool||||' "true"
+    register 0 "Primary Voice (V1)"      'voice_1|cycle||'"${all_voices}"'||' '"af_heart"'
+    register 0 "Primary Weight (W1)"     'weight_1|float||0.05|1.0|0.05' "0.4"
+    register 0 "Secondary Voice (V2)"    'voice_2|cycle||'"${all_voices}"'||' '"af_bella"'
+    register 0 "Secondary Weight (W2)"   'weight_2|float||0.0|1.0|0.05' "0.6"
+    register 0 "Third Voice (V3)"        'voice_3|cycle||'"${v3_voices}"'||' '"none"'
+    register 0 "Third Weight (W3)"       'weight_3|float||0.0|1.0|0.05' "0.0"
+    register 0 "Language Code"           'lang|cycle||"auto","en-us","en-gb","ja","cmn","es","fr-fr","hi","it","pt-br"||' '"auto"'
 
-    # Tab 1: Engine
-    register 1 "Model Precision"    'MODEL_PRECISION|cycle||"f32","fp16","int8"||' '"fp16"'
-    register 1 "Sample Rate"        'SAMPLE_RATE|cycle||24000,44100,48000||' "24000"
+    # Tab 1: Speed & Timing
+    register 1 "Speech Gen Speed"        'speed|float||0.5|2.0|0.05' "1.0"
+    register 1 "MPV Playback Speed"      'mpv_speed|float||0.5|2.0|0.05' "1.0"
+    register 1 "Sentence Pause (ms)"     'sentence_pause_ms|int||0|1000|20' "140"
+    register 1 "Paragraph Pause (ms)"    'paragraph_pause_ms|int||0|2000|50' "380"
+    register 1 "Trim Silence"            'trim_silence|bool||||' "true"
 
-    # Submenu for Text Processing
-    register 1 "Text Processing"    'text_proc|menu||||' ""
-    register_child "text_proc" "Strip Special Chars" 'STRIP_SPECIAL_CHARS|bool||||' "True"
-    register_child "text_proc" "Allowed Punctuation" 'ALLOWED_PUNCTUATION|string||||' 'frozenset({".", ",", "!", "?", ";", ":", "\x27", "%", "-"})'
+    # Tab 2: Playback
+    register 2 "Audio Volume"            'volume|int||0|150|5' "100"
+    register 2 "Show MPV Window"         'window|bool||||' "true"
+    register 2 "Window Geometry"         'window_geometry|cycle||"420x96","360x80","500x120","300x60"||' '"420x96"'
+    register 2 "Archive to WAV"          'enabled|bool||||' "true"
+    register 2 "Archive Bit Depth"       'bit_depth|cycle||16,24||' "16"
+    register 2 "Prefetch Segments"       'prefetch_segments|int||1|16|1' "4"
 
-    # Tab 2: Buffer
-    register 2 "Max Batch Length"   'MAX_BATCH_LEN|int||500|5000|100' "2000"
-    register 2 "Idle Timeout (s)"   'IDLE_TIMEOUT|float||0.0|300.0|5.0' "10.0"
-    register 2 "Dedup Window (s)"   'DEDUP_WINDOW|float||0.0|10.0|0.5' "2.0"
-    register 2 "Queue Size"         'QUEUE_SIZE|int||1|20|1' "5"
+    # Tab 3: Engine & GPU
+    register 3 "Hardware Provider"       'provider|cycle||"cuda","cpu","rocm","openvino","auto"||' '"cuda"'
+    register 3 "Model Precision"         'precision|cycle||"fp16-gpu","int8","f32","fp16","auto"||' '"auto"'
+    register 3 "Model Idle Unload (s)"   'model_idle_timeout_s|float||5.0|300.0|5.0' "30.0"
+    register 3 "Process Idle Exit (s)"   'process_idle_timeout_s|float||10.0|600.0|10.0' "30.0"
+    register 3 "GPU VRAM Limit (MB)"     'gpu_mem_limit_mb|int||0|8192|256' "2048"
+    register 3 "Warmup on Load"          'warmup|bool||||' "true"
 }
 
-# Post-Write Hook (Now Deferred)
+# Post-Write Hook (Hot-reload running daemon)
 post_write_action() {
-    NEEDS_RESTART=1
+    if [[ -x "$TRIGGER_SCRIPT" ]]; then
+        "$TRIGGER_SCRIPT" --reload >/dev/null 2>&1 &
+    fi
 }
 
 # =============================================================================
@@ -216,7 +232,72 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
+ensure_config_file() {
+    mkdir -p "$CONFIG_DIR"
+    if [[ ! -f "$CONFIG_FILE" ]]; then
+        local main_py="${CONTAINED_DIR}/dusky_main.py"
+        local venv_py="${CONTAINED_DIR}/.venv/bin/python"
+        if [[ -x "$venv_py" && -f "$main_py" ]]; then
+            "$venv_py" "$main_py" config --write "$CONFIG_FILE" >/dev/null 2>&1 || true
+        fi
+        if [[ ! -f "$CONFIG_FILE" ]]; then
+            cat > "$CONFIG_FILE" <<'EOF'
+# Dusky Kokoro TTS - configuration (TOML)
+[voice]
+spec = "af_heart:0.4,af_bella:0.6"
+blend = true
+voice_1 = "af_heart"
+weight_1 = 0.4
+voice_2 = "af_bella"
+weight_2 = 0.6
+voice_3 = "none"
+weight_3 = 0.0
+speed = 1.0
+lang = "auto"
+
+[playback]
+mpv_binary = "mpv"
+mpv_speed = 1.0
+volume = 100
+window = true
+window_geometry = "420x96"
+prefetch_segments = 4
+
+[archive]
+enabled = true
+bit_depth = 16
+
+[engine]
+provider = "cuda"
+precision = "auto"
+model_idle_timeout_s = 30.0
+gpu_mem_limit_mb = 2048
+warmup = true
+
+[daemon]
+process_idle_timeout_s = 30.0
+exit_when_idle = true
+dedup_window_s = 2.0
+max_queue = 8
+
+[text]
+sentence_pause_ms = 140
+paragraph_pause_ms = 380
+trim_silence = true
+strip_citations = true
+read_code_blocks = false
+url_mode = "domain"
+emoji_mode = "strip"
+EOF
+        fi
+    fi
+    if [[ -d "$CONTAINED_DIR" && ! -e "$CONTAINED_DIR/config.toml" ]]; then
+        ln -sfn "$CONFIG_FILE" "$CONTAINED_DIR/config.toml" 2>/dev/null || true
+    fi
+}
+
 resolve_write_target() {
+    ensure_config_file
     WRITE_TARGET=$(realpath -e -- "$CONFIG_FILE")
 }
 
@@ -330,11 +411,11 @@ populate_config_cache() {
                 k = trim(substr(clean, 1, eq_pos - 1))
                 v = trim(substr(clean, eq_pos + 1))
 
-                if (v ~ /^frozenset\(\{/ || v ~ /^\{/ || v ~ /^\[/) {
+                if (v ~ /^\[/ || v ~ /^\{/) {
                     in_multiline = 1
                     current_k = k
                     current_v = v
-                    if (v ~ /[\}\)]/) {
+                    if (v ~ /[\}\]]/) {
                         in_multiline = 0
                         print k "|" v
                     }
@@ -342,16 +423,60 @@ populate_config_cache() {
                 }
 
                 if (match(v, /[[:space:]]*#.*$/)) { v = substr(v, 1, RSTART - 1) }
+                v = trim(v)
                 if (k != "") { print k "|" v }
             } else if (in_multiline) {
                 current_v = current_v " " trim(clean)
-                if (clean ~ /[\}\)\]]/) {
+                if (clean ~ /[\}\]]/) {
                     in_multiline = 0
                     print current_k "|" current_v
                 }
             }
         }
-    ' "$CONFIG_FILE")
+    ' "$WRITE_TARGET")
+
+    # If spec exists but voice_1 was not explicitly defined in config.toml, extract from spec
+    if [[ -z "${CONFIG_CACHE["voice_1"]:-}" && -n "${CONFIG_CACHE["spec"]:-}" ]]; then
+        local clean_spec="${CONFIG_CACHE["spec"]//\"/}"
+        local -a parts
+        IFS=',' read -r -a parts <<< "$clean_spec"
+        if (( ${#parts[@]} == 1 )); then
+            local p0="${parts[0]}"
+            local v0="${p0%%:*}"
+            CONFIG_CACHE["blend"]="false"
+            CONFIG_CACHE["voice_1"]="\"${v0}\""
+            CONFIG_CACHE["weight_1"]="1.0"
+            CONFIG_CACHE["voice_2"]="\"af_bella\""
+            CONFIG_CACHE["weight_2"]="0.0"
+            CONFIG_CACHE["voice_3"]="\"none\""
+            CONFIG_CACHE["weight_3"]="0.0"
+        elif (( ${#parts[@]} == 2 )); then
+            local p0="${parts[0]}" p1="${parts[1]}"
+            local v0="${p0%%:*}" w0="${p0##*:}"
+            local v1="${p1%%:*}" w1="${p1##*:}"
+            [[ "$v0" == "$w0" ]] && w0="0.5"
+            [[ "$v1" == "$w1" ]] && w1="0.5"
+            CONFIG_CACHE["blend"]="true"
+            CONFIG_CACHE["voice_1"]="\"${v0}\""
+            CONFIG_CACHE["weight_1"]="$w0"
+            CONFIG_CACHE["voice_2"]="\"${v1}\""
+            CONFIG_CACHE["weight_2"]="$w1"
+            CONFIG_CACHE["voice_3"]="\"none\""
+            CONFIG_CACHE["weight_3"]="0.0"
+        elif (( ${#parts[@]} >= 3 )); then
+            local p0="${parts[0]}" p1="${parts[1]}" p2="${parts[2]}"
+            local v0="${p0%%:*}" w0="${p0##*:}"
+            local v1="${p1%%:*}" w1="${p1##*:}"
+            local v2="${p2%%:*}" w2="${p2##*:}"
+            CONFIG_CACHE["blend"]="true"
+            CONFIG_CACHE["voice_1"]="\"${v0}\""
+            CONFIG_CACHE["weight_1"]="$w0"
+            CONFIG_CACHE["voice_2"]="\"${v1}\""
+            CONFIG_CACHE["weight_2"]="$w1"
+            CONFIG_CACHE["voice_3"]="\"${v2}\""
+            CONFIG_CACHE["weight_3"]="$w2"
+        fi
+    fi
 }
 
 write_value_to_file() {
@@ -372,12 +497,6 @@ write_value_to_file() {
     BEGIN { target_nr = 0; skip_dict = 0 }
     { lines[NR] = $0 }
     {
-        if (skip_dict) {
-            if ($0 ~ /[\}\)\]]/) skip_dict = 0
-            lines[NR] = "\x00"
-            next
-        }
-
         if (match($0, /^[[:space:]]*[A-Za-z0-9_]+[[:space:]]*=/)) {
             eq_pos = index($0, "=")
             k = substr($0, 1, eq_pos - 1)
@@ -386,21 +505,12 @@ write_value_to_file() {
 
             if (k == ENVIRON["TARGET_KEY"]) {
                 target_nr = NR
-                rest = substr($0, eq_pos + 1)
-                sub(/^[[:space:]]+/, "", rest)
-
-                if (rest ~ /^[\[\{\(]/ || rest ~ /^[a-zA-Z0-9_]+\([\[\{\(]/) {
-                    skip_dict = 1
-                }
-                if (rest ~ /[\}\)\]]/) skip_dict = 0
             }
         }
     }
     END {
-        if (target_nr) {
+        if (target_nr > 0) {
             for (i = 1; i <= NR; i++) {
-                if (lines[i] == "\x00") continue
-
                 if (i == target_nr) {
                     line = lines[i]
                     eq_pos = index(line, "=")
@@ -416,13 +526,17 @@ write_value_to_file() {
                     print lines[i]
                 }
             }
-            exit 0
+        } else {
+            for (i = 1; i <= NR; i++) {
+                print lines[i]
+            }
+            print ENVIRON["TARGET_KEY"] " = " ENVIRON["NEW_VALUE"]
         }
-        exit 1
+        exit 0
     }
-    ' "$CONFIG_FILE" > "$_TMPFILE" || {
+    ' "$WRITE_TARGET" > "$_TMPFILE" || {
         rm -f -- "$_TMPFILE" 2>/dev/null || :
-        set_status "Key not found: ${key}"
+        set_status "Save failed: ${key}"
         return 1
     }
 
@@ -441,6 +555,45 @@ write_value_to_file() {
     CONFIG_CACHE["$cache_key"]="$new_val"
     LAST_WRITE_CHANGED=1
     return 0
+}
+
+sync_voice_spec() {
+    local b="${CONFIG_CACHE["blend"]:-true}"
+    local v1="${CONFIG_CACHE["voice_1"]:-\"af_heart\"}"
+    local w1="${CONFIG_CACHE["weight_1"]:-0.4}"
+    local v2="${CONFIG_CACHE["voice_2"]:-\"af_bella\"}"
+    local w2="${CONFIG_CACHE["weight_2"]:-0.6}"
+    local v3="${CONFIG_CACHE["voice_3"]:-\"none\"}"
+    local w3="${CONFIG_CACHE["weight_3"]:-0.0}"
+
+    v1="${v1//\"/}"; v2="${v2//\"/}"; v3="${v3//\"/}"
+    local new_spec
+    if [[ "${b,,}" == "false" || "$v2" == "none" || "$w2" == "0" || "$w2" == "0.0" || "$w2" == "0.00" ]]; then
+        new_spec="\"${v1}\""
+    elif [[ "$v3" != "none" && "$w3" != "0" && "$w3" != "0.0" && "$w3" != "0.00" ]]; then
+        local -a norm
+        mapfile -t norm < <(LC_ALL=C awk -v w1="$w1" -v w2="$w2" -v w3="$w3" 'BEGIN {
+            s = w1 + w2 + w3
+            if (s <= 0) s = 1.0
+            n1 = sprintf("%.2f", w1 / s)
+            n2 = sprintf("%.2f", w2 / s)
+            n3 = sprintf("%.2f", 1.0 - n1 - n2)
+            if (n3 < 0) n3 = "0.00"
+            print n1; print n2; print n3
+        }')
+        new_spec="\"${v1}:${norm[0]},${v2}:${norm[1]},${v3}:${norm[2]}\""
+    else
+        local -a norm
+        mapfile -t norm < <(LC_ALL=C awk -v w1="$w1" -v w2="$w2" 'BEGIN {
+            s = w1 + w2
+            if (s <= 0) s = 1.0
+            n1 = sprintf("%.2f", w1 / s)
+            n2 = sprintf("%.2f", 1.0 - n1)
+            print n1; print n2
+        }')
+        new_spec="\"${v1}:${norm[0]},${v2}:${norm[1]}\""
+    fi
+    write_value_to_file "spec" "$new_spec"
 }
 
 get_active_context() {
@@ -464,6 +617,8 @@ load_active_values() {
         cache_key="${key}"
         if [[ -n "${CONFIG_CACHE["$cache_key"]+_}" ]]; then
             VALUE_CACHE["${REPLY_CTX}::${item}"]="${CONFIG_CACHE["$cache_key"]}"
+        elif [[ -n "${RAW_DEFAULTS["${REPLY_CTX}::${item}"]+_}" ]]; then
+            VALUE_CACHE["${REPLY_CTX}::${item}"]="${RAW_DEFAULTS["${REPLY_CTX}::${item}"]}"
         else
             VALUE_CACHE["${REPLY_CTX}::${item}"]="$UNSET_MARKER"
         fi
@@ -518,7 +673,7 @@ modify_value() {
     current="${VALUE_CACHE["${REPLY_CTX}::${label}"]:-}"
 
     if [[ "$current" == "$UNSET_MARKER" || -z "$current" ]]; then
-        current="${DEFAULTS["${REPLY_CTX}::${label}"]:-}"
+        current="${RAW_DEFAULTS["${REPLY_CTX}::${label}"]:-}"
         [[ -z "$current" ]] && current="${min:-0}"
     fi
 
@@ -565,21 +720,19 @@ modify_value() {
             ;;
         float)
             if [[ ! "$current" =~ ^-?[0-9]*\.?[0-9]+$ ]]; then current="${min:-0.0}"; fi
-            new_val=$(LC_ALL=C awk -v c="$current" -v dir="$direction" -v s="${step:-0.1}" \
+            new_val=$(LC_ALL=C awk -v c="$current" -v dir="$direction" -v s="${step:-0.05}" \
                           -v mn="$min" -v mx="$max" 'BEGIN {
                 val = c + (dir * s)
                 if (mn != "" && val < mn+0) val = mn+0
                 if (mx != "" && val > mx+0) val = mx+0
                 if (val == 0) val = 0
-                str = sprintf("%.6f", val)
-                sub(/0+$/, "", str)
-                sub(/\.$/, "", str)
-                if (str == "-0") str = "0"
+                str = sprintf("%.2f", val)
+                if (str == "-0.00" || str == "-0.0") str = "0.0"
                 print str
             }')
             ;;
         bool)
-            if [[ "$current" == "True" ]]; then new_val="False"; else new_val="True"; fi
+            if [[ "${current,,}" == "true" ]]; then new_val="false"; else new_val="true"; fi
             ;;
         cycle)
             local -a opts
@@ -598,6 +751,11 @@ modify_value() {
 
     if write_value_to_file "$key" "$new_val"; then
         VALUE_CACHE["${REPLY_CTX}::${label}"]="$new_val"
+        case "$key" in
+            blend|voice_1|weight_1|voice_2|weight_2|voice_3|weight_3)
+                sync_voice_spec
+                ;;
+        esac
         clear_status
         if (( LAST_WRITE_CHANGED )); then
             post_write_action
@@ -685,9 +843,9 @@ render_item_list() {
                 fi
                 ;;
             *)
-                case "$val" in
-                    True)            display="${C_GREEN}ON${C_RESET}" ;;
-                    False)           display="${C_RED}OFF${C_RESET}" ;;
+                case "${val,,}" in
+                    true)            display="${C_GREEN}ON${C_RESET}" ;;
+                    false)           display="${C_RED}OFF${C_RESET}" ;;
                     "$UNSET_MARKER") display="${C_YELLOW}⚠ UNSET${C_RESET}" ;;
                     *)               display="${C_WHITE}${clean_val}${C_RESET}" ;;
                 esac
@@ -1112,6 +1270,10 @@ handle_key_main() {
         h|H)                         adjust -1 ;;
         g)                           navigate_end 0 ;;
         G)                           navigate_end 1 ;;
+        1)                           set_tab 0 ;;
+        2)                           set_tab 1 ;;
+        3)                           set_tab 2 ;;
+        4)                           set_tab 3 ;;
         $'\t')                       switch_tab 1 ;;
         s|S)                         toggle_daemon ;;
         r|R)                         reset_defaults ;;
@@ -1180,8 +1342,6 @@ handle_input_router() {
 main() {
     if (( BASH_VERSINFO[0] < 5 )); then log_err "Bash 5.0+ required"; exit 1; fi
     if [[ ! -t 0 ]]; then log_err "TTY required"; exit 1; fi
-    if [[ ! -f "$CONFIG_FILE" ]]; then log_err "Config not found: $CONFIG_FILE"; exit 1; fi
-
     local _dep
     for _dep in awk realpath; do
         if ! command -v "$_dep" &>/dev/null; then

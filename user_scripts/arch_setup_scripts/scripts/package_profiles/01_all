@@ -23,7 +23,6 @@ xdg-desktop-portal-hyprland
 xdg-desktop-portal-gtk
 localsearch
 polkit
-hyprpolkitagent
 xdg-utils
 socat
 inotify-tools

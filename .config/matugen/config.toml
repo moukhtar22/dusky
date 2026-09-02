@@ -16,6 +16,10 @@ post_hook   = '''
   ln -nfs "$HOME/.config/matugen/generated/gtk-3.css" "$HOME/.config/gtk-3.0/gtk.css"
   gsettings set org.gnome.desktop.interface gtk-theme "Adwaita" || :
   gsettings set org.gnome.desktop.interface gtk-theme "adw-gtk3-dark" || :
+  # Portal file chooser (xdg-desktop-portal-gtk) caches theme at startup; new
+  # dialogs opened after a matugen switch would otherwise stay teal/cyan until
+  # next login. Cheap try-restart makes the next Select folder pick up pink.
+  systemctl --user try-restart xdg-desktop-portal-gtk >/dev/null 2>&1 || :
 '''
 
 [templates.gtk4]
@@ -121,35 +125,46 @@ post_hook   = '''
   ln -nfs "$HOME/.config/matugen/generated/kate-matugen.theme" "$HOME/.local/share/org.kde.syntax-highlighting/themes/Matugen.theme"
 '''
 
-[templates.konsole]
-input_path  = '~/.config/matugen/templates/konsole.colorscheme'
-output_path = '~/.config/matugen/generated/konsole-matugen.colorscheme'
-post_hook   = '''
-  mkdir -p "$HOME/.local/share/konsole"
-  ln -nfs "$HOME/.config/matugen/generated/konsole-matugen.colorscheme" "$HOME/.local/share/konsole/Matugen.colorscheme"
-'''
-
-[templates.konsole_profile]
-input_path  = '~/.config/matugen/templates/konsole.profile'
-output_path = '~/.config/matugen/generated/konsole-matugen.profile'
-post_hook   = '''
-  mkdir -p "$HOME/.local/share/konsole"
-  ln -nfs "$HOME/.config/matugen/generated/konsole-matugen.profile" "$HOME/.local/share/konsole/Matugen.profile"
-'''
-
-# [templates.kvantum_kvconfig]
-# input_path  = '~/.config/matugen/templates/kvantum-colors.kvconfig'
-# output_path = '~/.config/matugen/generated/kvantum-matugen.kvconfig'
+# [templates.konsole]
+# input_path  = '~/.config/matugen/templates/konsole.colorscheme'
+# output_path = '~/.config/matugen/generated/konsole-matugen.colorscheme'
 # post_hook   = '''
-#   ln -nfs "$HOME/.config/matugen/generated/kvantum-matugen.kvconfig" "$HOME/.config/Kvantum/matugen/matugen.kvconfig"
+#   mkdir -p "$HOME/.local/share/konsole"
+#   ln -nfs "$HOME/.config/matugen/generated/konsole-matugen.colorscheme" "$HOME/.local/share/konsole/Matugen.colorscheme"
 # '''
 
-# [templates.kvantum_svg]
-# input_path  = '~/.config/matugen/templates/kvantum-colors.svg'
-# output_path = '~/.config/matugen/generated/kvantum-matugen.svg'
+# [templates.konsole_profile]
+# input_path  = '~/.config/matugen/templates/konsole.profile'
+# output_path = '~/.config/matugen/generated/konsole-matugen.profile'
 # post_hook   = '''
-#   ln -nfs "$HOME/.config/matugen/generated/kvantum-matugen.svg" "$HOME/.config/Kvantum/matugen/matugen.svg"
+#   mkdir -p "$HOME/.local/share/konsole"
+#   ln -nfs "$HOME/.config/matugen/generated/konsole-matugen.profile" "$HOME/.local/share/konsole/Matugen.profile"
 # '''
+
+[templates.kvantum_kvconfig]
+input_path  = '~/.config/matugen/templates/kvantum-colors.kvconfig'
+output_path = '~/.config/matugen/generated/kvantum-matugen.kvconfig'
+post_hook   = '''
+  ln -nfs "$HOME/.config/matugen/generated/kvantum-matugen.kvconfig" "$HOME/.config/Kvantum/matugen/matugen.kvconfig"
+'''
+
+[templates.kvantum_svg]
+input_path  = '~/.config/matugen/templates/kvantum-colors.svg'
+output_path = '~/.config/matugen/generated/kvantum-matugen.svg'
+post_hook   = '''
+  ln -nfs "$HOME/.config/matugen/generated/kvantum-matugen.svg" "$HOME/.config/Kvantum/matugen/matugen.svg"
+'''
+
+[templates.gimp]
+input_path  = '~/.config/matugen/templates/gimp.css'
+output_path = '~/.config/matugen/generated/gimp.css'
+post_hook   = '''
+  ln -nfs "$HOME/.config/matugen/generated/gimp.css" "$HOME/.config/GIMP/3.0/themes/Matugen/gimp.css"
+  ln -nfs "$HOME/.config/matugen/generated/gimp.css" "$HOME/.config/GIMP/3.2/themes/Matugen/gimp.css"
+  # Personal override for immediate effect regardless of theme selection
+  ln -nfs "$HOME/.config/matugen/generated/gimp.css" "$HOME/.config/GIMP/3.2/gimp.css"
+  ln -nfs "$HOME/.config/matugen/generated/gimp.css" "$HOME/.config/GIMP/3.0/gimp.css"
+'''
 
 
 # =============================================================================
@@ -229,13 +244,13 @@ post_hook   = 'ln -nfs "$HOME/.config/matugen/generated/khal-config" "$HOME/.con
 #   touch "$HOME/.config/zellij/config.kdl" || :
 # '''
 
-# [templates.opencode]
-# input_path  = '~/.config/matugen/templates/opencode-colors.json'
-# output_path = '~/.config/matugen/generated/opencode.json'
-# post_hook   = '''
-#   ln -nfs "$HOME/.config/matugen/generated/opencode.json" "$HOME/.config/opencode/themes/matugen.json"
-#   pkill -SIGUSR1 -x kitty || :
-# '''
+[templates.opencode]
+input_path  = '~/.config/matugen/templates/opencode-colors.json'
+output_path = '~/.config/matugen/generated/opencode.json'
+post_hook   = '''
+  ln -nfs "$HOME/.config/matugen/generated/opencode.json" "$HOME/.config/opencode/themes/matugen.json"
+  pkill -SIGUSR1 -x kitty || :
+'''
 
 # [templates.vscode]
 # input_path  = '~/.config/matugen/templates/vscode.json'
@@ -292,15 +307,15 @@ post_hook   = '''
 # input_path  = '~/.config/matugen/templates/tmux-colors.conf'
 # output_path = '~/.config/matugen/generated/tmux-colors.conf'
 
-[templates.pywalfox]
-input_path  = '~/.config/matugen/templates/pywalfox-colors.json'
-output_path = '~/.config/matugen/generated/pywalfox-colors.json'
-post_hook   = '''
-  if command -v pywalfox >/dev/null 2>&1; then
-    ln -nfs "$HOME/.config/matugen/generated/pywalfox-colors.json" "$HOME/.cache/wal/colors.json"
-    pywalfox update || :
-  fi
-'''
+# [templates.pywalfox]
+# input_path  = '~/.config/matugen/templates/pywalfox-colors.json'
+# output_path = '~/.config/matugen/generated/pywalfox-colors.json'
+# post_hook   = '''
+#   if command -v pywalfox >/dev/null 2>&1; then
+#     ln -nfs "$HOME/.config/matugen/generated/pywalfox-colors.json" "$HOME/.cache/wal/colors.json"
+#     pywalfox update || :
+#   fi
+# '''
 
 [templates.obsidian]
 input_path  = '~/.config/matugen/templates/obsidian-theme.css'
@@ -411,14 +426,6 @@ output_path = '~/.config/matugen/generated/dusky_sites.css'
 #   systemctl --user reset-failed dusky_quickpanal.service || :
 #   systemctl --user restart dusky_quickpanal.service || :
 # '''
-
-[templates.hyprpolkitagent]
-input_path  = '/dev/null'
-output_path = '/dev/null'
-post_hook   = '''
-  systemctl --user reset-failed hyprpolkitagent || :
-  systemctl --user restart hyprpolkitagent || :
-'''
 
 
 # =============================================================================

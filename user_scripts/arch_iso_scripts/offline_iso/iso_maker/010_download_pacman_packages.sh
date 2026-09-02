@@ -41,7 +41,7 @@ declare -ar pkgs_graphics=(
 )
 
 declare -ar pkgs_hyprland=(
-  "hyprland" "xorg-xwayland" "xdg-desktop-portal-hyprland" "xdg-desktop-portal-gtk" "localsearch" "polkit" "hyprpolkitagent" "xdg-utils" "socat" "inotify-tools" "libnotify" "mako" "file"
+  "hyprland" "xorg-xwayland" "xdg-desktop-portal-hyprland" "xdg-desktop-portal-gtk" "localsearch" "polkit" "xdg-utils" "socat" "inotify-tools" "libnotify" "mako" "file"
 )
 
 declare -ar pkgs_appearance=(

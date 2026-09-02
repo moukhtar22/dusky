@@ -1,0 +1,7 @@
+# UE5 — l5, 8M, zstd19, for already-compressed .pak (Satisfactory)
+level = 5
+block_size_bits = 23
+compression = "zstd:level=19"
+categorize = "incompressible"
+incompressible_compression = "null"
+note = "UE .pak already compressed, avoid wasting time"

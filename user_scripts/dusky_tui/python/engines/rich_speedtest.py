@@ -116,7 +116,20 @@ def run_phase(direction: str, script_path: str, live: Live) -> tuple[float | Non
             except Exception: proc.kill()
             break
 
-        line = proc.stdout.readline() if proc.stdout else ""
+        # Use select to avoid blocking readline indefinitely (fix HIGH timeout issue)
+        if proc.stdout:
+            try:
+                r, _, _ = select.select([proc.stdout], [], [], 0.1)
+                if not r:
+                    # No data yet, continue loop to check timeout/cancel
+                    if proc.poll() is not None:
+                        break
+                    continue
+                line = proc.stdout.readline()
+            except Exception:
+                line = ""
+        else:
+            line = ""
         if not line and proc.poll() is not None:
             break
 

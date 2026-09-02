@@ -1,0 +1,53 @@
+# ==============================================================================
+# Geometry Dash Profile
+# ==============================================================================
+
+extends = "base_wine_dxvk"
+
+[meta]
+id = "geometry_dash"
+name = "Geometry Dash"
+version = "2.2"
+icon = "applications-games"
+developer = "RobTop Games"
+genre = "Rhythm / Platformer"
+description = "Jump and fly your way through danger in this rhythm-based action platformer."
+
+[paths]
+game_dir = "/mnt/media/games/good_quality/Geometry.Dash-jc141"
+dwarfs_image = "files/game-root.dwarfs"
+dwarfs_mount = "files/.game-root-mnt"
+overlay_dir = "files/game-root"
+overlay_storage = "files/overlay-storage"
+overlay_work = "files/.game-root-work"
+executable = "GeometryDash.exe"
+arguments = []
+
+[runtime]
+type = "wine"
+
+[runtime.wine]
+prefix_dir = "files/wine-prefix-ew"
+arch = "win64"
+sync_mode = "fsync"
+dxvk = true
+
+[runtime.wine.dll_overrides]
+"winemenubuilder.exe" = "d"
+mshtml = "d"
+dxgi = "n,b"
+d3d11 = "n,b"
+d3d12 = "n,b"
+d3d9 = "n,b"
+
+[graphics]
+gpu = "auto"
+wayland_native = true
+
+[graphics.gamescope]
+enabled = false
+
+[performance]
+gamemode = true
+mangohud = false
+fps_limit = 60

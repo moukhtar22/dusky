@@ -1,0 +1,39 @@
+# ==============================================================================
+# Megabonk Profile
+# ==============================================================================
+
+extends = "base_unity_native"
+
+[meta]
+id = "megabonk"
+name = "Megabonk"
+version = "1.0"
+icon = "applications-games"
+developer = "Dani / Community"
+genre = "Action / Arena"
+description = "Fast-paced physics arena combat game."
+
+[paths]
+game_dir = "/mnt/media/games/good_quality/Megabonk-jc141"
+dwarfs_image = "files/game-root.dwarfs"
+dwarfs_mount = "files/.game-root-mnt"
+overlay_dir = "files/game-root"
+overlay_storage = "files/overlay-storage"
+overlay_work = "files/.game-root-work"
+executable = "Megabonk.x86_64"
+arguments = []
+
+[runtime]
+type = "native"
+
+[graphics]
+gpu = "auto"
+wayland_native = true
+
+[graphics.gamescope]
+enabled = false
+
+[performance]
+gamemode = true
+mangohud = false
+fps_limit = 60

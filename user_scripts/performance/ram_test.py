@@ -19,6 +19,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.request
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -330,19 +331,144 @@ def probe_cpu_cache_sizes(target_core: str = "0") -> tuple[int, int, int]:
     return l1_kb, l2_kb, l3_kb
 
 
-def check_and_install_deps() -> None:
-    required_tools = ["sysbench", "stress-ng", "dmidecode", "taskset", "mbw"]
-    if not tool_exists("gcc") and not tool_exists("clang"):
-        required_tools.append("gcc")
+MBW_CACHE = Path.home() / ".cache" / "ram_test_mbw" / "mbw"
 
-    missing = [t for t in required_tools if not tool_exists(t)]
+
+def _get_mbw_binary() -> str | None:
+    """Return path to mbw binary if available (system PATH or persistent cache).
+    Persistent cache survives atexit cleanup of ram_test_bench."""
+    if p := shutil.which("mbw"):
+        return p
+    if MBW_CACHE.exists() and os.access(MBW_CACHE, os.X_OK):
+        return str(MBW_CACHE)
+    return None
+
+
+def _ensure_mbw_available() -> str | None:
+    """Ensure mbw is available. mbw is AUR-only (pacman -Ss mbw -> not found, AUR mbw 2.0-1),
+    so build from source via gcc/clang. Returns binary path or None."""
+    if existing := _get_mbw_binary():
+        return existing
+
+    compiler = "gcc" if tool_exists("gcc") else ("clang" if tool_exists("clang") else None)
+    if not compiler:
+        eprint("[Warning] mbw: no compiler (gcc/clang) available")
+        return None
+
+    MBW_CACHE.parent.mkdir(parents=True, exist_ok=True)
+    url = "https://raw.githubusercontent.com/raas/mbw/master/mbw.c"
+    c_tmp = MBW_CACHE.with_suffix(".c")
+
+    ok = False
+    try:
+        with urllib.request.urlopen(url, timeout=15) as resp:
+            c_tmp.write_bytes(resp.read())
+        ok = c_tmp.stat().st_size > 1000
+    except Exception:
+        ok = False
+
+    if not ok and tool_exists("curl"):
+        try:
+            subprocess.run(["curl", "-fsSL", url, "-o", str(c_tmp)], check=True, capture_output=True, timeout=30)
+            ok = c_tmp.exists() and c_tmp.stat().st_size > 1000
+        except Exception:
+            ok = False
+
+    if not ok:
+        eprint(f"[Warning] mbw: failed to download {url}")
+        return None
+
+    try:
+        subprocess.run([compiler, "-O2", str(c_tmp), "-o", str(MBW_CACHE)], check=True, capture_output=True, text=True, timeout=30)
+        MBW_CACHE.chmod(0o755)
+        if str(MBW_CACHE.parent) not in os.environ.get("PATH", ""):
+            os.environ["PATH"] = f"{MBW_CACHE.parent}:{os.environ.get('PATH','')}"
+        with contextlib.suppress(Exception):
+            c_tmp.unlink()
+        if RICH_AVAILABLE:
+            console.print(f"[bold green]✓ Built mbw from source: {MBW_CACHE}[/bold green]")
+        return str(MBW_CACHE)
+    except subprocess.CalledProcessError as e:
+        eprint(f"[Warning] mbw compilation failed: {e.stderr.strip() if e.stderr else e}")
+        return None
+    except Exception as e:
+        eprint(f"[Warning] mbw build failed: {e}")
+        return None
+
+
+def check_and_install_deps() -> None:
+    """Auto-install missing dependencies via pacman with sudo elevation.
+    Official repo packages are installed via pacman; mbw (AUR-only) is built from source."""
+    global SUDO_AVAILABLE
+
+    # Only official repo tools are handled via pacman. mbw is AUR-only
+    # (verified: `pacman -Ss mbw` returns 'package mbw was not found', only in AUR as `mbw 2.0-1`),
+    # so it is built from source instead of via pacman.
+    official_tools = ["sysbench", "stress-ng", "dmidecode", "taskset"]
+    needs_compiler = not (tool_exists("gcc") or tool_exists("clang"))
+    if needs_compiler:
+        official_tools.append("gcc")
+
+    missing = [t for t in official_tools if not tool_exists(t)]
     if missing:
-        pacman_map = {"taskset": "util-linux", "gcc": "gcc", "sysbench": "sysbench", "stress-ng": "stress-ng", "dmidecode": "dmidecode", "mbw": "mbw"}
-        missing_pkgs = list(set([pacman_map.get(m, m) for m in missing]))
-        msg = f"Error: Missing critical benchmark dependencies: {', '.join(missing)}\n"
-        msg += f"Please install them using pacman: sudo pacman -S {' '.join(missing_pkgs)}"
-        eprint(msg)
-        sys.exit(1)
+        pacman_map = {
+            "taskset": "util-linux",
+            "gcc": "gcc",
+            "sysbench": "sysbench",
+            "stress-ng": "stress-ng",
+            "dmidecode": "dmidecode",
+        }
+        missing_pkgs = sorted({pacman_map.get(m, m) for m in missing})
+
+        if not tool_exists("pacman"):
+            eprint(f"Error: Missing dependencies: {', '.join(missing)}")
+            eprint("pacman not found - please install manually: " + ", ".join(missing_pkgs))
+            sys.exit(1)
+
+        if os.geteuid() != 0 and not SUDO_AVAILABLE:
+            SUDO_AVAILABLE = cache_sudo_privileges()
+
+        if os.geteuid() != 0 and not SUDO_AVAILABLE:
+            msg = f"Error: Missing critical benchmark dependencies: {', '.join(missing)}\n"
+            msg += f"Please install them using pacman: sudo pacman -S {' '.join(missing_pkgs)}"
+            msg += "\n(automatic sudo elevation failed - no cached credentials and no TTY)"
+            eprint(msg)
+            sys.exit(1)
+
+        install_str = " ".join(missing_pkgs)
+        if RICH_AVAILABLE:
+            console.print(f"[bold yellow]󰌆 Missing dependencies detected: {', '.join(missing)} → auto-installing via pacman: {install_str}[/bold yellow]")
+        else:
+            print(f"Missing dependencies detected: {', '.join(missing)} -> auto-installing via pacman: {install_str}")
+
+        if os.geteuid() == 0:
+            cmd = ["pacman", "-Sy", "--needed", "--noconfirm", *missing_pkgs]
+        else:
+            cmd = ["sudo", "pacman", "-Sy", "--needed", "--noconfirm", *missing_pkgs]
+
+        try:
+            subprocess.run(cmd, check=True)
+        except subprocess.CalledProcessError as e:
+            eprint(f"Error: pacman auto-install failed for {install_str}: {e}")
+            eprint(f"Please manually run: sudo pacman -S {' '.join(missing_pkgs)}")
+            sys.exit(1)
+        except FileNotFoundError as e:
+            eprint(f"Error: pacman/sudo not found: {e}")
+            sys.exit(1)
+
+        still_missing = [t for t in official_tools if not tool_exists(t)]
+        if still_missing:
+            eprint(f"Error: Still missing after auto-install: {', '.join(still_missing)}")
+            eprint(f"Try manually: sudo pacman -S {' '.join(sorted({pacman_map.get(m, m) for m in still_missing}))}")
+            sys.exit(1)
+
+        if RICH_AVAILABLE:
+            console.print("[bold green]✓ Dependencies installed successfully[/bold green]")
+
+    if not _get_mbw_binary():
+        _ensure_mbw_available()
+        if not _get_mbw_binary() and RICH_AVAILABLE:
+            console.print("[dim]Note: mbw (AUR-only) could not be built; single-core test will be skipped.[/dim]")
 
 
 def detect_hardware_specs(skip_sudo: bool = False) -> HardwareSpecs:
@@ -1021,9 +1147,12 @@ def run_single_core_test(
     avail_mib = (specs.avail_ram_gib or 64.0) * 1024.0
     size_mib = max(64, min(size_mib, int(avail_mib * 0.25)))
 
-    if tool_exists("mbw"):
+    mbw_bin = _get_mbw_binary()
+    if not mbw_bin:
+        mbw_bin = _ensure_mbw_available()
+    if mbw_bin:
         try:
-            cmd = ["taskset", "-c", target_core, "mbw", "-n", str(runs), str(size_mib)]
+            cmd = ["taskset", "-c", target_core, mbw_bin, "-n", str(runs), str(size_mib)]
             stdout = run_cmd(cmd, timeout=run_time + 60)
             avg_re = re.compile(r"^AVG\s+Method:\s+(\S+).+?Copy:\s+([0-9.]+)\s+MiB/s", re.MULTILINE)
             averages = avg_re.findall(stdout)
@@ -1047,7 +1176,7 @@ def run_single_core_test(
         name="Single-Core Copy (1 Core)",
         throughput_gb_s=0.0,
         throughput_mib_s=0.0,
-        details="Failed (mbw unavailable or error)"
+        details="Failed (mbw unavailable or error - AUR-only package, auto-build failed)"
     )
 
 

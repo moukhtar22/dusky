@@ -166,7 +166,7 @@ hl.on("hyprland.start", function()
     -- hl.exec_cmd("~/user_scripts/rofi/dusky_glance.sh --uptime")
     -- hl.exec_cmd("~/user_scripts/rofi/dusky_glance.sh --workspace")
     -- hl.exec_cmd("~/user_scripts/rofi/dusky_glance.sh --clock")
-    hl.exec_cmd('foot --hold --title "Dusky Orchestra" bash -c "~/user_scripts/arch_setup_scripts/orchestrator.sh"')
+    hl.exec_cmd('foot --hold --title "Dusky Orchestra" bash -c "~/user_scripts/arch_setup_scripts/orchestrator.sh --profile 02_iso"')
 
 end)
 

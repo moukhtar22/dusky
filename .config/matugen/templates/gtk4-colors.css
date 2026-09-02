@@ -355,7 +355,6 @@ row.button.suggested-action:disabled,
 headerbar button.suggested-action:disabled,
 dialog button.suggested-action:disabled,
 .action-bar button.suggested-action:disabled {
-  filter: none;
   opacity: 1;
   background-color: color-mix(in srgb, var(--accent-bg-color) 75%, var(--window-bg-color));
   color: var(--accent-fg-color);

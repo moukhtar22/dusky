@@ -232,6 +232,25 @@ hl.window_rule({
 --     idle_inhibit = "fullscreen"
 -- })
 
+
+--- Wine: Headless explorer.exe Systray / Background Stub ---
+-- Rationale: Wine spawns headless explorer.exe helper windows (title="") for background
+-- systray and shell plumbing. These can steal focus from fullscreen games.
+-- Matching title="^$" ensures real Wine File Manager / Explorer windows (with non-empty titles)
+-- remain visible and interactable.
+hl.window_rule({
+    name = "suppress-wine-explorer",
+    match = {
+        class = "^(explorer\\.exe)$",
+        title = "^$"
+    },
+    float = true,
+    no_initial_focus = true,
+    no_focus = true,
+    opacity = "0.0 override 0.0 override",
+})
+
+
 -- -----------------------------------------------------------------------------
 -- COMMON DESKTOP / GNOME / QT UTILITIES (calculator, viewers, managers)
 -- -----------------------------------------------------------------------------
@@ -1171,7 +1190,7 @@ hl.window_rule({
         class = "^(com\\.github\\.dusky\\.controlcenter)$",
     },
     float = true,
-    size = {630, "(monitor_h*0.90)"},
+    size = {670, "(monitor_h*0.90)"},
     center = true,
     animation = "slide up",
     workspace = "unset",
@@ -1440,16 +1459,6 @@ hl.window_rule({
     center = true
 })
 
-
---- dusky_hyprlock_switcher.sh script ---
-hl.window_rule({
-    name = "dusky_hyprlock_switcher.sh",
-    match = { class = "^(dusky_hyprlock_switcher.sh)$" },
-    float = true,
-    size = {821, 508},
-    center = true
-})
-
 --- waybar tui ---
 hl.window_rule({
     name = "waybar_tui",
@@ -1527,12 +1536,26 @@ hl.window_rule({
     dim_around = true
 })
 
---- Hyprland Polkit Agent ---
+--- Legacy Polkit Agent (kept for compatibility) ---
 hl.window_rule({
     name = "pin-polkit-agent",
     match = { class = "^(hyprpolkitagent)$" },
     float = true,
     center = true,
+    workspace = "unset",
+    focus_on_activate = true,
+    stay_focused = true,
+    dim_around = true
+})
+
+--- Dusky Polkit Agent ---
+hl.window_rule({
+    name = "pin-dusky-polkit-agent",
+    match = { class = "^(dusky-polkit)$" },
+    float = true,
+    center = true,
+    size = {640, 240},
+    pin = true,
     workspace = "unset",
     focus_on_activate = true,
     stay_focused = true,
@@ -1937,10 +1960,10 @@ hl.window_rule({
     center = true
 })
 
---- 470_vesktop_matugen.sh (Vesktop Setup Script & Vesktop GUI - 80% W, 80% H Floating Dynamic) ---
+--- 470_vesktop_matugen.sh (Vesktop Setup Script ONLY - 80% W, 80% H Floating Dynamic) ---
 hl.window_rule({
     name = "470_vesktop_matugen.sh",
-    match = { class = "^(470_vesktop_matugen\\.sh|vesktop)$" },
+    match = { class = "^(470_vesktop_matugen\\.sh)$" },
     float = true,
     size = {"(monitor_w*0.80)", "(monitor_h*0.80)"},
     center = true

@@ -1,0 +1,27 @@
+# ==============================================================================
+# Base Unreal Engine 5 (Wine/Proton) Preset
+# Optimized for heavy Unreal Engine 5 Direct3D 12 titles
+# ==============================================================================
+
+extends = "base_wine_dxvk"
+
+[runtime]
+type = "wine"
+
+[runtime.wine]
+sync_mode = "auto"
+dxvk = true
+vkd3d = true
+debug = "fixme-all"
+redistributables = ["VC_redist.x64.exe"]
+winetricks = []
+
+[graphics]
+gpu = "discrete"
+prefer_xwayland = false
+
+[performance]
+gamemode = true
+
+[env]
+VKD3D_CONFIG = "force_static_cbv"

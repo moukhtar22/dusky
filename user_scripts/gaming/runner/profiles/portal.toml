@@ -1,0 +1,39 @@
+extends = "base_native"
+
+[meta]
+id = "portal"
+name = "Portal"
+version = "1.0"
+icon = "applications-games"
+developer = "Valve"
+genre = "Puzzle / FPS"
+description = "Set in the mysterious Aperture Science Laboratories, Portal is one of the most innovative new games on the horizon and offers gamers hours of unique gameplay."
+
+[paths]
+game_dir = "/mnt/media/games/good_quality/portal/Portal.Collection-jc141"
+dwarfs_image = "files/game-root.dwarfs"
+dwarfs_mount = "files/.game-root-mnt"
+overlay_dir = "files/game-root"
+overlay_storage = "files/overlay-storage"
+overlay_work = "files/.game-root-work"
+executable = "Portal/steam-runtime/run.sh"
+working_dir = "Portal"
+arguments = ["./hl2.sh", "-game", "portal", "-steam", "-novid"]
+
+[runtime]
+type = "native"
+
+[graphics]
+gpu = "auto"
+wayland_native = true
+prefer_xwayland = true
+
+[graphics.gamescope]
+enabled = false
+mode = "embedded"
+allow_tearing = true
+
+[performance]
+gamemode = true
+mangohud = false
+fps_limit = 60

@@ -1,0 +1,41 @@
+# ==============================================================================
+# Stardew Valley Profile
+# ==============================================================================
+
+extends = "base_native"
+
+[meta]
+id = "stardew_valley"
+name = "Stardew Valley"
+version = "1.6.8"
+icon = "applications-games"
+developer = "ConcernedApe"
+genre = "Simulation / RPG"
+description = "Build your dream farm, raise animals, and integrate into the Pelican Town community."
+
+[paths]
+game_dir = "/mnt/media/games/good_quality/Stardew.Valley-jc141"
+dwarfs_image = "files/game-root.dwarfs"
+dwarfs_mount = "files/.game-root-mnt"
+overlay_dir = "files/game-root"
+overlay_storage = "files/overlay-storage"
+overlay_work = "files/.game-root-work"
+executable = "StardewModdingAPI"
+arguments = []
+
+[runtime]
+type = "native"
+
+[graphics]
+gpu = "auto"
+wayland_native = true
+
+[graphics.gamescope]
+enabled = true
+mode = "embedded"
+allow_tearing = true
+
+[performance]
+gamemode = true
+mangohud = false
+fps_limit = 60

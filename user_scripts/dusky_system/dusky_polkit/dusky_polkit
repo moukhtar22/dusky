@@ -1,0 +1,1242 @@
+#!/usr/bin/python
+# Dusky Polkit - a minimal, high-performance polkit authentication agent.
+#
+# Speaks the D-Bus wire protocol directly over AF_UNIX (no external dbus libraries).
+# Uses Linux pidfd and selectors for zero-latency child terminal lifecycle management.
+#
+# Optimized for modern Arch Linux (Wayland / Hyprland).
+
+import ctypes
+import gc
+import os
+import pwd
+import select
+import selectors
+import signal
+import socket
+import struct
+import subprocess
+import sys
+import time
+from collections import deque
+
+BUS_NAME = "org.freedesktop.PolicyKit1"
+AUTHORITY_PATH = "/org/freedesktop/PolicyKit1/Authority"
+AUTHORITY_IFACE = "org.freedesktop.PolicyKit1.Authority"
+AGENT_IFACE = "org.freedesktop.PolicyKit1.AuthenticationAgent"
+OBJ_PATH = "/org/dusky/PolicyKit1/AuthenticationAgent"
+HELPER_SOCKET = "/run/polkit/agent-helper.socket"
+LOGIND_NAME = "org.freedesktop.login1"
+LOGIND_PATH = "/org/freedesktop/login1"
+LOGIND_MGR = "org.freedesktop.login1.Manager"
+
+MAX_ATTEMPTS = 3
+AUTH_TIMEOUT = 120.0
+HBUF_CAP = 65536        # helper protocol lines must stay sane
+PWBUF_CAP = 8192        # a password longer than this is invalid input
+
+BUS_NAME_WATCH_RULE = (
+    "type='signal',sender='org.freedesktop.DBus',"
+    "interface='org.freedesktop.DBus',member='NameOwnerChanged',"
+    "arg0='" + BUS_NAME + "'"
+)
+BENIGN_ERRORS = frozenset({
+    "org.freedesktop.DBus.Error.UnknownMethod",
+    "org.freedesktop.DBus.Error.UnknownDestName",
+    "org.freedesktop.DBus.Error.UnknownObject",
+    "org.freedesktop.DBus.Error.ServiceUnknown",
+})
+
+INTROSPECT_XML = (
+    '<!DOCTYPE node PUBLIC "-//freedesktop//DTD D-BUS Object Introspection 1.0//EN" '
+    '"http://www.freedesktop.org/standards/dbus/1.0/introspect.dtd">\n'
+    '<node>\n'
+    '  <interface name="org.freedesktop.DBus.Introspectable">\n'
+    '    <method name="Introspect">\n'
+    '      <arg name="xml_data" type="s" direction="out"/>\n'
+    '    </method>\n'
+    '  </interface>\n'
+    '  <interface name="org.freedesktop.DBus.Peer">\n'
+    '    <method name="Ping"/>\n'
+    '    <method name="GetMachineId">\n'
+    '      <arg name="machine_uuid" type="s" direction="out"/>\n'
+    '    </method>\n'
+    '  </interface>\n'
+    '  <interface name="org.freedesktop.PolicyKit1.AuthenticationAgent">\n'
+    '    <method name="BeginAuthentication">\n'
+    '      <arg name="action_id" type="s" direction="in"/>\n'
+    '      <arg name="message" type="s" direction="in"/>\n'
+    '      <arg name="icon_name" type="s" direction="in"/>\n'
+    '      <arg name="details" type="a{ss}" direction="in"/>\n'
+    '      <arg name="cookie" type="s" direction="in"/>\n'
+    '      <arg name="identities" type="a(sa{sv})" direction="in"/>\n'
+    '    </method>\n'
+    '    <method name="CancelAuthentication">\n'
+    '      <arg name="cookie" type="s" direction="in"/>\n'
+    '    </method>\n'
+    '  </interface>\n'
+    '</node>\n'
+)
+
+PROMPT_SH = (
+    "stty -echo 2>/dev/null; "
+    "trap 'stty echo 2>/dev/null' EXIT INT TERM; "
+    'if [ -n "$DUSKY_NOTICE" ]; then printf "%s\\n" "$DUSKY_NOTICE"; fi; '
+    'printf "%s\\n" "$DUSKY_MESSAGE"; '
+    'printf "%s" "$DUSKY_PROMPT"; '
+    'IFS= read -rs pw && printf "%s\\n" "$pw" > "$DUSKY_FIFO"'
+)
+
+ALIGN = {
+    "y": 1, "b": 4, "n": 2, "q": 2, "i": 4, "u": 4,
+    "x": 8, "t": 8, "d": 8, "s": 4, "o": 4, "g": 1,
+    "a": 4, "(": 8, "{": 8, "v": 1, "h": 4,
+}
+
+
+class BusError(Exception):
+    pass
+
+
+def log(msg: str) -> None:
+    print(f"[dusky-polkit] {msg}", file=sys.stderr, flush=True)
+
+
+_libc = None
+
+
+def trim_memory() -> None:
+    """Collect Python garbage and release glibc free arenas back to the OS."""
+    global _libc
+    try:
+        gc.collect()
+    except Exception:
+        pass
+    try:
+        if _libc is None:
+            _libc = ctypes.CDLL("libc.so.6")
+        _libc.malloc_trim(0)
+    except Exception:
+        pass
+
+
+def _read_type(sig: str, i: int) -> tuple[object, int]:
+    c = sig[i]
+    if c == "a":
+        elem, nxt = _read_type(sig, i + 1)
+        return ["a", elem], nxt
+    if c in "({":
+        node: list = [c]
+        closer = ")" if c == "(" else "}"
+        i += 1
+        while i < len(sig) and sig[i] != closer:
+            child, i = _read_type(sig, i)
+            node.append(child)
+        return node, i + 1
+    return c, i + 1
+
+
+def parse_sig(sig: str) -> list:
+    """Signature string -> nested token tree. Leaves are bare chars;
+    arrays are ['a', element]; structs/dicts carry '(' or '{' first."""
+    out: list = []
+    i = 0
+    while i < len(sig):
+        token, i = _read_type(sig, i)
+        out.append(token)
+    return out
+
+
+def first_char(node) -> str:
+    return node[0] if isinstance(node, list) else node
+
+
+class Writer:
+    """Marshals python values into D-Bus wire bytes (little endian)."""
+
+    __slots__ = ("buf",)
+
+    def __init__(self) -> None:
+        self.buf = bytearray()
+
+    def pad(self, n: int) -> None:
+        self.buf += b"\0" * ((-len(self.buf)) % n)
+
+    def put(self, node, v) -> None:
+        if isinstance(node, list):
+            kind = node[0]
+            if kind == "a":
+                elem = node[1]
+                self.pad(4)
+                len_pos = len(self.buf)
+                self.buf += b"\0\0\0\0"
+                if v:
+                    self.pad(ALIGN[first_char(elem)])
+                    start = len(self.buf)
+                    if isinstance(v, dict):
+                        for k, val in v.items():
+                            self.put(elem, [k, val])
+                    else:
+                        for item in v:
+                            self.put(elem, item)
+                    struct.pack_into("<I", self.buf, len_pos, len(self.buf) - start)
+            elif kind == "(":
+                self.pad(8)
+                for sub, item in zip(node[1:], v):
+                    self.put(sub, item)
+            elif kind == "{":
+                self.pad(8)
+                self.put(node[1], v[0])
+                self.put(node[2], v[1])
+            return
+
+        c = node
+        self.pad(ALIGN[c])
+        if c == "y":
+            self.buf.append(v)
+        elif c == "b":
+            self.buf += struct.pack("<I", 1 if v else 0)
+        elif c == "n":
+            self.buf += struct.pack("<h", v)
+        elif c == "q":
+            self.buf += struct.pack("<H", v)
+        elif c in "uh":
+            self.buf += struct.pack("<I", v)
+        elif c == "i":
+            self.buf += struct.pack("<i", v)
+        elif c == "x":
+            self.buf += struct.pack("<q", v)
+        elif c == "t":
+            self.buf += struct.pack("<Q", v)
+        elif c == "d":
+            self.buf += struct.pack("<d", v)
+        elif c in "so":
+            raw = v.encode() if isinstance(v, str) else v
+            self.buf += struct.pack("<I", len(raw))
+            self.buf += raw + b"\0"
+        elif c == "g":
+            raw = v.encode() if isinstance(v, str) else v
+            self.buf.append(len(raw))
+            self.buf += raw + b"\0"
+        elif c == "v":
+            sig, inner = v
+            self.put("g", sig)
+            self.put(parse_sig(sig)[0], inner)
+        else:
+            raise BusError(f"cannot marshal {c!r}")
+
+
+class Reader:
+    """Demarshals wire bytes relative to position 0 (body/header slices)."""
+
+    __slots__ = ("b", "p")
+
+    def __init__(self, data: bytes) -> None:
+        self.b = data
+        self.p = 0
+
+    def align(self, n: int) -> None:
+        self.p += (-self.p) % n
+
+    def take(self, n: int) -> bytes:
+        if self.p + n > len(self.b):
+            raise BusError("truncated message")
+        out = self.b[self.p:self.p + n]
+        self.p += n
+        return out
+
+    def u32(self) -> int:
+        self.align(4)
+        return struct.unpack("<I", self.take(4))[0]
+
+    def _string(self) -> str:
+        ln = self.u32()
+        raw = self.take(ln)
+        self.take(1)
+        return raw.decode("utf-8", "replace")
+
+    def _gstr(self) -> str:
+        ln = self.take(1)[0]
+        raw = self.take(ln)
+        self.take(1)  # trailing NUL
+        return raw.decode("ascii", "replace")
+
+    def value(self, node):
+        if isinstance(node, list):
+            kind = node[0]
+            if kind == "a":
+                elem = node[1]
+                self.align(4)
+                ln = self.u32()
+                if ln == 0:
+                    return []
+                self.align(ALIGN[first_char(elem)])
+                end = self.p + ln
+                out = []
+                while self.p < end:
+                    out.append(self.value(elem))
+                return out
+            if kind == "(":
+                self.align(8)
+                return tuple(self.value(c) for c in node[1:])
+            if kind == "{":
+                self.align(8)
+                return [self.value(node[1]), self.value(node[2])]
+        c = node
+        self.align(ALIGN[c])
+        if c == "y":
+            return self.take(1)[0]
+        if c == "b":
+            return bool(struct.unpack("<I", self.take(4))[0])
+        if c == "n":
+            return struct.unpack("<h", self.take(2))[0]
+        if c == "q":
+            return struct.unpack("<H", self.take(2))[0]
+        if c == "i":
+            return struct.unpack("<i", self.take(4))[0]
+        if c in "uh":
+            return struct.unpack("<I", self.take(4))[0]
+        if c == "x":
+            return struct.unpack("<q", self.take(8))[0]
+        if c == "t":
+            return struct.unpack("<Q", self.take(8))[0]
+        if c == "d":
+            return struct.unpack("<d", self.take(8))[0]
+        if c in "so":
+            return self._string()
+        if c == "g":
+            return self._gstr()
+        if c == "v":
+            sig = self._gstr()
+            return (sig, self.value(parse_sig(sig)[0]))
+        raise BusError(f"cannot demarshal {c!r}")
+
+
+def build_message(mtype: int, flags: int, serial: int,
+                  fields: list[tuple[int, str, object]],
+                  body_sig: str = "", body_args=()) -> bytes:
+    body = Writer()
+    if body_sig:
+        for node, val in zip(parse_sig(body_sig), body_args):
+            body.put(node, val)
+
+    hf = Writer()
+    for code, kind, val in fields:
+        hf.pad(8)
+        hf.buf.append(code)
+        hf.put("g", kind)
+        if kind in "uh":
+            hf.put("u", val)
+        else:
+            hf.put(kind, val)  # s / o / g
+
+    head = bytearray(b"l")
+    head += bytes((mtype, flags, 1))
+    head += struct.pack("<III", len(body.buf), serial, len(hf.buf))
+    head += hf.buf
+    head += b"\0" * ((-len(head)) % 8)
+    return bytes(head) + bytes(body.buf)
+
+
+def parse_message(buf: bytes) -> tuple[dict, int] | tuple[None, int]:
+    if len(buf) < 16:
+        return None, 0
+    body_len, serial, hlen = struct.unpack_from("<III", buf, 4)
+    hdr_end = 16 + hlen
+    body_start = (hdr_end + 7) & ~7
+    total = body_start + body_len
+    if len(buf) < total:
+        return None, 0
+
+    try:
+        hr = Reader(buf[16:hdr_end])
+        fields: dict[int, object] = {}
+        while hr.p < hlen:
+            hr.align(8)
+            code = hr.take(1)[0]
+            sig = hr._gstr()
+            fields[code] = hr.value(parse_sig(sig)[0])
+
+        vals = ()
+        sig = fields.get(8)
+        if body_len and sig:
+            br = Reader(buf[body_start:total])
+            vals = tuple(br.value(node) for node in parse_sig(sig))
+
+        msg = {"type": buf[1], "flags": buf[2], "serial": serial,
+               "fields": fields, "sig": sig, "body": vals}
+        return msg, total
+    except Exception as e:
+        log(f"warning: failed to decode D-Bus message serial={serial}: {e}")
+        return None, total
+
+
+class Agent:
+    def __init__(self) -> None:
+        self.sel = selectors.DefaultSelector()
+        self.sock: socket.socket | None = None
+        self.rbuf = b""
+        self.serial = 0
+        self.stopping = False
+        self.session_id: str = ""
+        self.current: dict | None = None
+        self.queue: deque[dict] = deque()
+        self.deferred: list[dict] = []
+
+    # ---------------- bus plumbing ----------------
+
+    def connect_bus(self) -> None:
+        addr = os.environ.get("DBUS_SYSTEM_BUS_ADDRESS",
+                              "unix:path=/run/dbus/system_bus_socket")
+        path = addr.split("path=", 1)[1].split(",")[0]
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.connect(path)
+        uid_hex = str(os.getuid()).encode().hex()
+        s.sendall(b"\0AUTH EXTERNAL " + uid_hex.encode() + b"\r\nBEGIN\r\n")
+        resp = b""
+        while b"\r\n" not in resp:
+            chunk = s.recv(64)
+            if not chunk:
+                raise BusError("bus closed during SASL")
+            resp += chunk
+        line = resp.split(b"\r\n", 1)[0]
+        if not line.startswith(b"OK "):
+            raise BusError(f"SASL rejected: {line!r}")
+        leftover = resp.split(b"\r\n", 1)[1]
+        s.setblocking(False)
+        self.sock = s
+        self.rbuf = leftover
+        self.sel.register(s, selectors.EVENT_READ, "bus")
+
+        unique = self.sync_call("org.freedesktop.DBus", "/org/freedesktop/DBus",
+                                "org.freedesktop.DBus", "Hello", "", (), "s")[0]
+        log(f"connected to system bus as {unique}")
+
+    @staticmethod
+    def sendall_nb(sk: socket.socket, data: bytes) -> None:
+        view = memoryview(data)
+        deadline = time.monotonic() + 5.0
+        while view:
+            try:
+                sent = sk.send(view)
+                view = view[sent:]
+            except (BlockingIOError, InterruptedError):
+                if time.monotonic() > deadline:
+                    raise OSError("send timeout")
+                select.select([], [sk], [], 0.05)
+
+    def send_msg(self, mtype: int, flags: int, fields: list,
+                 body_sig: str = "", body_args=()) -> int:
+        if self.sock is None:
+            return 0
+        self.serial += 1
+        data = build_message(mtype, flags, self.serial, fields, body_sig, body_args)
+        self.sendall_nb(self.sock, data)
+        return self.serial
+
+    def call_fields(self, dest: str, path: str, iface: str, member: str,
+                    sig: str) -> list[tuple]:
+        fields = [(1, "o", path), (6, "s", dest), (2, "s", iface), (3, "s", member)]
+        if sig:
+            fields.append((8, "g", sig))
+        return fields
+
+    def sync_call(self, dest: str, path: str, iface: str, member: str,
+                  sig: str, args: tuple, reply_sig: str) -> tuple:
+        assert self.sock is not None
+        serial = self.send_msg(1, 0, self.call_fields(dest, path, iface, member, sig),
+                               sig, args)
+        deadline = time.monotonic() + 10.0
+        off = 0
+        while True:
+            msg, used = parse_message(self.rbuf[off:])
+            if used == 0:
+                rem = deadline - time.monotonic()
+                if rem <= 0:
+                    self.rbuf = self.rbuf[off:]
+                    raise BusError(f"timeout awaiting reply for {member}")
+                r, _, _ = select.select([self.sock], [], [], min(rem, 1.0))
+                if not r:
+                    continue
+                try:
+                    chunk = self.sock.recv(65536)
+                except (BlockingIOError, InterruptedError):
+                    continue
+                if not chunk:
+                    raise BusError("bus closed awaiting reply")
+                self.rbuf += chunk
+                continue
+            off += used
+            if msg is None:
+                continue
+            if msg["type"] == 2 and msg["fields"].get(5) == serial:
+                self.rbuf = self.rbuf[off:]
+                return msg["body"]
+            if msg["type"] == 3 and msg["fields"].get(5) == serial:
+                err = msg["fields"].get(4, "?")
+                text = msg["body"][0] if msg["body"] else ""
+                self.rbuf = self.rbuf[off:]
+                raise BusError(f"{iface}.{member}: {err}: {text}")
+            # Any other message or signal received during sync_call must be preserved
+            self.deferred.append(msg)
+
+    # ---------------- registration ----------------
+
+    @staticmethod
+    def subject(session_id: str) -> list:
+        return ["unix-session", [["session-id", ("s", session_id)]]]
+
+    @staticmethod
+    def unescape_component(comp: str) -> str:
+        """Decode systemd sd-bus path component escaping (e.g. _33 -> 3, _2d1 -> -1)."""
+        out, i = [], 0
+        while i < len(comp):
+            if comp[i] == "_" and i + 3 <= len(comp):
+                try:
+                    out.append(chr(int(comp[i + 1:i + 3], 16)))
+                    i += 3
+                    continue
+                except ValueError:
+                    pass
+            out.append(comp[i])
+            i += 1
+        return "".join(out)
+
+    def resolve_session(self) -> str:
+        sid = os.environ.get("XDG_SESSION_ID", "").strip()
+        if sid:
+            return sid
+
+        # Tier 2: Try GetSessionByPID for this process
+        try:
+            obj_path = self.sync_call(LOGIND_NAME, LOGIND_PATH, LOGIND_MGR,
+                                      "GetSessionByPID", "u",
+                                      (os.getpid(),), "o")[0]
+            comp = obj_path.rstrip("/").rsplit("/", 1)[-1]
+            resolved = self.unescape_component(comp)
+            if resolved:
+                return resolved
+        except Exception:
+            pass
+
+        # Tier 3: Query logind User object for active session
+        try:
+            uid = os.getuid()
+            user_obj = self.sync_call(LOGIND_NAME, LOGIND_PATH, LOGIND_MGR,
+                                      "GetUser", "u", (uid,), "o")[0]
+            # Try Display property (so)
+            prop = self.sync_call(LOGIND_NAME, user_obj,
+                                  "org.freedesktop.DBus.Properties",
+                                  "Get", "ss",
+                                  ("org.freedesktop.login1.User", "Display"),
+                                  "v")[0]
+            if prop and isinstance(prop, tuple) and len(prop) > 1:
+                disp_val = prop[1]
+                if isinstance(disp_val, (tuple, list)) and disp_val and disp_val[0]:
+                    return str(disp_val[0])
+
+            # Try Sessions property a(so)
+            prop_sess = self.sync_call(LOGIND_NAME, user_obj,
+                                       "org.freedesktop.DBus.Properties",
+                                       "Get", "ss",
+                                       ("org.freedesktop.login1.User", "Sessions"),
+                                       "v")[0]
+            if prop_sess and isinstance(prop_sess, tuple) and len(prop_sess) > 1:
+                sess_list = prop_sess[1]
+                if isinstance(sess_list, (tuple, list)) and sess_list:
+                    return str(sess_list[0][0])
+        except Exception as e:
+            log(f"warning: logind user query failed: {e}")
+
+        raise BusError("unable to resolve logind session ID")
+
+    def register(self) -> None:
+        session_id = self.resolve_session()
+        self.session_id = session_id
+        lang = os.environ.get("LANG", "C.UTF-8")
+        last_err: Exception = BusError("unreachable")
+        for attempt in range(3):
+            try:
+                self.sync_call(BUS_NAME, AUTHORITY_PATH, AUTHORITY_IFACE,
+                               "RegisterAuthenticationAgent", "(sa{sv})ss",
+                               (self.subject(session_id), lang, OBJ_PATH), "")
+                log(f"registered agent for session {session_id}")
+                return
+            except BusError as e:
+                last_err = e
+                log(f"register attempt {attempt + 1} failed: {e}")
+                time.sleep(0.5)
+        raise last_err
+
+    def watch_authority(self) -> None:
+        """Get notified when polkitd restarts so we can re-register."""
+        try:
+            self.sync_call("org.freedesktop.DBus", "/org/freedesktop/DBus",
+                           "org.freedesktop.DBus", "AddMatch", "s",
+                           (BUS_NAME_WATCH_RULE,), "")
+        except BusError as e:
+            log(f"warning: NameOwnerChanged watch failed: {e}")
+
+    def reregister(self) -> None:
+        # Cancel any stale in-flight authentication from old polkitd instance
+        if self.current is not None:
+            cur = self.current
+            self.finish_auth(cur, cancelled=True)
+        self.queue.clear()
+        try:
+            self.register()
+        except Exception as e:
+            log(f"re-registration failed: {e}")
+
+    def unregister(self) -> None:
+        try:
+            sid = self.session_id or os.environ.get("XDG_SESSION_ID", "")
+            if not sid:
+                return
+            self.sync_call(BUS_NAME, AUTHORITY_PATH, AUTHORITY_IFACE,
+                           "UnregisterAuthenticationAgent", "(sa{sv})s",
+                           (self.subject(sid), OBJ_PATH), "")
+        except Exception:
+            pass
+
+    # ---------------- auth lifecycle ----------------
+
+    def pick_user(self, identities: list) -> str:
+        euid = os.geteuid()
+        chosen = None
+        for kind, props in identities or []:
+            if kind != "unix-user":
+                continue
+            uid = {k: v[1] for k, v in props}.get("uid")
+            if uid is not None:
+                if uid == euid:
+                    chosen = uid
+                    break
+                if chosen is None:
+                    chosen = uid
+        if chosen is None:
+            chosen = euid
+        try:
+            return pwd.getpwuid(chosen).pw_name
+        except KeyError:
+            return str(chosen)
+
+    def begin_authentication(self, sender: str, serial: int, vals: tuple) -> None:
+        try:
+            action_id, message, icon_name, details, cookie, identities = vals
+        except (ValueError, TypeError):
+            log(f"malformed BeginAuthentication from {sender!r}; ignoring")
+            return
+
+        if (self.current is not None and self.current["cookie"] == cookie) or \
+                any(q["cookie"] == cookie for q in self.queue):
+            log(f"ignoring duplicate dispatch cookie={cookie}")
+            return
+
+        auth = {
+            "sender": sender, "reply_serial": serial,
+            "action": action_id, "message": message, "icon": icon_name,
+            "cookie": cookie, "user": self.pick_user(identities),
+            "attempts": 0, "prompted": False, "submitted": False,
+            "notice": "", "helper": None, "hbuf": b"",
+            "fifo_path": None, "fifo_fd": -1, "proc": None,
+            "pidfd": -1, "fifobuf": b"", "deadline": 0.0,
+        }
+        if self.current is not None:
+            self.queue.append(auth)
+            log(f"queued auth cookie={cookie[:8]} ({len(self.queue)} waiting)")
+            return
+        self.current = auth
+        self.start_auth(auth)
+
+    def fifo_dir(self) -> str:
+        runtime = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+        d = os.path.join(runtime, "dusky-polkit")
+        os.makedirs(d, mode=0o700, exist_ok=True)
+        return d
+
+    @staticmethod
+    def fifo_name(cookie: str) -> str:
+        safe = "".join(c for c in cookie if c.isalnum() or c in ".-_")[:64]
+        return f"{safe or 'req'}.fifo"
+
+    def sweep_fifos(self) -> None:
+        """Remove fifos orphaned by a previous crashed instance."""
+        try:
+            d = self.fifo_dir()
+        except OSError:
+            return
+        for name in os.listdir(d):
+            if name.endswith(".fifo"):
+                try:
+                    os.unlink(os.path.join(d, name))
+                except OSError:
+                    pass
+
+    def open_fifo(self, auth: dict) -> None:
+        if auth["fifo_path"] is None:
+            path = os.path.join(self.fifo_dir(), self.fifo_name(auth["cookie"]))
+            try:
+                os.mkfifo(path, 0o600)
+            except FileExistsError:
+                pass
+            auth["fifo_path"] = path
+        fd = os.open(auth["fifo_path"], os.O_RDWR | os.O_NONBLOCK | os.O_CLOEXEC)
+        auth["fifo_fd"] = fd
+        self.sel.register(fd, selectors.EVENT_READ, "fifo")
+        auth["fifobuf"] = b""
+
+    def spawn_terminal(self, auth: dict, notice: str) -> None:
+        term = os.environ.get("DUSKY_POLKIT_TERMINAL", "foot")
+        cmd = term.split()
+        extra = []
+        base = os.path.basename(cmd[0])
+        if base == "foot":
+            extra = [
+                "--app-id=dusky-polkit",
+                "--title=Dusky Polkit",
+                "--window-size-chars=66x10",
+                "--override=pad=16x16",
+            ]
+        elif base == "kitty":
+            extra = ["--class=dusky-polkit", "--title=Dusky Polkit"]
+        elif base in ("alacritty", "ghostty"):
+            extra = ["--class=dusky-polkit,dusky-polkit", "--title=Dusky Polkit", "-e"]
+
+        env = dict(os.environ)
+        env.update({
+            "DUSKY_FIFO": auth["fifo_path"] or "",
+            "DUSKY_NOTICE": notice,
+            "DUSKY_USER": auth["user"],
+            "DUSKY_ACTION": auth["action"],
+            "DUSKY_MESSAGE": auth["message"] or f"Authentication required ({auth['action']})",
+        })
+
+        self.kill_terminal(auth)
+
+        try:
+            runner = ["/usr/bin/python3", os.path.abspath(__file__), "--ui"]
+            exec_args = cmd + extra + runner
+            proc = subprocess.Popen(
+                exec_args,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                env=env,
+                start_new_session=True,
+            )
+            auth["proc"] = proc
+            # Register Linux pidfd in selectors for instantaneous child exit notification
+            try:
+                pfd = os.pidfd_open(proc.pid)
+                auth["pidfd"] = pfd
+                self.sel.register(pfd, selectors.EVENT_READ, "child")
+            except Exception:
+                auth["pidfd"] = -1
+        except OSError as e:
+            log(f"terminal spawn failed ({cmd[0]}): {e}")
+            raise
+
+    def connect_helper(self, auth: dict) -> bool:
+        try:
+            sk = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            sk.settimeout(2.0)
+            sk.connect(HELPER_SOCKET)
+            sk.setblocking(False)
+            self.sendall_nb(sk, f"{auth['user']}\n{auth['cookie']}\n".encode())
+        except OSError as e:
+            log(f"helper connect failed: {e}")
+            return False
+        auth["helper"] = sk
+        auth["hbuf"] = b""
+        auth["prompted"] = False
+        auth["submitted"] = False
+        self.sel.register(sk, selectors.EVENT_READ, "helper")
+        return True
+
+    def start_auth(self, auth: dict) -> None:
+        self.open_fifo(auth)
+        try:
+            self.spawn_terminal(auth, auth["notice"])
+        except Exception:
+            self.finish_auth(auth, cancelled=True)
+            return
+        auth["notice"] = ""
+        if not self.connect_helper(auth):
+            self.helper_failed(auth)
+            return
+        auth["deadline"] = time.monotonic() + AUTH_TIMEOUT
+        log(f"auth begin cookie={auth['cookie']} user={auth['user']} action={auth['action']}")
+
+    def helper_line(self, auth: dict, line: str) -> None:
+        if line.startswith("PAM_PROMPT_ECHO_OFF") or line.startswith("PAM_PROMPT_ECHO_ON"):
+            auth["prompted"] = True
+            return
+        if line.startswith("PAM_TEXT_INFO") or line.startswith("PAM_ERROR_MSG"):
+            text = line.split(" ", 1)[1] if " " in line else ""
+            if line.startswith("PAM_ERROR_MSG"):
+                auth["notice"] = f"{text}\n"
+            return
+        if line == "SUCCESS":
+            log(f"auth success cookie={auth['cookie']}")
+            self.finish_auth(auth, ok=True)
+            return
+        if line == "FAILURE":
+            self.auth_failure(auth)
+
+    def auth_failure(self, auth: dict) -> None:
+        had_prompt = auth.get("prompted", False)
+        self.drop_helper(auth)
+        auth["attempts"] = auth.get("attempts", 0) + 1
+        if not had_prompt:
+            log(f"helper failed before prompt cookie={auth.get('cookie', '?')}")
+            self.finish_auth(auth, cancelled=True)
+            return
+        if auth["attempts"] >= MAX_ATTEMPTS:
+            log(f"auth failed after {auth['attempts']} attempts cookie={auth.get('cookie', '?')}")
+            self.finish_auth(auth, error=True)
+            return
+        notice = auth.get("notice") or f"Authentication failed (attempt {auth['attempts'] + 1}/{MAX_ATTEMPTS})\n"
+        auth["notice"] = notice
+        log(f"retry {auth['attempts'] + 1}/{MAX_ATTEMPTS} cookie={auth.get('cookie', '?')}")
+        self.open_fifo(auth)
+        try:
+            self.spawn_terminal(auth, auth["notice"])
+        except Exception:
+            self.finish_auth(auth, cancelled=True)
+            return
+        auth["notice"] = ""
+        if not self.connect_helper(auth):
+            self.helper_failed(auth)
+            return
+        auth["deadline"] = time.monotonic() + AUTH_TIMEOUT
+
+    def helper_failed(self, auth: dict) -> None:
+        self.finish_auth(auth, cancelled=True)
+
+    def submit_password(self, auth: dict, password: str) -> None:
+        if auth["submitted"]:
+            return
+        if auth["helper"] is None:
+            log(f"password arrived with no helper cookie={auth['cookie']}")
+            self.close_fifo(auth)
+            self.auth_failure(auth)
+            return
+        auth["submitted"] = True
+        try:
+            self.sendall_nb(auth["helper"], password.encode() + b"\n")
+            log(f"password forwarded cookie={auth['cookie']}")
+        except OSError:
+            self.close_fifo(auth)
+            self.auth_failure(auth)
+            return
+        self.close_fifo(auth)
+
+    def close_fifo(self, auth: dict) -> None:
+        fd = auth["fifo_fd"]
+        if fd >= 0:
+            try:
+                self.sel.unregister(fd)
+            except (KeyError, ValueError):
+                pass
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            auth["fifo_fd"] = -1
+        auth["fifobuf"] = b""
+
+    def drop_helper(self, auth: dict) -> None:
+        sk = auth["helper"]
+        if sk is not None:
+            try:
+                self.sel.unregister(sk)
+            except (KeyError, ValueError):
+                pass
+            try:
+                sk.close()
+            except OSError:
+                pass
+            auth["helper"] = None
+
+    def kill_terminal(self, auth: dict) -> None:
+        pfd = auth.get("pidfd", -1)
+        if pfd >= 0:
+            try:
+                self.sel.unregister(pfd)
+            except (KeyError, ValueError):
+                pass
+            try:
+                os.close(pfd)
+            except OSError:
+                pass
+            auth["pidfd"] = -1
+
+        proc = auth.get("proc")
+        if proc is not None:
+            if proc.poll() is None:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except OSError:
+                    proc.kill()
+                try:
+                    proc.wait(timeout=1.0)
+                except subprocess.TimeoutExpired:
+                    pass
+            auth["proc"] = None
+
+    def finish_auth(self, auth: dict, ok: bool = False,
+                    cancelled: bool = False, error: bool = False) -> None:
+        self.drop_helper(auth)
+        self.close_fifo(auth)
+        self.kill_terminal(auth)
+        if auth["fifo_path"]:
+            try:
+                os.unlink(auth["fifo_path"])
+            except OSError:
+                pass
+            auth["fifo_path"] = None
+
+        if error:
+            self.reply_error(auth["sender"], auth["reply_serial"],
+                             "org.freedesktop.PolicyKit1.Error.Failed",
+                             "Authentication failed")
+        else:
+            self.reply_return(auth["sender"], auth["reply_serial"])
+
+        if self.current is auth:
+            self.current = None
+        trim_memory()
+        self.start_next()
+
+    def cancel_by_cookie(self, cookie: str) -> None:
+        cur = self.current
+        if cur is not None and cur["cookie"] == cookie:
+            log(f"cancelled by authority cookie={cookie}")
+            self.finish_auth(cur, cancelled=True)
+            return
+        for queued in list(self.queue):
+            if queued["cookie"] == cookie:
+                self.queue.remove(queued)
+                self.reply_return(queued["sender"], queued["reply_serial"])
+                log(f"queued request cancelled cookie={cookie}")
+                return
+
+    def start_next(self) -> None:
+        while self.queue and self.current is None:
+            nxt = self.queue.popleft()
+            self.current = nxt
+            self.start_auth(nxt)
+
+    # ---------------- replies ----------------
+
+    def reply_return(self, sender: str, reply_serial: int) -> None:
+        self.send_msg(2, 1, [(5, "u", reply_serial), (6, "s", sender)])
+
+    def reply_error(self, sender: str, reply_serial: int, name: str, text: str) -> None:
+        self.send_msg(3, 1,
+                      [(4, "s", name), (5, "u", reply_serial),
+                       (6, "s", sender), (8, "g", "s")],
+                      "s", (text,))
+
+    # ---------------- main loop ----------------
+
+    def dispatch(self, msg: dict) -> None:
+        t = msg["type"]
+        fields = msg["fields"]
+        if t == 4:  # signal
+            member = fields.get(3)
+            if member == "Disconnected":
+                raise ConnectionError("bus disconnected")
+            if member == "NameOwnerChanged" and msg["body"] and msg["body"][0] == BUS_NAME:
+                if msg["body"][2]:
+                    log(f"polkitd reappeared (owner {msg['body'][2]}); re-registering")
+                    self.reregister()
+                return
+            return
+        if t == 3:
+            err = fields.get(4, "")
+            if err not in BENIGN_ERRORS:
+                log(f"unexpected bus error: {err}: "
+                    f"{msg['body'][0] if msg['body'] else ''}")
+            return
+        if t != 1 or fields.get(1) != OBJ_PATH:
+            return
+        member = fields.get(3)
+        sender = fields.get(7, "")
+        if member == "BeginAuthentication":
+            self.begin_authentication(sender, msg["serial"], msg["body"])
+        elif member == "CancelAuthentication":
+            if msg["body"]:
+                self.cancel_by_cookie(msg["body"][0])
+        elif member == "Introspect":
+            self.send_msg(2, 1,
+                          [(5, "u", msg["serial"]), (6, "s", sender),
+                           (8, "g", "s")], "s", (INTROSPECT_XML,))
+        elif member == "Ping":
+            self.reply_return(sender, msg["serial"])
+        else:
+            self.reply_error(sender, msg["serial"],
+                             "org.freedesktop.DBus.Error.UnknownMethod",
+                             f"unknown method {member}")
+
+    def pump_bus(self) -> None:
+        assert self.sock is not None
+        try:
+            chunk = self.sock.recv(65536)
+        except (BlockingIOError, InterruptedError):
+            return
+        except ConnectionResetError:
+            raise ConnectionError("bus reset")
+        if not chunk:
+            raise ConnectionError("bus eof")
+        self.rbuf += chunk
+        while True:
+            msg, used = parse_message(self.rbuf)
+            if used == 0:
+                break
+            self.rbuf = self.rbuf[used:]
+            if msg is not None:
+                self.dispatch(msg)
+
+    def pump_helper(self, auth: dict) -> None:
+        sk = auth["helper"]
+        if sk is None:
+            return
+        try:
+            chunk = sk.recv(4096)
+        except (BlockingIOError, InterruptedError):
+            return
+        except OSError:
+            self.auth_failure(auth)
+            return
+        if not chunk:
+            self.auth_failure(auth)
+            return
+        auth["hbuf"] += chunk
+        if len(auth["hbuf"]) > HBUF_CAP:
+            log(f"helper buffer overflow cookie={auth['cookie']}")
+            self.finish_auth(auth, cancelled=True)
+            return
+        while b"\n" in auth["hbuf"]:
+            raw, _, rest = auth["hbuf"].partition(b"\n")
+            auth["hbuf"] = rest
+            self.helper_line(auth, raw.decode("utf-8", "replace").strip())
+            if self.current is not auth:
+                break
+
+    def pump_fifo(self, auth: dict) -> None:
+        fd = auth["fifo_fd"]
+        if fd < 0:
+            return
+        while True:
+            try:
+                chunk = os.read(fd, 512)
+            except BlockingIOError:
+                break
+            except OSError:
+                break
+            if not chunk:
+                break
+            auth["fifobuf"] += chunk
+            if len(auth["fifobuf"]) > PWBUF_CAP:
+                log(f"password buffer overflow cookie={auth['cookie']}")
+                self.finish_auth(auth, cancelled=True)
+                return
+            if b"\n" in auth["fifobuf"]:
+                line, _, _ = auth["fifobuf"].partition(b"\n")
+                password = line.rstrip(b"\r").decode("utf-8", "replace")
+                self.submit_password(auth, password)
+                break
+
+    def handle_child_exit(self, auth: dict) -> None:
+        # Prompt window closed/killed
+        self.kill_terminal(auth)
+        if not auth["submitted"]:
+            log(f"user closed prompt cookie={auth['cookie']}")
+            self.finish_auth(auth, cancelled=True)
+
+    def run(self) -> None:
+        while not self.stopping:
+            if self.deferred:
+                stash, self.deferred = self.deferred, []
+                for msg in stash:
+                    try:
+                        self.dispatch(msg)
+                    except Exception as e:
+                        log(f"deferred dispatch error: {e}")
+
+            timeout = 1.0
+            if self.current is not None:
+                remaining = self.current["deadline"] - time.monotonic()
+                if remaining <= 0:
+                    log(f"auth timed out cookie={self.current['cookie']}")
+                    self.finish_auth(self.current, cancelled=True)
+                    continue
+                timeout = max(0.05, min(timeout, remaining))
+
+            events = self.sel.select(timeout)
+            for key, _mask in events:
+                try:
+                    if key.data == "bus":
+                        self.pump_bus()
+                    elif key.data == "helper" and self.current is not None:
+                        self.pump_helper(self.current)
+                    elif key.data == "fifo" and self.current is not None:
+                        self.pump_fifo(self.current)
+                    elif key.data == "child" and self.current is not None:
+                        self.handle_child_exit(self.current)
+                except ConnectionError:
+                    raise
+                except Exception as e:
+                    log(f"event handler error ({key.data}): {e}")
+                    cur = self.current
+                    if cur is not None:
+                        self.finish_auth(cur, cancelled=True)
+
+            cur = self.current
+            if cur is not None:
+                if time.monotonic() >= cur["deadline"]:
+                    log(f"auth timed out cookie={cur['cookie']}")
+                    self.finish_auth(cur, cancelled=True)
+
+    def shutdown_cleanup(self) -> None:
+        if self.current is not None:
+            auth = self.current
+            self.drop_helper(auth)
+            self.close_fifo(auth)
+            self.kill_terminal(auth)
+            if auth["fifo_path"]:
+                try:
+                    os.unlink(auth["fifo_path"])
+                except OSError:
+                    pass
+        self.unregister()
+        if self.sock is not None:
+            try:
+                self.sel.unregister(self.sock)
+            except (KeyError, ValueError):
+                pass
+            try:
+                self.sock.close()
+            except OSError:
+                pass
+
+
+def run_ui() -> int:
+    """Standalone child prompter executed in the transient terminal window."""
+    import getpass
+    fifo_path = os.environ.get("DUSKY_FIFO", "")
+    notice = os.environ.get("DUSKY_NOTICE", "").strip()
+    message = os.environ.get("DUSKY_MESSAGE", "").strip()
+    action = os.environ.get("DUSKY_ACTION", "").strip()
+    user = os.environ.get("DUSKY_USER", os.environ.get("USER", "root")).strip()
+
+    # Simplify verbose polkit defaults to clean, intuitive phrasing
+    if not message or any(p in message for p in ("as another user", "as the super user")):
+        if "pkexec" in message or action == "org.freedesktop.policykit.exec":
+            clean_msg = "Root authorization required for pkexec"
+        else:
+            clean_msg = "Root password required to authenticate"
+    else:
+        prefix = "Authentication is required to "
+        if message.startswith(prefix):
+            clean_msg = message[len(prefix):].capitalize()
+        elif message.startswith("Authentication is needed to "):
+            clean_msg = message[28:].capitalize()
+        else:
+            clean_msg = message
+
+    try:
+        from rich.console import Console
+        from rich.panel import Panel
+        from rich.table import Table
+        from rich.text import Text
+
+        console = Console(highlight=False, soft_wrap=True)
+
+        grid = Table.grid(padding=(0, 0))
+        grid.add_column()
+
+        if notice:
+            grid.add_row(Text.from_markup(f"[bold #f38ba8]  {notice}[/bold #f38ba8]"))
+            grid.add_row(Text(""))
+
+        grid.add_row(Text.from_markup(f"[bold #ffffff]{clean_msg}[/bold #ffffff]"))
+        grid.add_row(Text(""))
+
+        meta = Text.from_markup(f"[#a6adc8]User:[/#a6adc8] [bold #a6e3a1]{user}[/bold #a6e3a1]")
+        if action and action != "org.freedesktop.policykit.exec" and action not in clean_msg:
+            meta += Text.from_markup(f"   [#6c7086]•[/#6c7086]   [#a6adc8]Action:[/#a6adc8] [bold #89dceb]{action}[/bold #89dceb]")
+
+        grid.add_row(meta)
+
+        panel = Panel(
+            grid,
+            title="[bold #89b4fa] Dusky Polkit[/bold #89b4fa]",
+            border_style="bold #89b4fa",
+            padding=(0, 2),
+        )
+
+        console.print(panel)
+        console.print("[bold #cdd6f4]Password: [/bold #cdd6f4]", end="")
+        sys.stdout.flush()
+    except ImportError:
+        # Fallback to standard ANSI output only if rich is not installed
+        if notice:
+            print(f"\033[1;31m⚠  {notice}\033[0m")
+        print(f"\033[1;37m{clean_msg}\033[0m")
+        print(f"\033[2mUser:\033[0m \033[1;32m{user}\033[0m" + (f"   \033[2m•  Action:\033[0m \033[36m{action}\033[0m" if action and action != "org.freedesktop.policykit.exec" and action not in clean_msg else ""))
+        print("Password: ", end="", flush=True)
+
+    try:
+        pw = getpass.getpass(prompt="")
+    except (KeyboardInterrupt, EOFError):
+        return 1
+
+    if fifo_path:
+        try:
+            with open(fifo_path, "w", encoding="utf-8") as f:
+                f.write(pw + "\n")
+                f.flush()
+        except OSError:
+            return 1
+
+    return 0
+
+
+def main() -> int:
+    agent = Agent()
+    for sig_name in ("SIGTERM", "SIGINT", "SIGHUP"):
+        signum = getattr(signal, sig_name, None)
+        if signum is not None:
+            signal.signal(signum, lambda *_: setattr(agent, "stopping", True))
+    signal.signal(signal.SIGPIPE, signal.SIG_IGN)
+    try:
+        agent.connect_bus()
+        agent.register()
+        agent.watch_authority()
+        agent.sweep_fifos()
+        trim_memory()
+    except BusError as e:
+        log(f"fatal: {e}")
+        return 1
+    try:
+        agent.run()
+    except ConnectionError as e:
+        log(f"bus lost: {e}; exiting (systemd will restart)")
+        return 1
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        log(f"unexpected failure: {e}")
+        return 1
+    finally:
+        agent.shutdown_cleanup()
+    return 0
+
+
+if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == "--ui":
+        sys.exit(run_ui())
+    sys.exit(main())

@@ -1,0 +1,40 @@
+# ==============================================================================
+# EMUUROM Profile
+# ==============================================================================
+# Native Linux binary: emuurom.file (Steam wrapper). No dwarfs subdir handling.
+
+extends = "base_native"
+
+[meta]
+id = "emuurom"
+name = "EMUUROM"
+version = "1.0"
+icon = "applications-games"
+developer = "Unknown"
+genre = "Adventure / Indie"
+description = "EMUUROM - indie native Linux title distributed with Steam API integration."
+
+[paths]
+game_dir = "/mnt/media/games/unknown_quality/EMUUROM-jc141"
+dwarfs_image = "files/game-root.dwarfs"
+dwarfs_mount = "files/.game-root-mnt"
+overlay_dir = "files/game-root"
+overlay_storage = "files/overlay-storage"
+overlay_work = "files/.game-root-work"
+executable = "emuurom.file"
+arguments = []
+
+[runtime]
+type = "native"
+
+[graphics]
+gpu = "auto"
+wayland_native = true
+
+[graphics.gamescope]
+enabled = false
+
+[performance]
+gamemode = true
+mangohud = false
+fps_limit = 60

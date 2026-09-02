@@ -2490,6 +2490,9 @@ class EntryRow(DynamicIconMixin, HyprlandIPCMixin, Adw.EntryRow):
         title = str(properties.get("title", "Unnamed"))
         self.set_title(GLib.markup_escape_text(title))
 
+        if tooltip := properties.get("tooltip") or properties.get("description"):
+            self.set_tooltip_text(str(tooltip))
+
         icon_config = properties.get("icon", DEFAULT_ICON)
         self.icon_widget = self._create_icon_widget(icon_config)
         self.add_prefix(self.icon_widget)
@@ -2502,10 +2505,38 @@ class EntryRow(DynamicIconMixin, HyprlandIPCMixin, Adw.EntryRow):
         btn.connect("clicked", self._on_apply)
         self.add_suffix(btn)
 
+        # Trigger on Enter key in addition to button click
+        self.connect("apply", self._on_apply)
+        self.connect("entry-activated", self._on_apply)
+
+        if initial_val := properties.get("initial_value"):
+            self.set_text(str(initial_val))
+
         if _is_dynamic_icon(icon_config) and isinstance(icon_config, dict):
             self._start_icon_update_loop(icon_config)
 
+        self.connect("map", self._on_entry_map)
+        self.connect("unmap", self._on_entry_unmap)
+
+    def _on_entry_map(self, _widget: Gtk.Widget) -> None:
         self._start_hyprland_ipc()
+        self._resume_all_polls()
+        if (val_cmd := self.properties.get("value_command")) and not self.get_text():
+            self._poll_command(
+                self._state.value,
+                str(val_cmd).strip(),
+                on_output=self._on_initial_value_loaded,
+                timeout=SUBPROCESS_TIMEOUT_LONG,
+            )
+
+    def _on_entry_unmap(self, _widget: Gtk.Widget) -> None:
+        self._stop_hyprland_ipc()
+        self._pause_all_polls()
+
+    def _on_initial_value_loaded(self, output: str) -> None:
+        val = output.strip()
+        if val and val != LABEL_NA:
+            self.set_text(val)
 
     def _create_icon_widget(self, icon: object) -> Gtk.Image:
         if isinstance(icon, dict) and icon.get("type") == "file":
@@ -2521,7 +2552,7 @@ class EntryRow(DynamicIconMixin, HyprlandIPCMixin, Adw.EntryRow):
         img.add_css_class("action-row-prefix-icon")
         return img
 
-    def _on_apply(self, _btn: Gtk.Button) -> None:
+    def _on_apply(self, _widget: Any = None) -> None:
         text = self.get_text()
         if not text:
             return
@@ -2536,10 +2567,15 @@ class EntryRow(DynamicIconMixin, HyprlandIPCMixin, Adw.EntryRow):
             root = bool(self.on_action.get("requires_root", False))
             utility.execute_command(
                 final_cmd,
-                "Entry",
+                str(self.properties.get("title", "Entry")),
                 term,
                 requires_root=root
             )
+
+            if toast_msg := self.properties.get("toast"):
+                utility.toast(self.toast_overlay, str(toast_msg).replace("{value}", text))
+            elif self.properties.get("show_toast", True):
+                utility.toast(self.toast_overlay, f"Applied: {text}")
 
     def do_unroot(self) -> None:
         sources = self._state.mark_destroyed_and_get_sources()
@@ -3656,7 +3692,7 @@ class ServiceToggleRow(DynamicIconMixin, HyprlandIPCMixin, Adw.ActionRow, _Servi
 
     Efficiency: Checks state ONLY when mapped (page visible). No periodic polling.
     Correctness: If service was toggled outside CC, navigating back triggers fresh is-active.
-    Security: System scope uses pkexec → hyprpolkitagent prompts, caches via auth_admin_keep.
+    Security: System scope uses pkexec → dusky_polkit prompts, caches via auth_admin_keep.
     Robustness: Generation counters, cancellables, 4s/45s timeouts, revert on failure.
     """
 

@@ -4,7 +4,7 @@ b43-fwcutter
 archinstall
 base
 bolt
-broadcom-wl
+broadcom-wl-dkms
 btrfs-progs
 cryptsetup
 darkhttpd

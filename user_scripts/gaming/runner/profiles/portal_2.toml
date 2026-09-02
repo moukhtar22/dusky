@@ -1,0 +1,55 @@
+# ==============================================================================
+# Portal 2 Profile
+# ==============================================================================
+# Technical Architecture:
+# 1. Native Linux Source 1 Engine (32-bit ELF via steam-runtime).
+# 2. Memory Virtualization: Valve's 32-bit memory budget query overflows on 64GB
+#    RAM kernels (attempted allocation > 4GB). The pre_launch hook builds a tiny
+#    32-bit glibc memory virtualization shim (~/.local/lib32/libmeminfo_fix32.so)
+#    that reports 4GB physical RAM, allowing pure native Linux execution.
+# 3. Pure XWayland via Hyprland (gamescope disabled - 32-bit SDL2 has no Wayland backend, pure Wayland would require gamescope XWayland which currently SEGVs).
+# ==============================================================================
+
+extends = "base_native"
+
+[meta]
+id = "portal_2"
+name = "Portal 2"
+version = "1.0"
+icon = "applications-games"
+developer = "Valve"
+genre = "Puzzle / FPS / Co-op"
+description = "The sequel to the acclaimed original expands with new puzzles, chambers, and dynamic co-op multiplayer."
+
+[paths]
+game_dir = "/mnt/media/games/good_quality/portal/Portal.Collection-jc141"
+dwarfs_image = "files/game-root.dwarfs"
+dwarfs_mount = "files/.game-root-mnt"
+overlay_dir = "files/game-root"
+overlay_storage = "files/overlay-storage"
+overlay_work = "files/.game-root-work"
+executable = "Portal.2/steam-runtime/run.sh"
+working_dir = "Portal.2"
+arguments = ["./portal2.sh", "-game", "portal2", "-steam", "-windowed", "-w", "1280", "-h", "720", "-novid"]
+
+[runtime]
+type = "native"
+
+[graphics]
+gpu = "auto"
+wayland_native = true
+prefer_xwayland = true
+
+[graphics.gamescope]
+enabled = false
+
+[performance]
+gamemode = true
+mangohud = false
+fps_limit = 60
+
+[hooks]
+pre_launch = ["bash -c 'if [ ! -f \"$HOME/.local/lib32/libmeminfo_fix32.so\" ]; then mkdir -p \"$HOME/.local/lib32\" && gcc -m32 -shared -fPIC -O2 -o \"$HOME/.local/lib32/libmeminfo_fix32.so\" -x c - -ldl << \"EOF\"\n#define _GNU_SOURCE\n#include <stdio.h>\n#include <stdint.h>\n#include <string.h>\n#include <dlfcn.h>\n#include <unistd.h>\n#include <fcntl.h>\n#include <sys/stat.h>\n#include <sys/sysinfo.h>\n\ntypedef uint32_t VkFlags;\ntypedef VkFlags VkMemoryHeapFlags;\ntypedef VkFlags VkMemoryPropertyFlags;\n\ntypedef struct VkMemoryType {\n    VkMemoryPropertyFlags propertyFlags;\n    uint32_t              heapIndex;\n} VkMemoryType;\n\ntypedef struct VkMemoryHeap {\n    uint64_t              size;\n    VkMemoryHeapFlags     flags;\n} VkMemoryHeap;\n\ntypedef struct VkPhysicalDeviceMemoryProperties {\n    uint32_t     memoryTypeCount;\n    VkMemoryType memoryTypes[32];\n    uint32_t     memoryHeapCount;\n    VkMemoryHeap memoryHeaps[16];\n} VkPhysicalDeviceMemoryProperties;\n\ntypedef struct VkPhysicalDeviceMemoryProperties2 {\n    int          sType;\n    void*        pNext;\n    VkPhysicalDeviceMemoryProperties memoryProperties;\n} VkPhysicalDeviceMemoryProperties2;\n\ntypedef void (*PFN_vkGetPhysicalDeviceMemoryProperties)(void*, VkPhysicalDeviceMemoryProperties*);\ntypedef void (*PFN_vkGetPhysicalDeviceMemoryProperties2)(void*, VkPhysicalDeviceMemoryProperties2*);\n\nstatic PFN_vkGetPhysicalDeviceMemoryProperties real_vkGetMemProps = NULL;\nstatic PFN_vkGetPhysicalDeviceMemoryProperties2 real_vkGetMemProps2 = NULL;\n\nvoid vkGetPhysicalDeviceMemoryProperties(void* physicalDevice, VkPhysicalDeviceMemoryProperties* pMemoryProperties) {\n    if (!real_vkGetMemProps) {\n        real_vkGetMemProps = (PFN_vkGetPhysicalDeviceMemoryProperties)dlsym(RTLD_NEXT, \"vkGetPhysicalDeviceMemoryProperties\");\n    }\n    if (real_vkGetMemProps) {\n        real_vkGetMemProps(physicalDevice, pMemoryProperties);\n    }\n    if (pMemoryProperties) {\n        for (uint32_t i = 0; i < pMemoryProperties->memoryHeapCount; i++) {\n            if (pMemoryProperties->memoryHeaps[i].size > 2147483648ULL) {\n                pMemoryProperties->memoryHeaps[i].size = 2147483648ULL;\n            }\n        }\n    }\n}\n\nvoid vkGetPhysicalDeviceMemoryProperties2(void* physicalDevice, VkPhysicalDeviceMemoryProperties2* pMemoryProperties) {\n    if (!real_vkGetMemProps2) {\n        real_vkGetMemProps2 = (PFN_vkGetPhysicalDeviceMemoryProperties2)dlsym(RTLD_NEXT, \"vkGetPhysicalDeviceMemoryProperties2\");\n    }\n    if (real_vkGetMemProps2) {\n        real_vkGetMemProps2(physicalDevice, pMemoryProperties);\n    }\n    if (pMemoryProperties) {\n        for (uint32_t i = 0; i < pMemoryProperties->memoryProperties.memoryHeapCount; i++) {\n            if (pMemoryProperties->memoryProperties.memoryHeaps[i].size > 2147483648ULL) {\n                pMemoryProperties->memoryProperties.memoryHeaps[i].size = 2147483648ULL;\n            }\n        }\n    }\n}\n\nvoid vkGetPhysicalDeviceMemoryProperties2KHR(void* physicalDevice, VkPhysicalDeviceMemoryProperties2* pMemoryProperties) {\n    vkGetPhysicalDeviceMemoryProperties2(physicalDevice, pMemoryProperties);\n}\n\nvoid* vkGetInstanceProcAddr(void* instance, const char* pName) {\n    static void* (*real_vkGetInstanceProcAddr)(void*, const char*) = NULL;\n    if (!real_vkGetInstanceProcAddr) {\n        real_vkGetInstanceProcAddr = dlsym(RTLD_NEXT, \"vkGetInstanceProcAddr\");\n    }\n    if (pName) {\n        if (strcmp(pName, \"vkGetPhysicalDeviceMemoryProperties\") == 0) {\n            return (void*)vkGetPhysicalDeviceMemoryProperties;\n        }\n        if (strcmp(pName, \"vkGetPhysicalDeviceMemoryProperties2\") == 0 || strcmp(pName, \"vkGetPhysicalDeviceMemoryProperties2KHR\") == 0) {\n            return (void*)vkGetPhysicalDeviceMemoryProperties2;\n        }\n    }\n    return real_vkGetInstanceProcAddr ? real_vkGetInstanceProcAddr(instance, pName) : NULL;\n}\n\nFILE *fopen(const char *path, const char *mode) {\n    static FILE *(*real_fopen)(const char *, const char *) = NULL;\n    if (!real_fopen) real_fopen = dlsym(RTLD_NEXT, \"fopen\");\n    if (path && strcmp(path, \"/proc/meminfo\") == 0) {\n        const char *data = \"MemTotal:        4194304 kB\\nMemFree:         2097152 kB\\nMemAvailable:    3000000 kB\\nBuffers:          100000 kB\\nCached:          1000000 kB\\n\";\n        return fmemopen((void*)data, strlen(data), \"r\");\n    }\n    return real_fopen(path, mode);\n}\nFILE *fopen64(const char *path, const char *mode) {\n    return fopen(path, mode);\n}\nlong sysconf(int name) {\n    static long (*real_sysconf)(int) = NULL;\n    if (!real_sysconf) real_sysconf = dlsym(RTLD_NEXT, \"sysconf\");\n    if (name == _SC_PHYS_PAGES || name == _SC_AVPHYS_PAGES) {\n        return 1048576;\n    }\n    return real_sysconf(name);\n}\nlong int get_phys_pages(void) {\n    return 1048576;\n}\nlong int get_avphys_pages(void) {\n    return 524288;\n}\nint sysinfo(struct sysinfo *info) {\n    static int (*real_sysinfo)(struct sysinfo *) = NULL;\n    if (!real_sysinfo) real_sysinfo = dlsym(RTLD_NEXT, \"sysinfo\");\n    int ret = real_sysinfo ? real_sysinfo(info) : 0;\n    if (info) {\n        info->mem_unit = 1024;\n        info->totalram = 4194304;\n        info->freeram  = 2097152;\n        info->sharedram = 0;\n        info->bufferram = 100000;\n        info->totalswap = 0;\n        info->freeswap  = 0;\n    }\n    return ret;\n}\nEOF\nfi'"]
+
+[env]
+LD_PRELOAD = "$HOME/.local/lib32/libmeminfo_fix32.so"

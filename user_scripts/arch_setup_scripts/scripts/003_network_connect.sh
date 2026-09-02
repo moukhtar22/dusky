@@ -170,23 +170,53 @@ check_eth_carrier() {
     return 1
 }
 
-get_eth_dev()  { nmcli -g DEVICE,TYPE dev | awk -F: '$2=="ethernet"{print $1; exit}'; }
-get_wifi_dev() { nmcli -g DEVICE,TYPE dev | awk -F: '$2=="wifi"{print $1; exit}'; }
+get_eth_devs() {
+    nmcli -g DEVICE,TYPE dev 2>/dev/null | awk -F: '$2=="ethernet"{print $1}'
+}
+
+get_active_eth_dev() {
+    local devs
+    mapfile -t devs < <(get_eth_devs)
+    if [[ ${#devs[@]} -eq 0 ]]; then
+        return 1
+    fi
+    for d in "${devs[@]}"; do
+        if check_eth_carrier "$d"; then
+            echo "$d"
+            return 0
+        fi
+    done
+    echo "${devs[0]}"
+    return 0
+}
+
+get_wifi_devs() {
+    nmcli -g DEVICE,TYPE dev 2>/dev/null | awk -F: '$2=="wifi"{print $1}'
+}
+
+get_active_wifi_dev() {
+    local devs
+    mapfile -t devs < <(get_wifi_devs)
+    if [[ ${#devs[@]} -gt 0 ]]; then
+        echo "${devs[0]}"
+        return 0
+    fi
+    return 1
+}
 
 ensure_wifi_radio() {
-    if ! nmcli -g WIFI radio | grep -q "enabled"; then
+    if ! nmcli -g WIFI radio 2>/dev/null | grep -q "enabled"; then
         log_warn "Wi-Fi radio is disabled. Attempting to power on..."
         
-        # Soft-unblock in case the kernel is holding it down
         if command -v rfkill >/dev/null 2>&1; then
-            sudo rfkill unblock wifi wlan >/dev/null 2>&1 || true
+            rfkill unblock wifi wlan 2>/dev/null || sudo -n rfkill unblock wifi wlan 2>/dev/null || sudo rfkill unblock wifi wlan 2>/dev/null || true
         fi
         
-        sudo nmcli radio wifi on
-        sleep 3 # Allow hardware PHY to initialize
+        nmcli radio wifi on 2>/dev/null || sudo -n nmcli radio wifi on 2>/dev/null || sudo nmcli radio wifi on 2>/dev/null || true
+        sleep 2
 
-        if ! nmcli -g WIFI radio | grep -q "enabled"; then
-            log_error "Failed to enable Wi-Fi radio. A physical hardware switch may be toggled."
+        if ! nmcli -g WIFI radio 2>/dev/null | grep -q "enabled"; then
+            log_error "Failed to enable Wi-Fi radio. A physical hardware switch or BIOS setting may be toggled."
             fail_and_exit
         fi
     fi
@@ -205,75 +235,66 @@ if check_connectivity; then
     exit 0
 fi
 
-log_warn "No internet routing detected."
+log_info "Probing network hardware and auto-connecting interfaces..."
+
+# 1. Ensure Wi-Fi radio is enabled so saved auto-connect profiles can associate
+wifi_dev_auto=$(get_active_wifi_dev || true)
+if [[ -n "$wifi_dev_auto" ]]; then
+    if command -v rfkill >/dev/null 2>&1; then
+        rfkill unblock wifi wlan 2>/dev/null || sudo -n rfkill unblock wifi wlan 2>/dev/null || true
+    fi
+    nmcli radio wifi on 2>/dev/null || true
+fi
+
+# 2. Check for physical Ethernet carrier across all available adapters
+mapfile -t all_eth_devs < <(get_eth_devs)
+for eth_candidate in "${all_eth_devs[@]}"; do
+    if [[ -n "$eth_candidate" ]]; then
+        nmcli device set "$eth_candidate" managed yes 2>/dev/null || sudo -n nmcli device set "$eth_candidate" managed yes 2>/dev/null || true
+        if check_eth_carrier "$eth_candidate"; then
+            log_info "Active Ethernet carrier detected on $eth_candidate. Activating connection..."
+            timeout 10 nmcli device connect "$eth_candidate" >/dev/null 2>&1 || timeout 10 sudo -n nmcli device connect "$eth_candidate" >/dev/null 2>&1 || true
+        fi
+    fi
+done
+
+# 3. Allow network routes and DHCP leases up to 8s to settle
+log_info "Waiting for network routes to settle..."
+deadline=$((SECONDS + 8))
+while (( SECONDS < deadline )); do
+    if check_connectivity; then
+        log_success "Internet connection established."
+        exit 0
+    fi
+    sleep 0.5
+done
+
+# 4. Flush stale DNS caches and perform one final auto-check
+flush_dns_caches
+if check_connectivity; then
+    log_success "Internet connection established."
+    exit 0
+fi
+
+log_warn "No active internet connection established automatically."
 
 # ==============================================================================
-# Autonomous (Headless) Fallback
+# Non-Interactive (Headless) Fallback
 # ==============================================================================
 if [[ ! -t 0 ]]; then
-    log_warn "Non-interactive environment detected (No TTY). Switching to autonomous mode."
-    
-    # Ensure Wi-Fi radio is powered on so any saved auto-connect profiles can initialize
-    wifi_dev_auto=$(get_wifi_dev)
-    if [[ -n "$wifi_dev_auto" ]]; then
-        log_info "Wi-Fi interface detected ($wifi_dev_auto) in autonomous mode. Ensuring radio is enabled..."
-        if command -v rfkill >/dev/null 2>&1; then
-            sudo rfkill unblock wifi wlan >/dev/null 2>&1 || true
-        fi
-        sudo nmcli radio wifi on >/dev/null 2>&1 || true
-        sleep 2
-    fi
-
-    log_info "Waiting up to 10s for potential NM auto-connect profiles to trigger..."
-    deadline=$((SECONDS + 10))
-    while (( SECONDS < deadline )); do
-        if check_connectivity; then
-            log_success "System auto-connected autonomously. Pipeline ready."
-            exit 0
-        fi
-        sleep 1
-    done
-    
-    log_info "No auto-connect profiles triggered. Attempting Ethernet fallback..."
-    eth_dev=$(get_eth_dev)
-    
-    if [[ -n "$eth_dev" ]]; then
-        log_info "Primary Ethernet device detected: $eth_dev"
-        # Force NM management in case it was flagged as unmanaged (e.g. by systemd-networkd)
-        sudo nmcli device set "$eth_dev" managed yes >/dev/null 2>&1 || true
-
-        if check_eth_carrier "$eth_dev"; then
-            log_info "Carrier signal detected. Requesting DHCP lease..."
-            timeout 15 sudo nmcli dev up "$eth_dev" >/dev/null 2>&1 || true
-            
-            flush_dns_caches
-            
-            if check_connectivity; then
-                log_success "Autonomous LAN connected and internet routed."
-                exit 0
-            else
-                log_error "Autonomous LAN connected, but routing failed (No Internet)."
-            fi
-        else
-            log_error "No carrier detected on $eth_dev. Cable is unplugged."
-        fi
-    else
-        log_error "No Ethernet interfaces available for autonomous connection."
-    fi
-    
-    log_error "Autonomous connection failed. Interactive Wi-Fi setup requires a TTY."
+    log_error "Non-interactive environment detected. Interactive network configuration unavailable."
     fail_and_exit
 fi
 
 # ==============================================================================
-# Interactive Menu (TTY Mode Only)
+# Interactive Menu (TTY Mode Only - When Genuinely Disconnected)
 # ==============================================================================
 PS3=$(echo -e "\n${C_CYAN}Select connection interface (1/2) or Ctrl+C to abort: ${C_RESET}")
 
 select conn_method in "LAN (Wired)" "Wi-Fi"; do
     case $conn_method in
         "LAN (Wired)")
-            eth_dev=$(get_eth_dev)
+            eth_dev=$(get_active_eth_dev || true)
 
             if [[ -z "$eth_dev" ]]; then
                 log_error "No physical Ethernet interface detected on this system."
@@ -281,22 +302,20 @@ select conn_method in "LAN (Wired)" "Wi-Fi"; do
             fi
 
             log_info "Primary Ethernet device detected: $eth_dev"
-            # Force NM management in case it was flagged as unmanaged
-            sudo nmcli device set "$eth_dev" managed yes >/dev/null 2>&1 || true
-
-            echo -e "${C_YELLOW}[+] Please ensure your Ethernet cable is physically plugged in.${C_RESET}"
-            read -r -p "Press Enter to verify carrier state..."
+            nmcli device set "$eth_dev" managed yes 2>/dev/null || sudo -n nmcli device set "$eth_dev" managed yes 2>/dev/null || true
 
             if ! check_eth_carrier "$eth_dev"; then
-                log_error "No carrier detected on $eth_dev. The cable is unplugged or the switch port is dead."
-                fail_and_exit
+                echo -e "${C_YELLOW}[+] Please ensure your Ethernet cable is physically plugged in.${C_RESET}"
+                read -r -p "Press Enter to verify carrier state..."
+                if ! check_eth_carrier "$eth_dev"; then
+                    log_error "No carrier detected on $eth_dev. The cable is unplugged or the switch port is dead."
+                    fail_and_exit
+                fi
             fi
 
             log_info "Carrier detected. Requesting DHCP lease..."
-            if timeout 15 sudo nmcli dev up "$eth_dev" >/dev/null 2>&1; then
-                
+            if timeout 15 nmcli device connect "$eth_dev" >/dev/null 2>&1 || timeout 15 sudo -n nmcli device connect "$eth_dev" >/dev/null 2>&1 || timeout 15 sudo nmcli device connect "$eth_dev" >/dev/null 2>&1; then
                 flush_dns_caches
-                
                 if check_connectivity; then
                     log_success "LAN connected and internet routed."
                     exit 0
@@ -311,7 +330,7 @@ select conn_method in "LAN (Wired)" "Wi-Fi"; do
             ;;
 
         "Wi-Fi")
-            wifi_dev=$(get_wifi_dev)
+            wifi_dev=$(get_active_wifi_dev || true)
 
             if [[ -z "$wifi_dev" ]]; then
                 log_error "No Wi-Fi interface detected on this system."
@@ -320,20 +339,19 @@ select conn_method in "LAN (Wired)" "Wi-Fi"; do
 
             ensure_wifi_radio
             
-            # Force NM management in case it was flagged as unmanaged
-            sudo nmcli device set "$wifi_dev" managed yes >/dev/null 2>&1 || true
+            nmcli device set "$wifi_dev" managed yes 2>/dev/null || sudo -n nmcli device set "$wifi_dev" managed yes 2>/dev/null || true
 
             log_info "Triggering active 802.11 rescan on $wifi_dev..."
-            timeout 10 sudo nmcli dev wifi rescan ifname "$wifi_dev" >/dev/null 2>&1 || true
-            sleep 4 
+            timeout 10 nmcli dev wifi rescan ifname "$wifi_dev" >/dev/null 2>&1 || timeout 10 sudo -n nmcli dev wifi rescan ifname "$wifi_dev" >/dev/null 2>&1 || true
+            sleep 3
 
             # Mapfile safely handles SSIDs with spaces. sort -u drops duplicated BSSIDs.
             mapfile -t networks < <(nmcli -g SSID dev wifi list ifname "$wifi_dev" 2>/dev/null | grep -v '^$' | sort -u || true)
 
             if [[ ${#networks[@]} -eq 0 ]]; then
                 log_warn "No networks found on initial scan. Retrying scan..."
-                timeout 10 sudo nmcli dev wifi rescan ifname "$wifi_dev" >/dev/null 2>&1 || true
-                sleep 4
+                timeout 10 nmcli dev wifi rescan ifname "$wifi_dev" >/dev/null 2>&1 || timeout 10 sudo -n nmcli dev wifi rescan ifname "$wifi_dev" >/dev/null 2>&1 || true
+                sleep 3
                 mapfile -t networks < <(nmcli -g SSID dev wifi list ifname "$wifi_dev" 2>/dev/null | grep -v '^$' | sort -u || true)
                 
                 if [[ ${#networks[@]} -eq 0 ]]; then
@@ -352,21 +370,22 @@ select conn_method in "LAN (Wired)" "Wi-Fi"; do
                     echo -e "\n"
                     log_info "Negotiating handshake with '$ssid'..."
 
-                    nm_cmd=(sudo nmcli -w 15 dev wifi connect "$ssid" ifname "$wifi_dev")
+                    nm_cmd=(nmcli -w 20 dev wifi connect "$ssid" ifname "$wifi_dev")
                     [[ -n "$pass" ]] && nm_cmd+=(password "$pass")
 
-                    if timeout 30 "${nm_cmd[@]}" >/dev/null 2>&1; then
+                    if timeout 30 "${nm_cmd[@]}" >/dev/null 2>&1 || timeout 30 sudo -n "${nm_cmd[@]}" >/dev/null 2>&1 || timeout 30 sudo "${nm_cmd[@]}" >/dev/null 2>&1; then
                         log_success "Layer 2 authentication successful."
 
                         active_con=$(nmcli -g GENERAL.CONNECTION dev show "$wifi_dev" 2>/dev/null | awk 'NR==1' || true)
 
                         if [[ -n "$active_con" ]]; then
-                            sudo nmcli con modify "$active_con" \
+                            nmcli con modify "$active_con" \
+                                connection.autoconnect yes \
+                                connection.autoconnect-priority 99 >/dev/null 2>&1 || \
+                            sudo -n nmcli con modify "$active_con" \
                                 connection.autoconnect yes \
                                 connection.autoconnect-priority 99 >/dev/null 2>&1 || true
                             log_info "Profile '$active_con' hardened for future high-priority autoconnect."
-                        else
-                            log_warn "Could not resolve active connection profile. Autoconnect not configured."
                         fi
 
                         flush_dns_caches

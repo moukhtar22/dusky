@@ -1,0 +1,39 @@
+# ==============================================================================
+# Dicey Dungeons Profile
+# ==============================================================================
+
+extends = "base_native"
+
+[meta]
+id = "dicey_dungeons"
+name = "Dicey Dungeons"
+version = "1.0"
+icon = "applications-games"
+developer = "Terry Cavanagh"
+genre = "Roguelike / Strategy"
+description = "Become a giant walking die and battle to the end of an ever-changing dungeon in this inventive dice-driven roguelike."
+
+[paths]
+game_dir = "/mnt/media/games/unknown_quality/Dicey.Dungeons-jc141"
+dwarfs_image = "files/game-root.dwarfs"
+dwarfs_mount = "files/.game-root-mnt"
+overlay_dir = "files/game-root"
+overlay_storage = "files/overlay-storage"
+overlay_work = "files/.game-root-work"
+executable = "launch.sh"
+arguments = []
+
+[runtime]
+type = "native"
+
+[graphics]
+gpu = "auto"
+wayland_native = true
+
+[graphics.gamescope]
+enabled = false
+
+[performance]
+gamemode = true
+mangohud = false
+fps_limit = 60

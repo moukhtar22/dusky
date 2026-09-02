@@ -1,0 +1,42 @@
+# ==============================================================================
+# Bloodthief Profile
+# ==============================================================================
+
+extends = "base_native"
+
+[meta]
+id = "bloodthief"
+name = "Bloodthief"
+version = "1.0"
+icon = "applications-games"
+developer = "Blargis"
+genre = "Action / Indie, Parkour Dungeon-Runner"
+description = "Ultra-fast melee dungeon-runner where you parkour through haunted crypts and castles, slashing undead foes with momentum-driven combat as a vampire."
+
+[paths]
+game_dir = "/mnt/media/games/unknown_quality/Bloodthief-jc141"
+dwarfs_image = "files/game-root.dwarfs"
+dwarfs_mount = "files/.game-root-mnt"
+overlay_dir = "files/game-root"
+overlay_storage = "files/overlay-storage"
+overlay_work = "files/.game-root-work"
+executable = "bloodthief.sh"
+arguments = []
+
+[runtime]
+type = "native"
+
+[graphics]
+gpu = "auto"
+wayland_native = true
+prefer_xwayland = true  # Godot 4.4 custom_build: display driver only "x11" (no wayland) — requires XWayland
+
+[graphics.gamescope]
+enabled = false
+# Was enabled=true with wayland backend to match JC141 GAMESCOPE=1, but caused Hyprland SIGABRT in libgallium/EGL (Mesa 26.2.1 + NVIDIA 610.57 + gamescope 3.16 XWayland :1)
+# Reverted to system XWayland (now enabled) + prefer_xwayland=true — tested stable 7s Vulkan init, no crash
+
+[performance]
+gamemode = true
+mangohud = false
+fps_limit = 60

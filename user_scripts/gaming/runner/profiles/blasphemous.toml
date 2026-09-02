@@ -1,0 +1,58 @@
+# ==============================================================================
+# Blasphemous Profile
+# ==============================================================================
+# Architecture & Technical Notes:
+# 1. Engine: Unity 2017.4.40f1 (Legacy Unity Linux Player).
+# 2. Wayland Compatibility: Unity 2017 queries legacy X11 / XRandR root window
+#    screen geometry. On pure Wayland (Hyprland), rootless XWayland reports
+#    0x0@0Hz, causing Unity's ScreenSelector to hang indefinitely.
+#    Encapsulating the game in Gamescope embedded mode provides a full virtual
+#    X11 display server at 144Hz while rendering natively on Wayland.
+# 3. Gamepad/Controller Support: Rewired input queries libudev.so.0. The pre_launch
+#    hook links ~/.local/lib/libudev.so.0 to system libudev.so.1 seamlessly.
+# ==============================================================================
+
+extends = "base_unity_native"
+
+[meta]
+id = "blasphemous"
+name = "Blasphemous"
+version = "1.0"
+icon = "applications-games"
+developer = "The Game Kitchen"
+genre = "Metroidvania / Action"
+description = "A punishing action-platformer that combines the fast-paced, skillful combat of a hack-n-slash game with a deep and evocative narrative core."
+
+[paths]
+game_dir = "/mnt/media/games/good_quality/Blasphemous.Collection-jc141"
+dwarfs_image = "files/game-root.dwarfs"
+dwarfs_mount = "files/.game-root-mnt"
+overlay_dir = "files/game-root"
+overlay_storage = "files/overlay-storage"
+overlay_work = "files/.game-root-work"
+executable = "Blashphemous/Blasphemous.x86_64"
+arguments = []
+
+[runtime]
+type = "native"
+
+[graphics]
+gpu = "auto"
+wayland_native = true
+prefer_xwayland = true  # Unity 2017 X11-only, needs XWayland — system xwayland now enabled, gamescope caused SIGSEGV/XWAYLAND sync fail
+
+[graphics.gamescope]
+enabled = false
+mode = "embedded"
+allow_tearing = true
+
+[performance]
+gamemode = true
+mangohud = false
+fps_limit = 60
+
+[hooks]
+pre_launch = ["bash -c 'mkdir -p \"$HOME/.local/lib\" && ln -sf /usr/lib/libudev.so.1 \"$HOME/.local/lib/libudev.so.0\"'"]
+
+[env]
+LD_LIBRARY_PATH = "$HOME/.local/lib"

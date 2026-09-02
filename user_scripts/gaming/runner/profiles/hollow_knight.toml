@@ -1,0 +1,39 @@
+# ==============================================================================
+# Hollow Knight Profile
+# ==============================================================================
+
+extends = "base_unity_native"
+
+[meta]
+id = "hollow_knight"
+name = "Hollow Knight"
+version = "1.5.78"
+icon = "applications-games"
+developer = "Team Cherry"
+genre = "Metroidvania / Action-Adventure"
+description = "Forge your own path in Hollow Knight! An epic action adventure through a vast ruined kingdom of insects and heroes."
+
+[paths]
+game_dir = "/mnt/media/games/good_quality/Hollow.Knight-jc141"
+dwarfs_image = "files/game-root.dwarfs"
+dwarfs_mount = "files/.game-root-mnt"
+overlay_dir = "files/game-root"
+overlay_storage = "files/overlay-storage"
+overlay_work = "files/.game-root-work"
+executable = "hollow_knight.x86_64"
+arguments = []
+
+[runtime]
+type = "native"
+
+[graphics]
+gpu = "auto"
+wayland_native = true
+
+[graphics.gamescope]
+enabled = false
+
+[performance]
+gamemode = true
+mangohud = false
+fps_limit = 60

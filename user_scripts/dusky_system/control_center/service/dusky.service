@@ -16,9 +16,9 @@ BusName=com.github.dusky.controlcenter
 # --- [AGGRESSIVE RAM OPTIMIZATION] ---
 # PYTHONUNBUFFERED=1: Flushes logs immediately for real-time debugging[cite: 3].
 # PYTHONOPTIMIZE=2: Strips __debug__ assertions and docstrings directly from Python's memory footprint.
-# MALLOC_ARENA_MAX=1: Forces glibc to use a single memory arena, severely cutting multi-thread RAM bloat.
+# MALLOC_ARENA_MAX=2: Limits glibc memory arenas without causing single-arena lock contention across worker threads.
 # G_SLICE=always-malloc: Disables GTK's custom memory allocator so freed RAM is instantly returned to the OS.
-Environment=PYTHONUNBUFFERED=1 PYTHONOPTIMIZE=2 MALLOC_ARENA_MAX=1 G_SLICE=always-malloc
+Environment=PYTHONUNBUFFERED=1 PYTHONOPTIMIZE=2 MALLOC_ARENA_MAX=2 G_SLICE=always-malloc
 
 # Uses your exact path; %h dynamically resolves to your home directory[cite: 3].
 ExecStart=%h/user_scripts/dusky_system/control_center/dusky_control_center.py --gapplication-service
@@ -49,10 +49,10 @@ OOMPolicy=kill
 OOMScoreAdjust=400
 
 # A Control Center parses CSS, grids, and directory paths, requiring more overhead than a simple panel.
-# We set a soft limit of 250MB. If it crosses this, the Arch kernel aggressively pushes idle pages to ZRAM (ZSTD).
-MemoryHigh=140M
+# We set a soft limit of 350MB. If it crosses this, the Arch kernel aggressively pushes idle pages to ZRAM (ZSTD).
+MemoryHigh=350M
 # Absolute hard limit. If a severe memory leak occurs, Systemd kills and restarts it before it takes down Hyprland.
-MemoryMax=350M
+MemoryMax=750M
 
 SyslogIdentifier=dusky
 

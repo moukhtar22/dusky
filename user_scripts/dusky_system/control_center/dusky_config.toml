@@ -1045,7 +1045,7 @@ type = "button"
 title = "Setup Permissions"
 button_text = "Setup"
 description = "Run once: sets /etc/wireguard to 750 root:wheel and adds sudoers rules"
-icon = "security-medium-symbolic"
+icon = "security-high-symbolic"
 style = "suggested"
 [pages.layout.items.layout.items.on_press]
 type = "exec"
@@ -1361,7 +1361,7 @@ icon = "video-display-symbolic"
 style = "suggested"
 [pages.layout.items.properties.buttons.on_press]
 type = "exec"
-command = "kitty --class dusky_tui --title \"Monitors & Refresh Rate Wizard\" --hold python3 $HOME/user_scripts/hypr/monitor/tui_monitors.py"
+command = "kitty --class dusky_tui --title \"Monitors & Refresh Rate Wizard\" --hold python3 $HOME/user_scripts/hypr/monitor/monitor_wizard.py"
 
 
 
@@ -1369,6 +1369,14 @@ command = "kitty --class dusky_tui --title \"Monitors & Refresh Rate Wizard\" --
 id = "audio"
 title = "Audio"
 icon = "audio-volume-high-symbolic"
+
+[[pages.layout]]
+type = "warning_banner"
+[pages.layout.properties]
+title = ""
+message = "Denoise requires Dusky Audio to be On."
+icon = ""
+compact = true
 
 [[pages.layout]]
 type = "grid_section"
@@ -1475,7 +1483,7 @@ type = "button"
 [pages.layout.items.properties]
 title = "Open Audio Studio"
 button_text = "Launch Studio"
-description = "Full 4-Tab GUI: Noise, Voice FX, Delay/Reverb & 9-Band Parametric EQ"
+description = "Full: Noise, Voice FX, Delay/Reverb & 9-Band Parametric EQ"
 icon = "applications-multimedia-symbolic"
 style = "suggested"
 [pages.layout.items.on_press]
@@ -2001,35 +2009,200 @@ description = ""
 [[pages.layout.items]]
 type = "navigation"
 [pages.layout.items.properties]
-title = "ZRam Configuration"
-description = "Manage compressed memory swap"
+title = "Memory & Swap Management"
+description = "Configure ZRAM0, ZRAM1 RAM disk, and Disk Swap"
 icon = "memory-symbolic"
 
 [[pages.layout.items.layout]]
 type = "section"
 [pages.layout.items.layout.properties]
-title = "ZRam Setup"
+title = "Topology Overview"
+icon = "dialog-information-symbolic"
+
+[[pages.layout.items.layout.items]]
+type = "label"
+[pages.layout.items.layout.items.properties]
+title = "ZRAM0 Swap"
+icon = "memory-symbolic"
+interval = 3
+[pages.layout.items.layout.items.value]
+type = "exec"
+command = "$HOME/user_scripts/performance/zram/zram_swap_manager.py --zram0-status"
+
+[[pages.layout.items.layout.items]]
+type = "label"
+[pages.layout.items.layout.items.properties]
+title = "ZRAM1 Mount"
+icon = "drive-harddisk-symbolic"
+interval = 3
+[pages.layout.items.layout.items.value]
+type = "exec"
+command = "$HOME/user_scripts/performance/zram/zram_swap_manager.py --zram1-status"
+
+[[pages.layout.items.layout.items]]
+type = "label"
+[pages.layout.items.layout.items.properties]
+title = "Disk Swap"
+icon = "drive-harddisk-system-symbolic"
+interval = 3
+[pages.layout.items.layout.items.value]
+type = "exec"
+command = "$HOME/user_scripts/performance/zram/zram_swap_manager.py --disk-swap-status"
+
+[[pages.layout.items.layout]]
+type = "section"
+[pages.layout.items.layout.properties]
+title = "ZRAM0 (Compressed Swap)"
+icon = "preferences-system-symbolic"
+
+[[pages.layout.items.layout.items]]
+type = "entry"
+[pages.layout.items.layout.items.properties]
+title = "ZRAM0 Size"
+description = "e.g. 80%, 50%, 20%, 6 GB, or auto"
+button_text = "Apply"
+icon = "edit-symbolic"
+value_command = "$HOME/user_scripts/performance/zram/zram_swap_manager.py --zram0-size"
+toast = "ZRAM0 size updated to {value}"
+[pages.layout.items.layout.items.on_action]
+type = "exec"
+command = "$HOME/user_scripts/performance/zram/zram_swap_manager.py --set-zram0-size {value}"
+terminal = false
+requires_root = true
+
+[[pages.layout.items.layout.items]]
+type = "toggle"
+[pages.layout.items.layout.items.properties]
+title = "ZRAM0 Swap Active"
+description = "Toggle compressed RAM swap on or off"
+icon = "memory-symbolic"
+state_command = "swapon --show | grep -q '/dev/zram0' && echo on || echo off"
+interval = 3
+[pages.layout.items.layout.items.on_toggle.enabled]
+type = "exec"
+command = "$HOME/user_scripts/performance/zram/zram_swap_manager.py --enable-zram0"
+terminal = false
+requires_root = true
+[pages.layout.items.layout.items.on_toggle.disabled]
+type = "exec"
+command = "$HOME/user_scripts/performance/zram/zram_swap_manager.py --disable-zram0"
+terminal = false
+requires_root = true
+
+[[pages.layout.items.layout]]
+type = "section"
+[pages.layout.items.layout.properties]
+title = "ZRAM1 (/mnt/zram1 RAM Disk)"
+icon = "folder-symbolic"
+
+[[pages.layout.items.layout.items]]
+type = "selection"
+[pages.layout.items.layout.items.properties]
+title = "ZRAM1 Mode"
+description = "Ext4 (Compressed) vs Tmpfs (Pure RAM) vs Disabled"
+icon = "drive-harddisk-symbolic"
+value_command = "$HOME/user_scripts/performance/zram/zram_swap_manager.py --zram1-backend"
+interval = 3
+options = ["Ext4", "Tmpfs", "Disabled"]
+options_map = { "ext4" = "Ext4", "zram" = "Ext4", "Ext4 ZRAM" = "Ext4", "tmpfs" = "Tmpfs", "disabled" = "Disabled", "none" = "Disabled" }
+[pages.layout.items.layout.items.on_change.Ext4]
+type = "exec"
+command = "$HOME/user_scripts/performance/zram/zram_swap_manager.py --set-zram1-backend zram"
+terminal = false
+requires_root = true
+[pages.layout.items.layout.items.on_change.Tmpfs]
+type = "exec"
+command = "$HOME/user_scripts/performance/zram/zram_swap_manager.py --set-zram1-backend tmpfs"
+terminal = false
+requires_root = true
+[pages.layout.items.layout.items.on_change.Disabled]
+type = "exec"
+command = "$HOME/user_scripts/performance/zram/zram_swap_manager.py --disable-zram1"
+terminal = false
+requires_root = true
+
+[[pages.layout.items.layout.items]]
+type = "entry"
+[pages.layout.items.layout.items.properties]
+title = "ZRAM1 Disk Size"
+description = "e.g. 100%, 8 GB, 4 GB, or ram"
+button_text = "Apply"
+icon = "edit-symbolic"
+value_command = "$HOME/user_scripts/performance/zram/zram_swap_manager.py --zram1-size"
+toast = "ZRAM1 size updated to {value}"
+[pages.layout.items.layout.items.on_action]
+type = "exec"
+command = "$HOME/user_scripts/performance/zram/zram_swap_manager.py --set-zram1-size {value}"
+terminal = false
+requires_root = true
+
+[[pages.layout.items.layout]]
+type = "section"
+[pages.layout.items.layout.properties]
+title = "Disk Swap (/swap/swapfile)"
+icon = "drive-harddisk-system-symbolic"
+
+[[pages.layout.items.layout.items]]
+type = "entry"
+[pages.layout.items.layout.items.properties]
+title = "Disk Swap Size"
+description = "e.g. 4 GB, 8 GB, 2 GB, 512 MB"
+button_text = "Allocate"
+icon = "edit-symbolic"
+value_command = "$HOME/user_scripts/performance/zram/zram_swap_manager.py --disk-swap-size"
+toast = "Disk swap allocated: {value}"
+[pages.layout.items.layout.items.on_action]
+type = "exec"
+command = "$HOME/user_scripts/performance/zram/zram_swap_manager.py --set-disk-swap-size {value}"
+terminal = false
+requires_root = true
+
+[[pages.layout.items.layout.items]]
+type = "toggle"
+[pages.layout.items.layout.items.properties]
+title = "Disk Swap Active"
+description = "Toggle disk swap on/off (Fallback swap @ priority -1)"
+icon = "drive-harddisk-symbolic"
+state_command = "swapon --show | grep -q '/swap/swapfile' && echo on || echo off"
+interval = 3
+[pages.layout.items.layout.items.on_toggle.enabled]
+type = "exec"
+command = "$HOME/user_scripts/performance/zram/zram_swap_manager.py --enable-disk-swap"
+terminal = false
+requires_root = true
+[pages.layout.items.layout.items.on_toggle.disabled]
+type = "exec"
+command = "$HOME/user_scripts/performance/zram/zram_swap_manager.py --disable-disk-swap"
+terminal = false
+requires_root = true
+
+[[pages.layout.items.layout]]
+type = "section"
+[pages.layout.items.layout.properties]
+title = "Diagnostics & Optimization"
+icon = "utilities-system-monitor-symbolic"
 
 [[pages.layout.items.layout.items]]
 type = "button"
 [pages.layout.items.layout.items.properties]
-title = "ZRam Configurator"
-button_text = "Setup"
-icon = "preferences-system-symbolic"
+title = "Run Deep Architecture Diagnostics"
+description = "Inspect memory limits, compression algorithm, and mount health"
+button_text = "Diagnose"
+icon = "dialog-information-symbolic"
 style = "suggested"
 [pages.layout.items.layout.items.on_press]
 type = "exec"
-command = "kitty --class 205_zram_configuration.sh --hold sh -c \"$HOME/user_scripts/arch_setup_scripts/scripts/205_zram_configuration.sh\""
+command = "kitty --class 208_check_zram0_zram1_setup.py --hold sh -c \"$HOME/user_scripts/arch_setup_scripts/scripts/208_check_zram0_zram1_setup.py\""
 terminal = false
 
 [[pages.layout.items.layout.items]]
 type = "button"
 [pages.layout.items.layout.items.properties]
-title = "Optimize Swappiness"
-description = "Uses more RAM"
+title = "Optimize Kernel Swappiness & VM Policy"
+description = "Apply high-performance MGLRU and swappiness parameters"
+button_text = "Optimize"
 icon = "power-profile-performance-symbolic"
 style = "destructive"
-button_text = "Optimize"
 [pages.layout.items.layout.items.on_press]
 type = "exec"
 command = "kitty --class 210_zram_optimize_swappiness.sh --hold sh -c \"$HOME/user_scripts/arch_setup_scripts/scripts/210_zram_optimize_swappiness.sh\""
@@ -2080,11 +2253,21 @@ terminal = false
 type = "button"
 [pages.layout.items.properties]
 title = "Mako Notifications Configurator"
-description = "Mako TUI"
+description = "Mako TUI (Matugen template)"
 icon = "preferences-system-notifications-symbolic"
-[pages.layout.items.on_press]
+
+[[pages.layout.items.properties.buttons]]
+icon = "document-edit-symbolic"
+[pages.layout.items.properties.buttons.on_press]
 type = "exec"
-command = "foot --app-id=dusky_tui --hold python3 ~/user_scripts/mako_osd/mako_tui/tui_mako.py"
+command = "$HOME/user_scripts/dusky_system/control_center/dusky_text_editor.py \"$HOME/.config/matugen/templates/mako.ini\""
+
+[[pages.layout.items.properties.buttons]]
+icon = "utilities-terminal-symbolic"
+style = "suggested"
+[pages.layout.items.properties.buttons.on_press]
+type = "exec"
+command = "foot --app-id=dusky_tui --hold python3 $HOME/user_scripts/mako_osd/mako_tui/tui_mako.py"
 terminal = false
 
 [[pages.layout]]
@@ -2112,7 +2295,7 @@ icon = "system-lock-screen-symbolic"
 style = "suggested"
 [pages.layout.items.items.on_press]
 type = "exec"
-command = "kitty --class dusky_hyprlock_switcher.sh --hold sh -c $HOME/user_scripts/hyprlock/dusky_hyprlock_switcher.sh"
+command = "foot --app-id=dusky_tui --hold python3 $HOME/user_scripts/hyprlock/tui_hyprlock.py"
 
 [[pages.layout.items.items]]
 type = "button"
@@ -2186,7 +2369,7 @@ center_title = true
 type = "service_card"
 [pages.layout.items.properties]
 title = "Firewall (UFW)"
-icon = "security-low-symbolic"
+icon = "security-high-symbolic"
 service = "ufw.service"
 scope = "system"
 
@@ -2948,70 +3131,61 @@ icon = "preferences-system-notifications-symbolic"
 type = "section"
 [pages.layout.items.layout.properties]
 title = "Mako Config"
+description = "Matugen template — re-apply wallpaper to apply colors"
 
 [[pages.layout.items.layout.items]]
 type = "button"
 [pages.layout.items.layout.items.properties]
-title = "Mako Side Switch"
-description = "Customize notification"
+title = "Mako Template"
+description = "Edit Matugen template (re-apply wallpaper to apply colors)"
 icon = "preferences-system-notifications-symbolic"
-[pages.layout.items.layout.items.on_press]
-type = "exec"
-command = "foot --app-id=dusky_tui --hold python3 ~/user_scripts/mako_osd/mako_tui/tui_mako.py"
-terminal = false
-
-[[pages.layout.items.layout.items]]
-type = "button"
-[pages.layout.items.layout.items.properties]
-title = "mako config"
-description = "Edit Current Configuration"
-icon = "preferences-system-symbolic"
 
 [[pages.layout.items.layout.items.properties.buttons]]
-icon = "preferences-system-symbolic"
+icon = "document-edit-symbolic"
 [pages.layout.items.layout.items.properties.buttons.on_press]
 type = "exec"
-command = "$HOME/user_scripts/dusky_system/control_center/dusky_text_editor.py \"$HOME/.config/mako/config\""
+command = "$HOME/user_scripts/dusky_system/control_center/dusky_text_editor.py \"$HOME/.config/matugen/templates/mako.ini\""
+
+[[pages.layout.items.layout.items.properties.buttons]]
+icon = "utilities-terminal-symbolic"
+style = "suggested"
+[pages.layout.items.layout.items.properties.buttons.on_press]
+type = "exec"
+command = "foot --app-id=dusky_tui --hold python3 $HOME/user_scripts/mako_osd/mako_tui/tui_mako.py"
+terminal = false
+
+[[pages.layout.items.layout]]
+type = "warning_banner"
+[pages.layout.items.layout.properties]
+title = "Matugen Template"
+message = "Colors are generated from wallpaper. After editing ~/.config/matugen/templates/mako.ini, re-apply your wallpaper or use 'Regenerate' in the TUI Profiles tab to rebuild ~/.config/matugen/generated/mako-colors.ini (included by ~/.config/mako/config)."
 
 [[pages.layout.items.layout]]
 type = "section"
 [pages.layout.items.layout.properties]
 title = "Path"
-description = "Located in ~/.config/mako/config"
+description = "Template: ~/.config/matugen/templates/mako.ini | Generated: ~/.config/matugen/generated/mako-colors.ini → ~/.config/mako/config"
 
 [[pages.layout.items.layout.items]]
-type = "directory_generator"
-[pages.layout.items.layout.items.properties]
-path = "~/.config/mako/config"
-sort = "name"
-
-[pages.layout.items.layout.items.item_template]
-type = "expander"
-[pages.layout.items.layout.items.item_template.properties]
-title = "{name_pretty}"
-description = "{name}"
-icon = "folder-symbolic"
-
-[[pages.layout.items.layout.items.item_template.items]]
 type = "button"
-[pages.layout.items.layout.items.item_template.items.properties]
-title = "Config"
-description = "config.json"
-icon = "preferences-system-symbolic"
-[pages.layout.items.layout.items.item_template.items.on_press]
+[pages.layout.items.layout.items.properties]
+title = "Open Template"
+description = "~/.config/matugen/templates/mako.ini"
+icon = "document-edit-symbolic"
+[pages.layout.items.layout.items.on_press]
 type = "exec"
-command = "$HOME/user_scripts/dusky_system/control_center/dusky_text_editor.py \"{path}/config.json\""
+command = "$HOME/user_scripts/dusky_system/control_center/dusky_text_editor.py \"$HOME/.config/matugen/templates/mako.ini\""
 terminal = false
 
-[[pages.layout.items.layout.items.item_template.items]]
+[[pages.layout.items.layout.items]]
 type = "button"
-[pages.layout.items.layout.items.item_template.items.properties]
-title = "Style"
-description = "style.css"
-icon = "document-edit-symbolic"
-[pages.layout.items.layout.items.item_template.items.on_press]
+[pages.layout.items.layout.items.properties]
+title = "View Generated Colors"
+description = "~/.config/matugen/generated/mako-colors.ini (read-only, overwritten by Matugen)"
+icon = "preferences-system-symbolic"
+[pages.layout.items.layout.items.on_press]
 type = "exec"
-command = "$HOME/user_scripts/dusky_system/control_center/dusky_text_editor.py \"{path}/style.css\""
+command = "$HOME/user_scripts/dusky_system/control_center/dusky_text_editor.py \"$HOME/.config/matugen/generated/mako-colors.ini\""
 terminal = false
 
 [[pages.layout.items]]
@@ -3055,7 +3229,7 @@ description = "Swap Lock Screen Layout (TUI)"
 icon = "system-lock-screen-symbolic"
 [pages.layout.items.layout.items.on_press]
 type = "exec"
-command = "kitty --class dusky_hyprlock_switcher.sh --hold sh -c $HOME/user_scripts/hyprlock/dusky_hyprlock_switcher.sh"
+command = "foot --app-id=dusky_tui --hold python3 $HOME/user_scripts/hyprlock/tui_hyprlock.py"
 terminal = false
 
 [[pages.layout.items.layout]]

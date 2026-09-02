@@ -1838,19 +1838,106 @@ class DuskyControlCenter(Adw.Application):
             return self._build_error_row(str(e), str(props.get("title", "Unknown")))
 
     def _build_warning_banner(self, props: ItemProperties) -> Adw.PreferencesRow:
-        """Build a warning banner row."""
+        """Build a warning banner row. Icon is optional; compact/subtle mode is supported."""
         row = Adw.PreferencesRow(css_classes=["action-row"])
 
+        # Determine icon: optional, custom allowed. Default to ICON_WARNING for backward compat
+        # if key not present. Use "" / "none" / "hidden" to hide icon.
+        if "icon" not in props:
+            icon_name = ICON_WARNING
+            show_icon = True
+        else:
+            raw_icon = props.get("icon")
+            if raw_icon is None:
+                icon_name = ICON_WARNING
+                show_icon = True
+            else:
+                icon_str = str(raw_icon).strip()
+                if icon_str == "" or icon_str.lower() in ("none", "hidden", "no", "false"):
+                    show_icon = False
+                    icon_name = ""
+                else:
+                    icon_name = icon_str
+                    show_icon = True
+
+        # Compact / subtle mode: triggered by compact=true, subtle=true, or style="compact"/"subtle"/"info"
+        is_compact = False
+        if props.get("compact") or props.get("subtle"):
+            # any truthy value triggers compact
+            with __import__("contextlib").suppress(Exception):
+                is_compact = bool(props.get("compact") or props.get("subtle"))
+        style_val = str(props.get("style", "")).strip().lower()
+        if style_val in ("compact", "subtle", "info", "small", "minimal"):
+            is_compact = True
+
+        if is_compact:
+            # Subtle horizontal layout: small icon + left-aligned text, minimal padding
+            # Add compact class to outer row to shrink its chrome
+            row.add_css_class("compact")
+            box = Gtk.Box(
+                orientation=Gtk.Orientation.HORIZONTAL,
+                spacing=8,
+                css_classes=["warning-banner-box", "compact"],
+            )
+            box.set_margin_top(0)
+            box.set_margin_bottom(0)
+
+            text_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+            text_box.set_hexpand(True)
+            text_box.set_valign(Gtk.Align.CENTER)
+
+            title_str = str(props.get("title", "")).strip()
+            # Only show title if non-empty and not just whitespace
+            if title_str:
+                title = Gtk.Label(
+                    label=title_str,
+                    css_classes=["heading"],
+                    xalign=0.0,
+                )
+                title.set_halign(Gtk.Align.START)
+                title.set_wrap(True)
+                text_box.append(title)
+
+            message_str = str(props.get("message", "")).strip()
+            if message_str:
+                # Use body/heading for high contrast, not dim caption
+                if title_str:
+                    css = ["caption"]
+                else:
+                    css = ["body"]
+                msg = Gtk.Label(
+                    label=message_str,
+                    css_classes=css,
+                    xalign=0.0,
+                )
+                msg.set_halign(Gtk.Align.START)
+                msg.set_wrap(True)
+                msg.set_justify(Gtk.Justification.LEFT)
+                text_box.append(msg)
+
+            if show_icon:
+                icon = Gtk.Image.new_from_icon_name(icon_name)
+                icon.set_valign(Gtk.Align.CENTER)
+                icon.add_css_class("warning-banner-icon")
+                # compact icon will be sized via CSS .compact override
+                box.append(icon)
+            box.append(text_box)
+            row.set_child(box)
+            return row
+
+        # Default: large centered vertical layout (backward compat)
         box = Gtk.Box(
             orientation=Gtk.Orientation.VERTICAL,
             spacing=4,
             css_classes=["warning-banner-box"],
         )
 
-        icon = Gtk.Image.new_from_icon_name(ICON_WARNING)
-        icon.set_halign(Gtk.Align.CENTER)
-        icon.set_margin_bottom(8)
-        icon.add_css_class("warning-banner-icon")
+        icon = None
+        if show_icon:
+            icon = Gtk.Image.new_from_icon_name(icon_name)
+            icon.set_halign(Gtk.Align.CENTER)
+            icon.set_margin_bottom(8)
+            icon.add_css_class("warning-banner-icon")
 
         title = Gtk.Label(
             label=str(props.get("title", "Warning")),
@@ -1865,7 +1952,8 @@ class DuskyControlCenter(Adw.Application):
         message.set_halign(Gtk.Align.CENTER)
         message.set_wrap(True)
 
-        box.append(icon)
+        if icon is not None:
+            box.append(icon)
         box.append(title)
         box.append(message)
         row.set_child(box)

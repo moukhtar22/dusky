@@ -1,0 +1,40 @@
+# ==============================================================================
+# Hollow Knight: Silksong Profile
+# ==============================================================================
+
+extends = "base_unity_native"
+
+[meta]
+id = "hollow_knight_silksong"
+name = "Hollow Knight: Silksong"
+version = "1.0"
+icon = "applications-games"
+developer = "Team Cherry"
+genre = "Metroidvania / Action-Adventure"
+description = "Play as Hornet, princess-protector of Hallownest, in a vast new kingdom ruled by silk and song."
+
+[paths]
+game_dir = "/mnt/media/games/good_quality/Hollow.Knight.Silksong-jc141"
+dwarfs_image = "files/game-root.dwarfs"
+dwarfs_mount = "files/.game-root-mnt"
+overlay_dir = "files/game-root"
+overlay_storage = "files/overlay-storage"
+overlay_work = "files/.game-root-work"
+executable = "Hollow Knight Silksong"
+arguments = []
+
+[runtime]
+type = "native"
+
+[graphics]
+gpu = "auto"
+wayland_native = true
+
+[graphics.gamescope]
+enabled = false
+allow_tearing = true
+
+[performance]
+gamemode = true
+mangohud = false
+fps_limit = 60

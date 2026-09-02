@@ -1,0 +1,65 @@
+# ==============================================================================
+# Silent Hill 2: Enhanced Edition Profile
+# ==============================================================================
+# Engine: DirectX 8 (Windows) via Wine + d3d8 wrapper + DXVK
+# Target: sh2pc.exe (Enhanced Edition sh2pc.exe.bak is original)
+# Notes: Community Enhanced Edition fixes PC port for modern hardware, widescreen, audio.
+# DLL overrides from start.e-w.sh: nvapi, d3d8 n,b ; dsoal/dsound n,b for OpenAL Soft
+
+extends = "base_wine_dxvk"
+
+[meta]
+id = "silent_hill_2_enhanced_edition"
+name = "Silent Hill 2: Enhanced Edition"
+version = "1.0"
+icon = "applications-games"
+developer = "Konami / Enhanced Edition Team"
+genre = "Survival Horror / Adventure"
+description = "Definitive PC experience of the 2001 classic. Enhanced Edition restores PS2 visuals and audio, fixes bugs and adds modern resolution and audio support."
+
+[paths]
+game_dir = "/mnt/media/games/unknown_quality/Silent.Hill.2.Enhanced.Edition-jc141"
+dwarfs_image = "files/game-root.dwarfs"
+dwarfs_mount = "files/.game-root-mnt"
+overlay_dir = "files/game-root"
+overlay_storage = "files/overlay-storage"
+overlay_work = "files/.game-root-work"
+executable = "sh2pc.exe"
+arguments = []
+
+[runtime]
+type = "wine"
+
+[runtime.wine]
+prefix_dir = "files/wine-prefix-ew"
+arch = "win64"
+sync_mode = "fsync"
+dxvk = true
+vkd3d = true
+
+[runtime.wine.dll_overrides]
+"winemenubuilder.exe" = "d"
+mshtml = "d"
+dxgi = "n,b"
+d3d11 = "n,b"
+d3d12 = "n,b"
+d3d9 = "n,b"
+d3d8 = "n,b"
+d3d10core = "n"
+d3d12core = "n"
+nvapi = "n"
+nvapi64 = "n"
+dsoal-aldrv = "n,b"
+dsound = "n,b"
+
+[graphics]
+gpu = "discrete"
+wayland_native = true
+
+[graphics.gamescope]
+enabled = false
+
+[performance]
+gamemode = true
+mangohud = false
+fps_limit = 60

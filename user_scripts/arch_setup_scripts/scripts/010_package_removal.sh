@@ -18,6 +18,7 @@ readonly -a REPO_TARGETS=(
   network-manager-applet
   firewalld
   waybar
+  hyprpolkitagent
 )
 
 # AUR Packages

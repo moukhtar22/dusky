@@ -198,8 +198,13 @@ def perform_reclaim() -> None:
                     info(f"Kernel could not reclaim enough from {slice_name} (EAGAIN). No reclaimable cold pages or no swap.")
                     continue
                 elif e.errno == errno.EINVAL:
-                    err(f"Invalid reclaim command for {slice_name}: {reclaim_command} ({e})")
-                    continue
+                    try:
+                        reclaim_file.write_text(str(target_reclaim), encoding="utf-8")
+                    except OSError as e2:
+                        if e2.errno == errno.EAGAIN:
+                            continue
+                        err(f"Invalid reclaim command for {slice_name}: {target_reclaim} ({e2})")
+                        continue
                 else:
                     raise
 

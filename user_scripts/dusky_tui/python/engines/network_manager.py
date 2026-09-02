@@ -753,6 +753,8 @@ class NetworkManagerEngine(BaseEngine):
         self._verbose_info: dict[str, str] = {}
         self._dns_provider: str = "DHCP"
         self._dns_servers_str: str = ""
+        self._devices_cache: list[dict[str, str]] = []
+        self._device_details: dict[str, dict[str, str]] = {}
 
         # Speed test state
         self._speedtest_running: bool = False
@@ -1113,7 +1115,7 @@ class NetworkManagerEngine(BaseEngine):
                 self.rescan_event.set()
                 return True, "NetworkManager restarted.", ""
             err = res.stderr.strip().lower()
-            if "password is required" in err or "sudo:" in err:
+            if "password is required" in err or "sudo:" in err or "polkit" in err or "not authorized" in err:
                 return False, "AUTH_REQUIRED", res.stderr
             return False, f"Failed: {res.stderr.strip()}", res.stderr
 
@@ -1155,6 +1157,9 @@ class NetworkManagerEngine(BaseEngine):
         elif key == "speedtest_up":
             mode = "up"
 
+        # Set flag synchronously to avoid race if spammed before callback runs
+        self._speedtest_running = True
+
         if self.app:
             def run_interactive_speedtest():
                 self._speedtest_running = True
@@ -1167,7 +1172,7 @@ class NetworkManagerEngine(BaseEngine):
                 try:
                     rich_script = str(Path(__file__).parent / "rich_speedtest.py")
                     with self.app.suspend():
-                        subprocess.run([sys.executable, rich_script, mode])
+                        subprocess.run([sys.executable, rich_script, mode], timeout=60)
 
                     # Read results after interactive run
                     res_file = Path.home() / ".cache" / "dusky_tui" / "speedtest_last.json"
@@ -1381,8 +1386,6 @@ class NetworkManagerEngine(BaseEngine):
 
     def _background_loop(self) -> None:
         """Daemon thread: polls radio, active state, live throughput, ping stats every 1.5s."""
-        last_radio: str | None = None
-        last_active_uuid: str | None = None
         last_scan_time: float = time.time()
 
         while not self.shutdown_event.is_set():
@@ -1405,6 +1408,13 @@ class NetworkManagerEngine(BaseEngine):
                 # Poll DNS provider
                 self._dns_provider = self._get_active_dns_provider()
 
+                # Refresh device cache (filtered, non-verbose) for Devices tab
+                try:
+                    self._devices_cache = self._get_nmcli_devices()
+                    self._device_details = self._get_device_details_map()
+                except Exception:
+                    pass
+
                 should_scan = self.rescan_event.is_set() or (now - last_scan_time > 25.0)
 
                 if should_scan and radio == "enabled":
@@ -1412,8 +1422,7 @@ class NetworkManagerEngine(BaseEngine):
                     last_scan_time = now
                     threading.Thread(target=self._async_rescan_wifi, daemon=True).start()
 
-                last_radio = radio
-                last_active_uuid = active_uuid
+                # (radio/uuid tracking removed - rebuild every cycle for live metrics)
 
                 # Always refresh UI labels for live traffic / pings every iteration
                 self._safe_call_from_thread(self._rebuild_schema)
@@ -1462,7 +1471,11 @@ class NetworkManagerEngine(BaseEngine):
                             self._speedtest_down_val = format_speed_mbps(val)
                             if self.app:
                                 self.app.call_from_thread(self._rebuild_schema)
-                proc.wait()
+                try:
+                    proc.wait(timeout=30)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=5)
                 self._speedtest_down_val = format_speed_mbps(last_val)
             except Exception as e:
                 self._speedtest_down_val = "Failed"
@@ -1489,7 +1502,11 @@ class NetworkManagerEngine(BaseEngine):
                             self._speedtest_up_val = format_speed_mbps(val)
                             if self.app:
                                 self.app.call_from_thread(self._rebuild_schema)
-                proc.wait()
+                try:
+                    proc.wait(timeout=30)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=5)
                 self._speedtest_up_val = format_speed_mbps(last_val)
             except Exception as e:
                 self._speedtest_up_val = "Failed"
@@ -1742,7 +1759,7 @@ class NetworkManagerEngine(BaseEngine):
                 cmd.extend(["ifname", iface])
             cmd.extend(["--rescan", "no"])
 
-            res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            res = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=5)
             for line in res.stdout.splitlines():
                 line = line.strip()
                 if not line:
@@ -1824,7 +1841,7 @@ class NetworkManagerEngine(BaseEngine):
         try:
             prev_res = subprocess.run(
                 ["nmcli", "-e", "no", "-g", "802-11-wireless.band", "connection", "show", target_uuid],
-                capture_output=True, text=True, check=False
+                capture_output=True, text=True, check=False, timeout=5
             )
             raw_prev = prev_res.stdout.strip()
             previous = raw_prev if raw_prev in ("bg", "a", "6GHz") else ""
@@ -1843,7 +1860,7 @@ class NetworkManagerEngine(BaseEngine):
         try:
             mod_res = subprocess.run(
                 ["nmcli", "connection", "modify", target_uuid, "802-11-wireless.band", desired_nm],
-                capture_output=True, text=True, check=False
+                capture_output=True, text=True, check=False, timeout=5
             )
             if mod_res.returncode != 0:
                 if self.app:
@@ -1861,7 +1878,7 @@ class NetworkManagerEngine(BaseEngine):
                 rollback_val = previous if previous in ("bg", "a", "6GHz") else ""
                 subprocess.run(
                     ["nmcli", "connection", "modify", target_uuid, "802-11-wireless.band", rollback_val],
-                    capture_output=True, text=True, check=False
+                    capture_output=True, text=True, check=False, timeout=5
                 )
                 subprocess.run(
                     ["nmcli", "connection", "up", target_uuid],
@@ -1880,9 +1897,9 @@ class NetworkManagerEngine(BaseEngine):
             rollback_val = previous if previous in ("bg", "a", "6GHz") else ""
             subprocess.run(
                 ["nmcli", "connection", "modify", target_uuid, "802-11-wireless.band", rollback_val],
-                capture_output=True, text=True, check=False
+                capture_output=True, text=True, check=False, timeout=5
             )
-            subprocess.run(["nmcli", "connection", "up", target_uuid], capture_output=True, text=True, check=False)
+            subprocess.run(["nmcli", "connection", "up", target_uuid], capture_output=True, text=True, check=False, timeout=20)
             if self.app:
                 self._safe_call_from_thread(self.app.notify_status, f"Error: {e}")
                 self._safe_call_from_thread(self.app.play_reset_sound)
@@ -1898,7 +1915,7 @@ class NetworkManagerEngine(BaseEngine):
     # =========================================================================
 
     def _rebuild_schema(self) -> None:
-        """Rebuilds tabs 0 & 1 in-place. Updates live traffic, ping, DNS, speed test & hotspot labels."""
+        """Rebuilds Networks/Saved/Devices tabs in-place. Updates live metrics across all tabs."""
         if not self.app or not self.app.schema:
             return
 
@@ -1920,18 +1937,24 @@ class NetworkManagerEngine(BaseEngine):
 
         # ----- Tab 0: Networks -----
         t0 = []
+        # Radio toggle always visible on first page — succinct 2-word label
         t0.append(self._make_item(
-            label="⟳ Rescan Networks", key="rescan", scope="network",
+            label="Wi-Fi Radio", key="wifi_radio", scope="status",
+            type_="bool", default=radio, group="Hardware",
+            extended_help="Toggle Wi-Fi radio on/off."
+        ))
+        t0.append(self._make_item(
+            label="Rescan", key="rescan", scope="network",
             type_="bool", default=False, group="Actions",
-            extended_help="Triggers a new wireless network scan in the background.",
-            options=["trigger"]
+            options=["trigger"],
+            extended_help="Scan for nearby networks."
         ))
 
         if not radio:
             t0.append(self._make_item(
-                label="󰤮 Wi-Fi Radio is OFF — Enable in Status tab",
-                key="radio_off_notice", scope="network", type_="action", default=":",
-                group="Status"
+                label="Wi-Fi Off",
+                key="wifi_off_notice", scope="network", type_="action", default=":",
+                group="Networks"
             ))
         else:
             # Sort scanned wifi using pure sort_wifi_rows logic
@@ -1982,23 +2005,23 @@ class NetworkManagerEngine(BaseEngine):
 
                 if in_use:
                     t0.append(self._make_item(
-                        label="✕ Disconnect", key=f"dc__{ssid}", scope="network",
+                        label="Disconnect", key=f"dc__{ssid}", scope="network",
                         type_="bool", default=False, parent_ref=parent_uid, options=["trigger"]
                     ))
                     t0.append(self._make_item(
-                        label="󰆴 Forget", key=f"fg__{ssid}", scope="network",
+                        label="Forget", key=f"fg__{ssid}", scope="network",
                         type_="bool", default=False, parent_ref=parent_uid, options=["trigger"],
-                        confirm_message=f"Permanently delete saved profile for **{ssid}**?"
+                        confirm_message=f"Delete **{ssid}**?"
                     ))
                     t0.append(self._make_item(
-                        label="⟳ Reconnect", key=f"rc__{ssid}", scope="network",
+                        label="Reconnect", key=f"rc__{ssid}", scope="network",
                         type_="bool", default=False, parent_ref=parent_uid, options=["trigger"],
-                        extended_help=f"Disconnects and immediately reconnects to {ssid}."
+                        extended_help=f"Reconnect to {ssid}."
                     ))
                     t0.append(self._make_item(
-                        label="󰐳 Share via QR Code", key=f"qr_net__{ssid}", scope="network",
+                        label="Share QR", key=f"qr_net__{ssid}", scope="network",
                         type_="bool", default=False, parent_ref=parent_uid, options=["trigger"],
-                        extended_help=f"Displays an interactive QR code to share {ssid} with mobile devices."
+                        extended_help=f"Show QR for {ssid}."
                     ))
                     match_uuid = match[0]["uuid"] if match else (active.get("uuid", "") if active else "")
                     active_dev = active.get("device", "") if active else ""
@@ -2012,26 +2035,26 @@ class NetworkManagerEngine(BaseEngine):
                         raw_nm = b_raw if b_raw in ("bg", "a", "6GHz") else ""
                         pinned_band = band_label(band_from_nm(raw_nm))
                     t0.append(self._make_item(
-                        label=f"Wi-Fi Band: {pinned_band}", key=f"band__{ssid}", scope="network",
+                        label=f"Band: {pinned_band}", key=f"band__{ssid}", scope="network",
                         type_="cycle", default=pinned_band, options=band_opts,
                         parent_ref=parent_uid,
-                        extended_help=f"Pins {ssid} to a specific frequency band with auto-rollback on failure."
+                        extended_help=f"Pin {ssid} band."
                     ))
                 elif is_saved:
                     uuid = match[0]["uuid"]
                     t0.append(self._make_item(
-                        label="▶ Connect", key=f"cn__{ssid}", scope="network",
+                        label="Connect", key=f"cn__{ssid}", scope="network",
                         type_="bool", default=False, parent_ref=parent_uid, options=["trigger"]
                     ))
                     t0.append(self._make_item(
-                        label="󰆴 Forget", key=f"fg__{ssid}", scope="network",
+                        label="Forget", key=f"fg__{ssid}", scope="network",
                         type_="bool", default=False, parent_ref=parent_uid, options=["trigger"],
-                        confirm_message=f"Permanently delete saved profile for **{ssid}**?"
+                        confirm_message=f"Delete **{ssid}**?"
                     ))
                     t0.append(self._make_item(
-                        label="󰐳 Share via QR Code", key=f"qr_net__{ssid}", scope="network",
+                        label="Share QR", key=f"qr_net__{ssid}", scope="network",
                         type_="bool", default=False, parent_ref=parent_uid, options=["trigger"],
-                        extended_help=f"Displays an interactive QR code to share {ssid} with mobile devices."
+                        extended_help=f"Show QR for {ssid}."
                     ))
                     t0.append(self._make_item(
                         label="Auto-connect", key=uuid, scope="saved",
@@ -2040,18 +2063,18 @@ class NetworkManagerEngine(BaseEngine):
                 else:
                     if is_protected(security):
                         t0.append(self._make_item(
-                            label="▶ Connect (Enter Password)", key=f"pw__{ssid}",
+                            label="Password", key=f"pw__{ssid}",
                             scope="network", type_="string", default="", parent_ref=parent_uid
                         ))
                     else:
                         t0.append(self._make_item(
-                            label="▶ Connect (Open)", key=f"cn__{ssid}", scope="network",
+                            label="Connect", key=f"cn__{ssid}", scope="network",
                             type_="bool", default=False, parent_ref=parent_uid, options=["trigger"]
                         ))
                         t0.append(self._make_item(
-                            label="󰐳 Share via QR Code", key=f"qr_net__{ssid}", scope="network",
+                            label="Share QR", key=f"qr_net__{ssid}", scope="network",
                             type_="bool", default=False, parent_ref=parent_uid, options=["trigger"],
-                            extended_help=f"Displays an interactive QR code to share {ssid} with mobile devices."
+                            extended_help=f"Show QR for {ssid}."
                         ))
 
         self.app.schema[0] = t0
@@ -2074,23 +2097,23 @@ class NetworkManagerEngine(BaseEngine):
 
             if is_active:
                 t1.append(self._make_item(
-                    label="✕ Disconnect", key=f"dc__{uuid}", scope="saved_action",
+                    label="Disconnect", key=f"dc__{uuid}", scope="saved_action",
                     type_="bool", default=False, parent_ref=parent_uid, options=["trigger"]
                 ))
                 t1.append(self._make_item(
-                    label="󰆴 Forget", key=f"fg__{uuid}", scope="saved_action",
+                    label="Forget", key=f"fg__{uuid}", scope="saved_action",
                     type_="bool", default=False, parent_ref=parent_uid, options=["trigger"],
-                    confirm_message=f"Permanently delete **{name}**?"
+                    confirm_message=f"Delete **{name}**?"
                 ))
                 t1.append(self._make_item(
-                    label="⟳ Reconnect", key=f"rc__{uuid}", scope="saved_action",
+                    label="Reconnect", key=f"rc__{uuid}", scope="saved_action",
                     type_="bool", default=False, parent_ref=parent_uid, options=["trigger"],
-                    extended_help=f"Disconnects and immediately reconnects to {name}."
+                    extended_help=f"Reconnect to {name}."
                 ))
                 t1.append(self._make_item(
-                    label="󰐳 Share via QR Code", key=f"qr_prof__{uuid}", scope="saved_action",
+                    label="Share QR", key=f"qr_prof__{uuid}", scope="saved_action",
                     type_="bool", default=False, parent_ref=parent_uid, options=["trigger"],
-                    extended_help=f"Displays an interactive QR code to share {name} with mobile devices."
+                    extended_help=f"Show QR for {name}."
                 ))
                 t1.append(self._make_item(
                     label="Auto-connect", key=uuid, scope="saved",
@@ -2105,25 +2128,25 @@ class NetworkManagerEngine(BaseEngine):
                 raw_nm = b_raw if b_raw in ("bg", "a", "6GHz") else ""
                 pinned_band = band_label(band_from_nm(raw_nm))
                 t1.append(self._make_item(
-                    label=f"Wi-Fi Band: {pinned_band}", key=f"band__{uuid}", scope="saved_action",
+                    label=f"Band: {pinned_band}", key=f"band__{uuid}", scope="saved_action",
                     type_="cycle", default=pinned_band, options=band_opts,
                     parent_ref=parent_uid,
-                    extended_help=f"Pins {name} to a specific frequency band with auto-rollback on failure."
+                    extended_help=f"Pin {name} band."
                 ))
             else:
                 t1.append(self._make_item(
-                    label="▶ Connect", key=f"cn__{uuid}", scope="saved_action",
+                    label="Connect", key=f"cn__{uuid}", scope="saved_action",
                     type_="bool", default=False, parent_ref=parent_uid, options=["trigger"]
                 ))
                 t1.append(self._make_item(
-                    label="󰆴 Forget", key=f"fg__{uuid}", scope="saved_action",
+                    label="Forget", key=f"fg__{uuid}", scope="saved_action",
                     type_="bool", default=False, parent_ref=parent_uid, options=["trigger"],
-                    confirm_message=f"Permanently delete **{name}**?"
+                    confirm_message=f"Delete **{name}**?"
                 ))
                 t1.append(self._make_item(
-                    label="󰐳 Share via QR Code", key=f"qr_prof__{uuid}", scope="saved_action",
+                    label="Share QR", key=f"qr_prof__{uuid}", scope="saved_action",
                     type_="bool", default=False, parent_ref=parent_uid, options=["trigger"],
-                    extended_help=f"Displays an interactive QR code to share {name} with mobile devices."
+                    extended_help=f"Show QR for {name}."
                 ))
                 t1.append(self._make_item(
                     label="Auto-connect", key=uuid, scope="saved",
@@ -2131,6 +2154,110 @@ class NetworkManagerEngine(BaseEngine):
                 ))
 
         self.app.schema[1] = t1
+
+        # ----- Tab: Devices (nmcli device status) -----
+        # Dynamically find Devices tab index by name
+        devices_idx = None
+        try:
+            # app.tabs is dict[int,str] after DuskyTUI init
+            tabs_dict = getattr(self.app, "tabs", {}) if hasattr(self.app, "tabs") else {}
+            if isinstance(tabs_dict, dict):
+                for idx, name in tabs_dict.items():
+                    if str(name).lower() == "devices":
+                        devices_idx = int(idx)
+                        break
+            if devices_idx is None:
+                # fallback: search schema keys
+                for k in list(self.app.schema.keys()):
+                    # heuristic: highest index likely devices if not found
+                    pass
+        except Exception:
+            devices_idx = None
+        # Fallback to 3 if not found (new TABS ordering)
+        if devices_idx is None:
+            devices_idx = 3 if 3 in self.app.schema else max(self.app.schema.keys()) if self.app.schema else 3
+
+        # Use cached devices if available, otherwise fetch synchronously
+        if not getattr(self, "_devices_cache", None):
+            try:
+                self._devices_cache = self._get_nmcli_devices()
+                self._device_details = self._get_device_details_map()
+            except Exception:
+                self._devices_cache = []
+                self._device_details = {}
+
+        # Preserve expanded state for devices
+        dev_expanded = set()
+        dev_collapsed = set()
+        for item in self.app.schema.get(devices_idx, []):
+            if item.is_parent:
+                uid = f"{item.scope}.{item.key}" if item.scope and item.scope != "DEFAULT" else item.key
+                if item.expanded:
+                    dev_expanded.add(uid)
+                else:
+                    dev_collapsed.add(uid)
+
+        t_devices = []
+        # Show each device as parent menu
+        for d in self._devices_cache:
+            dev_name = d.get("device", "")
+            dtype = d.get("type", "")
+            state = d.get("state", "")
+            conn = d.get("connection", "") or "--"
+            det = self._device_details.get(dev_name, {})
+
+            sl = state.lower().strip()
+            if sl.startswith("connected"):
+                icon, grp = "●", "Connected"
+            elif sl.startswith("disconnected"):
+                icon, grp = "○", "Disconnected"
+            elif sl.startswith("unavailable"):
+                icon, grp = "◯", "Unavailable"
+            else:
+                icon, grp = "·", "Other"
+
+            pkey = f"dev__{dev_name}"
+            parent_uid = f"devices.{pkey}"
+            is_exp = (parent_uid in dev_expanded) if parent_uid in dev_expanded else (sl.startswith("connected") and parent_uid not in dev_collapsed)
+            label = f"{icon} {dev_name:<14} {dtype:<10} {state}"
+            if conn and conn != "--":
+                label += f"  {conn}"
+            # Truncate to keep succinct, avoid overflow
+            if len(label) > 65:
+                label = label[:62] + "..."
+
+            t_devices.append(self._make_item(
+                label=label, key=pkey, scope="devices", type_="menu", default=None,
+                is_parent=True, expanded=is_exp, group=grp
+            ))
+
+            # Details children (succinct 1-2 word labels)
+            hw = det.get("GENERAL.HWADDR", "")
+            if hw and hw != "(unknown)":
+                t_devices.append(self._make_item(label=f"MAC: {hw}", key=f"mac__{dev_name}", scope="clipboard", type_="bool", default=False, options=["copy"], parent_ref=parent_uid))
+            mtu = det.get("GENERAL.MTU", "")
+            if mtu:
+                t_devices.append(self._make_item(label=f"MTU: {mtu}", key=f"mtu__{dev_name}", scope="clipboard", type_="bool", default=False, options=["copy"], parent_ref=parent_uid))
+            driver = det.get("GENERAL.DRIVER", "")
+            if driver:
+                t_devices.append(self._make_item(label=f"Driver: {driver}", key=f"drv__{dev_name}", scope="clipboard", type_="bool", default=False, options=["copy"], parent_ref=parent_uid))
+            ipaddr = det.get("IP4.ADDRESS[1]", "") or det.get("IP4.ADDRESS", "")
+            if ipaddr:
+                t_devices.append(self._make_item(label=f"IP: {ipaddr}", key=f"ip__{dev_name}", scope="clipboard", type_="bool", default=False, options=["copy"], parent_ref=parent_uid))
+            gw = det.get("IP4.GATEWAY", "")
+            if gw and gw != "--":
+                t_devices.append(self._make_item(label=f"Gateway: {gw}", key=f"gw__{dev_name}", scope="clipboard", type_="bool", default=False, options=["copy"], parent_ref=parent_uid))
+            dns = det.get("IP4.DNS[1]", "") or det.get("IP4.DNS", "")
+            if dns:
+                t_devices.append(self._make_item(label=f"DNS: {dns}", key=f"dns__{dev_name}", scope="clipboard", type_="bool", default=False, options=["copy"], parent_ref=parent_uid))
+            t_devices.append(self._make_item(label=f"Type: {dtype}", key=f"type__{dev_name}", scope="clipboard", type_="bool", default=False, options=["copy"], parent_ref=parent_uid))
+            t_devices.append(self._make_item(label=f"State: {state}", key=f"state__{dev_name}", scope="clipboard", type_="bool", default=False, options=["copy"], parent_ref=parent_uid))
+            t_devices.append(self._make_item(label=f"Conn: {conn}", key=f"conn__{dev_name}", scope="clipboard", type_="bool", default=False, options=["copy"], parent_ref=parent_uid))
+
+        if not t_devices:
+            t_devices.append(self._make_item(label="No Devices", key="no_devices", scope="devices", type_="action", default=":", group="Devices"))
+
+        self.app.schema[devices_idx] = t_devices
 
         # ----- Update dynamic labels across all tabs -----
         verb = self._verbose_info
@@ -2186,49 +2313,49 @@ class NetworkManagerEngine(BaseEngine):
                         raw_nm = b_raw if b_raw in ("bg", "a", "6GHz") else ""
                         pinned_band = band_label(band_from_nm(raw_nm))
                         item.value = pinned_band
-                        item.label = f"Wi-Fi Band: {pinned_band}"
+                        item.label = f"Band: {pinned_band}"
                     else:
                         item.options = ["Auto"]
                         item.value = "Auto"
-                        item.label = "Wi-Fi Band: Auto"
+                        item.label = "Band: Auto"
                 elif item.key == "status_type":
-                    item.label = f"Connection:   {conn_status_label}"
+                    item.label = f"Connection: {conn_status_label}"
                 elif item.key == "status_ssid":
-                    item.label = f"SSID / Name:  {ssid_label}"
+                    item.label = f"SSID: {ssid_label}"
                 elif item.key == "status_ip":
-                    item.label = f"IP Address:   {ip_label}"
+                    item.label = f"IP: {ip_label}"
                 elif item.key == "status_gateway":
-                    item.label = f"Gateway:      {gateway_label}"
+                    item.label = f"Gateway: {gateway_label}"
                 elif item.key == "status_detail":
-                    item.label = f"Link Detail:  {link_detail_str}"
+                    item.label = f"Link: {link_detail_str}"
                 elif item.key == "status_device":
-                    item.label = f"Interface:    {iface_name or 'N/A'}"
+                    item.label = f"Iface: {iface_name or 'N/A'}"
                 elif item.key == "throughput_down":
-                    item.label = f"Download Rate: ↓ {dl_rate_str}"
+                    item.label = f"Down: ↓ {dl_rate_str}"
                 elif item.key == "throughput_up":
-                    item.label = f"Upload Rate:   ↑ {ul_rate_str}"
+                    item.label = f"Up: ↑ {ul_rate_str}"
                 elif item.key == "throughput_rx_total":
-                    item.label = f"Total Received:{rx_total_str}"
+                    item.label = f"RX Total: {rx_total_str}"
                 elif item.key == "throughput_tx_total":
-                    item.label = f"Total Sent:    {tx_total_str}"
+                    item.label = f"TX Total: {tx_total_str}"
                 elif item.key == "ping_router":
-                    item.label = f"Router Gateway Ping: {router_ping_str}"
+                    item.label = f"Router Ping: {router_ping_str}"
                 elif item.key == "ping_internet":
-                    item.label = f"Internet Ping (1.1.1.1): {internet_ping_str}"
+                    item.label = f"Internet Ping: {internet_ping_str}"
                 elif item.key == "ping_packet_loss":
-                    item.label = f"Packet Loss:         {packet_loss_str}"
+                    item.label = f"Loss: {packet_loss_str}"
                 elif item.key == "dns_current":
-                    item.label = f"Current DNS Provider: {self._dns_provider}"
+                    item.label = f"DNS: {self._dns_provider}"
                 elif item.key == "speedtest_status":
                     item.label = f"Status: {self._speedtest_status}"
                 elif item.key == "speedtest_down_result":
-                    item.label = f"Download Speed: {self._speedtest_down_val}"
+                    item.label = f"Down: {self._speedtest_down_val}"
                 elif item.key == "speedtest_up_result":
-                    item.label = f"Upload Speed:   {self._speedtest_up_val}"
+                    item.label = f"Up: {self._speedtest_up_val}"
                 elif item.key == "hotspot_status_info":
                     item.label = f"Status: {status_text}"
                 elif item.key == "hotspot_clients_info":
-                    item.label = f"Connected Clients: {clients_text}"
+                    item.label = f"Clients: {clients_text}"
                 elif item.key == "hotspot_ssid":
                     item.value = self._hotspot_ssid
                 elif item.key == "hotspot_password":
@@ -2360,9 +2487,63 @@ class NetworkManagerEngine(BaseEngine):
         except Exception:
             return 0
 
+
+    def _get_nmcli_devices(self) -> list[dict[str, str]]:
+        """Parse `nmcli device status` into filtered list, handling escaped colons."""
+        devices: list[dict[str, str]] = []
+        out = self._run_cmd(["nmcli", "-t", "-f", "DEVICE,TYPE,STATE,CONNECTION", "device", "status"])
+        for line in out.splitlines():
+            if not line.strip():
+                continue
+            parts = _split_nmcli_line(line)
+            if len(parts) < 4:
+                continue
+            dev = parts[0] if parts[0] else ""
+            dtype = parts[1] if len(parts) > 1 else ""
+            state = parts[2] if len(parts) > 2 else ""
+            conn = parts[3] if len(parts) > 3 else "" 
+            if not dev:
+                continue
+            devices.append({"device": dev, "type": dtype, "state": state, "connection": conn})
+        return devices
+
+    def _get_device_details_map(self) -> dict[str, dict[str, str]]:
+        """Parse `nmcli device show` grouped by DEVICE into dict."""
+        details: dict[str, dict[str, str]] = {}
+        out = self._run_cmd(["nmcli", "-t", "-f", "GENERAL.DEVICE,GENERAL.TYPE,GENERAL.HWADDR,GENERAL.MTU,GENERAL.STATE,GENERAL.DRIVER,IP4.ADDRESS,IP4.GATEWAY,IP4.DNS", "device", "show"])
+        current_dev = None
+        cur_map: dict[str, str] = {}
+        for line in out.splitlines():
+            if not line.strip():
+                if current_dev and cur_map:
+                    details[current_dev] = dict(cur_map)
+                current_dev = None
+                cur_map = {}
+                continue
+            idx = line.find(":")
+            if idx == -1:
+                continue
+            key = line[:idx].strip()
+            val = line[idx+1:].strip().replace("\\:", ":")
+            if key == "GENERAL.DEVICE" and val:
+                if current_dev and cur_map:
+                    details[current_dev] = dict(cur_map)
+                    cur_map = {}
+                current_dev = val
+                cur_map[key] = val
+            else:
+                if current_dev is None:
+                    continue
+                if key.startswith(("GENERAL.", "IP4.", "IP6.", "WIRED-PROPERTIES.", "WIFI-PROPERTIES.")):
+                    if key not in cur_map:
+                        cur_map[key] = val
+        if current_dev and cur_map:
+            details[current_dev] = dict(cur_map)
+        return details
+
     @staticmethod
     def _is_uuid(s: str) -> bool:
-        return bool(re.match(r'^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$', s))
+        return bool(re.match(r'^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$', s, re.IGNORECASE))
 
     @staticmethod
     def _signal_bar(signal: int) -> str:

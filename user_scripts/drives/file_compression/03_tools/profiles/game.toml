@@ -1,0 +1,10 @@
+# Game — the "game" profile is just balanced + game directory convention
+# Usage: DWARFS_PROFILE=game bash actions.sh dwarfs-compress
+# Or: bash actions.sh dwarfs-compress /path/to/game/files/game-root /path/to/game/files/game-root.dwarfs
+# This profile is intentionally minimal: it reuses balanced (l7, 64M, zstd22, nilsimsa) but documents that game is NOT hardcoded in engine
+level = 7
+block_size_bits = 24
+order = "nilsimsa"
+input = "files/game-root"
+output = "files/game-root.dwarfs"
+note = "Game is just a profile — engine is universal for any directory. Use DWARFS_PROFILE=game or pass [src] [dst] for generic."

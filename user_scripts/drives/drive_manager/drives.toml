@@ -24,12 +24,13 @@ mount_options = ["noatime", "uid=1000", "gid=1000", "umask=002", "windows_names"
 
 [drives.browser]
 type = "PROTECTED"
-mountpoint = "/home/dusk/.config/mozilla"
+mountpoint = "~/.config/mozilla"
 outer_uuid = "65541589-e0e0-4cc0-99f4-9b179f05ffb5"
 inner_uuid = "b982f02e-32f6-40cd-86de-964c90676cc2"
 hint = "LAP_P"
 fstype = "ext4"
 mount_options = ["noatime", "delalloc", "commit=20"]
+symlinks = ["~/.mozilla"]
 
 [drives.media]
 type = "PROTECTED"

@@ -39,6 +39,7 @@ SCHEMA_PATH = USER_SCRIPTS / "fonts" / "tui_fonts.py"
 ENGINE_OUTPUT = "~/.config/fontconfig/conf.d/99-dusky-fonts.conf"
 
 _METRIC_COMPAT_SANS = ("Arial", "Helvetica", "Verdana")
+_METRIC_COMPAT_EMOJI = ("Segoe UI Emoji", "Apple Color Emoji", "Twemoji Mozilla")
 
 
 def _load_schema():
@@ -109,10 +110,23 @@ def build_config(target: str) -> tuple[bool, str]:
         conf = Path(ENGINE_OUTPUT).expanduser()
         if ok and conf.is_file():
             text = conf.read_text()
-            missing = [name for name in _METRIC_COMPAT_SANS
-                       if f">{name}</string>" not in text]
-            if missing:
-                blocks = "".join(_metric_rewrite_block(n, target) for n in missing)
+            missing_sans = [name for name in _METRIC_COMPAT_SANS
+                            if f">{name}</string>" not in text]
+            missing_emoji = [name for name in _METRIC_COMPAT_EMOJI
+                             if f">{name}</string>" not in text]
+            # Determine the configured emoji family from schema defaults
+            emoji_target = "Noto Color Emoji"
+            if mod:
+                for items in mod.SCHEMA.values():
+                    for item in items:
+                        if item.key == "emoji" and item.default:
+                            emoji_target = str(item.default)
+            blocks = "".join(
+                _metric_rewrite_block(n, target) for n in missing_sans
+            ) + "".join(
+                _metric_rewrite_block(n, emoji_target) for n in missing_emoji
+            )
+            if blocks:
                 new_text = text.replace("</fontconfig>", blocks + "</fontconfig>")
                 # Atomic replace: fontconfig re-parses this file on every
                 # fc-match/fc-cache call, so a truncate-then-write would let

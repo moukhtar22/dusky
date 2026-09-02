@@ -1,0 +1,311 @@
+# ==============================================================================
+# Master Game Runner Engine (MGRE) -- Installer Profile Template (FitGirl/DODI)
+# Target: Bleeding-Edge Arch Linux (Kernel 7.1+, Python 3.14+, Pure Wayland)
+# ==============================================================================
+# PURPOSE - READ FIRST:
+#   This is a TEMPORARY profile to RUN a Windows game INSTALLER (FitGirl,
+#   DODI, ElAmigos - InnoSetup with setup.exe + fg-*.bin / .bin) through the
+#   SAME Wine / cgroup / prefix pipeline as normal games. MGRE has NO native
+#   "install" command - verified at master_runner.py:5274 KNOWN_COMMANDS
+#   (run, menu, tui, list, status, mount, unmount, validate, init, doctor,
+#   desktop, env - no install). This template abuses paths.executable to point
+#   at setup.exe as if it were a game binary.
+#
+#   Lifecycle: Use once -> choose PERSISTENT install destination inside the
+#   installer UI (NOT /mnt/zram1 - zram is RAM-backed and volatile) -> delete
+#   this installer profile -> scaffold the REAL game profile:
+#     python3 master_runner.py init ~/Games/<GameName> --preset base_wine_dxvk
+#     python3 master_runner.py validate <new_id> && python3 master_runner.py run <new_id> --dry-run
+#
+# QUICK START (FitGirl example: /mnt/zram1/Portal Collection [FitGirl Repack]):
+#   1. cp profiles/_template_game_installer.toml profiles/<game>_install.toml
+#   2. Edit [paths] game_dir = "/mnt/zram1/Portal Collection [FitGirl Repack]"
+#      Keep executable = "setup.exe" (relative to game_dir; if nested use "Setup/setup.exe")
+#   3. Edit [runtime.wine] prefix_dir = "$HOME/.local/share/wineprefixes/<game>"
+#      MUST be OUTSIDE /mnt/zram1 (volatile). $HOME / $XDG_DATA_HOME expansion works.
+#   4. Test: python3 master_runner.py validate <game>_install
+#            python3 master_runner.py run <game>_install --dry-run
+#            python3 master_runner.py run <game>_install
+#   5. In FitGirl UI: uncheck "Install DirectX / VC++" if offered, pick target like
+#      ~/Games/PortalCollection (ensure 2x free space: compressed + unpacked).
+#   6. After success: remove installer profile, init real profile.
+#
+# REFERENCE: This file borrows ALL 15 tables from profiles/_template.toml:1
+#   with installer-appropriate defaults commented inline. Fields omitted use
+#   DEFAULT_CONFIG_TOML at master_runner.py:1754.
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# 1. Preset Inheritance (extends)
+# ------------------------------------------------------------------------------
+# Inherits archetype defaults from presets/*.toml or built-in presets at
+# master_runner.py:1872 DEFAULT_PRESETS. Any key here overrides preset.
+# Installer MUST use Wine baseline - do NOT use base_native. Valid:
+#   "base_wine_dxvk" -> Wine-Staging + DXVK (this file, presets/base_wine_dxvk.toml:1)
+#   "base_wine"      -> Fallback Wine baseline (master_runner.py:1881)
+#   "base_unreal_engine_5" -> Only if installer itself is UE5 (rare)
+extends = "base_wine_dxvk"
+
+# ------------------------------------------------------------------------------
+# 2. Metadata Information [meta]
+# ------------------------------------------------------------------------------
+[meta]
+id          = "example_game_install"              # Unique ID, must match <id>.toml filename
+name        = "Example Game - FitGirl Installer"  # Display title for logs/notifications/.desktop
+version     = "1.0"                               # Repack version
+icon        = "applications-games"                # System icon or absolute .png/.ico/.svg
+developer   = "Example Studio / FitGirl Repack"   # Developer / repack author
+genre       = "Installer"                         # Keep "Installer" to distinguish from game profiles
+description = "TEMPORARY profile to run setup.exe for Example Game. Delete after install and scaffold real game via `init`."
+
+# ------------------------------------------------------------------------------
+# 3. Paths & Storage Lifecycle [paths]
+# ------------------------------------------------------------------------------
+# Variable expansions supported in ALL path/string fields (master_runner.py:1681 _VAR_RE, 2103 base_ctx):
+#   $GAME_DIR         -> Resolved paths.game_dir (master_runner.py:2117)
+#   $PROFILE_ID       -> Profile ID (e.g. "example_game_install") (master_runner.py:2116)
+#   $HOME or ~        -> User home (/home/<user>)
+#   $USER             -> Current username
+#   $ROOT             -> Config root (SELF_DIR)
+#   $XDG_DATA_HOME    -> ~/.local/share
+#   $XDG_CONFIG_HOME  -> ~/.config
+#   $XDG_CACHE_HOME   -> ~/.cache
+#   $XDG_STATE_HOME   -> ~/.local/state
+#   $XDG_RUNTIME_DIR  -> /run/user/<uid>
+#   $STATE_DIR        -> XDG_STATE_HOME/master-runner
+#   $CACHE_DIR        -> XDG_CACHE_HOME/master-runner
+# NOTE: profiles/_template.toml:45 documents $GAME_ID and $ZRAM (/mnt/zram1) but
+#       master_runner.py:2103 does NOT populate them - they remain literal
+#       unless you export ZRAM/GAME_ID as env vars. Use $PROFILE_ID not $GAME_ID,
+#       and use absolute /mnt/zram1/... not $ZRAM for repack paths.
+[paths]
+# REPACK source directory - MUST contain setup.exe + fg-*.bin / .bin files.
+# Absolute path required. Example: "/mnt/zram1/Portal Collection [FitGirl Repack]"
+# Verify with: ls "/mnt/zram1/Portal Collection [FitGirl Repack]" -> setup.exe, fg-01.bin ...
+game_dir = "/mnt/zram1/ExampleGame [FitGirl Repack]"
+
+# DwarFS / fuse-overlayfs UNION LAYERS - OMIT for FitGirl installers.
+# FitGirl is LOOSE files (InnoSetup), not a compressed .dwarfs image.
+# master_runner.py:2194 resolve_paths() treats empty/missing dwarfs_image as
+# "uses_dwarfs=False" and master_runner.py:2449 MountEngine.mount() then
+# no-ops. Do NOT set these for installers; keep commented to avoid accidental mount.
+# dwarfs_image    = "files/game-root.dwarfs"
+# dwarfs_mount    = "files/.game-root-mnt"
+# overlay_dir     = "files/game-root"
+# overlay_storage = "files/overlay-storage"
+# overlay_work    = "files/.game-root-work"
+
+# Executable Specification (master_runner.py:3795 resolve_executable):
+# Relative to game_dir (since uses_dwarfs=False). FitGirl is almost always
+# "setup.exe" at repack root. If repack nests it (e.g. "Setup/setup.exe") use
+# that relative path. Do NOT point at a game binary here - this is the installer.
+executable  = "setup.exe"
+working_dir = ""                                   # Empty = executable parent directory (correct for InnoSetup)
+# CLI Arguments - forwarded directly to setup.exe:
+# FitGirl respects InnoSetup flags: "/SILENT" "/VERYSILENT" "/NOCANCEL" but
+# unattended is NOT recommended (hides error dialogs for corrupt fg-*.bin).
+# Leave [] for interactive install (lets you pick destination/options).
+arguments   = []
+
+# ------------------------------------------------------------------------------
+# 4. Runtime Selection [runtime]
+# ------------------------------------------------------------------------------
+[runtime]
+# "native" -> Linux ELF (WRONG for FitGirl)
+# "wine"   -> Windows .exe via Wine-Staging (CORRECT for setup.exe)
+# "proton" / "umu" -> Steam Proton/umu-run (only if you force Proton Wine)
+# "script" -> Shell script launcher
+type = "wine"
+
+# ------------------------------------------------------------------------------
+# 5. Wine Execution Layer [runtime.wine]
+# (Active when runtime.type is "wine", master_runner.py:2653 WinePrefix)
+# ------------------------------------------------------------------------------
+[runtime.wine]
+wine_binary           = "wine"                     # "wine", "wine64", or absolute GE-Proton path (e.g. "~/.local/share/Steam/compatibilitytools.d/GE-Proton11-6/files/bin/wine")
+prefix_dir            = "$HOME/.local/share/wineprefixes/example_game"  # CRITICAL: PERSISTENT path OUTSIDE /mnt/zram1. Relative "prefix" would resolve to /mnt/zram1/.../prefix (volatile) via master_runner.py:2206 under().
+arch                  = "win64"                    # "win64" for all modern FitGirl repacks; "win32" only for legacy 32-bit repacks
+sync_mode             = "auto"                     # "auto" -> ntsync (/dev/ntsync, kernel 6.14+) -> fsync -> esync -> server (master_runner.py:2681)
+debug                 = "fixme-all"                # WINEDEBUG filter; "-all" also valid, "fixme-all" is installer-friendly
+large_address_aware   = true                       # WINE_LARGE_ADDRESS_AWARE=1 (harmless for installer, needed for installed game later)
+dxvk                  = true                       # Installer is D3D-agnostic but true keeps prefix provisioning consistent with game profile
+vkd3d                 = false                      # false saves ~2s provisioning (installer does not need D3D12); set true only if installer uses D3D12 preview
+dxvk_nvapi            = false                      # DLSS not needed for installer
+disable_menubuilder   = true                       # Suppress winemenubuilder .desktop pollution (master_runner.py:2765)
+hide_wine             = false                      # WINE_HIDE_VERSION
+
+# DLL Overrides (master_runner.py:2769 link_translators - auto-links DXVK/VKD3D):
+# "n,b" = native first, builtin fallback (correct for DXVK DLLs)
+dll_overrides = { "winemenubuilder.exe" = "d", "mshtml" = "d", "dxgi" = "n,b", "d3d11" = "n,b", "d3d12" = "n,b", "d3d9" = "n,b" }
+
+# Automated Prefix Provisioning (WinePrefix.link_translators):
+# Installer itself needs NO VC++ / DirectX; the REAL game profile (via `init`) will declare them.
+# Keep empty to avoid 15-minute wine tricks during decompression.
+redistributables = []                              # e.g. ["VC_redist.x64.exe"] - NOT needed for installer run
+winetricks       = []                              # e.g. ["vcrun2022"] - NOT needed for installer run
+
+# ------------------------------------------------------------------------------
+# 5b. UMU / Proton Configuration [runtime.umu]
+# (Active when runtime.type is "proton" or "umu" - master_runner.py:1897)
+# Installer should NOT use umu/proton; keep commented as reference.
+# ------------------------------------------------------------------------------
+# [runtime.umu]
+# game_id     = ""                                 # Empty = umu-$GAME_ID
+# store       = "none"                             # "none", "steam", "epic", "gog", "heroic"
+# proton      = "GE-Proton11-6"                    # Proton version dir
+# verb        = "waitforexitandrun"
+# protonfixes = true
+
+# ------------------------------------------------------------------------------
+# 6. Graphics Pipeline & Wayland Integration [graphics]
+# ------------------------------------------------------------------------------
+[graphics]
+# GPU Selection (master_runner.py:1421 select_gpu):
+#   Semantic: "auto", "discrete", "integrated", "primary"
+#   Vendor:   "nvidia", "amd", "intel"
+#   Explicit: "10de:25a0", "card0", "0000:01:00.0", "pci-0000_01_00_0"
+# For installer, "auto" is fine (no GPU load). Keep auto to avoid forcing dGPU for a 2D InnoSetup wizard.
+gpu = "auto"
+
+wayland_native      = true                         # Wine-Staging waylanddrv (pure Wayland)
+prefer_xwayland     = false                        # false = native Wayland; true = XWayland fallback (not needed for installer)
+vulkan_icd          = "auto"                       # "auto", "nvidia", "radv", "intel" (master_runner.py:1042 ICD_LIB_VENDOR)
+gl_threaded         = true
+vsync               = "default"                    # "default", "on", "off"
+hdr                 = false
+shader_cache        = false                        # false for installer (no shaders to cache; saves 12 GiB default at master_runner.py:1793)
+shader_cache_size_gb = 2                           # Minimal; installer does not benefit from cache
+
+# Gamescope Micro-Compositor Sandbox (master_runner.py:3359 stage_wine):
+# NEVER enable for installer - it composites the 2D wizard into useless nested window.
+[graphics.gamescope]
+enabled         = false                            # MUST stay false for installer
+backend         = "wayland"                        # "wayland", "drm", "sdl", "headless" (ignored when enabled=false)
+mode            = "borderless"                     # "borderless", "fullscreen", "windowed" (ignored)
+width           = 0
+height          = 0
+output_width    = 0
+output_height   = 0
+refresh_rate    = 0
+scaler          = ""                               # "auto", "integer", "fit", "fill", "stretch"
+filter          = ""                               # "linear", "nearest", "fsr", "nis", "pixel"
+fsr_sharpness   = 5
+adaptive_sync   = false
+immediate_flips = false
+realtime        = true
+hdr             = false
+expose_wayland  = true
+mangoapp        = true
+extra_args      = []
+
+# ------------------------------------------------------------------------------
+# 7. Performance & Scheduling [performance]
+# ------------------------------------------------------------------------------
+[performance]
+gamemode          = true                           # Feral GameMode (gamemoderun) - safe to keep true even for installer
+mangohud          = false                          # No telemetry for installer wizard
+mangohud_preset   = ""
+fps_limit         = 0                              # 0 = uncapped (installer is CPU-bound decompression, not FPS)
+cpu_affinity      = ""                             # "" or "0-7" / "pcores" / "smt-off" - leave "" for installer (needs all cores for decompression)
+scope_cpu_weight  = 0                              # 0 = systemd default 100 (master_runner.py:1823)
+scope_io_weight   = 0                              # 0 = default 100
+scope_memory_high = ""                             # e.g. "24G" - leave "" for installer
+
+# ------------------------------------------------------------------------------
+# 8. Audio Server [audio]
+# ------------------------------------------------------------------------------
+[audio]
+driver        = "pipewire"                         # "pipewire", "pulseaudio", "alsa"
+quantum       = 1024                               # 1024/48000 = 21.3 ms (master_runner.py:1829)
+rate          = 48000
+openal_driver = "pipewire"
+
+# ------------------------------------------------------------------------------
+# 9. Gamepad & Input Mapping [input]
+# ------------------------------------------------------------------------------
+# Included for parity with profiles/_template.toml:202 - irrelevant for installer but defaults are harmless.
+[input]
+sdl_gamecontrollerconfig = ""
+raw_input                = true
+
+# ------------------------------------------------------------------------------
+# 10. Storage & DwarFS Tuning [storage]
+# ------------------------------------------------------------------------------
+# Included for parity with profiles/_template.toml:210 / master_runner.py:1772.
+# ALL dwarfs_* keys are IGNORED when runner.auto_mount=false (master_runner.py:2449),
+# but listed here so you see what a REAL game profile would tune after install.
+[storage]
+dwarfs_cache_percent    = 25                       # % of MemAvailable (64 MiB..8 GiB, master_runner.py:2385)
+dwarfs_workers          = 0                        # 0 = auto min(8, cpus/2)
+dwarfs_tidy_strategy    = "time"                   # "time", "swap", "none"
+dwarfs_tidy_interval    = "5m"
+dwarfs_tidy_max_age     = "10m"
+dwarfs_seq_detector     = 4
+dwarfs_readahead        = "0"
+dwarfs_block_allocator  = "mmap"                   # "mmap" or "malloc"
+dwarfs_preload_category = ""
+dwarfs_preload_all      = false
+auto_clean_workdir      = true                     # Purge stale .game-root-work on mount (ignored here)
+union_backend           = "fuse-overlayfs"         # master_runner.py:2406
+
+# ------------------------------------------------------------------------------
+# 11. Runner Lifecycle & Session Safety [runner]
+# ------------------------------------------------------------------------------
+[runner]
+auto_mount           = false                        # CRITICAL: MUST be false - FitGirl is loose files, not DwarFS. If true, MountEngine waits for dwarfs_image that doesn't exist.
+auto_unmount_on_exit = false                        # false because nothing was mounted
+mount_timeout_s      = 20.0                         # Ignored when auto_mount=false
+use_systemd_scope    = true                         # true = transient cgroup v2 scope via systemd-run (master_runner.py:3871 scope_argv)
+scope_slice          = "app-games.slice"
+inhibit_idle         = true                         # Inhibit screensaver via org.freedesktop.ScreenSaver + logind fd (master_runner.py:942 IdleInhibitor)
+inhibit_sleep        = true                         # Inhibit sleep/lid via logind - CRITICAL for 30-90 min FitGirl decompression
+notifications        = true
+kill_grace_s         = 8.0                          # SIGTERM -> cgroup.kill escalation (master_runner.py:4008 Supervisor._teardown)
+
+# ------------------------------------------------------------------------------
+# 12. Sandboxing & Bubblewrap Isolation [sandbox]
+# ------------------------------------------------------------------------------
+[sandbox]
+enabled      = false                               # MUST be false for installer - installer must write to ~/Games or chosen dest outside game_dir
+isolate_home = true                                # Ignored when enabled=false
+bind_gpu     = true
+bind_audio   = true
+bind_wayland = true
+bind_network = false                               # false = block network (safe for installer, but FitGirl does not need network)
+
+# ------------------------------------------------------------------------------
+# 13. Lifecycle Hooks [hooks]
+# ------------------------------------------------------------------------------
+# Useful for installer verification. Example: verify md5 before launch.
+# FitGirl repack contains MD5/fitgirl-bins.md5 + Verify BIN files before installation.bat (Windows batch).
+# On Linux you can pre-verify with: md5sum -c MD5/fitgirl-bins.md5 (from game_dir)
+[hooks]
+pre_mount    = []                                  # e.g. ["bash -c 'cd \"$GAME_DIR\" && md5sum -c MD5/fitgirl-bins.md5'"]
+post_mount   = []
+pre_launch   = []                                  # e.g. ["echo 'Installer starting - pick persistent target like ~/Games/PortalCollection'"]
+post_launch  = []                                  # e.g. ["echo 'Installer exited with code $? - if 0, run: python3 master_runner.py init ~/Games/PortalCollection'"]
+post_unmount = []
+
+# ------------------------------------------------------------------------------
+# 14. Custom Environment Variables [env]
+# ------------------------------------------------------------------------------
+[env]
+# Injected into Wine pipeline (master_runner.py:3061 EnvironmentBuilder). Examples:
+# WINEDEBUG = "fixme-all"  # already set via runtime.wine.debug
+# WINEPREFIX is set automatically from runtime.wine.prefix_dir
+# For FitGirl low-RAM systems: uncomment to limit InnoSetup memory
+# WINE_LARGE_ADDRESS_AWARE = "1"
+
+# ------------------------------------------------------------------------------
+# 15. Hardware & Session Conditional Overlays [when.<predicate>]
+# (Applied at master_runner.py:2125 _apply_conditionals when predicate holds)
+# Available predicates: nvidia, amd, intel, hybrid, single_gpu, ntsync, hdr_output, hyprland, kwin, wayland, kernel_ge_7_1, gamescope
+# ------------------------------------------------------------------------------
+# [when.nvidia]
+# runtime.wine.dxvk_nvapi = true  # Not needed for installer, but shown as example
+#
+# [when.hybrid]
+# graphics.gpu = "discrete"
+#
+# [when.ntsync]
+# runtime.wine.sync_mode = "ntsync"  # Already covered by sync_mode=auto

@@ -1,0 +1,94 @@
+extends = "base_wine_dxvk"
+
+[meta]
+id = "beamng_drive"
+name = "BeamNG.drive"
+version = "0.39.4"
+icon = "/mnt/media/games/installed_games/beamng/BeamNG.drive.v0.39.4/BeamNG.drive/icon-beamng.ico"
+developer = "BeamNG GmbH"
+genre = "Driving / Simulation"
+description = "Dynamic soft-body physics vehicle simulator with open-world driving, highly detailed crash deformation, and extensive modding via Wine + DXVK/VKD3D on native Wayland."
+
+[paths]
+game_dir = "/mnt/media/games/installed_games/beamng/BeamNG.drive.v0.39.4"
+executable = "BeamNG.drive/Bin64/BeamNG.drive.x64.exe"
+arguments = ["-gfx", "vk"]
+
+[runtime]
+type = "wine"
+
+[runtime.wine]
+wine_binary = "wine"
+prefix_dir = "files/wine-prefix-beamng"
+arch = "win64"
+sync_mode = "fsync"
+large_address_aware = true
+debug = "fixme-all"
+dxvk = true
+vkd3d = true
+dxvk_nvapi = false
+redistributables = ["BeamNG.drive/Bin64/VC_redist.x64.exe"]
+winetricks = []
+
+[runtime.wine.dll_overrides]
+"winemenubuilder.exe" = "d"
+mshtml = "d"
+dxgi = "n,b"
+d3d11 = "n,b"
+d3d12 = "n,b"
+d3d9 = "n,b"
+
+[graphics]
+gpu = "integrated"
+wayland_native = true
+prefer_xwayland = false
+vulkan_icd = "auto"
+
+[graphics.gamescope]
+enabled = false
+mode = "embedded"
+width = 0
+height = 0
+output_width = 0
+output_height = 0
+refresh_rate = 0
+fsr_upscaling = false
+fsr_sharpness = 2
+allow_tearing = true
+force_grab_cursor = false
+hdr = false
+extra_args = []
+
+[performance]
+gamemode = true
+mangohud = false
+fps_limit = 0
+cpu_governor = "performance"
+process_priority = 0
+
+[audio]
+driver = "pipewire"
+pipewire_latency = "128/48000"
+
+[storage]
+dwarfs_cache_percent = 25
+dwarfs_tidy_interval = "15m"
+dwarfs_tidy_max_age = "30m"
+persistent_overlay = true
+auto_clean_workdir = true
+
+[sandbox]
+enabled = false
+
+[hooks]
+pre_mount = []
+post_mount = []
+pre_launch = []
+post_launch = []
+post_unmount = []
+
+[env]
+WINE_LARGE_ADDRESS_AWARE = "1"
+WINEDEBUG = "fixme-all"
+DXVK_LOG_LEVEL = "none"
+VKD3D_DEBUG = "none"

@@ -347,6 +347,21 @@ if (( IN_CHROOT == 0 )); then
     chroot_exit=$?
     set -e
 
+    # Check for auto-poweroff request across chroot boundary BEFORE scrubbing payload
+    declare -i auto_poweroff_requested=0
+    for marker_check in \
+        "/tmp/dusky_auto_poweroff" \
+        "/etc/dusky_auto_poweroff" \
+        "${CHROOT_MNT}/etc/dusky_auto_poweroff" \
+        "${CHROOT_MNT}/root/dusky_auto_poweroff" \
+        "${CHROOT_MNT}/tmp/dusky_auto_poweroff" \
+        "${TARGET_TMP}/dusky_auto_poweroff"; do
+        if [[ -f "$marker_check" ]]; then
+            auto_poweroff_requested=1
+            rm -f "$marker_check" 2>/dev/null || true
+        fi
+    done
+
     log "INFO" "Phase 2 execution terminated (Exit Code: $chroot_exit)."
     log "INFO" "Scrubbing temporary payload and sensitive environment data..."
     rm -rf "$TARGET_TMP"
@@ -360,7 +375,10 @@ if (( IN_CHROOT == 0 )); then
 
     # --- FINAL USER UNMOUNT FLOW ---
     _poweroff_choice="y"
-    if [[ -t 0 ]]; then
+    if (( auto_poweroff_requested )); then
+        log "INFO" "Power off requested from orchestrator. Proceeding with graceful unmount and power off..."
+        _poweroff_choice="y"
+    elif [[ -t 0 ]]; then
         printf "\n"
         read -r -p ">>> Installation complete! Unmount filesystems and power off now? [Y/n]: " _poweroff_choice || _poweroff_choice="y"
     fi

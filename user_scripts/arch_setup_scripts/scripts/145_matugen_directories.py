@@ -18,6 +18,8 @@ TARGET_DIRS: tuple[str, ...] = (
     "~/.config/gtk-3.0",
     "~/.config/gtk-4.0",
     "~/.config/Kvantum/matugen",
+    "~/.config/GIMP/3.0/themes/Matugen",
+    "~/.config/GIMP/3.2/themes/Matugen",
     "~/.config/btop/themes",
     "~/.config/yazi",
     "~/.config/zellij/themes",

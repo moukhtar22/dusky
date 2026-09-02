@@ -11,7 +11,7 @@ Features:
 - Async Gio.Subprocess with generation counters, cancellables, and timeouts
 - Batch-capable: can query multiple units in single systemctl is-active call
 - Efficient: single-shot check on page map, no continuous polling
-- Polkit caching: auth_admin_keep (~5 min) keeps password for session via hyprpolkitagent
+- Polkit caching: auth_admin_keep (~5 min) keeps password for session via dusky_polkit
 """
 
 from __future__ import annotations
@@ -115,7 +115,7 @@ def _build_toggle_argv(scope: Scope, unit: str, enable: bool) -> list[str]:
     if scope == "user":
         return [SYSTEMCTL_PATH, "--user", action, "--now", unit]
     # System scope requires polkit privilege via pkexec.
-    # pkexec will prompt via hyprpolkitagent and cache per auth_admin_keep (~5min).
+    # pkexec will prompt via dusky_polkit and cache per auth_admin_keep (~5min).
     return [PKEXEC_PATH, SYSTEMCTL_PATH, action, "--now", unit]
 
 

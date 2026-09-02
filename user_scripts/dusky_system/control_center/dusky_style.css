@@ -653,6 +653,59 @@ flowboxchild {
     margin-top: 4px;
 }
 
+/* Compact / subtle variant — small bounding box, high-contrast readable text, optional icon */
+.warning-banner-box.compact {
+    padding: 6px 10px;
+    margin: 0;
+    border-radius: 8px;
+    background-color: alpha(@card_bg_color, 0.38);
+    border: 1px solid alpha(@borders, 0.22);
+    min-height: 0;
+}
+
+row.action-row.compact {
+    padding: 0;
+    margin: 0;
+    background: transparent;
+    border: none;
+    box-shadow: none;
+}
+row.action-row.compact:hover {
+    background: transparent;
+    border-color: transparent;
+    box-shadow: none;
+}
+
+.warning-banner-box.compact .warning-banner-icon {
+    -gtk-icon-size: 14px;
+    opacity: 0.70;
+    margin-right: 0;
+}
+
+.warning-banner-box.compact .heading {
+    font-size: 0.88em;
+    font-weight: 700;
+    color: @window_fg_color;
+}
+
+.warning-banner-box.compact .caption {
+    font-size: 0.88em;
+    color: alpha(@window_fg_color, 0.90);
+    font-weight: 600;
+}
+
+.warning-banner-box.compact .body {
+    font-size: 0.92em;
+    color: @window_fg_color;
+    font-weight: 600;
+}
+
+.warning-banner-box.compact .dim-label {
+    font-size: 0.88em;
+    color: alpha(@window_fg_color, 0.88);
+    font-weight: 600;
+}
+
 
 /* ─────────────────────────────────────────────────────────────────────────────
    EMPTY STATE — Graceful void

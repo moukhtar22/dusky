@@ -32,6 +32,7 @@
 .config/matugen/generated_fresh/
 .config/mpv/mpv.conf
 .config/opencode/opencode.json
+.config/opencode/plugins/notification.js
 .config/obs-studio/user.ini
 .config/pacman/makepkg.conf
 .config/pacseek/

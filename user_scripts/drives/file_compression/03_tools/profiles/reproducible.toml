@@ -1,0 +1,9 @@
+# Reproducible — bit-identical, fixed time, single worker, no history
+level = 7
+block_size_bits = 24
+order = "nilsimsa"
+set_time = 0
+no_create_timestamp = true
+no_history = true
+num_workers = 1
+note = "Bit-identical builds, slower, for sharing"

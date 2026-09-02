@@ -1,0 +1,39 @@
+# ==============================================================================
+# Waves of Steel Profile
+# ==============================================================================
+
+extends = "base_unity_native"
+
+[meta]
+id = "waves_of_steel"
+name = "Waves of Steel"
+version = "1.0"
+icon = "applications-games"
+developer = "TMA Games"
+genre = "Action / Naval Combat"
+description = "Arcade naval combat - captain a battleship through explosive, physics-driven oceanic battles."
+
+[paths]
+game_dir = "/mnt/media/games/unknown_quality/Waves.of.Steel-jc141"
+dwarfs_image = "files/game-root.dwarfs"
+dwarfs_mount = "files/.game-root-mnt"
+overlay_dir = "files/game-root"
+overlay_storage = "files/overlay-storage"
+overlay_work = "files/.game-root-work"
+executable = "Waves of Steel.x86_64"
+arguments = []
+
+[runtime]
+type = "native"
+
+[graphics]
+gpu = "auto"
+wayland_native = true
+
+[graphics.gamescope]
+enabled = false
+
+[performance]
+gamemode = true
+mangohud = false
+fps_limit = 60

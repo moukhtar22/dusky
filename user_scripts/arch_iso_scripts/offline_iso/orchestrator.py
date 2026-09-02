@@ -1465,6 +1465,100 @@ def resolve_script(
     return None
 
 
+def is_rich_or_ssh_terminal() -> bool:
+    """
+    Check if current execution is in a rich graphical terminal environment
+    (e.g., Wayland, X11, Kitty, Foot, Alacritty) or over an active SSH session,
+    where terminal keybinds (like Alt+Left/Right) do not conflict with Linux VT console switching.
+    Returns False in raw Linux console TTYs (/dev/tty1..N, TERM=linux).
+    """
+    if any(os.environ.get(k) for k in ("SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY")):
+        return True
+
+    if os.environ.get("WAYLAND_DISPLAY") or os.environ.get("DISPLAY"):
+        return True
+
+    term = os.environ.get("TERM", "")
+    term_program = os.environ.get("TERM_PROGRAM", "")
+    colorterm = os.environ.get("COLORTERM", "")
+    if term_program or colorterm in ("truecolor", "24bit"):
+        return True
+    if any(t in term for t in ("kitty", "foot", "alacritty", "ghostty", "wezterm")):
+        return True
+
+    try:
+        tty_name = os.ttyname(sys.stdin.fileno())
+        if re.match(r"^/dev/tty\d+$", tty_name) or term == "linux":
+            return False
+        if tty_name.startswith("/dev/pts/"):
+            return True
+    except Exception:
+        pass
+
+    if term == "linux":
+        return False
+
+    return False
+
+
+def is_in_chroot() -> bool:
+    """Detect if running inside an active chroot environment."""
+    try:
+        root_stat = os.stat("/")
+        init_root_stat = os.stat("/proc/1/root")
+        return (root_stat.st_dev, root_stat.st_ino) != (init_root_stat.st_dev, init_root_stat.st_ino)
+    except Exception:
+        return False
+
+
+AUTO_POWEROFF_MARKERS = [
+    Path("/tmp/dusky_auto_poweroff"),
+    Path("/etc/dusky_auto_poweroff"),
+    Path("/root/dusky_auto_poweroff"),
+    Path("/root/arch_install_tmp/dusky_auto_poweroff"),
+    Path("/mnt/etc/dusky_auto_poweroff"),
+    Path("/mnt/root/dusky_auto_poweroff"),
+    Path("/mnt/tmp/dusky_auto_poweroff"),
+]
+
+
+def set_auto_poweroff_marker() -> None:
+    for marker_path in AUTO_POWEROFF_MARKERS:
+        with suppress(Exception):
+            marker_path.parent.mkdir(parents=True, exist_ok=True)
+            marker_path.touch()
+
+
+def remove_auto_poweroff_marker() -> None:
+    for marker_path in AUTO_POWEROFF_MARKERS:
+        with suppress(Exception):
+            if marker_path.exists():
+                marker_path.unlink()
+
+
+def graceful_unmount_and_poweroff(mnt_point: str = "/mnt") -> None:
+    """Performs disk synchronization, swap deactivation, target unmount, and system power off."""
+    try:
+        subprocess.run(["sync"], check=False)
+        subprocess.run(["swapoff", "-a"], check=False)
+        res = subprocess.run(["mountpoint", "-q", mnt_point], check=False)
+        if res.returncode == 0:
+            unmount_res = subprocess.run(["umount", "-R", mnt_point], check=False)
+            if unmount_res.returncode != 0:
+                if shutil.which("fuser"):
+                    subprocess.run(["fuser", "-k", "-TERM", "-m", mnt_point], check=False)
+                    time.sleep(1.5)
+                    subprocess.run(["fuser", "-k", "-KILL", "-m", mnt_point], check=False)
+                    time.sleep(0.5)
+                subprocess.run(["umount", "-R", mnt_point], check=False)
+    except Exception:
+        pass
+    try:
+        subprocess.run(["poweroff"], check=False)
+    except Exception:
+        subprocess.run(["systemctl", "poweroff"], check=False)
+
+
 # ==============================================================================
 # MODAL SCREENS
 # ==============================================================================
@@ -1479,9 +1573,9 @@ class FailureModalScreen(ModalScreen):
             yield Label(f"{S('failed')} TASK FAILED: {self.task_name}", id="modal_title")
             yield Static(self.error_msg, id="error_details")
             with Horizontal(id="button_bar"):
-                yield Button("Retry [R]", variant="primary", id="btn_retry")
-                yield Button("Skip [S]", variant="warning", id="btn_skip")
-                yield Button("Quit [Q]", variant="error", id="btn_quit")
+                yield Button("Retry [R]", id="btn_retry")
+                yield Button("Skip [S]", id="btn_skip")
+                yield Button("Quit [Q]", id="btn_quit")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "btn_retry":
@@ -1491,9 +1585,17 @@ class FailureModalScreen(ModalScreen):
         elif event.button.id == "btn_quit":
             self.dismiss("quit")
 
-    def on_key(self, event) -> None:
+    def on_key(self, event: events.Key) -> None:
         key = event.key.lower()
-        if key == "r":
+        if key in ("left", "h", "up", "k"):
+            self.focus_previous()
+            event.prevent_default()
+            event.stop()
+        elif key in ("right", "l", "down", "j"):
+            self.focus_next()
+            event.prevent_default()
+            event.stop()
+        elif key == "r":
             self.dismiss("retry")
         elif key == "s":
             self.dismiss("skip")
@@ -1511,9 +1613,9 @@ class ManualModalScreen(ModalScreen):
             yield Label(f"{S('logo')} MANUAL STEP REQUIRED", id="manual_title")
             yield Static(f"About to execute: [bold white]{self.task_name}[/bold white]\nProceed with execution?", id="manual_details")
             with Horizontal(id="button_bar"):
-                yield Button("Proceed [Y]", variant="success", id="btn_yes")
-                yield Button("Skip [S]", variant="warning", id="btn_skip")
-                yield Button("Quit [Q]", variant="error", id="btn_quit")
+                yield Button("Proceed [Y]", id="btn_yes")
+                yield Button("Skip [S]", id="btn_skip")
+                yield Button("Quit [Q]", id="btn_quit")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "btn_yes":
@@ -1523,9 +1625,17 @@ class ManualModalScreen(ModalScreen):
         elif event.button.id == "btn_quit":
             self.dismiss("quit")
 
-    def on_key(self, event) -> None:
+    def on_key(self, event: events.Key) -> None:
         key = event.key.lower()
-        if key in ("y", "enter", "space"):
+        if key in ("left", "h", "up", "k"):
+            self.focus_previous()
+            event.prevent_default()
+            event.stop()
+        elif key in ("right", "l", "down", "j"):
+            self.focus_next()
+            event.prevent_default()
+            event.stop()
+        elif key in ("y", "space"):
             self.dismiss("yes")
         elif key == "s":
             self.dismiss("skip")
@@ -1533,16 +1643,21 @@ class ManualModalScreen(ModalScreen):
             self.dismiss("quit")
 
 
-class CompletionDialog(ModalScreen[bool]):
-    """Final dialog shown when the phase finishes: review logs or quit."""
+class CompletionDialog(ModalScreen[str]):
+    """Final dialog shown when installation completes: View Logs or Power Off."""
 
     BINDINGS = [
-        ("enter,space", "dismiss_stay", "View Logs"),
+        Binding("left,h,up,k", "focus_previous", "Previous", priority=True, show=False),
+        Binding("right,l,down,j", "focus_next", "Next", priority=True, show=False),
+        Binding("enter", "poweroff", "Power Off"),
+        Binding("v", "view_logs", "View Logs"),
+        Binding("p", "poweroff", "Power Off"),
+        Binding("escape", "view_logs", "View Logs"),
     ]
 
     def __init__(
         self,
-        title: str = "PHASE COMPLETE",
+        title: str = "INSTALLATION COMPLETE",
         message: str = "",
         level: str = "success",
     ) -> None:
@@ -1556,25 +1671,45 @@ class CompletionDialog(ModalScreen[bool]):
             yield Label(self.title_text, id="completion_title")
             yield Static(self.message, id="completion_message", markup=False)
             with Horizontal(id="button_bar"):
-                yield Button(" View Logs ", id="btn_completion_view")
-                yield Button(" Quit ", variant="primary", id="btn_completion_quit")
+                yield Button(" View Logs [V] ", id="btn_completion_view")
+                yield Button(" Power Off [Enter] ", id="btn_completion_poweroff")
 
     def on_mount(self) -> None:
         with suppress(Exception):
-            self.query_one("#btn_completion_view", Button).focus()
+            self.query_one("#btn_completion_poweroff", Button).focus()
 
-    def action_dismiss_stay(self) -> None:
-        self.dismiss(False)
+    def action_poweroff(self) -> None:
+        self.dismiss("poweroff")
+
+    def action_view_logs(self) -> None:
+        self.dismiss("view_logs")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        self.dismiss(event.button.id == "btn_completion_quit")
+        if event.button.id == "btn_completion_poweroff":
+            self.dismiss("poweroff")
+        elif event.button.id == "btn_completion_view":
+            self.dismiss("view_logs")
 
-    def on_key(self, event) -> None:
+    def on_key(self, event: events.Key) -> None:
         key = event.key.lower()
-        if key in ("q", "escape"):
-            self.dismiss(True)
-        elif key in ("enter", "space", "v"):
-            self.dismiss(False)
+        if key in ("left", "h", "up", "k"):
+            self.focus_previous()
+            event.prevent_default()
+            event.stop()
+        elif key in ("right", "l", "down", "j"):
+            self.focus_next()
+            event.prevent_default()
+            event.stop()
+        elif key in ("enter", "return"):
+            focused = self.focused
+            if focused and getattr(focused, "id", None) == "btn_completion_view":
+                self.dismiss("view_logs")
+            else:
+                self.dismiss("poweroff")
+        elif key in ("p",):
+            self.dismiss("poweroff")
+        elif key in ("v", "escape"):
+            self.dismiss("view_logs")
 
 
 # ==============================================================================
@@ -1628,7 +1763,7 @@ class DuskyOrchestratorApp(App):
         height: 1fr;
     }
     #left_pane {
-        width: 38%;
+        width: 27%;
         border-right: solid #30363d;
         padding: 0;
         height: 100%;
@@ -1638,7 +1773,7 @@ class DuskyOrchestratorApp(App):
         background-tint: transparent 0%;
     }
     #right_pane {
-        width: 62%;
+        width: 73%;
         height: 100%;
         layout: vertical;
         padding: 0;
@@ -1759,11 +1894,28 @@ class DuskyOrchestratorApp(App):
         align: center middle;
         height: 3;
     }
-    Button {
+    Button, #button_bar Button {
         height: 1;
-        min-width: 14;
+        min-width: 16;
         border: none;
         margin: 0 1;
+        background: #21262d;
+        color: #8b949e;
+        text-style: none;
+    }
+    Button:hover, #button_bar Button:hover {
+        background: #30363d;
+        color: #ffffff;
+    }
+    Button:focus, #button_bar Button:focus {
+        background: #58a6ff !important;
+        color: #ffffff !important;
+        text-style: bold;
+    }
+    Button:focus:hover, #button_bar Button:focus:hover {
+        background: #58a6ff !important;
+        color: #ffffff !important;
+        text-style: bold;
     }
     """
 
@@ -1771,24 +1923,24 @@ class DuskyOrchestratorApp(App):
         Binding("q", "quit_app", "Quit"),
         Binding("m", "toggle_manual", "Manual Mode"),
         Binding("r", "reset_state", "Reset State"),
-        Binding("alt+left", "shrink_left_pane", "Shrink Sidebar", priority=True),
-        Binding("alt+right", "expand_left_pane", "Expand Sidebar", priority=True),
-        Binding("alt+h", "shrink_left_pane", "Shrink Sidebar", priority=True),
-        Binding("alt+l", "expand_left_pane", "Expand Sidebar", priority=True),
-        Binding("ctrl+left", "shrink_left_pane", "Shrink Sidebar", priority=True),
-        Binding("ctrl+right", "expand_left_pane", "Expand Sidebar", priority=True),
-        Binding("bracketleft", "shrink_left_pane", "Shrink Sidebar"),
-        Binding("bracketright", "expand_left_pane", "Expand Sidebar"),
-        Binding("j", "tree_down", "Tree Down", priority=True),
-        Binding("k", "tree_up", "Tree Up", priority=True),
-        Binding("up", "scroll_preview_up", "Scroll Log Up", priority=True),
-        Binding("down", "scroll_preview_down", "Scroll Log Down", priority=True),
-        Binding("pageup", "scroll_preview_page_up", "Page Up", priority=True),
-        Binding("pagedown", "scroll_preview_page_down", "Page Down", priority=True),
-        Binding("home", "scroll_preview_home", "Home", priority=True),
-        Binding("end", "scroll_preview_end", "End", priority=True),
+        Binding("alt+left", "shrink_left_pane", "Shrink Sidebar", priority=True, show=False),
+        Binding("alt+right", "expand_left_pane", "Expand Sidebar", priority=True, show=False),
+        Binding("alt+h", "shrink_left_pane", "Shrink Sidebar", priority=True, show=False),
+        Binding("alt+l", "expand_left_pane", "Expand Sidebar", priority=True, show=False),
+        Binding("ctrl+left", "shrink_left_pane", "Shrink Sidebar", priority=True, show=False),
+        Binding("ctrl+right", "expand_left_pane", "Expand Sidebar", priority=True, show=False),
+        Binding("bracketleft", "shrink_left_pane", "Shrink ["),
+        Binding("bracketright", "expand_left_pane", "Expand ]"),
+        Binding("j", "tree_down", "Tree Down", priority=True, show=False),
+        Binding("k", "tree_up", "Tree Up", priority=True, show=False),
+        Binding("up", "scroll_preview_up", "Scroll Log Up", priority=True, show=False),
+        Binding("down", "scroll_preview_down", "Scroll Log Down", priority=True, show=False),
+        Binding("pageup", "scroll_preview_page_up", "Page Up", priority=True, show=False),
+        Binding("pagedown", "scroll_preview_page_down", "Page Down", priority=True, show=False),
+        Binding("home", "scroll_preview_home", "Home", priority=True, show=False),
+        Binding("end", "scroll_preview_end", "End", priority=True, show=False),
         Binding("tab", "toggle_focus", "Switch Focus"),
-        Binding("shift+tab", "toggle_focus", "Switch Focus"),
+        Binding("shift+tab", "toggle_focus", "Switch Focus", show=False),
     ]
 
     def __init__(
@@ -1826,7 +1978,17 @@ class DuskyOrchestratorApp(App):
         self.conditions = ConditionEvaluator()
         self.run_id = hashlib.md5(f"{time.time()}:{phase_title}".encode()).hexdigest()[:8]
         self.logger = RunLogger(profile_name, self.run_id)
-        self.left_pane_width: int = GLOBAL_CONFIG.get("ui", {}).get("left_pane_width", 38)
+        for i, t in enumerate(self.tasks, start=1):
+            if not getattr(t, "state_key", ""):
+                t.state_key = make_state_key(t, i)
+
+        self.left_pane_width: int = GLOBAL_CONFIG.get("ui", {}).get("left_pane_width", 27)
+        cfg_footer = GLOBAL_CONFIG.get("ui", {}).get("show_keybinds_footer", "auto")
+        if isinstance(cfg_footer, bool):
+            self.show_footer: bool = cfg_footer
+        else:
+            self.show_footer: bool = is_rich_or_ssh_terminal()
+
         self.active_task: Optional[OrchestratorTask] = None
         self.current_log_key: str | None = None
         self._log_widgets: dict[str | None, RichLog] = {}
@@ -1879,7 +2041,8 @@ class DuskyOrchestratorApp(App):
                             max_lines=max_lines,
                         )
 
-        yield Footer()
+        if self.show_footer:
+            yield Footer()
 
     def on_mount(self) -> None:
         with suppress(Exception):
@@ -2393,7 +2556,7 @@ class DuskyOrchestratorApp(App):
             f"Skipped: {skipped}\n"
             f"Elapsed: {elapsed_str}\n"
             f"Logs: {self.logger.root or logs_dir()}\n\n"
-            "Choose how to continue:"
+            "Choose an action:"
         )
 
         res = await self.push_screen_wait(
@@ -2403,8 +2566,11 @@ class DuskyOrchestratorApp(App):
                 level="warning" if failed_tasks else "success",
             )
         )
-        if res:
-            self.exit(1 if failed_tasks else 0)
+        if res == "poweroff":
+            self.trigger_poweroff()
+        elif res == "view_logs":
+            remove_auto_poweroff_marker()
+            self.log_system("Reviewing execution logs. Press 'q' when finished to exit.")
 
     async def handle_missing_task(self, task: OrchestratorTask):
         self.update_task_status(self.current_idx, TaskStatus.FAILED)
@@ -2712,6 +2878,20 @@ class DuskyOrchestratorApp(App):
                 self.log_system("Phase completion state reset.")
             except Exception as e:
                 self.log_system(f"Failed to reset state: {e}")
+
+    def trigger_poweroff(self):
+        set_auto_poweroff_marker()
+        failed_tasks = [t for t in self.tasks if self.task_statuses.get(t.state_key) == "FAILED"]
+        exit_code = 1 if failed_tasks else 0
+
+        if is_in_chroot():
+            self.exit(exit_code)
+            return
+
+        with self._suspend_ui():
+            print("\n[INFO] Flushing filesystem buffers and powering off system...")
+            graceful_unmount_and_poweroff("/mnt")
+        self.exit(exit_code)
 
 
 # ==============================================================================

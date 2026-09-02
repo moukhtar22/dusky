@@ -1,0 +1,35 @@
+# ==============================================================================
+# Base Native Linux Preset
+# Presets provide default configurations for Linux ELF binaries.
+# ==============================================================================
+
+[runtime]
+type = "native"
+
+[graphics]
+gpu = "auto"
+prefer_xwayland = false
+gl_threaded = true
+
+[performance]
+gamemode = true
+mangohud = false
+fps_limit = 0
+
+[audio]
+driver = "pipewire"
+quantum = 1024
+rate = 48000
+
+[storage]
+dwarfs_cache_percent = 25
+dwarfs_tidy_interval = "5m"
+dwarfs_tidy_max_age = "10m"
+auto_clean_workdir = true
+
+[runner]
+auto_mount = true
+auto_unmount_on_exit = true
+use_systemd_scope = true
+inhibit_idle = true
+inhibit_sleep = true

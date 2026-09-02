@@ -77,9 +77,9 @@ CORE_USER_DEFS = {
         "OSD for CapsLock,NumLock,ScrollLock",
         "On-Screen Display service for hardware lock keys. Shows a visual pop-up when Caps Lock, Num Lock, or Scroll Lock is toggled.",
     ),
-    "hyprpolkitagent.service": (
-        "(Polkit) Root Password Prompt",
-        "The authentication agent for Hyprland. This is what prompts you for a password when an app requests root access (like pkexec).",
+    "dusky_polkit.service": (
+        "Dusky Polkit",
+        "Lightweight Python/Rich Polkit agent. Prompts for root/admin password on privilege escalation (like pkexec).",
     ),
     "dusky_ram_monitor.service": (
         "Dusky RAM Monitor Daemon",

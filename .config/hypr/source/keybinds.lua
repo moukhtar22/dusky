@@ -522,6 +522,20 @@ hl.bind(
     { description = "Image Search (Select and search)" }
 )
 
+-- Game Runner (Master Runner) — installed games only
+hl.bind(
+    "SUPER + ALT + G",
+    hl.dsp.exec_cmd("pkill rofi; " .. dusky_scripts .. "gaming/runner/rofi/rofi_game_runner.sh"),
+    { description = "Game Launcher" }
+)
+
+-- Dusky Games TUI — Master Runner (matched to window rule class=dusky_tui)
+hl.bind(
+    "SUPER + ALT + SHIFT + G",
+    hl.dsp.exec_cmd("foot --app-id=dusky_tui python $HOME/user_scripts/dusky_tui/python/main/main.py $HOME/user_scripts/gaming/runner/tui/tui_dusky_games.py"),
+    { description = "Dusky Games TUI" }
+)
+
 -- OCR (Tesseract)
 hl.bind(
     "SUPER + T",

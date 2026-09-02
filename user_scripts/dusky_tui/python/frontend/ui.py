@@ -21,6 +21,7 @@ from textual.message import Message
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical, Horizontal
+from textual.geometry import Size
 from textual.widgets import Label, Input, Tabs, Tab, ContentSwitcher, OptionList, Markdown, Static
 from textual.widgets.option_list import Option, OptionDoesNotExist
 from textual.screen import ModalScreen
@@ -1657,14 +1658,14 @@ class AppFooter(Vertical):
 # =============================================================================
 class TabContainer(Horizontal):
     """
-    A custom container that tells the App to re-evaluate tab overflow when scrolled.
+    A custom container that tells the App to re-evaluate tab overflow when scrolled or resized.
     """
 
     def watch_scroll_x(self, old_value: float, new_value: float) -> None:
         if hasattr(self.app, "check_tab_overflow"):
             self.app.check_tab_overflow()
 
-    def watch_max_scroll_x(self, old_value: float, new_value: float) -> None:
+    def watch_virtual_size(self, old_value: Size, new_value: Size) -> None:
         if hasattr(self.app, "check_tab_overflow"):
             self.app.check_tab_overflow()
 
@@ -1841,7 +1842,10 @@ ContentSwitcher > Vertical { width: 100%; height: 100%; background: transparent;
 #content-area.-show-help #help-panel { display: block; }
 
 Tabs { width: auto; height: 1; background: transparent; }
-Tabs > Underline { display: none; }
+Tabs #tabs-scroll { width: auto; }
+Tabs #tabs-list-bar { width: auto; height: 1; min-width: 0; }
+Tabs #tabs-list { width: auto; height: 1; min-width: 0; }
+Tabs Underline { display: none; }
 
 Tab { height: 1; padding: 0 1; color: $primary 60%; background: transparent; border: none; }
 Tab:hover { color: $foreground; background: $primary 25%; }
@@ -2188,6 +2192,7 @@ Tooltip {
 
         self._status_timer: Timer | None = None
 
+        self._cached_tab_bar: Horizontal | None = None
         self._cached_tabs_container: Horizontal | None = None
         self._cached_tab_left: Label | None = None
         self._cached_tab_right: Label | None = None
@@ -2378,8 +2383,15 @@ Tooltip {
         if hasattr(self, "_option_cache"):
             self._option_cache.invalidate_uid(item.uid)
         if item.type_ not in ("preset", "action", "menu"):
-            if hasattr(self, "_preset_matrix"):
-                self._preset_matrix.on_item_changed(item)
+            # Preset matching is global-only: per-file overrides (e.g. per-game GPU) should NOT
+            # pollute the global preset ratio. Only default-engine items participate.
+            try:
+                if self._get_item_engine_info(item) == self.default_engine_key:
+                    if hasattr(self, "_preset_matrix"):
+                        self._preset_matrix.on_item_changed(item)
+            except Exception:
+                if hasattr(self, "_preset_matrix"):
+                    self._preset_matrix.on_item_changed(item)
             if hasattr(self, "_option_cache"):
                 self._option_cache.invalidate_presets()
         self._schema_dirty_counter += 1
@@ -2404,6 +2416,10 @@ Tooltip {
         )
 
         return (e_type, t_file)
+
+    def _uid_engine_key(self, item: ConfigItem) -> str:
+        """Composite key for per-file isolation: UID + engine."""
+        return f"{self._get_item_uid(item)}@@{self._get_item_engine_info(item)[0]}@@{self._get_item_engine_info(item)[1]}"
 
     def _get_engine_for_item(self, item: ConfigItem) -> BaseEngine:
         key = self._get_item_engine_info(item)
@@ -2487,10 +2503,13 @@ Tooltip {
                     self._preset_items.append((t_idx, i_idx, item))
 
         if hasattr(self, "_preset_matrix"):
-            # Rebuild expects both configurables and presets (it separates
-            # internally).  Passing only configurables starved the preset
-            # index, leaving ratio() always 0.  Combine both lists.
-            self._preset_matrix.rebuild(self._configurable_items + self._preset_items)
+            # Presets are global snapshots (default file only). Per-game duplicates sharing same UID
+            # but different target_file_override must NOT pollute the preset ratio. Filter to default engine.
+            try:
+                global_cfg = [c for c in self._configurable_items if self._get_item_engine_info(c[2]) == self.default_engine_key]
+            except Exception:
+                global_cfg = self._configurable_items
+            self._preset_matrix.rebuild(global_cfg + self._preset_items)
 
     def _rebuild_key_map(self) -> None:
         # Compatibility wrapper for older call sites.
@@ -3062,6 +3081,7 @@ Tooltip {
         first_engine = self.engine_pool[self.default_engine_key]
         self.query_one("#file-link", FileLink).path = first_engine.target_path
 
+        self._cached_tab_bar = self.query_one("#tab-bar", Horizontal)
         self._cached_tabs_container = self.query_one("#tabs-container", Horizontal)
         self._cached_tab_left = self.query_one("#tab-left", Label)
         self._cached_tab_right = self.query_one("#tab-right", Label)
@@ -3228,7 +3248,12 @@ Tooltip {
 
         self._tab_data_ready.add(tab_idx)
         if freshly and hasattr(self, "_preset_matrix"):
-            self._preset_matrix.ingest_items(freshly)
+            try:
+                global_fresh = [it for it in freshly if self._get_item_engine_info(it) == self.default_engine_key]
+            except Exception:
+                global_fresh = freshly
+            if global_fresh:
+                self._preset_matrix.ingest_items(global_fresh)
 
     def _mark_boot_complete_if_done(self) -> None:
         self._boot_complete = (
@@ -3238,7 +3263,11 @@ Tooltip {
             )
         )
         if self._boot_complete and hasattr(self, "_preset_matrix"):
-            self._preset_matrix.rebuild(self._configurable_items + self._preset_items)
+            try:
+                global_cfg = [c for c in self._configurable_items if self._get_item_engine_info(c[2]) == self.default_engine_key]
+            except Exception:
+                global_cfg = self._configurable_items
+            self._preset_matrix.rebuild(global_cfg + self._preset_items)
             if hasattr(self, "_option_cache"):
                 self._option_cache.invalidate_presets()
             self._schema_dirty_counter += 1
@@ -3487,7 +3516,11 @@ Tooltip {
         # preset match matrix so ratios reflect the newly loaded state.
         if hasattr(self, "_preset_matrix"):
             try:
-                self._preset_matrix.rebuild(self._configurable_items + self._preset_items)
+                try:
+                    global_cfg = [c for c in self._configurable_items if self._get_item_engine_info(c[2]) == self.default_engine_key]
+                except Exception:
+                    global_cfg = self._configurable_items
+                self._preset_matrix.rebuild(global_cfg + self._preset_items)
             except Exception:
                 pass
 
@@ -3624,29 +3657,57 @@ Tooltip {
 
         return None
 
+    def _get_tabs_total_width(self) -> int:
+        try:
+            tabs_widget = self.query_one(Tabs)
+            tab_list = list(tabs_widget.query(Tab))
+            if not tab_list:
+                return 0
+            total = 0
+            for tab in tab_list:
+                if tab.region.width > 0:
+                    total += tab.region.width
+                else:
+                    total += len(str(tab.label)) + 2
+            return total
+        except Exception:
+            return 0
+
     def check_tab_overflow(self) -> None:
         if not self._cached_tabs_container or not self._cached_tab_left or not self._cached_tab_right:
             return
 
         try:
             container = self._cached_tabs_container
+            bar = getattr(self, "_cached_tab_bar", None)
             left = self._cached_tab_left
             right = self._cached_tab_right
 
-            has_overflow = container.max_scroll_x > 0
+            tabs_w = self._get_tabs_total_width()
+            bar_w = bar.size.width if bar else 0
+            cont_w = container.size.width
+
+            if bar_w > 0 and tabs_w > 0:
+                has_overflow = (tabs_w > bar_w) or (left.display and tabs_w > cont_w)
+            else:
+                has_overflow = container.max_scroll_x > 0
 
             if has_overflow:
-                left.display = True
-                right.display = True
+                if not left.display:
+                    left.display = True
+                    right.display = True
                 left.update(" ◀ " if container.scroll_x > 0.5 else "   ")
                 right.update(" ▶ " if container.scroll_x < (container.max_scroll_x - 0.5) else "   ")
                 if container.styles.align != ("left", "middle"):
                     container.styles.align = ("left", "middle")
             else:
-                left.display = False
-                right.display = False
+                if left.display:
+                    left.display = False
+                    right.display = False
                 left.update("")
                 right.update("")
+                if container.scroll_x > 0:
+                    container.scroll_to(x=0, animate=False)
                 if container.styles.align != ("center", "middle"):
                     container.styles.align = ("center", "middle")
 
@@ -4230,6 +4291,9 @@ Tooltip {
         self._write_generation[uid] = gen
         return gen
 
+    def _bump_write_generation_for_item(self, item: ConfigItem) -> int:
+        return self._bump_write_generation(self._uid_engine_key(item))
+
     def _cancel_autosave_ref(self, tab_idx: int, item_idx: int) -> None:
         k = (tab_idx, item_idx)
 
@@ -4240,25 +4304,37 @@ Tooltip {
         self._pending_autosave_args.pop(k, None)
 
     def _cancel_autosave_for_transaction(self, transaction: list[tuple[int, int, Any, Any]]) -> None:
-        uids: set[str] = set()
-
+        # Collect per-file UID keys to avoid cross-file cancellation.
+        uid_engines: set[str] = set()
+        # Also keep simple UID set for legacy, but filter by engine when cancelling duplicates.
         for t, i, o, n in transaction:
             self._cancel_autosave_ref(t, i)
-
             item = self._get_schema_item(t, i)
             if item:
-                uids.add(self._get_item_uid(item))
+                uid_engines.add(self._uid_engine_key(item))
 
-        # Also cancel duplicate UID views.
-        for uid in uids:
-            for t, i, itm in self._items_by_uid.get(uid, []):
-                self._cancel_autosave_ref(t, i)
+        # Also cancel duplicate UID views that share the SAME engine/file.
+        # Previously this cancelled ALL duplicates regardless of file, causing per-game cross-contamination.
+        seen = set()
+        for t, i, o, n in transaction:
+            src_item = self._get_schema_item(t, i)
+            if not src_item:
+                continue
+            src_uid = self._get_item_uid(src_item)
+            src_eng = self._get_item_engine_info(src_item)
+            for dup_t, dup_i, dup_itm in self._items_by_uid.get(src_uid, []):
+                if (dup_t, dup_i) in seen:
+                    continue
+                seen.add((dup_t, dup_i))
+                if self._get_item_engine_info(dup_itm) != src_eng:
+                    continue
+                self._cancel_autosave_ref(dup_t, dup_i)
 
-        for uid in uids:
-            self._bump_write_generation(uid)
+        for uek in uid_engines:
+            self._bump_write_generation(uek)
 
     def _apply_transaction_to_ram(self, transaction: list[tuple[int, int, Any, Any]], undo: bool = False) -> None:
-        uids: set[str] = set()
+        uid_engines: set[str] = set()
 
         for t, i, o, n in transaction:
             item = self._get_schema_item(t, i)
@@ -4269,12 +4345,12 @@ Tooltip {
             item.exists_in_target = True
             self._on_item_value_changed(item)
             self._refresh_single_ui(t, i, item)
-            uids.add(self._get_item_uid(item))
+            uid_engines.add(self._uid_engine_key(item))
 
         self._schema_dirty_counter += 1
 
-        for uid in uids:
-            self._bump_write_generation(uid)
+        for uek in uid_engines:
+            self._bump_write_generation(uek)
 
     def _revert_transaction(self, transaction: list[tuple[int, int, Any, Any]]) -> None:
         self._apply_transaction_to_ram(transaction, undo=True)
@@ -4286,14 +4362,17 @@ Tooltip {
 
     def _reset_trigger_ui(self, item: ConfigItem) -> None:
         uid = self._get_item_uid(item)
+        src_eng = self._get_item_engine_info(item)
         self._schema_dirty_counter += 1
 
         for t_idx, i_idx, other_item in self._items_by_uid.get(uid, []):
+            if self._get_item_engine_info(other_item) != src_eng:
+                continue
             other_item.value = item.default
             self._on_item_value_changed(other_item)
             self._refresh_single_ui(t_idx, i_idx, other_item)
 
-        self._bump_write_generation(uid)
+        self._bump_write_generation(self._uid_engine_key(item))
         self._refresh_presets_ui()
 
     # =========================================================================
@@ -4316,14 +4395,14 @@ Tooltip {
             self.pending_commits.add((t, i))
             self._refresh_single_ui(t, i, item)
 
-        uids: set[str] = set()
+        uid_engines: set[str] = set()
         for t, i, o, n in transaction:
             item = self._get_schema_item(t, i)
             if item:
-                uids.add(self._get_item_uid(item))
+                uid_engines.add(self._uid_engine_key(item))
 
-        for uid in uids:
-            self._bump_write_generation(uid)
+        for uek in uid_engines:
+            self._bump_write_generation(uek)
 
         if self.auto_save:
             def finalize_transaction(batch_success: bool):
@@ -4428,11 +4507,15 @@ Tooltip {
         self._schema_dirty_counter += 1
 
         item_uid = self._get_item_uid(item)
+        src_eng = self._get_item_engine_info(item)
         transaction = [(tab_idx, item_idx, old_val, new_val)]
 
         for t_idx, i_idx, other in self._items_by_uid.get(item_uid, []):
-            if other is not item:
-                transaction.append((t_idx, i_idx, other.value, new_val))
+            if other is item:
+                continue
+            if self._get_item_engine_info(other) != src_eng:
+                continue
+            transaction.append((t_idx, i_idx, other.value, new_val))
 
         if not is_undo and record_undo:
             self.undo_stack.append(transaction)
@@ -4445,19 +4528,23 @@ Tooltip {
         item.exists_in_target = True
         self._on_item_value_changed(item)
 
-        # Sync duplicate items across tabs.
+        # Sync duplicate items that share the SAME file/engine (e.g. same setting shown in two tabs).
+        # Previously this synced across ALL files with same UID, which broke per-game isolation.
         for t_idx, i_idx, other_item in self._items_by_uid.get(item_uid, []):
-            if other_item is not item:
-                other_item.value = new_val
-                other_item.exists_in_target = True
-                self._on_item_value_changed(other_item)
-                self._refresh_single_ui(t_idx, i_idx, other_item)
+            if other_item is item:
+                continue
+            if self._get_item_engine_info(other_item) != src_eng:
+                continue
+            other_item.value = new_val
+            other_item.exists_in_target = True
+            self._on_item_value_changed(other_item)
+            self._refresh_single_ui(t_idx, i_idx, other_item)
 
         val_str = item.serialize(new_val)
 
         if self.auto_save and not batch_mode:
             k = (tab_idx, item_idx)
-            gen = self._bump_write_generation(item_uid)
+            gen = self._bump_write_generation(self._uid_engine_key(item))
 
             self._save_timers[k] = self.set_timer(
                 0.25,
@@ -4509,12 +4596,12 @@ Tooltip {
         self._save_timers.pop((tab_idx, item_idx), None)
         self._pending_autosave_args.pop((tab_idx, item_idx), None)
 
-        uid = self._get_item_uid(item)
+        uek = self._uid_engine_key(item)
 
         if force:
             self._apply_transaction_to_ram(transaction, undo=False)
         else:
-            if self._write_generation.get(uid) != generation:
+            if self._write_generation.get(uek) != generation:
                 return
 
             if item.serialize(item.value) != val_str:

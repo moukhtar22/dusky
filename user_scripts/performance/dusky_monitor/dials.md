@@ -104,7 +104,7 @@ The Penalty: "Thrashing." The system will literally lock up for seconds at a tim
 
 If you wanted to go beyond the scripts and attack the OS itself:
 
-Delete the Polkit Agent: Uninstall hyprpolkitagent (Saves ~27 MB). You will no longer be able to run GUI apps as root or format drives via the GUI.
+Delete the Polkit Agent: Uninstall hyprpolkitagent (Saves ~27 MB). Dusky Polkit replaces it as a lightweight Python alternative.
 
 Nuke Python Daemons: Disable osd_lock.py (Saves ~36 MB). Your Caps Lock notification will disappear.
 

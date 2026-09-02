@@ -46,6 +46,9 @@ class SymlinkConfig:
 # 1. Systemd User Services (Target: ~/.config/systemd/user/)
 # ------------------------------------------------------------------------------
 USER_SERVICES: list[ServiceConfig] = [
+    # Dusky Polkit Authentication Agent (Default: Enable)
+    # Replaces hyprpolkitagent (removed by 010_package_removal.sh).
+    ServiceConfig("$HOME/user_scripts/dusky_system/dusky_polkit/dusky_polkit.service", "enable"),
     # Network Meter (Default: Enable)
     ServiceConfig("$HOME/user_scripts/waybar/network/network_meter.service", "enable"),
     # Dusky Control Center Daemon (Default: Disable)
@@ -632,7 +635,7 @@ def display_status(ctx: UserContext) -> None:
     def get_bulk_states(units: list[str], is_user: bool) -> dict[str, tuple[str, str]]:
         if not units:
             return {}
-        cmd = ["systemctl", "show", "--output=json", "--property=Id,ActiveState,UnitFileState,LoadState"] + units
+        cmd = ["systemctl", "show", "--property=Id,ActiveState,UnitFileState,LoadState"] + units
         if is_user:
             cmd.insert(1, "--user")
 
@@ -647,28 +650,34 @@ def display_status(ctx: UserContext) -> None:
         if not out:
             return states
 
-        # Parse JSON Array or JSON Lines (JSONL)
-        lines = out.splitlines() if not out.startswith("[") else [out]
-        for line in lines:
+        current_item: dict[str, str] = {}
+        for line in out.splitlines():
             line_str = line.strip()
             if not line_str:
+                if "Id" in current_item:
+                    unit_id = current_item["Id"]
+                    if current_item.get("LoadState") == "not-found":
+                        states[unit_id] = ("not-found", "not-found")
+                    else:
+                        states[unit_id] = (
+                            current_item.get("ActiveState", "unknown"),
+                            current_item.get("UnitFileState", "unknown"),
+                        )
+                current_item = {}
                 continue
-            try:
-                items = json.loads(line_str)
-                if isinstance(items, dict):
-                    items = [items]
-                for item in items:
-                    unit_id = item.get("Id") or "unknown"
-                    if unit_id != "unknown":
-                        if item.get("LoadState") == "not-found":
-                            states[unit_id] = ("not-found", "not-found")
-                        else:
-                            states[unit_id] = (
-                                item.get("ActiveState") or "unknown",
-                                item.get("UnitFileState") or "unknown",
-                            )
-            except json.JSONDecodeError:
-                pass
+            if "=" in line_str:
+                k, _, v = line_str.partition("=")
+                current_item[k] = v
+
+        if "Id" in current_item:
+            unit_id = current_item["Id"]
+            if current_item.get("LoadState") == "not-found":
+                states[unit_id] = ("not-found", "not-found")
+            else:
+                states[unit_id] = (
+                    current_item.get("ActiveState", "unknown"),
+                    current_item.get("UnitFileState", "unknown"),
+                )
 
         return states
 

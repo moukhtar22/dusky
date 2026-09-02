@@ -17,7 +17,10 @@
 ascii_mode = false
 
 # Default initial width percentage of the left execution tree pane (15 to 80)
-left_pane_width = 38
+left_pane_width = 27
+
+# Bottom keybinds footer visibility: "auto" (enabled on SSH / Wayland / X11 / GUI terminals, hidden on minimal Linux TTYs), true, or false
+show_keybinds_footer = "auto"
 
 # Minimum and maximum allowable percentage bounds when dragging or resizing the left pane
 min_left_pane_width = 15

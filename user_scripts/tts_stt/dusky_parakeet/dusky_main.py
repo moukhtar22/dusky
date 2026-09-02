@@ -35,6 +35,7 @@ import sys
 import threading
 import time
 from typing import Any
+import urllib.request as urllib_request
 import uuid
 import wave
 
@@ -605,6 +606,84 @@ def usable_transcript(text: str) -> bool:
     return len(normalized) >= 2 and normalized not in HALLUCINATIONS
 
 
+S1_MINI_SYSTEM_PROMPT = (
+    "You are a text normalizer for speech-to-text transcripts. The input begins "
+    "with a control line specifying the styling, structure, and context settings; "
+    "clean the transcript to match those settings and output only the cleaned text."
+)
+
+
+class S1Cleanup:
+    """Post-ASR transcript normalizer backed by the local s1-mini model via Ollama.
+
+    S1-mini (superwhisper/s1-mini) is a small text normalizer that sits between ASR
+    and output. It is not a chat model and is steered only by an exact system prompt
+    plus a control line. It is Qwen3-based, which defaults to thinking mode; S1-mini
+    was trained with thinking off, so the assistant turn must begin with an empty
+    ``thinking`` block or the model emits nothing. Ollama's chat template can
+    mishandle that generation prefix, so this builds the raw prompt by hand and
+    sends it through ``/api/generate`` with ``raw: true`` — the documented fallback
+    that matches the training prefix exactly. Greedy decoding (temperature 0) is
+    required. Any failure falls back to the raw text so the STT pipeline is never
+    blocked by an unavailable cleanup model.
+    """
+
+    def __init__(self, config: JsonObject) -> None:
+        self._endpoint = str(config.get("llm_endpoint", "http://localhost:11434")) + "/api/generate"
+        self._model = str(config.get("llm_model", "s1-mini"))
+        self._styling = str(config.get("llm_cleanup_style", "semi-formal"))
+        self._structure = str(config.get("llm_cleanup_structure", "prose"))
+        self._context = str(config.get("llm_cleanup_context", "general"))
+        self._timeout = float(config.get("llm_timeout_seconds", 60))
+        self._max_tokens = int(config.get("llm_max_tokens", 2048))
+        self._system = S1_MINI_SYSTEM_PROMPT
+
+    def _prompt(self, transcript: str) -> str:
+        control = (
+            f"[Styling: {self._styling}] "
+            f"[Structure: {self._structure}] "
+            f"[Context: {self._context}]"
+        )
+        return (
+            f"<|im_start|>system\n{self._system}<|im_end|>\n"
+            f"<|im_start|>user\n{control}\n{transcript}<|im_end|>\n"
+            "<|im_start|>assistant\n thinking\n\n response\n\n"
+        )
+
+    def normalize(self, transcript: str) -> str:
+        raw = transcript.strip()
+        if not raw:
+            return raw
+        payload = {
+            "model": self._model,
+            "prompt": self._prompt(raw),
+            "raw": True,
+            "stream": False,
+            "options": {"temperature": 0, "num_predict": self._max_tokens},
+        }
+        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        request = urllib_request.Request(
+            self._endpoint,
+            data=data,
+            method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            with urllib_request.urlopen(request, timeout=self._timeout) as response:
+                body = json.loads(response.read().decode("utf-8"))
+        except Exception as exc:
+            LOG.warning("S1-mini cleanup request failed; using raw transcript: %s", exc)
+            return raw
+        try:
+            content = str(body["response"]).strip()
+        except (KeyError, TypeError) as exc:
+            LOG.warning("S1-mini returned an unexpected payload; using raw transcript: %s", exc)
+            return raw
+        if not content or not usable_transcript(content):
+            return raw
+        return content
+
+
 class WaylandTyper:
     def __init__(self) -> None:
         binary = shutil.which("wtype")
@@ -717,6 +796,12 @@ class RecordingSession:
         self.last_provisional_at = 0.0
         self.overflow_count = 0
         self.typer = StableSuffixTyper(int(config["stable_holdback_words"])) if realtime else None
+        self._s1: S1Cleanup | None = None
+        if bool(config.get("llm_enabled", False)):
+            try:
+                self._s1 = S1Cleanup(config)
+            except Exception as exc:
+                LOG.warning("S1-mini cleanup disabled for this session: %s", exc)
         self._audio_temporary: Path | None = None
         self._wave: wave.Wave_write | None = None
         if bool(config["keep_audio"]):
@@ -854,6 +939,11 @@ class RecordingSession:
 
     def _save_outputs(self) -> str:
         transcript = " ".join(self.latest[key].text for key in sorted(self.latest)).strip()
+        if transcript and self._s1 is not None:
+            cleaned = self._s1.normalize(transcript)
+            if cleaned and cleaned != transcript:
+                LOG.info("S1-mini cleaned transcript (%d -> %d chars)", len(transcript), len(cleaned))
+                transcript = cleaned
         state_dir = require_private_directory(Path(self.config["state_dir"]), create=True)
         transcript_dir = require_private_directory(state_dir / "transcripts", create=True)
         stamp = time.strftime("%Y%m%d-%H%M%S")
@@ -930,6 +1020,12 @@ class FileTranscriber:
         self.session_id = uuid.uuid4().hex
         self.vad = StatefulSileroVad(APP_DIR / "models" / "silero_vad.onnx")
         self.parts: list[str] = []
+        self._s1: S1Cleanup | None = None
+        if bool(config.get("llm_enabled", False)):
+            try:
+                self._s1 = S1Cleanup(config)
+            except Exception as exc:
+                LOG.warning("S1-mini cleanup disabled for file transcription: %s", exc)
 
     def _transcribe_segment(self, segment: list[np.ndarray], index: int) -> None:
         if not segment:
@@ -1088,6 +1184,11 @@ class FileTranscriber:
             stderr_thread.join(timeout=2)
 
         transcript = " ".join(self.parts).strip()
+        if transcript and self._s1 is not None:
+            cleaned = self._s1.normalize(transcript)
+            if cleaned and cleaned != transcript:
+                LOG.info("S1-mini cleaned file transcript (%d -> %d chars)", len(transcript), len(cleaned))
+                transcript = cleaned
         if transcript:
             state_dir = require_private_directory(Path(self.config["state_dir"]), create=True)
             transcript_dir = require_private_directory(state_dir / "transcripts", create=True)
@@ -1336,6 +1437,17 @@ def load_config() -> JsonObject:
     if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid():
         raise RuntimeError("config.json must be a regular file owned by the service user")
     config = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    for key, default in {
+        "llm_enabled": True,
+        "llm_endpoint": "http://localhost:11434",
+        "llm_model": "s1-mini",
+        "llm_cleanup_style": "semi-formal",
+        "llm_cleanup_structure": "prose",
+        "llm_cleanup_context": "general",
+        "llm_timeout_seconds": 60,
+        "llm_max_tokens": 2048,
+    }.items():
+        config.setdefault(key, default)
     required = {
         "schema_version",
         "model",
@@ -1379,6 +1491,12 @@ def load_config() -> JsonObject:
         raise RuntimeError("max_inflight_requests must be one or two")
     if not 0.0 < float(config["vad_end_threshold"]) <= float(config["vad_start_threshold"]) < 1.0:
         raise RuntimeError("VAD thresholds are invalid")
+    if config["llm_cleanup_style"] not in {"casual", "semi-casual", "semi-formal", "formal"}:
+        raise RuntimeError("unsupported LLM cleanup styling")
+    if config["llm_cleanup_structure"] not in {"prose", "lists"}:
+        raise RuntimeError("unsupported LLM cleanup structure")
+    if config["llm_cleanup_context"] not in {"general", "email"}:
+        raise RuntimeError("unsupported LLM cleanup context")
     vad_path = APP_DIR / "models" / "silero_vad.onnx"
     digest = hashlib.sha256()
     with vad_path.open("rb") as model_file:

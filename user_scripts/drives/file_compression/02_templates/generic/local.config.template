@@ -1,0 +1,39 @@
+# local.config — per-game overrides for actions.sh + start.sh (remove # to enable)
+# This overrides ~/.jc141rc for this game only. Copy from here.
+
+# --- Core ---
+#UNMOUNT=1                # 1 = auto-unmount on exit, 0 = keep mounted
+#EXTRACT=0                # 1 = extract to files/game-root instead of mount (fallback if fuse-overlayfs missing)
+#TERMINAL_OUTPUT=1        # 1 = show logs, 0 = silent
+#CUSTOM_CMD=""            # Override auto-detect: e.g. "./Game.x86_64 -windowed" or "wine Game.exe"
+
+# --- Wine ---
+#SYSWINE="$(command -v wine)"  # Path to wine binary (or wine-tkg, proton)
+#WINEPREFIX=""            # Overridden by JC_DIRECTORY/wine-prefix-ew when ISOLATE=1
+
+# --- Sandboxing (bubblewrap) ---
+#ISOLATE=0                # 1 = sandbox in bwrap (recommended), 0 = none
+#BLOCK_NET=1              # 1 = block network (only if ISOLATE=1)
+#JC_DIRECTORY="$HOME/Games/jc141"  # Sandbox home + Wine prefix base
+
+# --- Gamescope (Wayland compositor) ---
+#GAMESCOPE=0              # 1 = wrap in gamescope
+#GAMESCOPE_FULLSCREEN=1   # 1 = fullscreen, 0 = embedded window
+#GAMESCOPE_BORDERLESS=0   # 1 = borderless
+#GAMESCOPE_SCREEN_WIDTH=  # Output width (0 = auto-detect)
+#GAMESCOPE_SCREEN_HEIGHT= # Output height
+#GAMESCOPE_GAME_WIDTH=    # Render width
+#GAMESCOPE_GAME_HEIGHT=   # Render height
+#ADDITIONAL_FLAGS=""      # Extra gamescope flags
+
+# --- DwarFS Universal (new) ---
+#ENV=""                   # Extra env injected before game launch
+#DWARFS_PROFILE="balanced" # Profile from 03_tools/profiles/ (fast/balanced/max/reproducible/game/game_ue/audio)
+#DWARFS_REPRODUCIBLE=0    # 1 = bit-identical (fixed time, single worker)
+#DWARFS_AUTOCATEGORIZE=0  # 1 = auto-detect pcmaudio/incompressible
+#DWARFS_OWNER=1000        # Owner for image (1000 for sharing, or $(id -u) for personal)
+#DWARFS_GROUP=1000
+#DWARFS_FILTER=""         # mkdwarfs filter, e.g. "-*.tmp"
+#DWARFS_PAR2=0            # 1 = create par2 for bit-rot
+#DWARFS_ANALYSIS_FILE=""  # Path for hotness analysis
+#DWARFS_EXTRA_OPTS=""     # Extra dwarfs mount opts, e.g. "-o mlock=try"

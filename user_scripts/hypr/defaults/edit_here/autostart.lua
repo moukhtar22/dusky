@@ -81,6 +81,18 @@ hl.on("hyprland.start", function()
     --
     --
 
+    -- ── LocalSend (managed by localsend.py, opt-in) ──
+    -- https://localsend.org — AirDrop alternative, LAN only
+    -- Runs as tray daemon (--hidden), idle ~0% CPU / ~30MB RAM, scales only during transfer
+    -- PROTOCOL: 224.0.0.167:53317/udp multicast discovery + 53317/tcp HTTPS
+    -- Native (AUR: localsend) preferred, Flatpak fallback auto-detected by helper
+    -- To enable, uncomment ONE line below (native vs flatpak). Thunar right-click works without this;
+    -- this only controls background receive/tray on login (opt-in, off by default).
+    -- hl.exec_cmd("localsend --hidden")
+    -- Flatpak alternative: flatpak run org.localsend.localsend_app --hidden
+    -- Tip: If tray missing after reboot, use 'localsend' without --hidden
+    -- ── end LocalSend ──
+
 end)
 
 -- hl.on("hyprland.shutdown", function()

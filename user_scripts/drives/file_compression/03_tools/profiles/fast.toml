@@ -1,0 +1,5 @@
+# Fast — l3, 2M block, lz4hc, for quick testing (mkdwarfs_auto.sh -l 3)
+level = 3
+block_size_bits = 21
+compression = "lz4hc:level=9"
+note = "Fast, low ratio, for iteration"

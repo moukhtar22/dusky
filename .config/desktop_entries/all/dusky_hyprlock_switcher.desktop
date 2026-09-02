@@ -3,9 +3,10 @@ Type=Application
 Name=Dusky Hyprlock Theme Manager
 GenericName=Lock Screen Theme Switcher
 Comment=Switch Hyprlock configurations interactively
-Exec=kitty --class dusky_hyprlock_switcher.sh -e /home/dusk/user_scripts/hyprlock/dusky_hyprlock_switcher.sh
+Exec=foot --app-id=dusky_tui python3 /home/dusk/user_scripts/hyprlock/tui_hyprlock.py
 Icon=preferences-desktop-screensaver
 Terminal=false
 Categories=Settings;DesktopSettings;Utility;
 Keywords=dusky;hyprland;hyprlock;theme;config;
-StartupNotify=false
+StartupNotify=true
+StartupWMClass=dusky_tui

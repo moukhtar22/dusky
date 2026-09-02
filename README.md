@@ -124,7 +124,7 @@ git --git-dir=$HOME/dusky/ --work-tree=$HOME checkout -f
 Run the master script to install dependencies, themes, and services, this will take a while. because it sets up everything. You'll be promted to say yes/no during setup, so dont leave it running unattended.
 
 ```bash
-~/user_scripts/arch_setup_scripts/ORCHESTRA.sh
+~/user_scripts/arch_setup_scripts/orchestrator.sh
 ```
 
 ## The Orchestra Script
@@ -297,7 +297,7 @@ togglalble with a keybind or from rofi.
     
 - **Accessibility:** Text-to-Speech (TTS) and Speech-to-Text (STT) capabilities (hardware dependent).
     
-- **Keybind Cheatsheet:** Press `CTRL` + `SHIFT` + `?` anytime to see your controls.
+- **Keybind Cheatsheet:** Press `CTRL` + `SHIFT` + `?` or `CTRL` + `SHIFT` + `SPACE` anytime to see your controls.
     
 
 

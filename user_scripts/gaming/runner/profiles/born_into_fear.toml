@@ -1,0 +1,58 @@
+# ==============================================================================
+# Born Into Fear Profile
+# ==============================================================================
+# Engine: Unreal Engine 4 (Windows via ColdClientLoader)
+# Target: BIF/Binaries/Win64/BIF-Win64-Shipping.exe via steamclient_loader_x64.exe
+# Notes: First-person horror in North Hollow Heights. Unreal PAK: BIF-WindowsNoEditor.pak
+
+extends = "base_unreal_engine_5"
+
+[meta]
+id = "born_into_fear"
+name = "Born Into Fear"
+version = "1.0"
+icon = "applications-games"
+developer = "Just Sauce Studio"
+genre = "Horror / Adventure"
+description = "First-person horror in the evacuated suburb of North Hollow Heights. As Agent Jay of Aegis, search abandoned homes, solve puzzles and evade Buffers to uncover what transpired."
+
+[paths]
+game_dir = "/mnt/media/games/unknown_quality/Born.Into.Fear-jc141"
+dwarfs_image = "files/game-root.dwarfs"
+dwarfs_mount = "files/.game-root-mnt"
+overlay_dir = "files/game-root"
+overlay_storage = "files/overlay-storage"
+overlay_work = "files/.game-root-work"
+executable = "BIF.exe"
+arguments = []
+
+[runtime]
+type = "wine"
+
+[runtime.wine]
+prefix_dir = "files/wine-prefix-ew"
+arch = "win64"
+sync_mode = "fsync"
+dxvk = true
+vkd3d = true
+
+[runtime.wine.dll_overrides]
+"winemenubuilder.exe" = "d"
+mshtml = "d"
+dxgi = "n,b"
+d3d11 = "n,b"
+d3d12 = "n,b"
+d3d9 = "n,b"
+
+[graphics]
+gpu = "discrete"
+wayland_native = true
+
+[graphics.gamescope]
+enabled = false
+
+[performance]
+gamemode = true
+mangohud = false
+fps_limit = 60
+cpu_governor = "performance"

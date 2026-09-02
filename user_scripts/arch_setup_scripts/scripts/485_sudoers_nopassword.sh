@@ -13,7 +13,7 @@ shopt -s nullglob inherit_errexit
 # 1. Custom Drop-in Configurations (System-wide Defaults & Policies)
 #    Define modular drop-in configurations deployed to /etc/sudoers.d/.
 #    Format: [DROPIN_NAME]="Content to be written"
-#    Note: Drop-in filenames MUST NOT contain dots (.) or tildes (~).
+#    Note: Drop-in filenames MUST NOT contain dots (.) or tildes (~). 
 declare -Ar DEFAULT_CUSTOM_DROPINS=(
     ["00-wayland-env"]=$'# Preserves Wayland session socket paths and theming environment for GUI applications under sudo\nDefaults env_keep += "WAYLAND_DISPLAY XDG_RUNTIME_DIR XDG_CURRENT_DESKTOP XDG_DATA_DIRS GTK_THEME QT_QPA_PLATFORMTHEME QT_QUICK_CONTROLS_STYLE"'
 )

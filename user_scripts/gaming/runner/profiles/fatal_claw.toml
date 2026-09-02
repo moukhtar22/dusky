@@ -1,0 +1,59 @@
+# ==============================================================================
+# Fatal Claw — Unreal Engine 5 (Windows) via Wine/GE-Proton
+# Fix: Use Shipping binary (89M) not launcher (337K crash). Prefix is Lutris GE-Proton at /mnt/media/games/installed_games/fatal-flaw
+# Tested 2026-08-29: Shipping boots to LogInit: Game Engine Initialized (20s run, exit 0 on SIGTERM)
+# ==============================================================================
+
+extends = "base_unreal_engine_5"
+
+[meta]
+id = "fatal_claw"
+name = "Fatal Claw"
+version = "1.0"
+icon = "applications-games"
+developer = "Unknown (FitGirl Repack)"
+genre = "Action / UE"
+description = "Fatal Claw — Unreal Engine 5, GE-Proton prefix, Shipping binary (verified launch)."
+
+[paths]
+game_dir = "/mnt/media/games/installed_games/Fatal Claw"
+executable = "FatalClaw/Binaries/Win64/FatalClaw-Win64-Shipping.exe"
+working_dir = "."
+arguments = []
+
+[runtime]
+type = "wine"
+
+[runtime.wine]
+wine_binary = "~/.local/share/Steam/compatibilitytools.d/GE-Proton11-6-x86_64/files/bin/wine"
+prefix_dir = "/mnt/media/games/installed_games/fatal-flaw"
+arch = "win64"
+sync_mode = "fsync"
+debug = "fixme-all"
+dxvk = true
+vkd3d = true
+dxvk_nvapi = false
+
+[runtime.wine.dll_overrides]
+"winemenubuilder.exe" = "d"
+mshtml = "d"
+dxgi = "n,b"
+d3d11 = "n,b"
+d3d12 = "n,b"
+d3d9 = "n,b"
+
+[graphics]
+gpu = "integrated"
+wayland_native = true
+prefer_xwayland = false
+
+[graphics.gamescope]
+enabled = false
+
+[performance]
+gamemode = true
+mangohud = false
+fps_limit = 0
+
+[sandbox]
+enabled = false

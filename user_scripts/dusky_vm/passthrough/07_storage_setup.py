@@ -410,16 +410,21 @@ def provision_acls(target: Path, qemu: QemuIdentity, operator: pwd.struct_passwd
             "provisioned for the operator only.[/dim]"
         )
 
-    traversal_want = {f"user:{name}": "--x" for _, name in principals}
+    traversal_want = {f"user:{name}": "r-x" for _, name in principals}
     for parent in reversed(target.parents):
         if str(parent) == "/":
             continue
         if not parent.exists():
             continue
+        # If standard unix permissions already grant read and execute (e.g. 0755),
+        # skip adding redundant ACLs that override base permissions.
+        stat_mode = parent.stat().st_mode
+        if (stat_mode & 0o005) == 0o005 and parent.stat().st_uid == 0:
+            continue
         if acl_satisfied(parent, traversal_want):
             continue
-        apply_acl(parent, [f"{kind}:{name}:x" for kind, name in principals])
-        ledger.append(f"+x  {parent}")
+        apply_acl(parent, [f"{kind}:{name}:rx" for kind, name in principals])
+        ledger.append(f"+rx  {parent}")
 
     full_want: dict[str, str] = {}
     for _, name in principals:

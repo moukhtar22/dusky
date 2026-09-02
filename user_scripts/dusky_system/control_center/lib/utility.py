@@ -238,14 +238,18 @@ def execute_command(
             log.error("Executable not found: %r", executable)
             return False
 
+    spawn_cmd = full_cmd
+    if shutil.which("dusky-run") and spawn_cmd and spawn_cmd[0] != "dusky-run":
+        spawn_cmd = ["dusky-run", *spawn_cmd]
+
     try:
         GLib.spawn_async(
-            full_cmd,
+            spawn_cmd,
             flags=GLib.SpawnFlags.SEARCH_PATH,
         )
         return True
     except GLib.Error as e:
-        log.error("Executable failed or not found: %s. (GLib Error: %s)", full_cmd, e.message)
+        log.error("Executable failed or not found: %s. (GLib Error: %s)", spawn_cmd, e.message)
         return False
     except Exception as e:
         log.error("Unexpected error executing %r: %s", cmd_string, e)

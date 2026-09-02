@@ -1380,6 +1380,8 @@ class SudoEngine:
 
         cls._askpass_path = None
         cls._sudoers_path = None
+        cls._password = None
+        cls._mode = "none"
 
     @classmethod
     def _write_askpass(cls, password: str) -> Path:
@@ -1560,6 +1562,13 @@ done
             return False
 
         with suppress(Exception):
+            subprocess.run(
+                ["sudo", "-k"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+            )
             proc = subprocess.run(
                 ["sudo", "-n", "-v"],
                 stdin=subprocess.DEVNULL,
@@ -4213,6 +4222,10 @@ def run_git_self_update(
 
                 destructive = True
 
+            elif merge_base == remote_head:
+                sys.stdout.write("[GIT] Local repository is ahead of upstream. Keeping local commits.\n")
+                return False
+
             elif merge_base != local_head:
                 _print_update_preview(base_cmd, local_head, remote_head)
 
@@ -4435,9 +4448,9 @@ def _task_label(task: OrchestratorTask) -> Text:
 
 class TaskSearchScreen(ModalScreen[str | None]):
     BINDINGS = [
-        Binding("escape", "dismiss_modal", "Dismiss"),
-        Binding("ctrl+n", "cursor_down", "Down"),
-        Binding("ctrl+p", "cursor_up", "Up"),
+        Binding("escape", "dismiss_modal", "Dismiss", priority=True),
+        Binding("ctrl+n", "cursor_down", "Down", priority=True),
+        Binding("ctrl+p", "cursor_up", "Up", priority=True),
     ]
 
     def __init__(self, tasks: list[OrchestratorTask]):
@@ -4566,7 +4579,9 @@ class TaskSearchScreen(ModalScreen[str | None]):
 
 class LogSearchScreen(ModalScreen[None]):
     BINDINGS = [
-        Binding("escape", "dismiss_modal", "Dismiss"),
+        Binding("escape", "dismiss_modal", "Dismiss", priority=True),
+        Binding("ctrl+n", "cursor_down", "Down", priority=True),
+        Binding("ctrl+p", "cursor_up", "Up", priority=True),
     ]
 
     def __init__(self, title: str, lines: list[str]):
@@ -4739,7 +4754,7 @@ class ManualModalScreen(ModalScreen[str]):
 
 
 class SudoPasswordScreen(ModalScreen[bool]):
-    BINDINGS = [Binding("escape", "cancel", "Cancel")]
+    BINDINGS = [Binding("escape", "cancel", "Cancel", priority=True)]
 
     def compose(self) -> ComposeResult:
         with Container(id="sudo_dialog"):
@@ -4781,9 +4796,9 @@ class SudoPasswordScreen(ModalScreen[bool]):
 
 class ConfirmQuitScreen(ModalScreen[str]):
     BINDINGS = [
-        Binding("escape", "cancel", "Cancel"),
-        Binding("y,a,enter", "confirm_abort", "Abort"),
-        Binding("n,c,q", "cancel", "Cancel"),
+        Binding("escape", "cancel", "Cancel", priority=True),
+        Binding("y,a,enter", "confirm_abort", "Abort", priority=True),
+        Binding("n,c,q", "cancel", "Cancel", priority=True),
     ]
 
     def compose(self) -> ComposeResult:
@@ -4818,8 +4833,12 @@ class ConfirmQuitScreen(ModalScreen[str]):
 
 class HelpScreen(ModalScreen[None]):
     BINDINGS = [
-        Binding("f1", "dismiss", "Dismiss"),
-        Binding("question_mark", "dismiss", "Dismiss"),
+        Binding("escape", "dismiss", "Dismiss", priority=True),
+        Binding("f1", "dismiss", "Dismiss", priority=True),
+        Binding("question_mark", "dismiss", "Dismiss", priority=True),
+        Binding("q", "dismiss", "Dismiss", priority=True),
+        Binding("enter", "dismiss", "Dismiss", priority=True),
+        Binding("space", "dismiss", "Dismiss", priority=True),
     ]
 
     def compose(self) -> ComposeResult:
@@ -4855,10 +4874,7 @@ class HelpScreen(ModalScreen[None]):
 
     def on_key(self, event: events.Key) -> None:
         key = event.key.lower()
-        if key == "escape":
-            event.stop()
-            return
-        if key in ("f1", "question_mark", "q", "enter", "space", "?") or event.character in ("?", "q"):
+        if key in ("escape", "f1", "question_mark", "q", "enter", "space", "?") or event.character in ("?", "q"):
             self.dismiss(None)
             event.stop()
 
@@ -4872,7 +4888,11 @@ class HelpScreen(ModalScreen[None]):
 
 
 class FailureSummaryScreen(ModalScreen[str]):
-    BINDINGS = [Binding("escape", "close", "Close")]
+    BINDINGS = [
+        Binding("escape", "close", "Close", priority=True),
+        Binding("c,q", "close", "Close", priority=True),
+        Binding("r", "retry", "Retry", priority=True),
+    ]
 
     def __init__(
         self,
@@ -4924,16 +4944,12 @@ class FailureSummaryScreen(ModalScreen[str]):
 
 
 class CompletionDialog(ModalScreen[bool]):
-    """Final dialog shown when the sequence finishes: review logs or quit.
-
-    Note: `q`/`escape` are NOT bound here on purpose. The orchestrator's app-
-    level priority bindings route those keys to `action_request_quit`, which
-    special-cases this dialog (quitting directly, since the run is already
-    finished). Enter/space and the buttons both resolve to "stay and review".
-    """
+    """Final dialog shown when the sequence finishes: review logs or quit."""
 
     BINDINGS = [
-        Binding("enter,space", "dismiss_stay", "View Logs"),
+        Binding("escape", "dismiss_stay", "View Logs", priority=True),
+        Binding("enter,space,v", "dismiss_stay", "View Logs", priority=True),
+        Binding("q", "dismiss_quit", "Quit", priority=True),
     ]
 
     def __init__(
@@ -4961,6 +4977,18 @@ class CompletionDialog(ModalScreen[bool]):
 
     def action_dismiss_stay(self) -> None:
         self.dismiss(False)
+
+    def action_dismiss_quit(self) -> None:
+        self.dismiss(True)
+
+    def on_key(self, event: events.Key) -> None:
+        key = event.key.lower()
+        if key in ("escape", "enter", "space", "v"):
+            self.dismiss(False)
+            event.stop()
+        elif key == "q":
+            self.dismiss(True)
+            event.stop()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         self.dismiss(event.button.id == "btn_completion_quit")
@@ -5421,13 +5449,30 @@ class DuskyOrchestratorApp(App):
         self._is_dragging_pane = False
 
     def action_request_quit(self) -> None:
+        if isinstance(self.screen, HelpScreen):
+            self.screen.dismiss(None)
+            return
+
+        if isinstance(self.screen, (TaskSearchScreen, LogSearchScreen, SudoPasswordScreen, FailureSummaryScreen)):
+            self.screen.dismiss(None)
+            return
+
+        if isinstance(self.screen, (ConflictModalScreen, ManualModalScreen)):
+            with suppress(Exception):
+                self.screen.dismiss("abort")
+            return
+
         if isinstance(self.screen, ConfirmQuitScreen):
+            self.screen.dismiss("cancel")
             return
 
         if isinstance(self.screen, CompletionDialog):
-            # The sequence is already finished: quitting from the completion
-            # dialog must not ask about aborting a running run.
-            self.exit()
+            self.screen.dismiss(False)
+            return
+
+        if isinstance(self.screen, ModalScreen):
+            with suppress(Exception):
+                self.screen.dismiss(None)
             return
 
         async def on_quit_decision(result: str | None) -> None:
@@ -5971,7 +6016,9 @@ class DuskyOrchestratorApp(App):
             self._prompt_last[name] = now
             self._prompt_buffer = ""
 
-            if name != "sudo_password" and count < 5:
+            if name == "sudo_password" and count < 5:
+                self.log_system("Auto-responded with cached sudo credentials.")
+            elif name != "sudo_password" and count < 5:
                 self.log_system(f"Auto-responded to prompt: {name}")
 
             break
@@ -6514,12 +6561,24 @@ class DuskyOrchestratorApp(App):
         ok = SudoEngine.refresh_sync()
         if ok:
             self.has_sudo = True
+            if self.sudo_task is None or self.sudo_task.done():
+                self.sudo_task = asyncio.create_task(
+                    SudoEngine.maintain_heartbeat(
+                        error_callback=lambda msg: self.log_system(msg, is_err=True)
+                    )
+                )
             return True
 
         self.log_system("Sudo credentials expired. Re-authentication required.", is_err=True)
         res = await self.push_screen_wait(SudoPasswordScreen())
         if res:
             self.has_sudo = True
+            if self.sudo_task is None or self.sudo_task.done():
+                self.sudo_task = asyncio.create_task(
+                    SudoEngine.maintain_heartbeat(
+                        error_callback=lambda msg: self.log_system(msg, is_err=True)
+                    )
+                )
             return True
         return False
 
@@ -6985,7 +7044,11 @@ def parse_command_line() -> argparse.Namespace:
         epilog="Example: ./orchestrator.py --profile 01_main",
     )
 
-    parser.add_argument("--profile", help="Execute specific profile (name, stem, or number)")
+    parser.add_argument(
+        "--profile",
+        "-p",
+        help="Execute specific profile (name, stem, filename, or number)",
+    )
     parser.add_argument("--list", action="store_true", help="List all available profiles and exit")
     parser.add_argument("--list-scripts", action="store_true", help="List sequence of selected profile and exit")
     parser.add_argument("--reset", action="store_true", help="Reset state for selected profile and exit")
@@ -7175,17 +7238,37 @@ def main() -> None:
         store.close()
         sys.exit(0)
 
-    git_check_profile: ProfileConfig | None = None
-    if args.profile:
-        if args.profile.isdigit():
-            idx = int(args.profile) - 1
+    profile_query = (args.profile or os.environ.get("DUSKY_PROFILE", "")).strip()
+
+    def resolve_profile(query: str) -> ProfileConfig | None:
+        if not query:
+            return None
+        if query.isdigit():
+            idx = int(query) - 1
             if 0 <= idx < len(profiles):
-                git_check_profile = profiles[idx]
-        else:
-            for p in profiles:
-                if p.name == args.profile or p.filepath.stem == args.profile:
-                    git_check_profile = p
-                    break
+                return profiles[idx]
+        q_lower = query.lower()
+        # 1. Exact match (case-insensitive) on name, stem, or filename
+        for p in profiles:
+            if (
+                p.filepath.stem.lower() == q_lower
+                or p.name.lower() == q_lower
+                or p.filepath.name.lower() == q_lower
+            ):
+                return p
+        # 2. Substring / prefix match (e.g. 'iso' matches '02_iso' or 'ISO Setup')
+        for p in profiles:
+            if (
+                q_lower in p.filepath.stem.lower()
+                or q_lower in p.name.lower()
+                or p.filepath.stem.lower().startswith(q_lower)
+            ):
+                return p
+        return None
+
+    git_check_profile: ProfileConfig | None = None
+    if profile_query:
+        git_check_profile = resolve_profile(profile_query)
     else:
         for p in profiles:
             if p.git_enabled:
@@ -7201,7 +7284,7 @@ def main() -> None:
                 update_only=True,
                 offline=args.offline,
                 assume_yes=args.yes,
-                preserve_profile=bool(args.profile),
+                preserve_profile=bool(profile_query),
             )
         sys.exit(0)
 
@@ -7211,25 +7294,16 @@ def main() -> None:
             update_only=False,
             offline=False,
             assume_yes=args.yes,
-            preserve_profile=bool(args.profile),
+            preserve_profile=bool(profile_query),
         ):
             sys.exit(0)
 
     selected_profile: ProfileConfig | None = None
 
-    if args.profile:
-        if args.profile.isdigit():
-            idx = int(args.profile) - 1
-            if 0 <= idx < len(profiles):
-                selected_profile = profiles[idx]
-        else:
-            for p in profiles:
-                if p.name == args.profile or p.filepath.stem == args.profile:
-                    selected_profile = p
-                    break
-
+    if profile_query:
+        selected_profile = resolve_profile(profile_query)
         if selected_profile is None:
-            Console(stderr=True).print(f"[bold red]Profile '{args.profile}' not found.[/bold red]")
+            Console(stderr=True).print(f"[bold red]Profile '{profile_query}' not found.[/bold red]")
             sys.exit(1)
     else:
         selector = ProfileSelectorApp(profiles)
@@ -7313,15 +7387,17 @@ def main() -> None:
     temp_state.close()
 
     once_store = OnceStore()
-    has_sudo = any(
-        t.mode == "S"
-        and not (t.once and once_store.marker_valid(t, selected_profile.name))
-        and (
-            t.always
-            or not StateStore.is_done(statuses.get(t.state_key))
+    has_sudo = (
+        any(t.mode == "S" for t in selected_profile.tasks)
+        or any(
+            not (t.once and once_store.marker_valid(t, selected_profile.name))
+            and (
+                t.always
+                or not StateStore.is_done(statuses.get(t.state_key))
+            )
+            for t in selected_profile.tasks
         )
-        for t in selected_profile.tasks
-    )
+    ) and bool(shutil.which("sudo"))
     once_store.close()
 
     if has_sudo:
@@ -7374,6 +7450,11 @@ def main() -> None:
 if __name__ == "__main__":
     try:
         main()
+    except BrokenPipeError:
+        with suppress(Exception):
+            devnull = os.open(os.devnull, os.O_WRONLY)
+            os.dup2(devnull, sys.stdout.fileno())
+        sys.exit(0)
     except KeyboardInterrupt:
         Console(stderr=True).print("\n[bold red]:: Interrupted by user.[/bold red]")
         sys.exit(130)

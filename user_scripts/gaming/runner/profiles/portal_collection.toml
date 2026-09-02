@@ -1,0 +1,220 @@
+# ==============================================================================
+# Portal Collection [FitGirl Repack] - Optimized Runtime Profile
+# Installed at: /mnt/zram1/portal/Portal Collection (8-in-1: Portal, Portal 2,
+#   Aperture Tag, TWTM, Portal Stories: Mel/VR, Perceptual Pack, Final Hours)
+# Source: FitGirl repack Windows binaries + LumaEmu/SmartSteamEmu crack
+# Borrows full 15-table logic from profiles/_template.toml:1
+# Preset: base_wine_dxvk (Wine + DXVK, D3D9 for Source) - optimized for hybrid
+#         NVIDIA RTX 3050 Ti + Intel Iris Xe (integrated for shared RAM / low power)
+# ==============================================================================
+
+extends = "base_wine_dxvk"
+
+[meta]
+id          = "portal_collection"
+name        = "Portal Collection"
+version     = "FitGirl Repack"
+icon        = "/mnt/zram1/portal/Portal Collection/game.ico"
+developer   = "Valve / FitGirl Repack"
+genre       = "Puzzle / FPS"
+description = "8-in-1 Portal Collection via Wine + DXVK. Collection launcher validated (Portal Collection.exe). For direct per-game launch see notes below."
+
+# ------------------------------------------------------------------------------
+# 3. Paths & Storage Lifecycle [paths]
+# ------------------------------------------------------------------------------
+[paths]
+# Absolute repack install root. WARNING: /mnt/zram1 is RAM-backed (zram) - volatile on reboot.
+# For persistence move to ~/Games or other non-volatile path and update game_dir.
+game_dir = "/mnt/zram1/portal/Portal Collection"
+
+# FitGirl is LOOSE files (InnoSetup extract), NOT DwarFS compressed.
+# Do NOT set dwarfs_image/overlay - auto_mount is false below, storage.* is ignored.
+
+# COLLECTION launcher - persistent 2D menu (PECompact2, 32-bit) that stays open.
+# Per _template.toml:68 "avoid transient wrappers" - this launcher is NOT transient;
+# it is a FitGirl menu with 8 buttons each launching Language Selector.exe.
+# For direct per-game optimization (bypassing menu), create separate profiles:
+#   Portal:            executable = "Portal/hl2.exe"      arguments = ["-game","portal","-steam","-novid"]
+#   Portal 2 (Wine):   executable = "Portal 2/portal2.exe" arguments = ["-game","portal2","-steam","-novid"]
+#   Portal 2 (native): runtime.type="script", executable = "Portal 2/portal2.sh" arguments = ["-game","portal2","-steam","-novid"]
+#                      + portal_2.toml memory shim for 64GB RAM (see portal_2.toml:52 pre_launch)
+executable  = "Portal Collection.exe"
+working_dir = ""                                   # Empty = exe parent (required for <APP_PATH> ini resolves)
+arguments   = []                                   # FitGirl launcher takes no CLI args
+
+# ------------------------------------------------------------------------------
+# 4. Runtime Selection [runtime]
+# ------------------------------------------------------------------------------
+[runtime]
+type = "wine"                                      # Windows PE32 via Wine-Staging
+
+# ------------------------------------------------------------------------------
+# 5. Wine Execution Layer [runtime.wine] (master_runner.py:2653 WinePrefix)
+# ------------------------------------------------------------------------------
+[runtime.wine]
+wine_binary           = "wine"                     # "wine" or absolute GE-Proton path
+prefix_dir            = "$HOME/.local/share/wineprefixes/portal-collection"  # PERSISTENT outside /mnt/zram1
+arch                  = "win64"                    # win64 with WoW64 for 32-bit hl2.exe/portal2.exe
+sync_mode             = "auto"                     # auto -> ntsync (7.1+) -> fsync -> esync (fastest available, master_runner.py:1481)
+debug                 = "fixme-all"
+large_address_aware   = true                       # Prevent 2GB 32-bit OOM for portal2.exe (large maps/mods)
+dxvk                  = true                       # D3D9 -> Vulkan (Source uses D3D9, NOT D3D12)
+vkd3d                 = false                      # Source is D3D9 only; false saves provisioning/linking
+dxvk_nvapi            = false
+disable_menubuilder   = true
+hide_wine             = false
+dll_overrides = { "winemenubuilder.exe" = "d", "mshtml" = "d", "dxgi" = "n,b", "d3d11" = "n,b", "d3d12" = "n,b", "d3d9" = "n,b" }
+redistributables = []                              # _Redist/vc_redist.* already handled by FitGirl installer; prefix gets DXVK/VKD3D auto-linked
+winetricks       = []
+
+# ------------------------------------------------------------------------------
+# 5b. UMU / Proton Configuration [runtime.umu] - not used for Wine, kept as reference
+# ------------------------------------------------------------------------------
+# [runtime.umu]
+# game_id     = ""
+# store       = "none"
+# proton      = "GE-Proton11-6"
+# verb        = "waitforexitandrun"
+# protonfixes = true
+
+# ------------------------------------------------------------------------------
+# 6. Graphics Pipeline & Wayland Integration [graphics]
+# ------------------------------------------------------------------------------
+[graphics]
+# integrated = Intel Iris Xe (boot_vga, master_runner.py:1454) - uses shared RAM (up to 32G on 64G host,
+# per _template.toml:143) ideal for Source (low VRAM need), saves power vs discrete RTX 3050 Ti.
+# Use --set graphics.gpu=discrete to force dGPU if needed.
+gpu = "integrated"
+
+wayland_native      = true                         # Wine waylanddrv - native Wayland
+prefer_xwayland     = true                         # CRITICAL for Source 32-bit SDL2: native SDL2 has no Wayland backend, pure Wayland SEGVs without gamescope XWayland (see portal_2.toml:10)
+vulkan_icd          = "auto"                       # auto picks libGLX_nvidia for discrete, intel for integrated (master_runner.py:1042)
+gl_threaded         = true
+vsync               = "default"                    # "default" = let game/compositor decide; "off" for max FPS
+hdr                 = false
+shader_cache        = true                         # Per-prefix isolated cache (12 GiB) - helps DXVK stutter
+shader_cache_size_gb = 12
+
+[graphics.gamescope]
+enabled         = false                            # Keep false - collection launcher is 2D menu, no need to sandbox. Enable only if you want HDR/VRR sandbox: --gamescope --res 1920x1080
+backend         = "wayland"
+mode            = "borderless"
+width           = 0
+height          = 0
+output_width    = 0
+output_height   = 0
+refresh_rate    = 0
+scaler          = ""
+filter          = ""
+fsr_sharpness   = 5
+adaptive_sync   = false
+immediate_flips = false
+realtime        = true
+hdr             = false
+expose_wayland  = true
+mangoapp        = true
+extra_args      = []
+
+# ------------------------------------------------------------------------------
+# 7. Performance & Scheduling [performance]
+# ------------------------------------------------------------------------------
+[performance]
+gamemode          = true                           # gamemoderun (CPU governor, I/O prio)
+mangohud          = false                          # false for max FPS; set true for telemetry
+mangohud_preset   = ""
+fps_limit         = 0                              # 0 uncapped (Source can hit 300+ FPS); portal.toml:39 had 60 but uncapped is more optimized
+cpu_affinity      = ""                             # "" = all cores (fitgirl decompression + Source need all cores)
+scope_cpu_weight  = 0
+scope_io_weight   = 0
+scope_memory_high = ""
+
+# ------------------------------------------------------------------------------
+# 8. Audio Server [audio]
+# ------------------------------------------------------------------------------
+[audio]
+driver        = "pipewire"
+quantum       = 1024
+rate          = 48000
+openal_driver = "pipewire"
+
+# ------------------------------------------------------------------------------
+# 9. Gamepad & Input Mapping [input]
+# ------------------------------------------------------------------------------
+[input]
+sdl_gamecontrollerconfig = ""
+raw_input                = true
+
+# ------------------------------------------------------------------------------
+# 10. Storage & DwarFS Tuning [storage]
+# ------------------------------------------------------------------------------
+# Ignored because runner.auto_mount=false (no DwarFS for FitGirl loose files)
+# Listed for parity with _template.toml:210
+[storage]
+dwarfs_cache_percent    = 25
+dwarfs_workers          = 0
+dwarfs_tidy_strategy    = "time"
+dwarfs_tidy_interval    = "5m"
+dwarfs_tidy_max_age     = "10m"
+dwarfs_seq_detector     = 4
+dwarfs_readahead        = "0"
+dwarfs_block_allocator  = "mmap"
+dwarfs_preload_category = ""
+dwarfs_preload_all      = false
+auto_clean_workdir      = true
+union_backend           = "fuse-overlayfs"
+
+# ------------------------------------------------------------------------------
+# 11. Runner Lifecycle & Session Safety [runner]
+# ------------------------------------------------------------------------------
+[runner]
+auto_mount           = false                        # FitGirl is loose, not DwarFS (master_runner.py:2449)
+auto_unmount_on_exit = false
+mount_timeout_s      = 20.0
+use_systemd_scope    = true                         # Transient cgroup v2 scope via systemd-run (master_runner.py:3871)
+scope_slice          = "app-games.slice"
+inhibit_idle         = true
+inhibit_sleep        = true                         # Block idle/sleep during long Portal sessions
+notifications        = true
+kill_grace_s         = 8.0
+
+# ------------------------------------------------------------------------------
+# 12. Sandboxing & Bubblewrap Isolation [sandbox]
+# ------------------------------------------------------------------------------
+[sandbox]
+enabled      = false                               # false = full FS access to /mnt/zram1/portal (needed)
+isolate_home = true
+bind_gpu     = true
+bind_audio   = true
+bind_wayland = true
+bind_network = false
+
+# ------------------------------------------------------------------------------
+# 13. Lifecycle Hooks [hooks]
+# ------------------------------------------------------------------------------
+[hooks]
+pre_mount    = []
+post_mount   = []
+pre_launch   = []                                  # Could verify game files: ["bash -c 'ls \"$GAME_DIR/Portal/portal/portal_pak_dir.vpk\" >/dev/null || echo missing'"]
+post_launch  = []
+post_unmount = []
+
+# ------------------------------------------------------------------------------
+# 14. Custom Environment Variables [env]
+# ------------------------------------------------------------------------------
+[env]
+# Injected into Wine pipeline (master_runner.py:3061 EnvironmentBuilder)
+# DXVK_LOG_LEVEL = "none"  # Uncomment to silence DXVK logs for max perf
+# VKD3D_DEBUG = "none"
+
+# ------------------------------------------------------------------------------
+# 15. Hardware & Session Conditional Overlays [when.<predicate>] (master_runner.py:2125)
+# Predicates: nvidia, amd, intel, hybrid, single_gpu, ntsync, hdr_output, hyprland, kwin, wayland, kernel_ge_7_1, gamescope
+# ------------------------------------------------------------------------------
+# [when.nvidia]
+# runtime.wine.dxvk_nvapi = false  # Keep false - DLSS not used by Source
+#
+# [when.hybrid.graphics]
+# gpu = "discrete"  # Already set to discrete above - auto would also pick discrete
+
+[when.hybrid]
+graphics.gpu = "integrated"

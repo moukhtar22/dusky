@@ -717,11 +717,11 @@ SCHEMA = {
             key="timeout",
             scope="LOADER",
             type_="picker",
-            options=["0", "1", "2", "3", "4", "5", "10", "menu-force", "menu-hidden"],
-            hints=["0s (Instant boot / hold Space to show)", "1 second", "2 seconds", "3 seconds", "4 seconds (Default)", "5 seconds", "10 seconds", "Always display menu without countdown", "Hidden until key press"],
+            options=["0", "1", "2", "3", "4", "5", "10", "menu-force", "menu-hidden", "menu-disabled"],
+            hints=["0s (Instant boot / hold Space to show)", "1 second", "2 seconds", "3 seconds", "4 seconds (Default)", "5 seconds", "10 seconds", "Always display menu without countdown", "Hidden until key press", "Disabled (Never show menu)"],
             default="4",
             group="Menu Display & Timing",
-            extended_help="**Boot Menu Timeout (`timeout` in loader.conf)**\n\n- `0`: Instant boot / hidden menu (Hold Space during boot to show).\n- `2`-`5`: Fast countdown in seconds.\n- `menu-force`: Always displays boot menu without timeout countdown."
+            extended_help="**Boot Menu Timeout (`timeout` in loader.conf)**\n\n- `0`: Instant boot / hidden menu (Hold Space during boot to show).\n- `2`-`5`: Fast countdown in seconds.\n- `menu-force`: Always displays boot menu without timeout countdown.\n- `menu-hidden`: Hides menu unless key is pressed.\n- `menu-disabled`: Disables menu display completely."
         ),
         ConfigItem(
             label="Console Mode",
@@ -731,7 +731,7 @@ SCHEMA = {
             options=["max", "keep", "0", "1", "2", "auto"],
             default="max",
             group="Display Resolution",
-            extended_help="**Console Mode (`console-mode` in loader.conf)**\n\nSets UEFI GOP display resolution for systemd-boot.\n\n- `max`: Native maximum display resolution.\n- `keep`: Keeps firmware default mode."
+            extended_help="**Console Mode (`console-mode` in loader.conf)**\n\nSets UEFI GOP display resolution for systemd-boot.\n\n- `max`: Native maximum display resolution.\n- `keep`: Keeps firmware default mode.\n- `0`: Standard UEFI 80x25 mode.\n- `1`: 80x50 mode.\n- `auto`: Automatic heuristics mode."
         ),
         ConfigItem(
             label="Cmdline Editor",
@@ -748,10 +748,31 @@ SCHEMA = {
             key="secure-boot-enroll",
             scope="LOADER",
             type_="cycle",
-            options=["off", "manual", "if-safe", "force"],
+            options=["if-safe", "manual", "off", "force"],
             default="if-safe",
             group="Security & TPM",
             extended_help="**Secure Boot Key Enrollment (`secure-boot-enroll` in loader.conf)**\n\nControls automatic enrollment of Secure Boot keys into firmware variables."
+        ),
+        ConfigItem(
+            label="Secure Boot Action",
+            key="secure-boot-enroll-action",
+            scope="LOADER",
+            type_="cycle",
+            options=["unset", "reboot", "shutdown"],
+            default="unset",
+            group="Security & TPM",
+            extended_help="**Secure Boot Enrollment Action (`secure-boot-enroll-action` in loader.conf)**\n\nAction to execute after automatic Secure Boot key enrollment completes (reboot or shutdown)."
+        ),
+        ConfigItem(
+            label="Secure Boot Timeout (s)",
+            key="secure-boot-enroll-timeout-sec",
+            scope="LOADER",
+            type_="picker",
+            options=["unset", "0", "5", "10", "15", "30", "hidden"],
+            hints=["Unset (Default 15s)", "0s (Immediate enrollment)", "5 seconds", "10 seconds", "15 seconds", "30 seconds", "Hidden"],
+            default="unset",
+            group="Security & TPM",
+            extended_help="**Secure Boot Warning Timeout (`secure-boot-enroll-timeout-sec` in loader.conf)**\n\nSeconds to display warning before automatic enrollment starts (0 or hidden for instant)."
         ),
         ConfigItem(
             label="Reboot BitLocker",
@@ -761,7 +782,27 @@ SCHEMA = {
             options=["no", "yes"],
             default="no",
             group="Security & TPM",
-            extended_help="**Reboot for BitLocker (`reboot-for-bitlocker` in loader.conf)**\n\nReboots instead of chainloading directly when launching Windows BitLocker to preserve TPM measurements."
+            extended_help="**Reboot for BitLocker (`reboot-for-bitlocker` in loader.conf)**\n\nReboots instead of chainloading directly when launching Windows Boot Manager to preserve TPM PCR measurements."
+        ),
+        ConfigItem(
+            label="Reboot on Error",
+            key="reboot-on-error",
+            scope="LOADER",
+            type_="cycle",
+            options=["unset", "auto", "yes", "no"],
+            default="unset",
+            group="Boot Recovery & Reliability",
+            extended_help="**Reboot on Boot Error (`reboot-on-error` in loader.conf)**\n\n- `auto`: (Default) Reboots if boot assessment is active and tries left counter is non-zero.\n- `yes`: Always reboot if boot entry fails to start.\n- `no`: Return control to UEFI firmware interface."
+        ),
+        ConfigItem(
+            label="Systemd-Boot Log Level",
+            key="log-level",
+            scope="LOADER",
+            type_="cycle",
+            options=["unset", "info", "emerg", "alert", "crit", "err", "warning", "notice", "debug"],
+            default="unset",
+            group="Boot Recovery & Reliability",
+            extended_help="**Systemd-Boot Log Level (`log-level` in loader.conf)**\n\nConfigures log verbosity used by systemd-boot during early initialization."
         ),
         ConfigItem(
             label="Auto Entries",

@@ -120,7 +120,7 @@ TABS = [
 # 5. DYNAMIC COMPONENT GENERATORS
 # =============================================================================
 
-def build_standard_glance(suffix, label_name, group_name="Modules"):
+def build_standard_glance(suffix, label_name, group_name="Modules", expanded=False):
     """
     Dynamically generates a Hybrid Folder containing all configuration parameters
     mapped exactly to the specified [app-name=dusky-glance-{suffix}] scope.
@@ -165,6 +165,7 @@ def build_standard_glance(suffix, label_name, group_name="Modules"):
             type_="menu",
             default=None,
             is_parent=True,
+            expanded=expanded,
             group=group_name,
             extended_help=f"**{label_name} Settings**\n\nGranular geometry and color controls exclusively scoped to the `{app_name}` service block."
         ),
@@ -223,6 +224,15 @@ def build_standard_glance(suffix, label_name, group_name="Modules"):
             step=2,
             parent_ref=uid,
             extended_help="**Total Height**\n\nVertical pixel height for the widget. Keep this thin to maintain a floating text-bar illusion."
+        ),
+        ConfigItem(
+            label="Outer Margin",
+            key="outer-margin",
+            scope=scope,
+            type_="string",
+            default="0,0,0,0",
+            parent_ref=uid,
+            extended_help="**Outer Screen Margin**\n\nCSS-style outer margins (Top, Right, Bottom, Left) that push the entire glance widget away from the screen edges. Distinct from `margin` which controls spacing between stacked notifications."
         ),
         ConfigItem(
             label="Margin",
@@ -385,6 +395,16 @@ def build_alert_glance():
             extended_help="**Critical Alert Anchor**\n\nThe screen quadrant where serious hardware events (e.g., Critical Battery, Unsafe Ejection) will drop from. `top-center` grabs maximum user attention."
         ),
         ConfigItem(
+            label="Layer",
+            key="layer",
+            scope=scope,
+            type_="cycle",
+            default="overlay",
+            options=["background", "bottom", "top", "overlay"],
+            parent_ref=uid,
+            extended_help="**Window Layering**\n\nArranges the alert at the specified layer relative to normal windows. `overlay` ensures it appears above fullscreen windows."
+        ),
+        ConfigItem(
             label="Align",
             key="text-alignment",
             scope=scope,
@@ -417,6 +437,15 @@ def build_alert_glance():
             step=4,
             parent_ref=uid,
             extended_help="**Warning Box Height**\n\nThe vertical thickness for the alert box. Slightly larger to accommodate a visible warning icon."
+        ),
+        ConfigItem(
+            label="Outer Margin",
+            key="outer-margin",
+            scope=scope,
+            type_="string",
+            default="0,0,0,0",
+            parent_ref=uid,
+            extended_help="**Outer Screen Margin**\n\nCSS-style outer margins (Top, Right, Bottom, Left) that push the entire alert widget away from the screen edges."
         ),
         ConfigItem(
             label="Margin",
@@ -491,6 +520,27 @@ def build_alert_glance():
             extended_help="**Enable Warning Emblems**\n\nAllows the system to attach `.svg` icons (like a red battery symbol or disconnected cable) to visually augment the threat level."
         ),
         ConfigItem(
+            label="Format",
+            key="format",
+            scope=scope,
+            type_="string",
+            default="%s",
+            parent_ref=uid,
+            extended_help="**Data Interpreter**\n\nDictates how the alert payload is mapped. `%s` shows summary only, `%b` shows body, `<b>%s</b>\\n%b` shows both."
+        ),
+        ConfigItem(
+            label="Timeout",
+            key="default-timeout",
+            scope=scope,
+            type_="int",
+            default=0,
+            min_val=0,
+            max_val=10000,
+            step=100,
+            parent_ref=uid,
+            extended_help="**Refresh Control**\n\nMilliseconds the alert stays on screen. `0` (Infinite) delegates control to `ignore-timeout` for manual dismissal."
+        ),
+        ConfigItem(
             label="IgnoreTime",
             key="ignore-timeout",
             scope=scope,
@@ -538,7 +588,7 @@ def build_alert_glance():
 # =============================================================================
 SCHEMA = {
     # --- TAB 0: Global Fallback ---
-    0: build_standard_glance("", "Fallback", "Global"),
+    0: build_standard_glance("", "Fallback", "Global", expanded=True),
 
     # --- TAB 1: System Alerts ---
     1: build_alert_glance(),

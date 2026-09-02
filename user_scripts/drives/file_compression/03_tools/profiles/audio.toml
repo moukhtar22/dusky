@@ -1,0 +1,5 @@
+# Audio — pcmaudio categorize + flac for wav-heavy games
+level = 7
+categorize = "pcmaudio"
+compression = "zstd:level=22"
+note = "WAV-heavy, uses FLAC for pcmaudio/waveform"

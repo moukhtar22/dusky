@@ -6,6 +6,7 @@ shopt -s inherit_errexit 2>/dev/null || true
 
 readonly SCRIPT_NAME="${0##*/}"
 readonly SELF_PATH="$(realpath -e -- "${BASH_SOURCE[0]}")"
+orig_args=("$@")
 
 # --- Target Configurations ---
 readonly CONF_DIR="/etc/systemd/journald.conf.d"
@@ -54,7 +55,7 @@ done
 if [[ $EUID -ne 0 && $DRY_RUN -eq 0 ]]; then
     log_info "Root privileges required. Escalating..."
     command -v sudo >/dev/null 2>&1 || die "'sudo' is not available."
-    exec sudo -- /usr/bin/bash "$SELF_PATH" "$@"
+    exec sudo -- /usr/bin/bash "$SELF_PATH" "${orig_args[@]}"
 fi
 
 log_info "Initializing systemd-journald optimizer..."

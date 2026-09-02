@@ -132,6 +132,7 @@ scripts = [
     "U | 390_clipboard_persistance.py",
     "S | 395_intel_media_sdk_check.sh",
     "U | dusky_sites_setup.py",
+    "U | dusk_personal_custom.py --yes",
     "U | optimize_firefox.py",
     # "U | 405_spicetify_matugen_setup.sh",
     "U | 410_waybar_swap_config.py --set waybar=15",

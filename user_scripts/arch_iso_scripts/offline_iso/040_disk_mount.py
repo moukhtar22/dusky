@@ -483,10 +483,10 @@ def auto_detect_efi_partition(root_disk,root_part):
             if ch.get("type")!="part":
                 continue
             non_root.append(pp)
-            if ptype==EFI_GPT_TYPE:
+            if label==DUSKY_EFI_LABEL or partlabel==DUSKY_EFI_LABEL:
+                dusky.append(pp)
+            elif ptype==EFI_GPT_TYPE:
                 guid.append(pp)
-                if label==DUSKY_EFI_LABEL or partlabel==DUSKY_EFI_LABEL:
-                    dusky.append(pp)
             if "efi" in partlabel.lower():
                 labelm.append(pp)
             if fstype in ("vfat","fat32"):

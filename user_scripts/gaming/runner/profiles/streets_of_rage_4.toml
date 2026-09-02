@@ -1,0 +1,39 @@
+# ==============================================================================
+# Streets of Rage 4 Profile
+# ==============================================================================
+
+extends = "base_native"
+
+[meta]
+id = "streets_of_rage_4"
+name = "Streets of Rage 4"
+version = "v08"
+icon = "applications-games"
+developer = "Dotemu / Guard Crush Games"
+genre = "Beat 'em up / Action"
+description = "Classic side-scrolling beat 'em up featuring hand-drawn visuals and updated mechanics."
+
+[paths]
+game_dir = "/mnt/media/games/good_quality/Streets.of.Rage.4-jc141"
+dwarfs_image = "files/game-root.dwarfs"
+dwarfs_mount = "files/.game-root-mnt"
+overlay_dir = "files/game-root"
+overlay_storage = "files/overlay-storage"
+overlay_work = "files/.game-root-work"
+executable = "steamclient_loader.sh"
+arguments = ["-appid", "985890", "-exe", "SOR4"]
+
+[runtime]
+type = "native"
+
+[graphics]
+gpu = "auto"
+wayland_native = true
+
+[graphics.gamescope]
+enabled = false
+
+[performance]
+gamemode = true
+mangohud = false
+fps_limit = 60

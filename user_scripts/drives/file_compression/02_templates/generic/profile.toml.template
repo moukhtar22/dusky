@@ -1,0 +1,49 @@
+# profile.toml — template for BOTH compression and game runner (copy and edit)
+# For compression: 03_tools/profiles/<name>.toml  | For games: ~/user_scripts/gaming/runner/profiles/<id>.toml
+
+# --- Compression Profile (mkdwarfs) — used by actions.sh / mkdwarfs_auto.sh ---
+# level: 0-9 (7=balanced zstd22 64M, 3=fast lz4, 9=max lzma). See mkdwarfs --long-help table.
+level = 7
+block_size_bits = 24          # 20=1M, 24=16M, 26=64M — larger = better ratio, more RAM
+order = "nilsimsa"            # none/path/similarity/nilsimsa — similarity groups similar files
+# categorize: pcmaudio (flac for wav), incompressible (null for .pak/.zip), binary, fits, hotness
+# categorize = "pcmaudio,incompressible"
+# no_create_timestamp = false # true = bit-identical (no time)
+# no_history = false
+# num_workers = 0             # 0=auto (nproc), 1=deterministic
+
+# --- Game Runner Profile (master_runner.py) — extends preset, defines mount + launch ---
+# extends = "base_wine_dxvk"  # base_native / base_unity_native / base_unreal_engine_5 / base_wine_dxvk
+# [meta]
+# id = "my_game"
+# name = "My Game"
+# version = "1.0"
+# developer = "Unknown"
+# genre = "General"
+# description = "DwarFS repack via universal toolkit."
+#
+# [paths]
+# game_dir = "/mnt/media/games/My.Game-jc141"  # or /mnt/zram1/...
+# dwarfs_image = "files/game-root.dwarfs"      # relative to game_dir or absolute
+# overlay_dir = "files/game-root"              # final mount (union)
+# overlay_storage = "files/overlay-storage"    # writable upper (saves)
+# executable = "steamclient_loader_x64.exe"    # or Game.x86_64 for native
+# arguments = []                               # ["-dx12", "-windowed"]
+#
+# [runtime]
+# type = "wine"  # native or wine
+# [runtime.wine]
+# wine_binary = "wine"
+# arch = "win64"
+# sync_mode = "fsync"  # fsync/esync/ntsync
+# dxvk = true
+# vkd3d = true
+#
+# [graphics]
+# gpu = "auto"  # auto/discrete/integrated
+# [performance]
+# gamemode = true
+# fps_limit = 0
+#
+# [sandbox]
+# enabled = false

@@ -110,7 +110,8 @@ esac
 
 mount_game() {
     local total cache
-    total=$(awk '/MemTotal/{print $2}' /proc/meminfo)
+    total=$(awk '/MemTotal/{print $2}' /proc/meminfo 2>/dev/null || echo 16777216)
+    total=${total:-16777216}
     cache=$((total * 25 / 100))
 
     # Tear down any stale FUSE mounts left from a previous run/crash
@@ -121,11 +122,21 @@ mount_game() {
     rm -rf "$OVERLAY_WORK"
 
     mkdir -p "$DWARFS_MNT" "$OVERLAY_STORAGE" "$OVERLAY_WORK" "$OVERLAY_DIR"
-    chmod +x "$DWARFS_BIN"
 
-    "$DWARFS_BIN" --tool=dwarfs "$DWARFS_IMG" "$DWARFS_MNT" \
-        -o tidy_strategy=time -o tidy_interval=15m -o tidy_max_age=30m \
-        -o cachesize="${cache}k" -o clone_fd
+    # DwarFS binary resolution (bundled repack binary vs system dwarfs)
+    if [ -f "$DWARFS_BIN" ]; then
+        chmod +x "$DWARFS_BIN" 2>/dev/null || true
+        "$DWARFS_BIN" --tool=dwarfs "$DWARFS_IMG" "$DWARFS_MNT" \
+            -o tidy_strategy=time -o tidy_interval=15m -o tidy_max_age=30m \
+            -o cachesize="${cache}k" -o clone_fd
+    elif command -v dwarfs >/dev/null 2>&1; then
+        dwarfs "$DWARFS_IMG" "$DWARFS_MNT" \
+            -o tidy_strategy=time -o tidy_interval=15m -o tidy_max_age=30m \
+            -o cachesize="${cache}k" -o clone_fd
+    else
+        echo "Error: DwarFS binary not found (neither $DWARFS_BIN nor system 'dwarfs')." >&2
+        exit 1
+    fi
 
     fuse-overlayfs \
         -o squash_to_uid="$(id -u)" \

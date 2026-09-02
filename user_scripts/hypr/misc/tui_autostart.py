@@ -152,6 +152,15 @@ SCHEMA = {
             extended_help="**Dusky Audio Studio & Voice DSP Engine**\n\nAutomatically launches Dusky Audio Studio on login, restoring real-time PipeWire vocoder, noise cancellation, spatial DSP, and parametric EQ settings."
         ),
         ConfigItem(
+            label="LocalSend (LAN File Transfer)",
+            key="localsend",
+            scope="autostart",
+            type_="bool",
+            default=False,
+            group="Daemons & Services",
+            extended_help="**LocalSend Tray Daemon**\n\nEfficient AirDrop alternative (LAN only). Runs as `localsend --hidden` tray daemon — idle ~0% CPU / ~30 MB RAM, scales only during active transfer. Uses 224.0.0.167:53317/udp multicast discovery + 53317/tcp HTTPS. Native `paru -S localsend` preferred, Flatpak `org.localsend.localsend_app` fallback auto-detected. Thunar right-click *Send via LocalSend* works without this; this toggle only controls background receive/tray on login (opt-in, off by default). If tray missing after reboot, try without `--hidden`."
+        ),
+        ConfigItem(
             label="Gnome Keyring",
             key="gnome_keyring",
             scope="autostart",

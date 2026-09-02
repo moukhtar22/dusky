@@ -624,6 +624,10 @@ EXAMPLES:
             from python.engines.toml import TomlEngine
             return TomlEngine(config_path=config_path)
 
+        elif e_type in ("kokoro", "dusky_kokoro"):
+            from python.engines.kokoro import KokoroEngine
+            return KokoroEngine(config_path=config_path)
+
         elif e_type == "systemd_dns":
             from python.engines.dns_systemd import SystemdDnsEngine
             return SystemdDnsEngine(config_path=config_path)
@@ -632,13 +636,17 @@ EXAMPLES:
             from python.engines.starship import StarshipEngine
             return StarshipEngine(config_path=config_path)
 
+        elif e_type == "hyprlock":
+            from python.engines.hyprlock import HyprlockEngine
+            return HyprlockEngine(config_path=config_path)
+
         else:
             print(f"[-] Fatal: Unknown ENGINE_TYPE '{e_type}' specified in schema '{schema_path.name}'.")
             print(
                 "[i] Supported engines are: 'lua', 'ini', 'bridged_ini', 'systemd', 'systemd_dns', 'hyprlang', "
                 "'trackpad', 'monitor', 'cmdline', 'systemd_boot', 'flatdotconfig', 'env', "
                 "'waybar', 'network', 'pkg_throttle', 'cpu_core', 'fstab', 'shell_fallback', 'json', "
-                "'dusky_sites', 'locale_gen', 'matugen', 'fontconfig', 'starship'"
+                "'dusky_sites', 'locale_gen', 'matugen', 'fontconfig', 'toml', 'kokoro', 'starship', 'hyprlock'"
             )
             sys.exit(1)
 

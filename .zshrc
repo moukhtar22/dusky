@@ -148,6 +148,7 @@ alias disk_usage='sudo btrfs filesystem usage /'
 alias ncdu='gdu'
 alias unlock="$HOME/user_scripts/drives/drive_manager/drive_manager.py unlock"
 alias lock="$HOME/user_scripts/drives/drive_manager/drive_manager.py lock"
+alias drive_status="$HOME/user_scripts/drives/drive_manager/drive_manager.py status"
 alias io_drives="$HOME/user_scripts/drives/dusky_disk_monitor_io.py"
 
 # Searching & Differencing

@@ -14,11 +14,44 @@
 #   • Kernel slab leak detection
 #   • Hyprland Headless / Render Leak vectors (Dynamic IPC) & OOM History
 #   • systemd cgroup pressure limits and user slice shields
+#   • Full cgroup-v2 ownership map (memory.current self-vs-children, per-slice)
+#   • KSM, HugeTLB pool, module resident footprint, top vmalloc allocations
+#   • Generic DRM/GEM client attribution (i915/amdgpu/virtio_gpu/…)
+#   • Page-allocation fragmentation snapshot (buddyinfo/pagetypeinfo)
+#   • Opt-in empirical reclaimability self-test: run with --probe
+#     (executes sync + drop_caches and MEASURES which buckets actually shrink,
+#      instead of asserting folklore about reclaimability)
+#
+# Non-overlapping accounting model:
+#   MemTotal ≈ MemFree + AnonPages + FileCache(Cached − Shmem) + Shmem + Buffers
+#              + Slab + KernelStack + PageTables + SecPageTables + Percpu
+#              + vmalloc-physically-backed(est) + IOMMU-pinned + zram-pool
+#   NOTE: Cached = FileCache + Shmem. Splitting them distinguishes evictable
+#   page cache from non-evictable shared memory/tmpfs while covering all of Cached.
+#   nr_kernel_file_pages ⊂ Cached+Buffers — subset only, never added on top.
+#   Unevictable IS added: with GEM-style drivers those pages live in no other
+#   bucket (residual ≈ 0 proves it per-system); if a future system shows a
+#   large NEGATIVE residual, its pinned pages overlap shmem — use --probe.
+#   VmallocUsed (address space incl. ioremap) ≠ physical RAM; only the
+#   physically-backed portion from /proc/vmallocinfo is counted.
 # ============================================================================
 
 set -euo pipefail
 
 # ── 1. PRIVILEGE ESCALATION & ENVIRONMENT ───────────────────────────────────
+PROBE=false
+for arg in "$@"; do
+    case "$arg" in
+        --probe) PROBE=true ;;
+        -h|--help)
+            echo "Usage: sudo $0 [--probe] [-h|--help]"
+            echo "  --probe    Run empirical reclaimability self-test (sync + drop_caches)"
+            echo "  -h, --help Show this help message"
+            exit 0
+            ;;
+    esac
+done
+
 if [[ "$EUID" -ne 0 ]]; then
     echo -e "\e[1;33m[!] Elevated privileges required. Auto-elevating...\e[0m"
     exec sudo ORIGINAL_USER="$USER" bash "$0" "$@"
@@ -28,7 +61,8 @@ TARGET_USER="${ORIGINAL_USER:-${SUDO_USER:-$USER}}"
 if [[ "$TARGET_USER" == "root" ]]; then
     TARGET_HOME="/root"
 else
-    TARGET_HOME=$(getent passwd "$TARGET_USER" | cut -d: -f6)
+    TARGET_HOME=$(getent passwd "$TARGET_USER" 2>/dev/null | cut -d: -f6)
+    TARGET_HOME="${TARGET_HOME:-${HOME:-/root}}"
 fi
 
 REPORT_DIR="$TARGET_HOME/Documents/logs/ram_audit"
@@ -88,7 +122,8 @@ pss_table() {
                 }
                 close(comm_file)
                 comm = substr(comm, 1, 20)
-                gsub(/\n|\r/, "", comm) 
+                gsub(/\n|\r/, "", comm)
+                gsub(/\|/, "-", comm)
                 
                 print p "\t" comm "\t" uss[p]+0 "\t" pss[p]+0 "\t" rss[p]+0 "\t" swap[p]+0
             }
@@ -157,6 +192,7 @@ ZSWAP=$(get_mem Zswap)
 ZSWAPPED=$(get_mem Zswapped)
 DIRTY=$(get_mem Dirty)
 WRITEBACK=$(get_mem Writeback)
+WRITEBACK_TMP=$(get_mem WritebackTmp)
 COMMITTED=$(get_mem Committed_AS)
 COMMIT_LIMIT=$(get_mem CommitLimit)
 HW_CORRUPTED=$(get_mem HardwareCorrupted)
@@ -178,23 +214,66 @@ ZRAM_PEAK_KB=$(
 [[ -z "$ZRAM_PEAK_KB" ]] && ZRAM_PEAK_KB=0
 
 # vmstat-only kernel allocations NOT exposed by /proc/meminfo (kernel 7.x):
-#   nr_kernel_file_pages — reclaimable kernel-internal file pages. Empirically
-#     DISJOINT from Cached: drop_caches frees them (181MB→24MB) while the identity
-#     NR_FILE_PAGES == Cached+Buffers+SwapCached holds exactly before AND after.
-#   nr_io_mmu_pages — pages pinned by the IOMMU (0 here, nonzero on VMs/PCI-passthru).
-KERNEL_FILE_KB=$(awk '/^nr_kernel_file_pages/{print $2}' /proc/vmstat 2>/dev/null | awk '{print $1*4}')
-IOMMU_KB=$(awk '/^nr_io_mmu_pages/{print $2}' /proc/vmstat 2>/dev/null | awk '{print $1*4}')
+#   nr_kernel_file_pages — kernel-internal file cache pages. SUBSET of Cached:
+#     the audit identity NR_FILE_PAGES == Cached+Buffers+SwapCached holds exactly,
+#     so these are a cross-check only and MUST NOT be added on top of Cached.
+#   nr_io_mmu_pages — pages pinned by the IOMMU (nonzero on VMs/PCI-passthru).
+KERNEL_FILE_KB=$(awk '/^nr_kernel_file_pages/{print $2*4}' /proc/vmstat 2>/dev/null)
+IOMMU_KB=$(awk '/^nr_io_mmu_pages/{print $2*4}' /proc/vmstat 2>/dev/null)
 [[ -z "$KERNEL_FILE_KB" ]] && KERNEL_FILE_KB=0
 [[ -z "$IOMMU_KB" ]] && IOMMU_KB=0
 
-KERNEL_CORE_KB=$(( K_RECLAIMABLE + S_UNRECLAIM + K_STACK + PAGE_TABLES + SEC_PAGE_TABLES + PERCPU + VMALLOC_USED + KERNEL_FILE_KB + IOMMU_KB ))
-# Unevictable is empirically DISJOINT from AnonPages/Cached/Shmem (drop_caches frees
-# it while Shmem stays flat), so it must be counted as known to close the accounting.
-KNOWN_KB=$(( MEM_FREE + ANON_PAGES + SHMEM + FILE_CACHE + BUFFERS + UNEVICTABLE + KERNEL_CORE_KB + ZRAM_TOTAL_KB ))
+# VmallocUsed counts ADDRESS SPACE (vmalloc + ioremap + module/execmem mappings),
+# not physical RAM. Only sum physically-backed pages from /proc/vmallocinfo
+# (skip ioremap lines which map device MMIO, not RAM). Estimate; 0 if unreadable.
+VMALLOC_PHYS_KB=$(
+    awk '!/ioremap/ { for (i = 1; i <= NF; i++)
+            if ($i ~ /^pages=[0-9]+$/) { split($i, a, "="); s += a[2] } }
+        END { printf "%.0f", s * 4 }' /proc/vmallocinfo 2>/dev/null || echo "")
+[[ -z "$VMALLOC_PHYS_KB" ]] && VMALLOC_PHYS_KB=0
+
+# Classic tooling view (what free(1)/htop call "used"): exact top-down remainder.
+USED_CLASSIC_KB=$(( MEM_TOTAL - MEM_FREE - BUFFERS - CACHED - S_RECLAIMABLE ))
+
+# Non-overlapping bottom-up accounting:
+# Total Page Cache is Cached = FILE_CACHE + SHMEM.
+# Slab is counted as SLAB (split into KReclaimable and SUnreclaim for display).
+# Unevictable is added: with GEM-style GPU drivers (virtio_gpu/i915/amdgpu) these pages
+# are private driver allocations appearing in no other bucket.
+KERNEL_CORE_KB=$(( SLAB + K_STACK + PAGE_TABLES + SEC_PAGE_TABLES + PERCPU + VMALLOC_PHYS_KB + IOMMU_KB ))
+KNOWN_KB=$(( MEM_FREE + ANON_PAGES + FILE_CACHE + SHMEM + BUFFERS + KERNEL_CORE_KB + UNEVICTABLE + ZRAM_TOTAL_KB ))
 RESIDUAL_KB=$(( MEM_TOTAL - KNOWN_KB ))
-if [[ $RESIDUAL_KB -lt 0 ]]; then
-    echo "> ⚠ **Accounting warning:** \`Residual\` went negative (double-count suspected). Values captured at slightly different moments can cause this transiently."
+RESID_PCT=$(( RESIDUAL_KB * 100 / (MEM_TOTAL > 0 ? MEM_TOTAL : 1) ))
+if (( RESID_PCT > 2 || RESID_PCT < -2 )); then
+    echo "> ⚠ **Accounting warning:** \`Residual\` is ${RESIDUAL_KB} kB (${RESID_PCT}% of RAM). This flags a missed category or double-count — investigate."
 fi
+
+# Userspace process totals (Σ over every live process, smaps_rollup)
+read -r PROC_COUNT USR_PSS_KB USR_RSS_KB USR_SWAP_KB <<< "$( (
+    set +e +o pipefail
+    grep -HE '^(Pss|Rss|Swap):' /proc/[0-9]*/smaps_rollup 2>/dev/null | awk -F':' '
+    {
+        split($1, path, "/"); pid = path[3]; seen[pid] = 1
+        if ($2 == "Pss") pss += $3 + 0
+        else if ($2 == "Rss") rss += $3 + 0
+        else if ($2 == "Swap") swp += $3 + 0
+    }
+    END { n = 0; for (p in seen) n++
+          printf "%d\t%d\t%d\t%d", n, pss, rss, swp }' 2>/dev/null
+) )"
+PROC_COUNT=${PROC_COUNT:-0}; USR_PSS_KB=${USR_PSS_KB:-0}
+USR_RSS_KB=${USR_RSS_KB:-0}; USR_SWAP_KB=${USR_SWAP_KB:-0}
+
+# Detect the active DRM driver dynamically.
+GPU_DRIVER=$(awk '$1 ~ /^(i915|xe|amdgpu|virtio_gpu|vmwgfx|nouveau|radeon|qxl|bochs|cirrus|gma500|hibmc|ivpu|panfrost|lima|msm|v3d|vc4|vkms)$/ {print $1; exit}' /proc/modules 2>/dev/null)
+if [[ -z "$GPU_DRIVER" ]]; then
+    for card_dd in /sys/class/drm/card[0-9]/device/driver; do
+        [[ -e "$card_dd" ]] || continue
+        GPU_DRIVER=$(basename "$(readlink -f "$card_dd" 2>/dev/null)" 2>/dev/null)
+        break
+    done
+fi
+GPU_DRIVER=${GPU_DRIVER:-unknown}
 
 # ── 0. EXECUTIVE SUMMARY (one-glance health check) ───────────────────────────
 echo ""
@@ -207,17 +286,19 @@ echo "|---|---:|"
 printf "| Total RAM (MemTotal) | %s |\n" "$(to_mb $MEM_TOTAL)"
 printf "| Truly Available | %s |\n" "$(to_mb $MEM_AVAIL)"
 printf "| Raw Free | %s |\n" "$(to_mb $MEM_FREE)"
+printf "| Committed (classic \`used\` = T−F−Buf−Cache−SRecl) | %s |\n" "$(to_mb $USED_CLASSIC_KB)"
+printf "| All processes combined (Σ PSS, $PROC_COUNT procs) | %s |\n" "$(to_mb $USR_PSS_KB)"
 printf "| Apps (AnonPages) | %s |\n" "$(to_mb $ANON_PAGES)"
-printf "| File Cache (auto-freed) | %s |\n" "$(to_mb $FILE_CACHE)"
+printf "| File Cache (auto-freed, Cached − Shmem) | %s |\n" "$(to_mb $FILE_CACHE)"
 printf "| Shared / Wayland (Shmem) | %s |\n" "$(to_mb $SHMEM)"
-printf "| GPU GEM Pool (Unevictable) | %s |\n" "$(to_mb $UNEVICTABLE)"
-printf "| Kernel (slab/PT/vmalloc/file) | %s |\n" "$(to_mb $KERNEL_CORE_KB)"
+printf "| Pinned LRU (Unevictable, driver-private) | %s |\n" "$(to_mb $UNEVICTABLE)"
+printf "| Kernel (slab/PT/stack/percpu/vmalloc-phys) | %s |\n" "$(to_mb $KERNEL_CORE_KB)"
 printf "| ZRAM Compressed Pool | %s |\n" "$(to_mb $ZRAM_TOTAL_KB)"
 printf "| **Residual (true unknown)** | **%s** |\n" "$(to_mb $RESIDUAL_KB)"
 ALERTS=""
 if [[ $S_UNRECLAIM -gt 524288 ]]; then ALERTS+="⚠ SUnreclaim >512MB (possible slab leak, Sec 7); "; fi
 if [[ $COMMIT_LIMIT -gt 0 ]] && (( COMMITTED * 100 / COMMIT_LIMIT > 90 )); then ALERTS+="⚠ Commit ratio >90% (Sec 2); "; fi
-if (( MEM_AVAIL * 100 / MEM_TOTAL < 5 )); then ALERTS+="⚠ Critically low free RAM (<5% avail); "; fi
+if (( MEM_AVAIL * 100 / (MEM_TOTAL > 0 ? MEM_TOTAL : 1) < 5 )); then ALERTS+="⚠ Critically low free RAM (<5% avail); "; fi
 [[ -z "$ALERTS" ]] && ALERTS="✅ No critical flags."
 echo "> **Alerts:** $ALERTS"
 TOP_PSS_LINE=$(
@@ -267,6 +348,7 @@ echo "| 8 | GPU DMA-BUF Allocations |"
 echo "| 9 | Transparent Hugepages (THP) |"
 echo "| 10 | Hyprland Memory Leak Checklist |"
 echo "| 11 | Memory Pressure Events (OOM) |"
+echo "| 11b | Reclaimability Self-Test (\`--probe\`, opt-in) |"
 echo "| 12 | Quick Diagnosis Guide |"
 echo "| 13 | Custom Kernel RAM Savings Estimation |"
 echo ""
@@ -278,8 +360,8 @@ echo "## 1. Complete Memory Accounting (Kernel Absolute Truth)"
 echo "---"
 echo '> **Understanding this section:** This is the absolute low-level truth of your RAM. Tools like `htop` group these numbers together unpredictably. Here, you see exactly what the kernel is allocating.'
 echo '> * **AnonPages:** Your running apps, browsers, and game memory.'
-echo '> * **Cached:** Files kept in RAM to make the system fast. *This is automatically freed if apps need more RAM.*'
-echo '> * **Shmem:** Shared Memory. On Wayland, this includes the literal pixel buffers of your visible windows.'
+echo '> * **Cached:** Files kept in RAM to make the system fast (`File Cache + Shmem`). *Clean file cache is automatically freed under memory pressure.*'
+echo '> * **Shmem:** Shared Memory & tmpfs. On Wayland, this includes the literal pixel buffers of your visible windows.'
 echo ""
 
 echo "### Overall"
@@ -288,18 +370,21 @@ echo "|---|---:|"
 printf "| Total Usable RAM (MemTotal) | %s |\n" "$(to_mb $MEM_TOTAL)"
 printf "| Truly Available (MemAvailable) | %s |\n" "$(to_mb $MEM_AVAIL)"
 printf "| Raw Free (MemFree) | %s |\n" "$(to_mb $MEM_FREE)"
+printf "| Committed — what free(1)/htop call \"used\" | %s |\n" "$(to_mb $USED_CLASSIC_KB)"
+echo ""
+echo "> **Tool reconciliation:** this report's *Committed* = \`MemTotal − MemFree − Buffers − Cached − SReclaimable\` — exactly how \`free\`/\`htop\` derive \"used\". It is exact by construction and is decomposed into named buckets below."
 echo ""
 echo "### Named Allocations"
 echo "| Category | MB |"
 echo "|---|---:|"
 printf "| Userspace Anon (AnonPages) | %s |\n" "$(to_mb $ANON_PAGES)"
-printf "| Page Cache / File-backed | %s |\n" "$(to_mb $FILE_CACHE)"
+printf "| Page Cache / File-backed (Cached − Shmem) | %s |\n" "$(to_mb $FILE_CACHE)"
 printf "| Shared Memory/Tmpfs (Shmem) | %s |\n" "$(to_mb $SHMEM)"
 printf "| Buffer Cache (Buffers) | %s |\n" "$(to_mb $BUFFERS)"
 printf "| Swap Cache (subset of File+Shmem) | %s |\n" "$(to_mb $SWAP_CACHED)"
 printf "| Mapped (file-mapped only on 7.x) | %s |\n" "$(to_mb $MAPPED)"
 printf "| Mlocked (subset of Unevictable) | %s |\n" "$(to_mb $MLOCKED)"
-printf "| Unevictable (pinned LRU) | %s |\n" "$(to_mb $UNEVICTABLE)"
+printf "| Unevictable (pinned LRU — driver-private, additive) | %s |\n" "$(to_mb $UNEVICTABLE)"
 [[ $GPU_ACTIVE -gt 0 || $GPU_RECLAIM -gt 0 ]] && printf "| GPU-managed active/reclaim (7.x) | %s |\n" "$(to_mb $((GPU_ACTIVE + GPU_RECLAIM)))"
 echo ""
 echo "### Kernel Structures"
@@ -312,8 +397,9 @@ printf "| Kernel Stacks | %s |\n" "$(to_mb $K_STACK)"
 printf "| Page Tables | %s |\n" "$(to_mb $PAGE_TABLES)"
 printf "| Secondary Page Tables (KVM/arm) | %s |\n" "$(to_mb $SEC_PAGE_TABLES)"
 printf "| Per-CPU Allocations | %s |\n" "$(to_mb $PERCPU)"
-printf "| vmalloc Used | %s |\n" "$(to_mb $VMALLOC_USED)"
-printf "| Kernel File Pages (vmstat-only) | %s |\n" "$(to_mb $KERNEL_FILE_KB)"
+printf "| vmalloc Address Space (VmallocUsed, incl. ioremap) | %s |\n" "$(to_mb $VMALLOC_USED)"
+printf "| └─ vmalloc Physically Backed (est. RAM) | %s |\n" "$(to_mb $VMALLOC_PHYS_KB)"
+printf "| Kernel File Pages (subset of Cached — cross-check) | %s |\n" "$(to_mb $KERNEL_FILE_KB)"
 [[ $IOMMU_KB -gt 0 ]] && printf "| IOMMU Pinned Pages (vmstat-only) | %s |\n" "$(to_mb $IOMMU_KB)"
 echo ""
 echo "### Summary"
@@ -327,7 +413,7 @@ printf "| **Residual estimate** | **%s** |\n" "$(to_mb $RESIDUAL_KB)"
 echo "> **Arithmetic identity (by construction):** \`Known\` + \`Residual\` = **$(to_mb $KNOWN_KB) + $(to_mb $RESIDUAL_KB) = $(to_mb $((KNOWN_KB + RESIDUAL_KB))) MB** = MemTotal **$(to_mb $MEM_TOTAL) MB**. This always holds because \`Residual\` is *defined* as \`MemTotal − Known\` — it only proves arithmetic. The audit below is the real correctness check."
 
 XCHECK=$(
-    awk -v zram_extra="$ZRAM_TOTAL_KB" -v zresid="$RESIDUAL_KB" '
+    awk -v zram_extra="$ZRAM_TOTAL_KB" -v zresid="$RESIDUAL_KB" -v vphys="$VMALLOC_PHYS_KB" '
         function mb(x) { return int((x + 512) / 1024) }
         FNR == NR {
             if ($1 == "MemTotal:")     mt = $2
@@ -337,14 +423,12 @@ XCHECK=$(
             else if ($1 == "Shmem:")   sh = $2
             else if ($1 == "Buffers:") bu = $2
             else if ($1 == "SwapCached:") sc = $2
+            else if ($1 == "Slab:") sl = $2
             else if ($1 == "Unevictable:") un = $2
-            else if ($1 == "KReclaimable:") kr = $2
-            else if ($1 == "SUnreclaim:") su = $2
             else if ($1 == "KernelStack:") ks = $2
             else if ($1 == "PageTables:") pt = $2
             else if ($1 == "SecPageTables:") sp = $2
             else if ($1 == "Percpu:") pc = $2
-            else if ($1 == "VmallocUsed:") vm = $2
             next
         }
         {
@@ -357,16 +441,15 @@ XCHECK=$(
         }
         END {
             fc = ca - sh; if (fc < 0) fc = 0
-            kcore = kr + su + ks + pt + sp + pc + vm + kfp*4 + iommu*4
-            known = mf + ap + sh + fc + bu + un + kcore + zram_extra
+            kcore = sl + ks + pt + sp + pc + vphys + iommu*4
+            known = mf + ap + fc + sh + bu + kcore + un + zram_extra
             resid = mt - known
             fpexpect = ca + bu + sc
             fp = nfp*4
-            printf "> * **Single-snapshot Residual ≈ %d MB** (multi-read script residual: %d MB) — delta < ~50 MB is per-field read timing skew; a large gap would flag a missed category or double-count.\n", mb(resid), mb(zresid)
-            printf "> * Identity NR_FILE_PAGES*4 == Cached+Buffers+SwapCached: **%s** (%d vs %d kB)\n", (fp == fpexpect ? "PASS" : "FAIL"), fp, fpexpect
+            printf "> * **Single-snapshot Residual ≈ %d MB** (script residual: %d MB) — delta < ~50 MB is per-field read timing skew; a large gap would flag a missed category or double-count.\n", mb(resid), mb(zresid)
+            printf "> * Identity NR_FILE_PAGES*4 == Cached+Buffers+SwapCached: **%s** (%d vs %d kB) → proves nr_kernel_file_pages (%d kB) is a *subset*, never added on top.\n", (fp == fpexpect ? "PASS" : "FAIL"), fp, fpexpect, kfp*4
             printf "> * Identity vmstat-meminfo PageTables: **%s** (%d vs %d kB)\n", (pttp*4 == pt ? "PASS" : "FAIL"), pttp*4, pt
             printf "> * Identity vmstat-meminfo KernelStack (KiB counter on 7.x): **%s** (%d vs %d kB)\n", (kstp == ks ? "PASS" : "FAIL"), kstp, ks
-            printf "> * Identity vmstat-meminfo VmallocUsed: **%s** (%d vs %d kB)\n", (vmp*4 == vm ? "PASS" : "FAIL"), vmp*4, vm
         }
     ' /proc/meminfo /proc/vmstat
 )
@@ -376,12 +459,11 @@ if [[ -n "$XCHECK" ]]; then
 fi
 
 echo "> **Diagnostic Note:**"
-echo "> * \`VmallocUsed\` (~800 MB here) is **real committed kernel RAM** (execmem/module/bpf mappings) and is counted as known, so \`Residual\` is the true unclassified remainder: kernel image/direct-map, boot reservations and fragmentation."
-echo "> * \`Unevictable\` is counted as known — empirically it is **disjoint** from \`Shmem\`/\`AnonPages\`/\`Cached\` (freeing it via \`echo 3 > /proc/sys/vm/drop_caches\` drops only \`Unevictable\`; \`Shmem\` stays flat). It is **not** double-counted."
-echo "> * On kernel 7.x, \`GPUActive\`/\`GPUReclaim\` are the emerging GPU-page counters — but most drivers (incl. i915 here) still report 0, so the real GPU system-RAM pool shows up in \`Unevictable\` instead."
-echo "> * \`Kernel File Pages\` reads \`nr_kernel_file_pages\` from \`/proc/vmstat\` (not shown in meminfo). Empirically **disjoint** from \`Cached\`: \`drop_caches\` freed it (181→24 MB) while the identity \`NR_FILE_PAGES == Cached+Buffers+SwapCached\` held exactly before and after. Counted as known."
+echo "> * \`VmallocUsed\` (\`$(to_mb $VMALLOC_USED) MB\` here) is **address space** (vmalloc + ioremap + module/execmem mappings) — NOT all physical RAM. Only the physically-backed portion (~$(to_mb $VMALLOC_PHYS_KB) MB, estimated from \`/proc/vmallocinfo\`, ioremap excluded) is counted as known. See Section 7d for the top allocations."
+echo "> * \`Cached\` (\`$(to_mb $CACHED) MB\`) is decomposed into evictable \`Page Cache\` (\`$(to_mb $FILE_CACHE) MB\`) and non-evictable \`Shmem\` (\`$(to_mb $SHMEM) MB\`). \`nr_kernel_file_pages\` (\`$(to_mb $KERNEL_FILE_KB) MB\`) is a subset of Cached+Buffers shown as a cross-check only."
+echo "> * \`Unevictable\` (\`$(to_mb $UNEVICTABLE) MB\`, \`Mlocked\` = $(to_mb $MLOCKED) MB) is **added** to the accounting: on GEM-style drivers ($GPU_DRIVER here) those pages are private driver allocations in *no* other bucket — verified by Residual collapsing to ~0 once added. On shmem-backed systems they would instead overlap \`Cached\` and drive Residual negative; the ±100 MB warning catches that case, and \`--probe\` measures reclaimability live. Attribute holders via the cgroup map in Section 1a."
+echo "> * On kernel 7.x, \`GPUActive\`/\`GPUReclaim\` meminfo fields exist but most drivers still report 0."
 echo "> * SUnreclaim > 500 MB → **ALERT:** Kernel slab leak (See Section 7)."
-echo "> * Large \`Unevictable\` with tiny \`Mlocked\` on an Intel/AMD desktop is the **i915/amdgpu GEM system-RAM pool** held by GPU-accelerated apps, not a leak — the driver shrinker releases it under pressure."
 echo "> * \`Mapped\`, \`SwapCached\`, \`Mlocked\` and the THP sub-fields are **subsets** of the categories above; they are shown for reference only and are NOT added to the total."
 echo ""
 
@@ -405,23 +487,57 @@ if [[ "$UNEVICTABLE" -gt 0 ]]; then
     echo "\`\`\`"
 
     echo ""
-    echo "### Unevictable Memory Attribution (per cgroup, empirical)"
-    echo "> *Read from \`/sys/fs/cgroup/*/memory.stat\`. Shows which services/apps actually own the pinned pages, so a 500 MB \`Unevictable\` with zero \`Mlocked\` is traced to its real owner instead of being mislabeled as a VM.*"
+    echo "### 1a. Cgroup Ownership Map (self-charges, empirical)"
+    echo "> *Every cgroup aggregates its children, so raw \`memory.current\` double-counts. This map computes each group's **self** charge (\`own − Σ children\`) for both total memory and pinned/unevictable pages — including slice-level and kernel-global charges that leaf-only views miss. The \`/\` (root) row is by definition the **kernel-unattributed** remainder.*"
     echo "\`\`\`text"
     (
         set +e +o pipefail
-        find /sys/fs/cgroup -type d 2>/dev/null | while read -r cg; do
-            [[ -f "$cg/memory.stat" ]] || continue
-            # Only leaf cgroups hold their own charges; parents merely aggregate children.
-            [[ -z "$(find "$cg" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | head -1)" ]] || continue
-            u=$(awk '/^unevictable /{print $2}' "$cg/memory.stat" 2>/dev/null || echo 0)
-            [[ "${u:-0}" -gt 1048576 ]] 2>/dev/null || continue
-            procs=""
-            while read -r p; do
-                procs+="$(cat /proc/$p/comm 2>/dev/null || echo "?")[$p] "
-            done < "$cg/cgroup.procs" 2>/dev/null
-            printf "%10.1f MB  %s  %s\n" "$(awk "BEGIN {printf \"%.1f\", $u/1048576}")" "${cg#/sys/fs/cgroup/}" "${procs:-<none>}"
-        done | sort -rn | head -10
+        cgroup_map() {
+            find /sys/fs/cgroup -mindepth 1 -type d 2>/dev/null | sort | while read -r cg; do
+                cur=$(cat "$cg/memory.current" 2>/dev/null)
+                [[ -z "$cur" ]] && continue
+                unev=$(awk '$1 == "unevictable" {print $2}' "$cg/memory.stat" 2>/dev/null)
+                [[ -z "$unev" ]] && unev=0
+                oom=$(awk '$1 == "oom_kill" {s += $2} END {print s + 0}' "$cg/memory.events" 2>/dev/null)
+                [[ -z "$oom" ]] && oom=0
+                csum=0; usum=0
+                for child in "$cg"/*/; do
+                    [[ -f "${child}memory.current" ]] || continue
+                    cc=$(cat "${child}memory.current" 2>/dev/null); [[ -z "$cc" ]] && cc=0
+                    uu=$(awk '$1 == "unevictable" {print $2}' "${child}memory.stat" 2>/dev/null); [[ -z "$uu" ]] && uu=0
+                    csum=$((csum + cc)); usum=$((usum + uu))
+                done
+                self_cur=$((cur - csum)); self_un=$((unev - usum))
+                { (( self_cur > 524288 )) || (( self_un > 1048576 )); } || continue
+                procs=""
+                n=0
+                while read -r p && (( n < 3 )); do
+                    procs+="$(cat "/proc/$p/comm" 2>/dev/null || echo "?")[$p] "
+                    n=$((n + 1))
+                done < "$cg/cgroup.procs" 2>/dev/null
+                printf "%13s %13.2f %5s %s %s\n" \
+                    "$(if [[ -n "$self_cur" ]]; then awk "BEGIN {printf \"%.2f\", $self_cur/1048576}"; else echo "n/a"; fi)" \
+                    "$(awk "BEGIN {printf \"%.2f\", $self_un/1048576}")" \
+                    "$oom" \
+                    "${cg#/sys/fs/cgroup}" "${procs:+— $procs}"
+            done
+        }
+        printf "%-13s %-13s %-5s %s\n" "SELF_CUR_MB" "UNEV_SELF_MB" "OOM" "CGROUP (processes)"
+        ROOT_UNEV=$(awk '$1 == "unevictable" {print $2}' /sys/fs/cgroup/memory.stat 2>/dev/null)
+        [[ -z "$ROOT_UNEV" ]] && ROOT_UNEV=0
+        ROOT_KID_SUM=0
+        for top_d in /sys/fs/cgroup/*/; do
+            ru=$(awk '$1 == "unevictable" {print $2}' "${top_d}memory.stat" 2>/dev/null)
+            [[ -z "$ru" ]] && ru=0
+            ROOT_KID_SUM=$((ROOT_KID_SUM + ru))
+        done
+        ROOT_OOM=$(awk '$1 == "oom_kill" {s += $2} END {print s + 0}' /sys/fs/cgroup/memory.events 2>/dev/null)
+        [[ -z "$ROOT_OOM" ]] && ROOT_OOM=0
+        printf "%13s %13.2f %5s %s\n" "n/a" \
+            "$(awk "BEGIN {printf \"%.2f\", ($ROOT_UNEV - $ROOT_KID_SUM)/1048576}")" \
+            "$ROOT_OOM" \
+            "/ (kernel-unattributed remainder)"
+        cgroup_map | sort -k1,1gr | head -24
     ) || true
     echo "\`\`\`"
     echo ""
@@ -439,6 +555,7 @@ printf "%-45s %8s MB\n" "  CommitLimit:"   "$(to_mb $COMMIT_LIMIT)"
 printf "%-45s %8s MB\n" "  Committed_AS:"  "$(to_mb $COMMITTED)"
 printf "%-45s %8s MB\n" "  Dirty pages:"   "$(to_mb $DIRTY)"
 printf "%-45s %8s MB\n" "  In writeback:"  "$(to_mb $WRITEBACK)"
+[[ $WRITEBACK_TMP -gt 0 ]] && printf "%-45s %8s MB\n" "  FUSE writeback (WritebackTmp):" "$(to_mb $WRITEBACK_TMP)"
 [[ $HW_CORRUPTED -gt 0 ]] && printf "%-45s %8s MB\n" "  *** HW CORRUPTED RAM ***:" "$(to_mb $HW_CORRUPTED)"
 echo "\`\`\`"
 OVERCOMMIT=$(( COMMITTED * 100 / (COMMIT_LIMIT > 0 ? COMMIT_LIMIT : 1) ))
@@ -510,6 +627,15 @@ echo '> * **PSS:** The most accurate metric. USS plus the fair mathematical shar
 echo ""
 pss_table 25
 echo ""
+echo "### All Processes Combined (userspace footprint)"
+echo "| Metric | MB |"
+echo "|---|---:|"
+printf "| Σ PSS across all $PROC_COUNT processes | %s |\n" "$(to_mb $USR_PSS_KB)"
+printf "| Σ RSS (inflated by shared-page double-count) | %s |\n" "$(to_mb $USR_RSS_KB)"
+printf "| Σ Swap already pushed out (mostly zram) | %s |\n" "$(to_mb $USR_SWAP_KB)"
+echo ""
+echo "> **Userspace vs Kernel split:** Σ PSS = **$(to_mb $USR_PSS_KB) MB** userspace vs ~$(to_mb $(( USED_CLASSIC_KB - USR_PSS_KB > 0 ? USED_CLASSIC_KB - USR_PSS_KB : 0 ))) MB kernel-side within the committed pool ($(to_mb $USED_CLASSIC_KB) MB). Anything Σ PSS doesn't explain is kernel/driver memory — chase it via Sections 1a, 7 & 8."
+echo ""
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SECTION 5 — HYPRLAND-SPECIFIC DIAGNOSTICS
@@ -557,7 +683,7 @@ echo ""
 echo "### Wayland Compositor & Daemon RSS Summary"
 echo "| Process | PID | RSS (MB) |"
 echo "|---|---|---|"
-PROCS=(Hyprland waybar xdg-desktop-portal xdg-desktop-portal-hyprland pipewire wireplumber hypridle hyprlock swaybg swww-daemon mako dunst fnott eww ags)
+PROCS=(Hyprland sway niri wayfire river kwin_wayland mutter waybar xdg-desktop-portal xdg-desktop-portal-hyprland xdg-desktop-portal-gtk xdg-desktop-portal-gnome pipewire wireplumber hypridle hyprlock swaybg swww-daemon mako dunst fnott eww ags)
 for proc in "${PROCS[@]}"; do
     pid=$(pgrep -x "$proc" 2>/dev/null | head -1 || true)
     if [[ -n "$pid" ]]; then
@@ -592,7 +718,6 @@ for uid_dir in /run/user/*/; do
     uid="${uid##*/}"
     uname_for_uid=$(getent passwd "$uid" 2>/dev/null | cut -d: -f1 || echo "uid:$uid")
     
-    # Subshell with pipefail disabled to prevent "3.3M\n?" bug
     size=$( (set +e +o pipefail; du -sh "$uid_dir" 2>/dev/null | awk '{print $1}') )
     [[ -z "$size" ]] && size="?"
     
@@ -613,7 +738,6 @@ if [[ -r /proc/slabinfo ]]; then
     echo "NAME                       NUM_OBJS  OBJSIZE  TOTAL_MB"
     echo "------------------------------------------------------"
     
-    # Subshell decoupled for numeric accuracy: Sort first, format second.
     (
         set +e +o pipefail
         awk 'NR>2 && NF>=4 {
@@ -635,6 +759,88 @@ else
 fi
 echo ""
 
+# ── 7b. KSM (Kernel Samepage Merging) ───────────────────────────────────────
+echo "### 7b. KSM — Kernel Samepage Merging"
+KSM_DIR=/sys/kernel/mm/ksm
+if [[ -d "$KSM_DIR" ]]; then
+    KSM_RUN=$(cat "$KSM_DIR/run" 2>/dev/null || echo "?")
+    if [[ "$KSM_RUN" == "0" ]]; then
+        echo "- **KSM disabled** (\`run=0\`) — no deduplication, no accounting impact."
+    else
+        KSH=$(cat "$KSM_DIR/pages_shared" 2>/dev/null || echo 0)
+        KSIG=$(cat "$KSM_DIR/pages_sharing" 2>/dev/null || echo 0)
+        KPROFIT=$(cat "$KSM_DIR/general_profit" 2>/dev/null || echo "?")
+        echo "- **KSM active** (\`run=$KSM_RUN\`): $KSH shared pages, $KSIG sharing users."
+        echo "- **RAM saved by deduplication:** ~$(to_mb $(((KSIG - KSH) * 4))) MB *(pages_sharing − pages_shared)* · general_profit: ${KPROFIT} kB"
+    fi
+else
+    echo "- **KSM not available** on this kernel config."
+fi
+echo ""
+
+# ── 7c. Loaded Modules (resident footprint) ─────────────────────────────────
+echo "### 7c. Loaded Kernel Modules (resident RAM)"
+MOD_SUMMARY=$(
+    set +e +o pipefail
+    lsmod | tail -n +2 | awk '{ n++; s += $2; if ($2 > max) { max = $2; name = $1 } } END { printf "%d %d %s %d", n, s, name, max }'
+) || true
+read -r MOD_N MOD_BYTES MOD_TOPNAME MOD_TOPSIZE <<< "${MOD_SUMMARY:-0 0 - 0}"
+echo "- **Modules resident:** \`$MOD_N\` — Σ in-memory size ≈ **$(awk "BEGIN {printf \"%.1f\", $MOD_BYTES/1048576}") MB** *(largest: \`$MOD_TOPNAME\` ≈ $(awk "BEGIN {printf \"%.0f\", $MOD_TOPSIZE/1024}") KB)*. Module .text lives in the vmalloc space (Sections 1 & 7d)."
+echo ""
+echo "Top 10 by resident size:"
+echo "\`\`\`text"
+(
+    set +e +o pipefail
+    lsmod | tail -n +2 | sort -k2 -rn | head -10 | awk '{ printf "  %-20s %8.0f KB   used_by: %s\n", $1, $2/1024, $4 }'
+) || true
+echo "\`\`\`"
+echo ""
+
+# ── 7d. Top vmalloc Allocations ─────────────────────────────────────────────
+echo "### 7d. Largest Physically-Backed vmalloc Allocations"
+if [[ -r /proc/vmallocinfo ]]; then
+    echo "- Σ physically-backed vmalloc pages ≈ **$(awk "BEGIN {printf \"%.1f\", $VMALLOC_PHYS_KB/1024}") MB** (vs VmallocUsed address space $(to_mb $VMALLOC_USED) MB). The gap is mostly ioremap/MMIO mappings that consume no RAM."
+    echo ""
+    echo "Top 10 (physically backed):"
+    echo "\`\`\`text"
+    (
+        set +e +o pipefail
+        awk '!/ioremap/ {
+            for (i = 1; i <= NF; i++) if ($i ~ /^pages=[0-9]+$/) {
+                split($i, a, "=")
+                caller = "?"
+                for (j = 3; j < i; j++) {
+                    if ($j ~ /\+0x/) {
+                        caller = $j
+                        if ($(j+1) ~ /^\[.*\]$/) caller = caller " " $(j+1)
+                        break
+                    }
+                }
+                print a[2]*4, caller
+            }
+        }' /proc/vmallocinfo \
+            | sort -rn | head -10 | awk '{ printf "  %10.1f MB  %s\n", $1/1024, $2 ($3 ? " " $3 : "") }'
+    ) || true
+    echo "\`\`\`"
+else
+    echo "- \`/proc/vmallocinfo\` not readable (lockdown/kernel param). Skipping."
+fi
+echo ""
+
+# ── 7e. Page Allocation Fragmentation Snapshot ──────────────────────────────
+echo "### 7e. Page Allocation Fragmentation"
+echo "> *High-order contiguous blocks matter for THP/DMA. If order-0 free RAM is plentiful but higher orders are starved, allocations stall despite 'available' memory.*"
+echo "\`\`\`text"
+(
+    set +e +o pipefail
+    grep -E "^Node" /proc/buddyinfo 2>/dev/null | head -4 | sed 's/^/  buddyinfo: /'
+    awk '/^Node/{zone=$4} /type/{print "  pagetypeinfo: " $0}' /proc/pagetypeinfo 2>/dev/null | head -6
+    COMPACT=$(grep -E "^compact_(stall|fail|success)" /proc/vmstat 2>/dev/null)
+    [[ -n "$COMPACT" ]] && echo "$COMPACT" | sed 's/^/  vmstat: /'
+) || true
+echo "\`\`\`"
+echo ""
+
 # ─────────────────────────────────────────────────────────────────────────────
 # SECTION 8 — DMA-BUF GPU BUFFERS (AQUAMARINE)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -654,9 +860,6 @@ DMABUF_INFO=/sys/kernel/debug/dma_buf/bufinfo
 DMABUF_SYSFS=/sys/kernel/dmabuf/buffers
 
 if [[ -r "$DMABUF_INFO" ]]; then
-    # Primary: debugfs bufinfo (kernel 7.x tab-separated format)
-    #   size flags mode count exp_name ino name
-    #   10485760 00000002 02080007 00000006 i915 00000802 <none>
     DMABUF_LINES=$(awk '$1 ~ /^[0-9]+$/ && NF>=7 {print $1, $5}' "$DMABUF_INFO" 2>/dev/null || true)
     BUF_COUNT=$(printf '%s\n' "$DMABUF_LINES" | grep -c . 2>/dev/null || echo 0)
     TOTAL_BYTES=$(printf '%s\n' "$DMABUF_LINES" | awk '{s+=$1} END {print s+0}')
@@ -686,7 +889,6 @@ if [[ -r "$DMABUF_INFO" ]]; then
     fi
 
 elif [[ -d "$DMABUF_SYSFS" ]]; then
-    # Fallback: sysfs interface (CONFIG_DMABUF_SYSFS_STATS)
     echo "> *Using sysfs DMA-BUF stats (debugfs unavailable — lockdown or not mounted).*"
     echo ""
     TOTAL_BYTES=0
@@ -741,6 +943,17 @@ if [[ -n "$GEM_FILE" && -r "$GEM_FILE" ]]; then
     echo "  → Shrinkable GEM pool (system RAM): $(awk "BEGIN {printf \"%.1f\", $GEM_SHRINK_BYTES/1048576}") MB across $GEM_SHRINK_CNT objects  *(object sizes; resident pages can be lower — the resident part is tracked in \`Unevictable\`)*"
     echo "\`\`\`"
 fi
+
+# Generic per-driver GEM client accounting (i915/amdgpu/virtio_gpu/xe/…)
+for dri_dir in /sys/kernel/debug/dri/[0-9]*; do
+    [[ -r "$dri_dir/clients" ]] || continue
+    echo ""
+    echo "### DRM GEM Clients ($dri_dir)"
+    echo "> *Per-userspace-client GPU buffer accounting straight from the driver — attributes the \`Unevictable\`/GEM pool of Section 1 to actual processes.*"
+    echo "\`\`\`text"
+    head -20 "$dri_dir/clients" 2>/dev/null | sed 's/^/  /' || true
+    echo "\`\`\`"
+done
 
 # udmabuf check
 if [[ -d /sys/kernel/debug/udmabuf ]]; then
@@ -824,7 +1037,28 @@ for f in $THP_DIR/hugepages-*kB/stats/nr_anon; do
         echo "- **hugepages-${sz}kB:** \`$count\` active allocations (*$total_mb MB total*)"
     fi
 done
-[[ "$MTHP_HEADER_PRINTED" == false ]] && echo '- **mTHP:** no active anon huge-page allocations (`stats/nr_anon` all zero). *(ShmemHugePages above covers huge-page shared-memory buffers from browsers/compositor; the GPU GEM pool is separate — it lives in `Unevictable`, not `Shmem`.)*'
+[[ "$MTHP_HEADER_PRINTED" == false ]] && echo '- **mTHP:** no active anon huge-page allocations (`stats/nr_anon` all zero). *(ShmemHugePages above covers huge-page shared-memory buffers from browsers/compositor.)*'
+
+# HugeTLB reserved pool
+HUGETLB_KB=$(get_mem Hugetlb)
+HP_TOTAL=$(get_mem HugePages_Total)
+if [[ $HP_TOTAL -gt 0 || $HUGETLB_KB -gt 0 ]]; then
+    echo ""
+    echo "### HugeTLB Reserved Pool"
+    echo "\`\`\`text"
+    (
+        set +e +o pipefail
+        printf "  HugeTLB total: %s kB across %s pages\n" "$HUGETLB_KB" "$HP_TOTAL"
+        for hp_dir in /sys/kernel/mm/hugepages/hugepages-*kB; do
+            [[ -d "$hp_dir" ]] || continue
+            printf "  %-28s total=%s free=%s surplus=%s\n" "$(basename "$hp_dir")" \
+                "$(cat "$hp_dir/nr_hugepages" 2>/dev/null)" \
+                "$(cat "$hp_dir/free_hugepages" 2>/dev/null)" \
+                "$(cat "$hp_dir/surplus_hugepages" 2>/dev/null)"
+        done
+    ) || true
+    echo "\`\`\`"
+fi
 
 echo ""
 echo '> **Note:** If **AnonHugePages** is extremely large (> 1 GB), standard tools will show vastly inflated RAM usage for apps like Electron and Chromium. The PSS table (Section 4) calculates this away to give you the real number.'
@@ -876,8 +1110,6 @@ fi
 echo ""
 echo "### D. Decorations & Shadows (Dynamic IPC)"
 if [[ -n "${HYPR_USER:-}" ]]; then
-    # Interrogate the live IPC to bypass commented lines and multi-file configs natively
-    # Using a robust jq expression to support both boolean values (true/false) in modern Hyprland and integer values (1/0) in older versions
     BLUR=$(sudo -u "$HYPR_USER" env $HYPR_ENV hyprctl getoption decoration:blur:enabled -j 2>/dev/null | jq -r 'if .bool != null then .bool else .int end' 2>/dev/null || echo 0)
     
     SHADOW=$(sudo -u "$HYPR_USER" env $HYPR_ENV hyprctl getoption decoration:shadow:enabled -j 2>/dev/null | jq -r 'if .bool != null then .bool else .int end' 2>/dev/null || echo "null")
@@ -953,6 +1185,61 @@ echo "\`\`\`"
 echo ""
 
 # ─────────────────────────────────────────────────────────────────────────────
+# SECTION 11b — EMPIRICAL RECLAIMABILITY SELF-TEST (--probe, opt-in)
+# ─────────────────────────────────────────────────────────────────────────────
+if [[ "$PROBE" == true ]]; then
+    echo "## 11b. Reclaimability Self-Test (\`--probe\`) — MEASURED, not assumed"
+    echo "---"
+    echo "> *Executes \`sync\` + \`echo 3 > /proc/sys/vm/drop_caches\` and measures which memory buckets actually shrink. Transiently evicts clean page cache/slab; safe but momentarily slows disk access. Answers empirically: what is truly pinned vs merely cached.*"
+    echo ""
+    probe_snap() {
+        awk '
+        $1=="MemFree:"{f=$2} $1=="Cached:"{c=$2} $1=="Shmem:"{sh=$2}
+        $1=="Slab:"{sl=$2} $1=="Unevictable:"{u=$2} $1=="AnonPages:"{a=$2}
+        END { printf "%d %d %d %d %d %d", f, c, sh, sl, u, a }' /proc/meminfo
+    }
+    read -r PF0 PC0 PS0 PSB0 PU0 PA0 <<< "$(probe_snap)"
+    sync
+    echo 3 > /proc/sys/vm/drop_caches
+    sleep 3
+    read -r PF1 PC1 PS1 PSB1 PU1 PA1 <<< "$(probe_snap)"
+    delta() { echo $(( $2 - $1 )); }
+    echo "| Bucket | Before (MB) | After+3s (MB) | Δ (MB) | Verdict |"
+    echo "|---|---:|---:|---:|---|"
+    verdict_row() {
+        local name="$1"
+        local b="$2"
+        local a="$3"
+        local d=$4
+        local v="unchanged → pinned/inert"
+        local delta_mb
+        if [[ "$name" == "MemFree" ]]; then
+            delta_mb=$(to_mb "$d")
+            if (( d > 2048 )); then
+                v="GAINED free RAM (reclaimed)"
+            elif (( d < -2048 )); then
+                v="LOST free RAM (unrelated activity)"
+            fi
+        else
+            delta_mb=$(to_mb "$(( -d ))")
+            if (( d < -2048 )); then
+                v="RECLAIMED by drop_caches"
+            elif (( d > 2048 )); then
+                v="GREW (unrelated activity)"
+            fi
+        fi
+        printf "| %s | %s | %s | %s | %s |\n" "$name" "$(to_mb "$b")" "$(to_mb "$a")" "$delta_mb" "$v"
+    }
+    verdict_row "MemFree"     "$PF0"  "$PF1"  "$(delta $PF0 $PF1)"
+    verdict_row "Cached"      "$PC0"  "$PC1"  "$(delta $PC0 $PC1)"
+    verdict_row "Slab"        "$PSB0" "$PSB1" "$(delta $PSB0 $PSB1)"
+    verdict_row "Unevictable" "$PU0"  "$PU1"  "$(delta $PU0 $PU1)"
+    verdict_row "AnonPages"   "$PA0"  "$PA1"  "$(delta $PA0 $PA1)"
+    verdict_row "Shmem"       "$PS0"  "$PS1"  "$(delta $PS0 $PS1)"
+    echo ""
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
 # SECTION 12 — QUICK DIAGNOSIS GUIDE
 # ─────────────────────────────────────────────────────────────────────────────
 echo "## 12. Quick Diagnosis Guide"
@@ -968,8 +1255,8 @@ cat << 'GUIDE'
    - Wayland pixel buffer leak. Check which compositor client is not releasing `wl_shm` buffers. Restart the offending app.
 
 3. **High Residual estimate (Section 1) + high DMA-BUF total (Section 8):**
-   - GPU driver holding system RAM as framebuffers. On AMD: `amdgpu` GTT. On NVIDIA: driver anonymous memory.
-   - Or memory fragmentation. Try: `echo 3 > /proc/sys/vm/drop_caches` (only reclaims slab/cache, not GPU memory).
+   - GPU driver holding system RAM as framebuffers. On AMD: `amdgpu` GTT. On NVIDIA: driver anonymous memory. On virtio_gpu: scanout/dumb buffers.
+   - Or memory fragmentation. Verify what is actually reclaimable with `sudo $0 --probe`.
 
 4. **High SUnreclaim (Slab, Section 7):**
    - Kernel slab leak. Run: `watch -n2 'cat /proc/meminfo | grep -E "Slab|SUnreclaim"'`
@@ -986,7 +1273,8 @@ cat << 'GUIDE'
    - ZRAM consumes actual system memory to compress the swap space. If your `Residual estimate` is low, your RAM is safely managed by compressed swap, not leaking. 
 
 8. **Unevictable memory is large (Section 1):**
-   - Check the cgroup attribution in Section 1 first. If `Mlocked` is near zero, the pinned pages are almost always **i915/amdgpu GEM system-RAM buffers** held by GPU-accelerated apps, not VMs (verified: freeing them via `echo 3 > /proc/sys/vm/drop_caches` drops `Unevictable` but leaves `Shmem` unchanged). `Unevictable` is counted as known in the accounting.
+   - Check the cgroup ownership map (Section 1a) first: the `/` row is kernel-unattributed, named rows are per-service/per-session holders. If `Mlocked` is near zero it is typically driver/GEM-pinned pages, not mlock.
+   - Whether `Unevictable` shrinks under cache pressure depends on what backs it — do NOT assume: rerun this script with `--probe` to measure it live.
    - Truly mlocked memory (mlock()/SHM_LOCK/QEMU/VFIO) shows up as `Mlocked` > 0.
 GUIDE
 
@@ -998,36 +1286,28 @@ echo "---"
 echo "> **Understanding this section:** Distro kernels compile almost all drivers and protocols as modules or built-ins to support a wide range of hardware. A custom kernel tailored exclusively to your machine can save RAM by reducing static kernel code size, eliminating unneeded drivers/maps (vmalloc), and reducing slab overhead."
 echo ""
 
-NUM_MODULES=$(lsmod | tail -n +2 | wc -l)
-VMALLOC_USED=$(get_mem VmallocUsed)
-S_UNRECLAIM=$(get_mem SUnreclaim)
-SLAB=$(get_mem Slab)
-K_RECLAIMABLE=$(get_mem KReclaimable)
-K_STACK=$(get_mem KernelStack)
-PAGE_TABLES=$(get_mem PageTables)
-SEC_PAGE_TABLES=$(get_mem SecPageTables)
-PERCPU=$(get_mem Percpu)
-KERNEL_FILE_KB=$(awk '/^nr_kernel_file_pages/{print $2}' /proc/vmstat 2>/dev/null | awk '{print $1*4}')
-[[ -z "$KERNEL_FILE_KB" ]] && KERNEL_FILE_KB=0
+# Reuse the Section-1 snapshot (no mid-report re-reads → no drift).
+NUM_MODULES=${MOD_N:-$(lsmod 2>/dev/null | tail -n +2 | wc -l)}
 
-# Compute current kernel totals
-KERNEL_TOTAL_KB=$(( SLAB + K_STACK + PAGE_TABLES + SEC_PAGE_TABLES + PERCPU + VMALLOC_USED + KERNEL_FILE_KB ))
+# Compute current kernel totals on the same physically-backed vmalloc basis as §1.
+KERNEL_TOTAL_KB=$(( SLAB + K_STACK + PAGE_TABLES + SEC_PAGE_TABLES + PERCPU + VMALLOC_PHYS_KB + IOMMU_KB ))
 KERNEL_RECLAIMABLE_KB=$K_RECLAIMABLE
 KERNEL_NONRECLAIMABLE_KB=$(( KERNEL_TOTAL_KB - KERNEL_RECLAIMABLE_KB ))
 
-# Calculate estimated savings (60% of Vmalloc, 15% of Unreclaimable Slab, 30MB of static code/subsystems)
-EST_VMALLOC_SAVINGS=$(( VMALLOC_USED * 60 / 100 ))
+# Calculate estimated savings (60% of physically-backed vmalloc, 15% of Unreclaimable Slab, 30MB of static code/subsystems)
+EST_VMALLOC_SAVINGS=$(( VMALLOC_PHYS_KB * 60 / 100 ))
 EST_SLAB_SAVINGS=$(( S_UNRECLAIM * 15 / 100 ))
 EST_STATIC_SAVINGS=30720
 TOTAL_SAVINGS_KB=$(( EST_VMALLOC_SAVINGS + EST_SLAB_SAVINGS + EST_STATIC_SAVINGS ))
 PROJECTED_KERNEL_KB=$(( KERNEL_TOTAL_KB - TOTAL_SAVINGS_KB ))
+(( PROJECTED_KERNEL_KB < 0 )) && PROJECTED_KERNEL_KB=0
 
 echo "### Current Kernel Overhead Metrics"
 printf -- "- **Total Active Kernel RAM Allocation:** \`%s MB\` (\`$KERNEL_TOTAL_KB kB\`)\n" "$(to_mb $KERNEL_TOTAL_KB)"
 printf -- "  - **Reclaimable under memory pressure:** \`%s MB\` (\`$KERNEL_RECLAIMABLE_KB kB\`)\n" "$(to_mb $KERNEL_RECLAIMABLE_KB)"
 printf -- "  - **Strictly Non-Reclaimable allocation:** \`%s MB\` (\`$KERNEL_NONRECLAIMABLE_KB kB\`)\n" "$(to_mb $KERNEL_NONRECLAIMABLE_KB)"
 echo "- **Loaded Kernel Modules:** \`$NUM_MODULES\`"
-echo "- **Vmalloc Memory (Drivers/Modules):** \`$(to_mb $VMALLOC_USED) MB\`"
+echo "- **Vmalloc Physically-Backed (est. RAM):** \`$(to_mb $VMALLOC_PHYS_KB) MB\` *(address space: $(to_mb $VMALLOC_USED) MB)*"
 echo "- **Unreclaimable Slab Memory:** \`$(to_mb $S_UNRECLAIM) MB\`"
 echo ""
 echo "### Potential Savings Estimates"

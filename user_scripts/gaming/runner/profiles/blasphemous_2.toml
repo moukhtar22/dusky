@@ -1,0 +1,45 @@
+# ==============================================================================
+# Blasphemous 2 Profile
+# ==============================================================================
+
+extends = "base_wine_dxvk"
+
+[meta]
+id = "blasphemous_2"
+name = "Blasphemous 2"
+version = "1.0"
+icon = "applications-games"
+developer = "The Game Kitchen"
+genre = "Metroidvania / Action"
+description = "Join the Penitent One once again in Blasphemous 2, thrusting him back into the endless struggle against the Miracle."
+
+[paths]
+game_dir = "/mnt/media/games/good_quality/Blasphemous.Collection-jc141"
+dwarfs_image = "files/game-root.dwarfs"
+dwarfs_mount = "files/.game-root-mnt"
+overlay_dir = "files/game-root"
+overlay_storage = "files/overlay-storage"
+overlay_work = "files/.game-root-work"
+executable = "Blasphemous.2/Blasphemous 2.exe"
+arguments = []
+
+[runtime]
+type = "wine"
+
+[runtime.wine]
+prefix_dir = "files/wine-prefix-ew"
+sync_mode = "fsync"
+dxvk = true
+winetricks = ["dxvk"]
+
+[graphics]
+gpu = "auto"
+wayland_native = true
+
+[graphics.gamescope]
+enabled = false
+
+[performance]
+gamemode = true
+mangohud = false
+fps_limit = 60

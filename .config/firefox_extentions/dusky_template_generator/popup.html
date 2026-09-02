@@ -1,36 +1,40 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
+  <meta charset="utf-8">
   <title>Dusky Template Generator</title>
   <link rel="stylesheet" href="popup.css">
 </head>
 <body>
-  <div class="header">
-    <span class="icon">🦊</span>
+  <header class="head">
+    <span class="logo" aria-hidden="true">🦊</span>
     <h1>Dusky Template Generator</h1>
-    <span class="domain-badge" id="domain-badge">detecting...</span>
+    <span id="domain" class="badge" title="The template file is named after this domain">…</span>
+  </header>
+
+  <div class="actions" role="group" aria-label="Generate">
+    <button id="auto" class="btn big" title="Scan this page's CSS colour variables and point them at your Matugen palette. Writes the file immediately.">
+      <b>⚡ Auto-map variables</b>
+      <small>site colour variables → palette tokens</small>
+    </button>
+    <button id="pick" class="btn big" title="Click parts of the page and give them a palette role. Every pick is saved immediately.">
+      <b>🎯 Pick elements</b>
+      <small>click things on the page, assign a role</small>
+    </button>
   </div>
 
-  <div class="btn-group">
-    <button class="btn btn-primary" id="btn-scan">⚡ Auto-Generate</button>
-    <button class="btn" id="btn-picker">🎯 Visual Picker</button>
+  <label class="sr-only" for="css">Template CSS</label>
+  <textarea id="css" spellcheck="false" wrap="off" placeholder="Loading…"></textarea>
+  <div class="meta"><code id="path"></code></div>
+
+  <div class="actions" role="group" aria-label="File">
+    <button id="save" class="btn" title="Write the text above to disk (Ctrl+S)">💾 Saved</button>
+    <button id="copy" class="btn" title="Copy the template to the clipboard">📋 Copy</button>
+    <button id="delete" class="btn danger" title="Delete this site's template file from disk">🗑 Delete</button>
   </div>
 
-  <div class="stats-bar">
-    <span>Vars Detected: <strong id="stat-vars">0</strong></span>
-    <span>Auto-Mapped: <strong id="stat-mapped">0</strong></span>
-  </div>
-
-  <textarea class="preview-box" id="css-preview" placeholder="Click 'Auto-Generate' or 'Visual Picker' to generate template CSS..."></textarea>
-
-  <div class="footer-actions">
-    <button class="btn btn-primary" id="btn-save" style="flex: 2;">💾 Save to Disk</button>
-    <button class="btn" id="btn-copy">📋 Copy</button>
-    <button class="btn" id="btn-reset" style="background: #b8545e; color: #fff; border: none;" title="Delete site config file from disk">🗑️ Delete</button>
-  </div>
-
-  <div class="status-msg" id="status-msg"></div>
+  <p id="status" class="status" role="status" aria-live="polite"></p>
+  <p class="hint"><kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>P</kbd> toggles the picker on any page · templates live in <code>~/.config/dusky_sites/</code></p>
 
   <script src="popup.js"></script>
 </body>
