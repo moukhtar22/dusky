@@ -1,121 +1,77 @@
-# Dusky STT CUDA 13
+# Dusky STT (bleeding-edge Arch, hardware-agnostic)
 
-Dusky STT is an Arch Linux Wayland voice-typing service for CPython 3.14.6+, Linux 7.1+, ONNX Runtime 1.27, CUDA 13, and onnx-asr 0.12.
+Local speech-to-text for Arch Linux rolling on Wayland. No usernames or machines hardcoded — everything resolves from `$HOME`, `%h`, `$USER`, `$XDG_RUNTIME_DIR`.
 
-## Architecture
+- **CPU daemon** (`.venv-main`): capture, Silero VAD v6.2.1, live typing, control plane. Never maps CUDA.
+- **On-demand worker** (`.venv-worker`): Parakeet TDT 0.6B via ONNX Runtime 1.29.0. EP follows `--hardware`: `CUDAExecutionProvider` (NVIDIA), opportunistic `MIGraphX/ROCM` else CPU (AMD), `CPUExecutionProvider` (CPU). Exits on idle so NVIDIA dGPUs can reach D3cold.
+- **IPC**: sealed memfds (`MFD_NOEXEC_SEAL` + `F_SEAL_EXEC=0x20`) over `SOCK_SEQPACKET` + `SCM_RIGHTS`. Large replies return via a second memfd, never truncated.
 
-- The systemd user daemon runs from `.venv-main`, which contains CPU `onnxruntime`, NumPy, and sounddevice only.
-- The on-demand ASR process runs from `.venv-worker`, which contains `onnxruntime-gpu`, onnx-asr, and pinned PyPI CUDA 13 libraries only.
-- Audio capture uses a blocking 16 kHz mono int16 PortAudio stream routed to PipeWire through pipewire-alsa.
-- Stateful Silero VAD 6.2.1 gates phrase submission in the CPU daemon.
-- Immutable, non-executable memfd objects carry PCM through SCM_RIGHTS over an AF_UNIX SOCK_SEQPACKET socketpair.
-- The GPU worker exits after its idle deadline. Process exit, not a cache API, destroys the CUDA context.
-- Realtime output types only stable word-prefix suffixes through wtype. Two words remain held back until stable.
-- Finalized transcripts optionally pass through an s1-mini text cleaner (see [Text Cleanup](#text-cleanup)) before being typed, copied, or saved.
+Target: Arch rolling, kernel 6.10+ (7.x tested), CPython 3.14.6+ GIL, `uv`, NVIDIA driver 580+ (for nvidia mode).
 
-## Extract
-
-Download every production file from the audit page into one directory. The required names are:
-
-```text
-dusky_main.py
-dusky_worker.py
-dusky_trigger.py
-dusky_installer.py
-dusky_verify.sh
-dusky-stt.service
-README.md
-```
-
-## Install
+## Install (you run this)
 
 ```bash
-chmod 0755 dusky_installer.py dusky_main.py dusky_worker.py dusky_trigger.py dusky_verify.sh
-uv python install 3.14.6
-uv run --python 3.14.6 ./dusky_installer.py --model nemo-parakeet-tdt-0.6b-v2 --quantization int8
+chmod +x dusky_installer.py dusky_main.py dusky_worker.py dusky_trigger.py dusky_verify.sh
+./dusky_installer.py --hardware auto --model nemo-parakeet-tdt-0.6b-v2 --quantization int8
+# explicit: --hardware cpu | nvidia | amd
+# NVIDIA example: ./dusky_installer.py --hardware nvidia --gpu-mem-limit-mb 2867
+# skip pacman if already present: --skip-pacman
 ```
 
-The default install performs all of the following before deployment:
+Auto-detect order: `nvidia` (nvidia-smi + driver 580+) → `amd` (rocm-smi / /dev/kfd / AMD VGA) → `cpu`. AMD without a ROCm stack uses CPU reliably; install system ROCm + MIGraphX separately for experimental GPU EPs.
 
-1. Validates Arch Linux, kernel, CPython ABI, NVIDIA driver, GPU index, and Wayland virtual-keyboard support.
-2. Installs Arch runtime packages with pacman.
-3. Creates independent CPU and CUDA Python environments.
-4. SHA-256 verifies the Silero ONNX artifact.
-5. Prefetches the selected Parakeet model.
-6. Executes CPU-only VAD inference and checks `/proc/self/maps` for CUDA objects.
-7. Executes full Parakeet inference through CUDAExecutionProvider.
-8. Atomically deploys the tested stage and verifies the systemd unit.
-
-## Text Cleanup
-
-By default the service runs an optional post-ASR cleanup pass with [s1-mini](https://huggingface.co/superwhisper/s1-mini), a small text normalizer served through a local [Ollama](https://ollama.com) instance. It strips fillers and disfluencies, and normalizes numbers, currency, and dates before a transcript is typed, placed on the Wayland clipboard, or written to a file. It is only used at finalize time, never in the realtime streaming path.
-
-### Requirements
-
-- A running Ollama server listening on `localhost:11434`.
-- An `s1-mini` model whose template begins the assistant turn with an empty thinking block (Qwen3 defaults to thinking mode, which produces blank output unless disabled).
-
-### Configuration
-
-The behavior is controlled by the `llm_*` keys in `config.json`. If they are absent they default as shown:
-
-| Key                      | Default                | Meaning                                    |
-| ------------------------ | ---------------------- | ------------------------------------------ |
-| `llm_enabled`            | `true`                 | Enable the cleanup pass; `false` disables  |
-| `llm_endpoint`           | `http://localhost:11434` | Ollama base URL                          |
-| `llm_model`              | `s1-mini`              | Ollama model used for cleanup               |
-| `llm_cleanup_style`      | `semi-formal`          | One of `casual`, `semi-casual`, `semi-formal`, `formal` |
-| `llm_cleanup_structure`  | `prose`                | One of `prose`, `lists`                    |
-| `llm_cleanup_context`    | `general`              | One of `general`, `email`                  |
-| `llm_timeout_seconds`    | `60`                   | Abort the cleanup request after this long  |
-| `llm_max_tokens`         | `2048`                 | Maximum tokens for the cleaned output      |
-
-The style, structure, and context settings are rendered into a control line that is passed to the model exactly as s1-mini expects, e.g. `[Styling: semi-formal] [Structure: prose] [Context: general]`.
-
-The service sandbox restricts network address families to `AF_UNIX AF_NETLINK AF_INET AF_INET6` so the daemon can reach the local Ollama endpoint (`localhost:11434`). If cleanup is disabled or the model is unreachable, the raw transcript is passed through unchanged and the pipeline is never blocked.
-
-## Use
+## Use (your existing keybind keeps working; bare `dusky_trigger` toggles)
 
 ```bash
-# Toggle realtime dictation
-dusky_trigger
-
-# Explicit start and stop
-dusky_trigger --start --realtime
-dusky_trigger --stop
-
-# Push mode types once after finalization
-dusky_trigger --start --push
-dusky_trigger --stop
-
-# File transcription
-dusky_trigger --file ~/Downloads/audio.m4a
-
-# Service state and logs
+dusky_trigger                 # toggle realtime (bind this to hotkey)
 dusky_trigger --status
-dusky_trigger --logs
+dusky_trigger --start --realtime | dusky_trigger --stop
+dusky_trigger --start --push   | dusky_trigger --stop
+dusky_trigger --file ~/audio.m4a
+dusky_trigger --file ~/episode.mp3 --wait   # block, then print transcript to stdout
+dusky_trigger --unload        # free GPU VRAM / RAM now (respawns on demand)
+dusky_trigger --logs | dusky_trigger --restart | dusky_trigger --kill
+dusky_trigger --help          # full usage + hotkey examples
 ```
+
+## Hotkeys (Hyprland / sway)
+
+```ini
+# Hyprland (~/.config/hypr/hyprland.conf):
+bind = SUPER, S, exec, dusky_trigger
+# sway (~/.config/sway/config):
+bindsym $mod+s exec dusky_trigger
+```
+
+Bare `dusky_trigger` toggles: idle → start realtime, recording → stop and finalize.
+Transcripts are pure Parakeet output (punctuated, ~6% WER) — there is no LLM
+cleanup stage and no Ollama dependency.
+
+## Power modes (follows the systemd unit)
+
+- **Service enabled** (default): **warm-resident**. The worker preloads at
+  boot and is never released — dictation is instant, VRAM stays held, and
+  the dGPU stays awake. For plugged-in / desktop use.
+- **Service disabled** (toggle off in the Dusky service TUI): **on-demand**.
+  The hotkey still works (the trigger starts the service), VRAM is held
+  only mid-job, then the worker exits and the service stops itself so the
+  dGPU can reach D3cold. For battery use.
+
+`dusky_trigger --unload` frees VRAM immediately in either mode.
 
 ## Verify
 
 ```bash
 dusky_verify static
 dusky_verify live
-dusky_verify d3 0000:01:00.0
+dusky_verify d3     # nvidia only; skipped otherwise
+dusky_verify all
 ```
 
-For the live check, keep `nvtop` open in a second terminal. The script also checks the worker PID with `nvidia-smi`. D3cold can only occur when the driver, firmware, PCIe topology, display routing, and every other GPU client permit runtime suspension.
-
-## Wayland Constraint
-
-wtype requires the compositor's virtual-keyboard-v1 protocol and always targets the surface focused at each update. Dusky intentionally has no X11, uinput, or destructive-backspace fallback. Saved transcript files and the Wayland clipboard are authoritative if focus changes during dictation.
+D3cold needs `NVreg_DynamicPowerManagement=0x02` and no other GPU clients; the check reads sysfs passively (running `nvidia-smi` wakes the GPU).
 
 ## Uninstall
 
 ```bash
-systemctl --user disable --now dusky-stt.service
-rm -f ~/.config/systemd/user/dusky-stt.service
-rm -f ~/.local/bin/dusky_trigger ~/.local/bin/dusky_verify
-rm -rf ~/.local/lib/dusky-stt ~/.local/state/dusky-stt
-systemctl --user daemon-reload
+./dusky_installer.py --uninstall
 ```

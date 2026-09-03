@@ -1995,5 +1995,22 @@ hl.window_rule({
     match = { class = "^(dusky_keylogger)$" },
     float = true,
     size = {"(monitor_w*0.9)", "(monitor_h*0.9)"},
+    center = true
+})
+
+--- Dusky STT recording indicator ---
+-- On-screen pill while the mic is capturing: centered, borderless, pinned
+-- so it follows you across workspaces. No initial focus so dictation keeps
+-- going into the window you were typing in (buttons still clickable).
+-- (The global style-pinned-windows rule also matches, but this later,
+-- class-specific rule wins the border_size.)
+hl.window_rule({
+    name = "dusky_rec_indicator",
+    match = { class = "^(dusky_rec_indicator\\.py)$" },
+    float = true,
     center = true,
+    pin = true,
+    border_size = 0,
+    no_dim = true,
+    no_initial_focus = true
 })

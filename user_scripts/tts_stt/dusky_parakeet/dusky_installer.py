@@ -1,54 +1,75 @@
 #!/usr/bin/env python3
-"""Atomic Arch Linux installer for the CUDA 13 Dusky STT architecture.
+"""Atomic Arch Linux installer for Dusky STT (hardware-agnostic, bleeding-edge).
 
-Two virtual environments are deliberate, not duplication:
+Targets Arch Linux rolling (kernel 6.10+, CPython 3.14.6+ GIL, uv).
+Hardware is explicit and auto-detected -- no hardcoded users or machines:
 
-* .venv-main owns the CPU onnxruntime namespace and can never import CUDA EP.
-* .venv-worker owns the onnxruntime-gpu namespace and CUDA 13 PyPI runtimes.
+  --hardware auto    (default) detect nvidia > amd > cpu
+  --hardware nvidia  NVIDIA dGPU via onnxruntime-gpu + CUDA 13 (D3cold capable)
+  --hardware amd     AMD GPU present; ASR runs on CPU reliably, tries
+                     MIGraphX/ROCM EPs opportunistically if installed
+  --hardware cpu     CPU-only, always works
 
-No environment ever overlays two distributions that export the onnxruntime
-package. The installer performs CPU VAD and full CUDA ASR inference tests before
-atomically replacing the deployed application.
+Layout (username-agnostic, all under $HOME):
+  APP_DIR = ~/.local/lib/dusky-stt
+    .venv-main    CPU onnxruntime + numpy + sounddevice (daemon, never CUDA)
+    .venv-worker  nvidia: onnxruntime-gpu + CUDA 13 + onnx-asr --no-deps
+                  cpu/amd: onnxruntime + onnx-asr (CPU, always works)
 """
 
 import argparse
 import hashlib
 import json
 import os
-from pathlib import Path
 import platform
+import re
 import shutil
 import stat
 import subprocess
 import sys
-import sysconfig
 import tempfile
 import time
-from typing import Any, Sequence
 import urllib.request
-import uuid
-
+from pathlib import Path
+from typing import Any
 
 MIN_PYTHON = (3, 14, 6)
-MIN_KERNEL = (7, 1)
-MIN_NVIDIA_DRIVER = (580, 0)
-PYTHON_LABEL = "3.14.6"
+MIN_KERNEL = (6, 10)
+MIN_DRIVER_MAJOR = 580
+SCHEMA_VERSION = 2
 
 APP_DIR = Path.home() / ".local" / "lib" / "dusky-stt"
 BIN_DIR = Path.home() / ".local" / "bin"
-SYSTEMD_DIR = Path.home() / ".config" / "systemd" / "user"
-STATE_DIR = Path.home() / ".local" / "state" / "dusky-stt"
-HF_HOME = Path.home() / ".cache" / "huggingface"
-SERVICE_NAME = "dusky_stt.service"
+UNIT_DIR = Path.home() / ".config" / "systemd" / "user"
+UNIT_NAME = "dusky_stt.service"
+DEFAULT_STATE_DIR = Path.home() / ".local" / "state" / "dusky-stt"
+DEFAULT_MODEL_ROOT = Path.home() / ".local" / "share" / "dusky-stt" / "models"
 
-ONNX_ASR_VERSION = "0.12.0"
-ORT_VERSION = "1.27.0"
-NUMPY_VERSION = "2.5.1"
-SOUNDDEVICE_VERSION = "0.5.5"
-HUGGINGFACE_HUB_VERSION = "0.36.0"
-HF_XET_VERSION = "1.1.9"
+SOURCE_DIR = Path(__file__).resolve().parent
+REQUIRED_SOURCES = ("dusky_main.py", "dusky_worker.py", "dusky_trigger.py", "dusky_rec_indicator.py", "dusky_verify.sh", UNIT_NAME)
 
-NVIDIA_PACKAGES = (
+BASE_PACKAGES = (
+    "pipewire",
+    "pipewire-audio",
+    "pipewire-alsa",
+    "pipewire-pulse",
+    "wireplumber",
+    "portaudio",
+    "ffmpeg",
+    "wtype",
+    "wl-clipboard",
+    "libnotify",
+    "uv",
+)
+NVIDIA_PACKAGES = ("nvidia-utils",)
+
+MAIN_PACKAGES = ("onnxruntime==1.29.0", "numpy==2.5.2", "sounddevice==0.5.6")
+
+# CUDA 13.0.x is deliberately HELD (not bumped to 13.3.x): 13.3 needs
+# driver >= 610.43 per NVIDIA release notes, which would brick every
+# 580-609 user this installer explicitly accepts (MIN_DRIVER_MAJOR=580).
+# ORT 1.29 + CUDA 13.0 runtime remain ABI-compatible (SONAME .so.13).
+WORKER_CUDA_PACKAGES = (
     "nvidia-cuda-runtime==13.0.88",
     "nvidia-cublas==13.0.2.14",
     "nvidia-cudnn-cu13==9.13.1.26",
@@ -57,630 +78,535 @@ NVIDIA_PACKAGES = (
     "nvidia-curand==10.4.0.35",
     "nvidia-nvjitlink==13.0.88",
 )
+WORKER_NVIDIA_PACKAGES = ("onnxruntime-gpu==1.29.0", "numpy==2.5.2", "huggingface-hub>=0.34")
+WORKER_NVIDIA_NO_DEPS = ("onnx-asr==0.12.0",)
+WORKER_CPU_PACKAGES = ("onnxruntime==1.29.0", "numpy==2.5.2", "huggingface-hub>=0.34", "onnx-asr==0.12.0")
 
-SILERO_URL = (
-    "https://raw.githubusercontent.com/snakers4/silero-vad/"
-    "v6.2.1/src/silero_vad/data/silero_vad.onnx"
-)
-SILERO_SIZE = 2_327_524
-SILERO_SHA256 = "1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3"
+SILERO_TAG = "v6.2.1"
+SILERO_URL = f"https://raw.githubusercontent.com/snakers4/silero-vad/{SILERO_TAG}/src/silero_vad/data/silero_vad.onnx"
+SILERO_BYTES = 2_327_524
+SILERO_SHA256_PREFIX = "1a153a22"
 
-REQUIRED_SOURCES = (
-    "dusky_main.py",
-    "dusky_worker.py",
-    "dusky_trigger.py",
-    "dusky_verify.sh",
-    "dusky_stt.service",
-)
-
-SYSTEM_PACKAGES = (
-    "pipewire",
-    "pipewire-audio",
-    "pipewire-alsa",
-    "wireplumber",
-    "portaudio",
-    "ffmpeg",
-    "wtype",
-    "wl-clipboard",
-    "libnotify",
-    "nvidia-utils",
-    "nvtop",
-    "uv",
-)
+MODEL_REPOS = {
+    "nemo-parakeet-tdt-0.6b-v2": "istupakov/parakeet-tdt-0.6b-v2-onnx",
+    "nemo-parakeet-tdt-0.6b-v3": "istupakov/parakeet-tdt-0.6b-v3-onnx",
+}
 
 type JsonObject = dict[str, Any]
+
+RESET = "\033[0m"
+BOLD = "\033[1m"
+GREEN = "\033[32m"
+RED = "\033[31m"
+YELLOW = "\033[33m"
 
 
 class InstallError(RuntimeError):
     pass
 
 
-def log(message: str) -> None:
-    print(f"[dusky-installer] {message}", flush=True)
+def log_step(msg: str) -> None:
+    print(f"{BOLD}==> {msg}{RESET}", flush=True)
+
+
+def log_ok(msg: str) -> None:
+    print(f"{GREEN}  ok {RESET}{msg}", flush=True)
+
+
+def log_warn(msg: str) -> None:
+    print(f"{YELLOW}  ** {RESET}{msg}", flush=True)
 
 
 def run(
-    command: Sequence[str | os.PathLike[str]],
+    cmd: list[str],
     *,
-    check: bool = True,
-    capture: bool = False,
-    environment: dict[str, str] | None = None,
+    env: dict[str, str] | None = None,
     cwd: Path | None = None,
-    timeout: float | None = None,
+    timeout: float = 3600.0,
+    check: bool = True,
+    quiet: bool = True,
 ) -> subprocess.CompletedProcess[str]:
-    rendered = [str(part) for part in command]
-    env = os.environ.copy() if environment is None else environment.copy()
-    env.setdefault("UV_HTTP_TIMEOUT", "300")
-    completed = subprocess.run(
-        rendered,
-        text=True,
-        capture_output=capture,
-        check=False,
-        env=env,
-        cwd=cwd,
-        timeout=timeout,
-    )
-    if check and completed.returncode != 0:
-        detail = (completed.stderr or completed.stdout or "").strip()
-        raise InstallError(
-            f"command failed with status {completed.returncode}: {' '.join(rendered)}\n{detail[-5000:]}"
-        )
-    return completed
+    res = subprocess.run(cmd, env=env, cwd=cwd, capture_output=quiet, text=True, timeout=timeout, check=False)
+    if check and res.returncode != 0:
+        detail = (res.stderr or res.stdout or "").strip()
+        raise InstallError(f"Command failed ({res.returncode}): {' '.join(cmd)}\n{detail[-4000:]}")
+    return res
 
 
-def numeric_version(value: str, fields: int = 2) -> tuple[int, ...]:
-    numbers: list[int] = []
-    for component in value.split("."):
-        digits = "".join(character for character in component if character.isdigit())
-        if not digits:
-            break
-        numbers.append(int(digits))
-        if len(numbers) == fields:
-            break
-    if len(numbers) != fields:
-        raise InstallError(f"could not parse version: {value}")
-    return tuple(numbers)
+# ------------------------------------------------------------------ hardware
+def detect_hardware() -> tuple[str, JsonObject]:
+    """Auto-detect: nvidia > amd > cpu. Never fails; returns (kind, info)."""
+    # NVIDIA: nvidia-smi must work and report a GPU with driver >= 580.
+    try:
+        smi = shutil.which("nvidia-smi")
+        if smi:
+            res = subprocess.run(
+                [smi, "--query-gpu=index,name,driver_version,memory.total", "--format=csv,noheader,nounits"],
+                capture_output=True, text=True, timeout=15, check=False,
+            )
+            if res.returncode == 0 and res.stdout.strip():
+                gpus: list[JsonObject] = []
+                for line in res.stdout.splitlines():
+                    parts = [p.strip() for p in line.split(",")]
+                    if len(parts) != 4:
+                        continue
+                    try:
+                        gpus.append({"index": int(parts[0]), "name": parts[1],
+                                     "driver": parts[2], "memory_total_mib": int(float(parts[3]))})
+                    except ValueError:
+                        continue
+                if gpus:
+                    try:
+                        major = int(gpus[0]["driver"].split(".")[0])
+                    except (ValueError, IndexError):
+                        major = 0
+                    if major >= MIN_DRIVER_MAJOR:
+                        return "nvidia", {"gpus": gpus, "driver_major": major}
+    except (OSError, subprocess.SubprocessError):
+        pass
+    # AMD: ROCm stack, /dev/kfd, or AMD VGA in lspci. Acceleration is
+    # opportunistic (CPU fallback always works), so detection is lenient.
+    try:
+        if shutil.which("rocm-smi") or Path("/dev/kfd").exists():
+            return "amd", {"reason": "rocm-smi or /dev/kfd present"}
+        lspci = shutil.which("lspci")
+        if lspci:
+            res = subprocess.run([lspci, "-nn"], capture_output=True, text=True, timeout=10, check=False)
+            if res.returncode == 0:
+                for line in res.stdout.splitlines():
+                    low = line.lower()
+                    if ("vga" in low or "3d" in low or "display" in low) and ("1002:" in line or " amd/" in low or "amd " in low and "advanced micro" in low):
+                        return "amd", {"reason": f"lspci: {line.strip()[:100]}"}
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return "cpu", {}
 
 
-def assert_runtime() -> None:
-    if sys.version_info < MIN_PYTHON:
-        raise InstallError(
-            f"CPython {PYTHON_LABEL}+ is required; running {sys.version.split()[0]}. "
-            f"Use: uv run --python {PYTHON_LABEL} dusky_installer.py"
-        )
-    if sys.implementation.name != "cpython":
-        raise InstallError("the installer requires CPython")
-    if sysconfig.get_config_var("Py_GIL_DISABLED") == 1 or not sys._is_gil_enabled():
-        raise InstallError("the GIL-enabled CPython ABI is required")
-    if os.geteuid() == 0:
-        raise InstallError("run the installer as the desktop user, not root")
-    if not Path("/etc/arch-release").is_file():
-        raise InstallError("this build targets Arch Linux only")
-    if numeric_version(platform.release(), 2) < MIN_KERNEL:
-        raise InstallError(f"Linux {MIN_KERNEL[0]}.{MIN_KERNEL[1]}+ is required")
-    if not os.environ.get("XDG_RUNTIME_DIR"):
-        raise InstallError("install from an active systemd desktop user session")
-
-
-def assert_sources(source_dir: Path) -> None:
-    missing: list[str] = []
-    for name in REQUIRED_SOURCES:
-        path = source_dir / name
-        try:
-            metadata = os.lstat(path)
-        except FileNotFoundError:
-            missing.append(name)
-            continue
-        if not stat.S_ISREG(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
-            raise InstallError(f"source must be a regular non-symlink file: {path}")
-    if missing:
-        raise InstallError("missing extracted source files: " + ", ".join(missing))
-
-
-def private_directory(path: Path) -> None:
-    path.mkdir(parents=True, exist_ok=True, mode=0o700)
-    metadata = os.lstat(path)
-    if not stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
-        raise InstallError(f"refusing non-directory path: {path}")
-    if metadata.st_uid != os.getuid():
-        raise InstallError(f"path is not owned by the installing user: {path}")
-    os.chmod(path, 0o700)
-
-
-def install_system_packages(skip: bool) -> None:
-    if skip:
-        log("skipping pacman package installation by explicit request")
-        return
-    missing: list[str] = []
-    for package in SYSTEM_PACKAGES:
-        result = run(["pacman", "-Q", package], check=False, capture=True)
-        if result.returncode != 0:
-            missing.append(package)
-    if missing:
-        run(["sudo", "pacman", "-S", "--needed", "--noconfirm", *missing])
-
-
-def query_nvidia(gpu_device: int) -> tuple[int, str]:
-    nvidia_smi = shutil.which("nvidia-smi")
-    if nvidia_smi is None:
-        raise InstallError("nvidia-smi is unavailable after installing nvidia-utils")
-    result = run(
-        [
-            nvidia_smi,
-            "--query-gpu=index,memory.total,driver_version",
-            "--format=csv,noheader,nounits",
-        ],
-        capture=True,
-        timeout=10,
-    )
-    selected: tuple[int, str] | None = None
-    for line in result.stdout.splitlines():
-        fields = [field.strip() for field in line.split(",")]
-        if len(fields) != 3:
+def query_nvidia_gpu(gpu_device: int) -> tuple[int, str]:
+    """Return (total_mib, driver) for the requested NVIDIA index. Raises if missing."""
+    smi = shutil.which("nvidia-smi")
+    if not smi:
+        raise InstallError("nvidia-smi not found; install nvidia-utils for --hardware nvidia.")
+    res = run([smi, "--query-gpu=index,memory.total,driver_version", "--format=csv,noheader,nounits"], timeout=30)
+    for line in res.stdout.splitlines():
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) != 3:
             continue
         try:
-            index = int(fields[0])
-            memory_mb = int(fields[1])
+            index = int(parts[0])
+            total_mb = int(float(parts[1]))
         except ValueError:
             continue
         if index == gpu_device:
-            selected = (memory_mb, fields[2])
-            break
-    if selected is None:
-        raise InstallError(f"nvidia-smi did not report GPU index {gpu_device}")
-    if numeric_version(selected[1], 2) < MIN_NVIDIA_DRIVER:
-        raise InstallError(
-            f"NVIDIA driver {MIN_NVIDIA_DRIVER[0]}.{MIN_NVIDIA_DRIVER[1]}+ is required; "
-            f"found {selected[1]}"
-        )
-    return selected
+            driver = parts[2]
+            try:
+                major = int(driver.split(".")[0])
+            except (ValueError, IndexError):
+                raise InstallError(f"Cannot parse NVIDIA driver version: {driver!r}")
+            if major < MIN_DRIVER_MAJOR:
+                raise InstallError(f"NVIDIA driver {driver} < required {MIN_DRIVER_MAJOR}+ for CUDA 13.")
+            log_ok(f"GPU {gpu_device}: driver {driver}, {total_mb} MiB VRAM")
+            return total_mb, driver
+    raise InstallError(f"nvidia-smi did not report GPU index {gpu_device}.")
 
 
 def choose_vram_limit(total_mb: int, requested_mb: int | None) -> int:
-    safe_maximum = total_mb - 768
-    if safe_maximum < 1024:
-        raise InstallError(f"GPU has insufficient VRAM: {total_mb} MiB")
+    safe_max = total_mb - 768
+    if safe_max < 1024:
+        raise InstallError(f"GPU has insufficient VRAM ({total_mb} MiB). Need >= 1792 MiB total.")
     if requested_mb is not None:
-        if requested_mb < 1024 or requested_mb > safe_maximum:
-            raise InstallError(f"GPU memory limit must be in [1024, {safe_maximum}] MiB")
+        if requested_mb > safe_max:
+            raise InstallError(f"Requested {requested_mb} MiB exceeds safe ceiling {safe_max} MiB.")
         return requested_mb
-    return min(round(total_mb * 0.70), safe_maximum)
+    return min(round(total_mb * 0.70), safe_max)
 
 
-def download_silero(destination: Path) -> str:
-    destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    temporary = destination.with_name(destination.name + ".download")
-    request = urllib.request.Request(SILERO_URL, headers={"User-Agent": "dusky-stt-installer/10"})
-    digest = hashlib.sha256()
-    total = 0
-    log(f"downloading SHA-pinned Silero VAD v6.2.1 from {SILERO_URL}")
+# ------------------------------------------------------------------ preflight
+def assert_runtime() -> None:
+    log_step("Validating runtime (Arch / kernel / Python / session)")
+    if os.geteuid() == 0:
+        raise InstallError("Do not run as root; installs into your user home.")
     try:
-        with urllib.request.urlopen(request, timeout=120) as response, temporary.open("xb") as output:
-            while chunk := response.read(1024 * 1024):
-                total += len(chunk)
-                if total > 16 * 1024 * 1024:
-                    raise InstallError("Silero download exceeded the hard size limit")
-                digest.update(chunk)
-                output.write(chunk)
-            output.flush()
-            os.fsync(output.fileno())
-        actual_digest = digest.hexdigest()
-        if total != SILERO_SIZE:
-            raise InstallError(
-                f"Silero size mismatch: expected {SILERO_SIZE}, downloaded {total} bytes"
-            )
-        if actual_digest != SILERO_SHA256:
-            raise InstallError(
-                f"Silero SHA-256 mismatch: expected {SILERO_SHA256}, got {actual_digest}"
-            )
-        os.replace(temporary, destination)
-        os.chmod(destination, 0o644)
-        return actual_digest
-    finally:
-        temporary.unlink(missing_ok=True)
+        os_release = Path("/etc/os-release").read_text(encoding="utf-8")
+    except OSError as exc:
+        raise InstallError(f"Cannot read /etc/os-release: {exc}") from exc
+    release = dict(line.split("=", 1) for line in os_release.splitlines() if "=" in line)
+    ident = release.get("ID", "").strip().strip('"')
+    like = release.get("ID_LIKE", "")
+    pretty = release.get("PRETTY_NAME", "").strip().strip('"')
+    if ident != "arch" and "arch" not in like:
+        raise InstallError(f"Targets Arch Linux rolling only (found {pretty or ident}).")
+    kernel = platform.release()
+    match = re.match(r"^(\d+)\.(\d+)", kernel)
+    if not match:
+        raise InstallError(f"Cannot parse kernel release: {kernel}")
+    if (int(match.group(1)), int(match.group(2))) < MIN_KERNEL:
+        raise InstallError(f"Kernel {kernel} < required {MIN_KERNEL[0]}.{MIN_KERNEL[1]}+.")
+    log_ok(f"Arch / kernel {kernel}")
+    if sys.version_info < MIN_PYTHON:
+        raise InstallError(f"CPython {MIN_PYTHON[0]}.{MIN_PYTHON[1]}.{MIN_PYTHON[2]}+ required (found {sys.version.split()[0]}).")
+    gil = getattr(sys, "_is_gil_enabled", None)
+    if gil is None or not gil():
+        raise InstallError("GIL-enabled CPython required; onnxruntime 1.27.0 targets the GIL ABI.")
+    log_ok(f"CPython {sys.version.split()[0]} (GIL enabled)")
+    if not os.environ.get("XDG_RUNTIME_DIR"):
+        raise InstallError("XDG_RUNTIME_DIR unset; run inside a systemd user session.")
+    if not os.environ.get("WAYLAND_DISPLAY"):
+        raise InstallError("WAYLAND_DISPLAY unset; Dusky types via wtype on Wayland.")
+    log_ok(f"Wayland {os.environ['WAYLAND_DISPLAY']}")
 
 
-def write_json(path: Path, payload: JsonObject, mode: int = 0o600) -> None:
-    encoded = json.dumps(payload, indent=2, sort_keys=True) + "\n"
-    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, mode)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
-            handle.write(encoded)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
+def install_pacman_packages(packages: tuple[str, ...], skip: bool) -> None:
+    log_step("Checking system packages via pacman")
+    missing = [p for p in packages if subprocess.run(["pacman", "-Qq", p], capture_output=True).returncode != 0]
+    if not missing:
+        log_ok("System dependencies present.")
+        return
+    if skip:
+        log_warn(f"Missing (skipped by --skip-pacman): {' '.join(missing)}")
+        return
+    log_warn(f"Installing: {' '.join(missing)}")
+    run(["sudo", "pacman", "-S", "--needed", "--noconfirm", *missing], quiet=False, timeout=1800)
+    log_ok("System dependencies installed.")
 
 
-def install_python_environments(stage: Path) -> tuple[Path, Path]:
+# ------------------------------------------------------------------ venvs
+def install_python_environments(stage: Path, hardware: str) -> tuple[Path, Path]:
+    log_step(f"Provisioning venvs via uv (hardware={hardware})")
     uv = shutil.which("uv")
-    if uv is None:
-        raise InstallError("uv is required after the system package phase")
+    if not uv:
+        raise InstallError("uv is required on PATH (pacman -S uv).")
+    env = dict(os.environ)
+    env["UV_PYTHON_DOWNLOADS"] = "never"
+    # NOTE: do NOT set UV_NO_PROGRESS -- pip wheel downloads (~2 GiB CUDA
+    # on nvidia, ~600 MiB model later) must stream progress, otherwise the
+    # installer looks hung for minutes (see: 4m51s silent hang report).
+    env.pop("UV_NO_PROGRESS", None)
+    # Cache (~/.cache/uv) and stage (~/.local/lib) are different filesystems
+    # here; copy avoids hardlink-fallback warning spam on every wheel.
+    env["UV_LINK_MODE"] = "copy"
+    env.pop("VIRTUAL_ENV", None)
+    env.pop("PYTHONPATH", None)
     main_venv = stage / ".venv-main"
     worker_venv = stage / ".venv-worker"
-    run([uv, "venv", "--python", sys.executable, "--clear", main_venv])
-    run([uv, "venv", "--python", sys.executable, "--clear", worker_venv])
-    main_python = main_venv / "bin" / "python"
-    worker_python = worker_venv / "bin" / "python"
+    log_step("Creating .venv-main + .venv-worker")
+    run([uv, "venv", "--python", sys.executable, "--python-preference", "only-system", str(main_venv)], env=env)
+    run([uv, "venv", "--python", sys.executable, "--python-preference", "only-system", str(worker_venv)], env=env)
+    main_py = main_venv / "bin" / "python"
+    worker_py = worker_venv / "bin" / "python"
+    log_step("Installing .venv-main packages (onnxruntime CPU, ~50 MiB)")
+    run([uv, "pip", "install", "--python", str(main_py), *MAIN_PACKAGES], env=env, quiet=False, timeout=1800)
+    if hardware == "nvidia":
+        log_step("Installing CUDA 13 runtime wheels (~2.2 GiB -- expect several minutes, progress below)")
+        run([uv, "pip", "install", "--python", str(worker_py), *WORKER_CUDA_PACKAGES], env=env, quiet=False, timeout=3600)
+        log_step("Installing onnxruntime-gpu + deps")
+        run([uv, "pip", "install", "--python", str(worker_py), *WORKER_NVIDIA_PACKAGES], env=env, quiet=False, timeout=1800)
+        log_step("Installing onnx-asr --no-deps (protects CUDA namespace)")
+        run([uv, "pip", "install", "--python", str(worker_py), "--no-deps", *WORKER_NVIDIA_NO_DEPS], env=env, quiet=False, timeout=600)
+    else:
+        log_step(f"Installing worker packages ({hardware}, CPU ORT)")
+        run([uv, "pip", "install", "--python", str(worker_py), *WORKER_CPU_PACKAGES], env=env, quiet=False, timeout=1800)
+    run([uv, "pip", "check", "--python", str(main_py)], env=env)
+    run([uv, "pip", "check", "--python", str(worker_py)], env=env)
+    log_ok("Virtual environments built.")
+    return main_py, worker_py
 
-    run(
-        [
-            uv,
-            "pip",
-            "install",
-            "--python",
-            main_python,
-            f"onnxruntime=={ORT_VERSION}",
-            f"numpy=={NUMPY_VERSION}",
-            f"sounddevice=={SOUNDDEVICE_VERSION}",
-        ]
+
+def verify_namespaces(main_py: Path, worker_py: Path, hardware: str) -> None:
+    log_step("Asserting onnxruntime namespace exclusivity")
+    probe = (
+        "import importlib.metadata as m, sys; "
+        "owners = sorted(set(m.packages_distributions().get('onnxruntime', []))); "
+        "assert owners == [sys.argv[1]], f'Namespace collision: {owners}'"
     )
-    run(
-        [
-            uv,
-            "pip",
-            "install",
-            "--python",
-            worker_python,
-            f"onnxruntime-gpu=={ORT_VERSION}",
-            f"numpy=={NUMPY_VERSION}",
-            f"huggingface-hub=={HUGGINGFACE_HUB_VERSION}",
-            f"hf-xet=={HF_XET_VERSION}",
-            *NVIDIA_PACKAGES,
-        ]
+    run([str(main_py), "-c", probe, "onnxruntime"], env={"CUDA_VISIBLE_DEVICES": "-1"})
+    expected = "onnxruntime-gpu" if hardware == "nvidia" else "onnxruntime"
+    run([str(worker_py), "-c", probe, expected],
+        env={"CUDA_VISIBLE_DEVICES": "0" if hardware == "nvidia" else "-1"})
+    log_ok("ORT namespaces partitioned.")
+
+
+def download_silero(stage: Path, expected_sha256: str | None) -> str:
+    log_step(f"Downloading pinned Silero VAD {SILERO_TAG}")
+    target_dir = stage / "models"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target = target_dir / "silero_vad.onnx"
+    req = urllib.request.Request(SILERO_URL, headers={"User-Agent": "dusky-installer/2"})
+    with urllib.request.urlopen(req, timeout=120) as resp:
+        data = resp.read()
+    if len(data) != SILERO_BYTES:
+        raise InstallError(f"Silero size mismatch: expected {SILERO_BYTES}, got {len(data)}")
+    digest = hashlib.sha256(data).hexdigest()
+    if expected_sha256:
+        if digest != expected_sha256.lower():
+            raise InstallError(f"Silero SHA-256 mismatch: {digest} != {expected_sha256.lower()}")
+    elif not digest.startswith(SILERO_SHA256_PREFIX):
+        raise InstallError(f"Silero digest {digest} lacks pinned prefix {SILERO_SHA256_PREFIX}")
+    target.write_bytes(data)
+    os.chmod(target, 0o644)
+    log_ok(f"Silero verified ({digest[:16]}...)")
+    return digest
+
+
+def prefetch_model(worker_py: Path, model: str, model_dir: Path, quantization: str) -> None:
+    log_step(f"Prefetching ASR model: {model} ({quantization}) -- ~600 MiB, progress below")
+    repo = MODEL_REPOS.get(model)
+    if repo is None:
+        raise InstallError(f"Unknown model {model!r}; known: {sorted(MODEL_REPOS)}")
+    model_dir.mkdir(parents=True, exist_ok=True)
+    # Phase 1: snapshot_download the HF repo (load_model alone with
+    # local_files_only will NOT download -- that was the
+    # ModelFileNotFoundError: encoder-model int8.onnx bug).
+    dl_code = (
+        "import sys; from huggingface_hub import snapshot_download; "
+        "p = snapshot_download(repo_id=sys.argv[1], local_dir=sys.argv[2]); print(p)"
     )
-    # onnx-asr's extras are intentionally not used: they are allowed to resolve
-    # an ORT wheel and would weaken exclusive namespace ownership.
-    run(
-        [
-            uv,
-            "pip",
-            "install",
-            "--python",
-            worker_python,
-            "--no-deps",
-            f"onnx-asr=={ONNX_ASR_VERSION}",
-        ]
-    )
-    run([uv, "pip", "check", "--python", main_python])
-    run([uv, "pip", "check", "--python", worker_python])
-    return main_python, worker_python
-
-
-def verify_ort_namespaces(main_python: Path, worker_python: Path) -> None:
-    verification = """
-import ctypes, glob, importlib.metadata, os, site, sys
-expected = sys.argv[1]
-if expected == 'onnxruntime-gpu':
-    for p in glob.glob(os.path.join(site.getsitepackages()[0], 'nvidia', '*', 'lib')):
-        for so in sorted(glob.glob(os.path.join(p, '*.so*'))):
-            try:
-                ctypes.CDLL(so, mode=ctypes.RTLD_GLOBAL)
-            except Exception:
-                pass
-owners = {name.lower().replace('_', '-') for name in importlib.metadata.packages_distributions().get('onnxruntime', [])}
-installed = {
-    dist.metadata['Name'].lower().replace('_', '-')
-    for dist in importlib.metadata.distributions()
-    if dist.metadata.get('Name', '').lower().startswith('onnxruntime')
-}
-if owners != {expected} or installed != {expected}:
-    raise SystemExit(f'ORT namespace collision: owners={owners}, installed={installed}, expected={expected}')
-import onnxruntime as ort
-if ort.__version__ != '1.27.0':
-    raise SystemExit(f'unexpected ORT version: {ort.__version__}')
-print(expected, ort.__version__, ort.get_available_providers())
-"""
-    cpu_environment = os.environ.copy()
-    cpu_environment["CUDA_VISIBLE_DEVICES"] = "-1"
-    run([main_python, "-c", verification, "onnxruntime"], environment=cpu_environment)
-    gpu_environment = os.environ.copy()
-    gpu_environment["CUDA_VISIBLE_DEVICES"] = "0"
-    run([worker_python, "-c", verification, "onnxruntime-gpu"], environment=gpu_environment)
-
-
-def verify_cpu_vad(main_python: Path, model_path: Path) -> None:
-    verification = """
-import pathlib, sys
-import numpy as np
-import onnxruntime as ort
-options = ort.SessionOptions()
-options.intra_op_num_threads = 1
-options.inter_op_num_threads = 1
-session = ort.InferenceSession(sys.argv[1], sess_options=options, providers=['CPUExecutionProvider'])
-if session.get_providers() != ['CPUExecutionProvider']:
-    raise SystemExit(f'VAD provider mismatch: {session.get_providers()}')
-inputs = {item.name for item in session.get_inputs()}
-if inputs != {'input', 'state', 'sr'}:
-    raise SystemExit(f'VAD input mismatch: {inputs}')
-output = session.run(None, {
-    'input': np.zeros((1, 576), dtype=np.float32),
-    'state': np.zeros((2, 1, 128), dtype=np.float32),
-    'sr': np.array(16000, dtype=np.int64),
-})
-if len(output) != 2:
-    raise SystemExit('VAD output count mismatch')
-maps = pathlib.Path('/proc/self/maps').read_text().lower()
-for name in ('libcuda.so', 'libcudart.so', 'libcublas.so', 'libcudnn.so', 'onnxruntime_providers_cuda'):
-    if name in maps:
-        raise SystemExit(f'CPU VAD process mapped forbidden CUDA object: {name}')
-print('CPU-only Silero VAD execution passed')
-"""
-    environment = os.environ.copy()
-    environment["CUDA_VISIBLE_DEVICES"] = "-1"
-    run([main_python, "-c", verification, model_path], environment=environment)
-
-
-def prefetch_model(
-    worker_python: Path,
-    stage: Path,
-    model: str,
-    quantization: str,
-) -> None:
-    model_dir = stage / "models" / "asr"
+    dl_env = dict(os.environ)
+    dl_env["HF_HUB_OFFLINE"] = "0"
+    dl_env["HF_HUB_ENABLE_HF_TRANSFER"] = "0"
+    run([str(worker_py), "-c", dl_code, repo, str(model_dir)], env=dl_env, timeout=5400, quiet=False)
+    onnx_files = list(model_dir.rglob("*.onnx"))
+    if not onnx_files:
+        raise InstallError(f"No .onnx graphs found in {model_dir} after download of {repo}")
+    log_ok(f"Downloaded {repo} ({len(onnx_files)} graphs). Smoke-loading...")
+    # Phase 2: smoke-load via CPU EP to prove the graph is valid.
+    # NOTE: .venv-worker on nvidia holds onnxruntime-gpu, whose import
+    # requires libcudart.so.13 at dlopen time even for CPU EP. Preload
+    # the PyPI CUDA libs RTLD_GLOBAL first; no-op on cpu workers.
     code = """
-import ctypes, glob, os, pathlib, site, sys
-for p in glob.glob(os.path.join(site.getsitepackages()[0], 'nvidia', '*', 'lib')):
-    for so in sorted(glob.glob(os.path.join(p, '*.so*'))):
-        try:
-            ctypes.CDLL(so, mode=ctypes.RTLD_GLOBAL)
-        except Exception:
-            pass
+import ctypes, importlib.metadata, os, pathlib, sys
+from pathlib import Path as _P
+_ORDER = ("libnvJitLink.so.13","libcudart.so.13","libnvrtc-builtins.so.13","libnvrtc.so.13",
+ "libcublasLt.so.13","libcublas.so.13","libcufft.so.12","libcurand.so.10",
+ "libcudnn_graph.so.9","libcudnn_engines_precompiled.so.9","libcudnn_ops.so.9",
+ "libcudnn_adv.so.9","libcudnn_cnn.so.9","libcudnn.so.9")
+_DISTS = ("nvidia-cuda-runtime","nvidia-cublas","nvidia-cudnn-cu13","nvidia-cuda-nvrtc","nvidia-cufft","nvidia-curand","nvidia-nvjitlink")
+_idx = {}
+for _d in _DISTS:
+    try: _dist = importlib.metadata.distribution(_d)
+    except importlib.metadata.PackageNotFoundError: continue
+    for _f in _dist.files or ():
+        _p = _P(_dist.locate_file(_f)).resolve()
+        if _p.is_file() and ".so" in _p.name:
+            _idx.setdefault(_p.name, _p)
+            for _s in _ORDER:
+                if _p.name == _s or _p.name.startswith(_s + "."): _idx.setdefault(_s, _p)
+for _s in _ORDER:
+    _m = _idx.get(_s)
+    if _m:
+        try: ctypes.CDLL(str(_m), mode=ctypes.RTLD_GLOBAL | os.RTLD_NOW)
+        except OSError: pass
 import onnx_asr
-quantization = None if sys.argv[3] == 'fp32' else sys.argv[3]
+q = None if sys.argv[3] in ('none', 'fp32') else sys.argv[3]
 model = onnx_asr.load_model(
     sys.argv[1],
     pathlib.Path(sys.argv[2]),
-    quantization=quantization,
+    quantization=q,
     providers=['CPUExecutionProvider'],
-    preprocessor_config={'max_concurrent_workers': 1, 'use_numpy_preprocessors': True},
+    preprocessor_config={'max_concurrent_workers': 1, 'use_numpy_preprocessors': True}
 )
-result = model.recognize(__import__('numpy').zeros(16000, dtype='float32'), sample_rate=16000)
-if not isinstance(result, str):
-    raise SystemExit(f'unexpected ASR result type: {type(result).__name__}')
-print('ASR model downloaded and CPU-load validated')
+res = model.recognize(__import__('numpy').zeros(16000, dtype='float32'), sample_rate=16000)
+assert isinstance(res, str)
 """
-    environment = os.environ.copy()
-    environment["CUDA_VISIBLE_DEVICES"] = "-1"
-    environment["HF_HOME"] = str(HF_HOME)
-    environment["HF_HUB_DISABLE_TELEMETRY"] = "1"
-    run(
-        [worker_python, "-c", code, model, model_dir, quantization],
-        environment=environment,
-        timeout=1800,
-    )
+    env = dict(os.environ)
+    env["CUDA_VISIBLE_DEVICES"] = "-1"
+    env["HF_HUB_ENABLE_HF_TRANSFER"] = "0"
+    run([str(worker_py), "-c", code, model, str(model_dir), quantization], env=env, timeout=1800, quiet=False)
+    log_ok("Model prefetched and smoke-tested.")
 
 
-def verify_cuda_asr(worker_python: Path, stage: Path, gpu_device: int) -> None:
-    environment = os.environ.copy()
-    environment["CUDA_VISIBLE_DEVICES"] = str(gpu_device)
-    environment["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-    environment["CUDA_MODULE_LOADING"] = "LAZY"
-    environment["HF_HUB_OFFLINE"] = "1"
-    environment["TRANSFORMERS_OFFLINE"] = "1"
-    run(
-        [
-            worker_python,
-            stage / "dusky_worker.py",
-            "--self-test",
-            "--config",
-            stage / "config.json",
-        ],
-        environment=environment,
-        cwd=stage,
-        timeout=600,
-    )
+def verify_cpu_vad(main_py: Path, vad_path: Path) -> None:
+    log_step("Verifying CPU-only VAD and clean address space")
+    code = """
+import pathlib, sys, numpy as np, onnxruntime as ort
+opts = ort.SessionOptions()
+opts.intra_op_num_threads = 1
+opts.inter_op_num_threads = 1
+session = ort.InferenceSession(sys.argv[1], sess_options=opts, providers=['CPUExecutionProvider'])
+assert session.get_providers() == ['CPUExecutionProvider']
+out = session.run(None, {
+    'input': np.zeros((1, 576), dtype=np.float32),
+    'state': np.zeros((2, 1, 128), dtype=np.float32),
+    'sr': __import__('numpy').array(16000, dtype=__import__('numpy').int64)
+})
+maps = pathlib.Path('/proc/self/maps').read_text().casefold()
+for f in ('libcuda.so', 'libcudart.so', 'libcublas', 'libcudnn', 'onnxruntime_providers_cuda'):
+    if f in maps:
+        raise SystemExit(f'Forbidden CUDA map: {f}')
+"""
+    run([str(main_py), "-c", code, str(vad_path)], env={"CUDA_VISIBLE_DEVICES": "-1"})
+    log_ok("CPU VAD clean.")
 
 
-def verify_wayland_typing(skip: bool) -> None:
-    if skip:
-        log("skipping Wayland protocol smoke test by explicit request")
-        return
-    if not os.environ.get("WAYLAND_DISPLAY"):
-        raise InstallError("WAYLAND_DISPLAY is required for the wtype smoke test")
-    wtype = shutil.which("wtype")
-    if wtype is None:
-        raise InstallError("wtype is unavailable")
-    result = run([wtype, ""], check=False, capture=True, timeout=10)
-    if result.returncode != 0:
-        detail = result.stderr.strip() or result.stdout.strip()
-        raise InstallError(
-            "wtype cannot bind the compositor's virtual-keyboard protocol: " + detail
-        )
-
-
-def freeze_environment(python: Path, output: Path) -> None:
-    uv = shutil.which("uv")
-    if uv is None:
-        raise InstallError("uv disappeared during installation")
-    result = run([uv, "pip", "freeze", "--python", python], capture=True)
-    output.write_text(result.stdout, encoding="utf-8")
-    os.chmod(output, 0o644)
+def verify_worker(worker_py: Path, stage: Path, hardware: str, gpu_device: int, config_path: Path) -> JsonObject:
+    log_step(f"Self-testing worker (hardware={hardware}) -- ~30-60s, silent while encoder loads")
+    env = dict(os.environ)
+    if hardware == "nvidia":
+        env["CUDA_VISIBLE_DEVICES"] = str(gpu_device)
+        env["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+        env["CUDA_MODULE_LOADING"] = "LAZY"
+    else:
+        env["CUDA_VISIBLE_DEVICES"] = "-1"
+    env["HF_HUB_OFFLINE"] = "1"
+    res = run([str(worker_py), str(stage / "dusky_worker.py"), "--config", str(config_path), "--self-test"],
+              env=env, cwd=stage, timeout=600, quiet=True)
+    stdout = res.stdout or ""
+    try:
+        report = json.loads(stdout.strip().splitlines()[-1])
+    except (json.JSONDecodeError, IndexError):
+        report = {"ok": True, "raw": stdout[-500:]}
+    if hardware == "nvidia" and not report.get("ok"):
+        raise InstallError(f"CUDA self-test failed (no CUDA EP nodes): {report}")
+    log_ok(f"Worker self-test passed ({hardware}).")
+    return report
 
 
 def deploy_stage(stage: Path) -> Path | None:
+    log_step(f"Atomically deploying to {APP_DIR}")
+    subprocess.run(["systemctl", "--user", "stop", UNIT_NAME], capture_output=True, check=False)
     backup: Path | None = None
     if APP_DIR.exists():
-        backup = APP_DIR.with_name(f"dusky-stt.backup-{int(time.time())}-{uuid.uuid4().hex[:8]}")
+        backup = APP_DIR.parent / f"dusky-stt.backup-{int(time.time())}"
         APP_DIR.rename(backup)
     try:
         stage.rename(APP_DIR)
-    except Exception:
-        if backup is not None and not APP_DIR.exists():
+    except Exception as exc:
+        if backup and backup.exists() and not APP_DIR.exists():
             backup.rename(APP_DIR)
-        raise
+        raise InstallError(f"Atomic rename failed: {exc}") from exc
+    log_ok("Deployed.")
     return backup
 
 
-def install_entrypoints(source_dir: Path) -> None:
+def install_entrypoints() -> None:
+    log_step("Installing entry points and unit")
     BIN_DIR.mkdir(parents=True, exist_ok=True)
-    SYSTEMD_DIR.mkdir(parents=True, exist_ok=True)
-    final_python = APP_DIR / ".venv-main" / "bin" / "python"
-
-    trigger_source = (source_dir / "dusky_trigger.py").read_text(encoding="utf-8")
-    trigger_lines = trigger_source.splitlines()
-    trigger_lines[0] = f"#!{final_python}"
-    trigger_temporary = BIN_DIR / f".dusky_trigger.{uuid.uuid4().hex}.tmp"
-    trigger_temporary.write_text("\n".join(trigger_lines) + "\n", encoding="utf-8")
-    os.chmod(trigger_temporary, 0o755)
-    os.replace(trigger_temporary, BIN_DIR / "dusky_trigger")
-
-    verify_temporary = BIN_DIR / f".dusky_verify.{uuid.uuid4().hex}.tmp"
-    shutil.copyfile(source_dir / "dusky_verify.sh", verify_temporary)
-    os.chmod(verify_temporary, 0o755)
-    os.replace(verify_temporary, BIN_DIR / "dusky_verify")
-
-    service_destination = SYSTEMD_DIR / SERVICE_NAME
-    service_temporary = SYSTEMD_DIR / f".{SERVICE_NAME}.{uuid.uuid4().hex}.tmp"
-    shutil.copyfile(source_dir / SERVICE_NAME, service_temporary)
-    os.chmod(service_temporary, 0o644)
-    os.replace(service_temporary, service_destination)
-
-
-def import_wayland_environment() -> None:
-    names = [name for name in ("WAYLAND_DISPLAY", "XDG_CURRENT_DESKTOP") if os.environ.get(name)]
-    if names:
-        run(["systemctl", "--user", "import-environment", *names])
-
-
-def configure_systemd(no_start: bool) -> None:
-    import_wayland_environment()
-    run(["systemd-analyze", "--user", "verify", SYSTEMD_DIR / SERVICE_NAME])
+    UNIT_DIR.mkdir(parents=True, exist_ok=True)
+    main_py = APP_DIR / ".venv-main" / "bin" / "python"
+    trigger_src = (APP_DIR / "dusky_trigger.py").read_text(encoding="utf-8").splitlines()
+    if trigger_src and trigger_src[0].startswith("#!"):
+        trigger_src[0] = f"#!{main_py}"
+    trigger_dest = BIN_DIR / "dusky_trigger"
+    trigger_dest.write_text("\n".join(trigger_src) + "\n", encoding="utf-8")
+    os.chmod(trigger_dest, 0o755)
+    verify_dest = BIN_DIR / "dusky_verify"
+    shutil.copyfile(APP_DIR / "dusky_verify.sh", verify_dest)
+    os.chmod(verify_dest, 0o755)
+    unit_dest = UNIT_DIR / UNIT_NAME
+    shutil.copyfile(APP_DIR / UNIT_NAME, unit_dest)
+    os.chmod(unit_dest, 0o644)
+    run(["systemd-analyze", "--user", "verify", str(unit_dest)])
     run(["systemctl", "--user", "daemon-reload"])
-    run(["systemctl", "--user", "enable", SERVICE_NAME])
-    if no_start:
-        return
-    run(["systemctl", "--user", "start", SERVICE_NAME])
-    deadline = time.monotonic() + 20
-    while time.monotonic() < deadline:
-        active = run(
-            ["systemctl", "--user", "is-active", SERVICE_NAME],
-            check=False,
-            capture=True,
-        )
-        socket_path = Path(os.environ["XDG_RUNTIME_DIR"]) / "dusky-stt" / "control.sock"
-        if active.returncode == 0 and socket_path.exists():
-            return
-        failed = run(
-            ["systemctl", "--user", "is-failed", "--quiet", SERVICE_NAME],
-            check=False,
-        )
-        if failed.returncode == 0:
-            break
-        time.sleep(0.2)
-    status = run(
-        ["systemctl", "--user", "status", SERVICE_NAME, "--no-pager", "--full"],
-        check=False,
-        capture=True,
-    )
-    raise InstallError("service did not become ready:\n" + status.stdout[-5000:])
+    run(["systemctl", "--user", "enable", "--now", UNIT_NAME])
+    log_ok("Service enabled.")
 
 
-def parse_arguments() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Install CUDA 13 Dusky STT on Arch Linux")
-    parser.add_argument(
-        "--model",
-        choices=("nemo-parakeet-tdt-0.6b-v2", "nemo-parakeet-tdt-0.6b-v3"),
-        default="nemo-parakeet-tdt-0.6b-v2",
-    )
-    parser.add_argument("--quantization", choices=("int8", "fp16", "fp32"), default="int8")
-    parser.add_argument("--gpu-device", type=int, default=0)
-    parser.add_argument("--gpu-mem-limit-mb", type=int)
-    parser.add_argument("--input-device", help="sounddevice input device name or index")
-    parser.add_argument("--idle-timeout-seconds", type=float, default=30.0)
-    parser.add_argument("--keep-audio", action="store_true")
-    parser.add_argument("--skip-system-packages", action="store_true")
-    parser.add_argument("--skip-wayland-smoke", action="store_true")
-    parser.add_argument("--no-start", action="store_true")
-    return parser.parse_args()
+def parse_arguments(argv: list[str]) -> argparse.Namespace:
+    p = argparse.ArgumentParser(prog="dusky_installer", description="Hardware-agnostic installer for Dusky STT")
+    p.add_argument("--hardware", default="auto", choices=("auto", "cpu", "nvidia", "amd"),
+                   help="ASR backend (default auto-detects nvidia > amd > cpu)")
+    p.add_argument("--model", default="nemo-parakeet-tdt-0.6b-v2",
+                   choices=sorted(MODEL_REPOS))
+    p.add_argument("--quantization", default="int8", choices=("int8", "fp16", "fp32", "none"))
+    p.add_argument("--gpu-device", type=int, default=0)
+    p.add_argument("--gpu-mem-limit-mb", type=int, default=None)
+    p.add_argument("--input-device", default=None)
+    p.add_argument("--state-dir", default=str(DEFAULT_STATE_DIR))
+    p.add_argument("--model-dir", default=None)
+    p.add_argument("--output-mode", default="realtime-both", choices=("clipboard", "both", "realtime-both"))
+    p.add_argument("--keep-audio", action="store_true")
+    p.add_argument("--idle-timeout-seconds", type=float, default=90.0)
+    p.add_argument("--silero-sha256", default=None)
+    p.add_argument("--skip-pacman", action="store_true")
+    p.add_argument("--uninstall", action="store_true")
+    return p.parse_args(argv)
 
 
-def main() -> int:
-    args = parse_arguments()
+def uninstall() -> int:
+    log_step("Uninstalling Dusky STT")
+    subprocess.run(["systemctl", "--user", "disable", "--now", UNIT_NAME], check=False)
+    subprocess.run(["systemctl", "--user", "daemon-reload"], check=False)
+    for p in (UNIT_DIR / UNIT_NAME, BIN_DIR / "dusky_trigger", BIN_DIR / "dusky_verify"):
+        p.unlink(missing_ok=True)
+    if APP_DIR.exists():
+        shutil.rmtree(APP_DIR)
+    log_ok("Uninstalled (transcripts/models retained).")
+    return 0
+
+
+def main(argv: list[str]) -> int:
+    args = parse_arguments(argv)
+    if args.uninstall:
+        return uninstall()
     assert_runtime()
-    if args.gpu_device < 0:
-        raise InstallError("GPU device index cannot be negative")
-    if args.idle_timeout_seconds < 5:
-        raise InstallError("idle timeout must be at least five seconds")
-    source_dir = Path(__file__).resolve().parent
-    assert_sources(source_dir)
-    install_system_packages(args.skip_system_packages)
-    total_vram_mb, driver_version = query_nvidia(args.gpu_device)
-    gpu_limit = choose_vram_limit(total_vram_mb, args.gpu_mem_limit_mb)
-    log(
-        f"GPU {args.gpu_device}: driver={driver_version} vram={total_vram_mb} MiB "
-        f"arena_limit={gpu_limit} MiB"
-    )
-    verify_wayland_typing(args.skip_wayland_smoke)
+    detected, info = detect_hardware()
+    hardware = detected if args.hardware == "auto" else args.hardware
+    if args.hardware != "auto" and args.hardware != detected and detected != "cpu":
+        log_warn(f"Requested {args.hardware} but auto-detected {detected} {info}; using requested.")
+    log_step(f"Hardware backend: {hardware} (auto-detected: {detected})")
+
+    gpu_limit = 4096
+    if hardware == "nvidia":
+        total_mb, _driver = query_nvidia_gpu(args.gpu_device)
+        # 2GB-VRAM guard: fp32 encoder alone is ~2.5 GB and can never fit;
+        # fail fast with a clear message instead of a post-download OOM.
+        if total_mb < 3072 and args.quantization in ("none", "fp32"):
+            raise InstallError(
+                f"GPU has {total_mb} MiB VRAM: fp32 model needs ~2.5 GB just for "
+                "weights. Re-run with --quantization int8 (recommended) or fp16.")
+        if total_mb < 3072 and args.quantization == "fp16":
+            log_warn(f"Only {total_mb} MiB VRAM with fp16 (~1.25 GB weights + CUDA "
+                     "context + activations): tight. Prefer --quantization int8.")
+        gpu_limit = choose_vram_limit(total_mb, args.gpu_mem_limit_mb)
+    elif hardware == "amd":
+        log_warn("AMD GPU acceleration via MIGraphX/ROCm is opportunistic; CPU fallback always works. "
+                 "For GPU EP install ROCm + MIGraphX system-side; otherwise CPU is used.")
+
+    packages = BASE_PACKAGES + (NVIDIA_PACKAGES if hardware == "nvidia" else ())
+    # Gentle AMD hint, never mandatory (keeps install reliable without ROCm).
+    if hardware == "amd" and not shutil.which("rocm-smi") and not Path("/dev/kfd").exists():
+        log_warn("No ROCm stack found; worker will use CPUExecutionProvider (reliable).")
+
+    install_pacman_packages(packages, args.skip_pacman)
 
     APP_DIR.parent.mkdir(parents=True, exist_ok=True)
-    app_parent_metadata = os.lstat(APP_DIR.parent)
-    if (
-        not stat.S_ISDIR(app_parent_metadata.st_mode)
-        or stat.S_ISLNK(app_parent_metadata.st_mode)
-        or app_parent_metadata.st_uid != os.getuid()
-    ):
-        raise InstallError(f"invalid application parent directory: {APP_DIR.parent}")
-    BIN_DIR.mkdir(parents=True, exist_ok=True)
-    SYSTEMD_DIR.mkdir(parents=True, exist_ok=True)
-    private_directory(STATE_DIR)
-    HF_HOME.mkdir(parents=True, exist_ok=True)
-
-    was_active = run(
-        ["systemctl", "--user", "is-active", "--quiet", SERVICE_NAME],
-        check=False,
-    ).returncode == 0
-    run(["systemctl", "--user", "stop", SERVICE_NAME], check=False)
-    stage = Path(tempfile.mkdtemp(prefix=".dusky-stt-stage-", dir=APP_DIR.parent))
+    stage = Path(tempfile.mkdtemp(prefix=".dusky-stage-", dir=APP_DIR.parent))
     os.chmod(stage, 0o700)
     backup: Path | None = None
-    deployed = False
     try:
         for name in REQUIRED_SOURCES:
-            shutil.copy2(source_dir / name, stage / name)
-        for name in ("dusky_main.py", "dusky_worker.py", "dusky_trigger.py", "dusky_verify.sh"):
+            shutil.copy2(SOURCE_DIR / name, stage / name)
+        for name in ("dusky_main.py", "dusky_worker.py", "dusky_trigger.py", "dusky_rec_indicator.py", "dusky_verify.sh"):
             os.chmod(stage / name, 0o755)
-
-        main_python, worker_python = install_python_environments(stage)
-        vad_hash = download_silero(stage / "models" / "silero_vad.onnx")
-        prefetch_model(
-            worker_python,
-            stage,
-            args.model,
-            args.quantization,
-        )
+        main_py, worker_py = install_python_environments(stage, hardware)
+        silero_hash = download_silero(stage, args.silero_sha256)
+        verify_namespaces(main_py, worker_py, hardware)
+        verify_cpu_vad(main_py, stage / "models" / "silero_vad.onnx")
+        model_dir = Path(args.model_dir).expanduser() if args.model_dir else DEFAULT_MODEL_ROOT / args.model
+        prefetch_model(worker_py, args.model, model_dir, args.quantization)
         config: JsonObject = {
-            "schema_version": 2,
-            "python_baseline": PYTHON_LABEL,
-            "backend": "cuda13",
+            "schema_version": SCHEMA_VERSION,
+            "hardware": hardware,
             "model": args.model,
-            "model_dir": "models/asr",
-            "quantization": args.quantization,
+            "model_dir": str(model_dir),
+            "quantization": None if args.quantization in ("none", "fp32") else args.quantization,
             "gpu_device": args.gpu_device,
             "gpu_mem_limit_mb": gpu_limit,
             "input_device": args.input_device,
-            "state_dir": str(STATE_DIR),
-            "output_mode": "realtime-both",
+            "state_dir": str(Path(args.state_dir).expanduser()),
+            "output_mode": args.output_mode,
             "push_type_at_end": True,
             "keep_audio": args.keep_audio,
-            "llm_enabled": True,
-            "llm_endpoint": "http://localhost:11434",
-            "llm_model": "s1-mini",
-            "llm_cleanup_style": "semi-formal",
-            "llm_cleanup_structure": "prose",
-            "llm_cleanup_context": "general",
-            "llm_timeout_seconds": 60,
-            "llm_max_tokens": 2048,
             "idle_timeout_seconds": args.idle_timeout_seconds,
             "max_inflight_requests": 2,
-            "worker_queue_timeout_seconds": 30,
             "realtime_interval_seconds": 1.2,
-            "finalize_timeout_seconds": 120,
-            "max_request_seconds": 30,
-            "max_phrase_seconds": 15,
-            "file_chunk_seconds": 25,
+            "finalize_timeout_seconds": 120.0,
+            "max_request_seconds": 30.0,
+            "max_phrase_seconds": 15.0,
+            # 20 s (not 25 s): Parakeet TDT is trained on short utterances and
+            # onnx-asr caps at 20-30 s per forward; 20 s cuts O(T^2) attention
+            # peak ~1.5x vs 25 s on 2 GB VRAM with fewer mid-word seams.
+            "file_chunk_seconds": 20.0,
             "pre_roll_seconds": 0.32,
             "phrase_silence_seconds": 0.80,
             "vad_onset_seconds": 0.096,
@@ -688,56 +614,49 @@ def main() -> int:
             "vad_start_threshold": 0.50,
             "vad_end_threshold": 0.35,
             "stable_holdback_words": 2,
-            "silero_source": SILERO_URL,
-            "silero_sha256": vad_hash,
-            "onnx_asr_version": ONNX_ASR_VERSION,
-            "onnxruntime_version": ORT_VERSION,
-            "cuda_runtime": "13.0",
+            "silero_sha256": silero_hash,
+            "vad_model_path": "models/silero_vad.onnx",
+            "worker_python": ".venv-worker/bin/python",
+            "worker_script": "dusky_worker.py",
         }
-        write_json(stage / "config.json", config)
-        verify_ort_namespaces(main_python, worker_python)
-        verify_cpu_vad(main_python, stage / "models" / "silero_vad.onnx")
-        verify_cuda_asr(worker_python, stage, args.gpu_device)
-        freeze_environment(main_python, stage / "environment-main.lock")
-        freeze_environment(worker_python, stage / "environment-worker.lock")
-
+        cfg_path = stage / "config.json"
+        cfg_path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+        os.chmod(cfg_path, 0o600)
+        report = verify_worker(worker_py, stage, hardware, args.gpu_device, cfg_path)
+        manifest = {
+            "schema_version": SCHEMA_VERSION, "hardware": hardware, "detected": detected,
+            "kernel": platform.release(), "python": sys.version.split()[0],
+            "silero_sha256": silero_hash, "model": args.model,
+            "self_test": report, "time": int(time.time()),
+        }
+        (stage / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
         backup = deploy_stage(stage)
-        deployed = True
-        install_entrypoints(APP_DIR)
-        configure_systemd(args.no_start)
-    except Exception:
-        if stage.exists():
-            shutil.rmtree(stage, ignore_errors=True)
-        if deployed:
-            run(["systemctl", "--user", "stop", SERVICE_NAME], check=False)
-            shutil.rmtree(APP_DIR, ignore_errors=True)
-            if backup is not None and backup.exists():
-                backup.rename(APP_DIR)
-                if all((APP_DIR / name).is_file() for name in REQUIRED_SOURCES):
-                    install_entrypoints(APP_DIR)
-                    run(["systemctl", "--user", "daemon-reload"], check=False)
-                    if was_active:
-                        run(["systemctl", "--user", "start", SERVICE_NAME], check=False)
-        raise
-    else:
-        if backup is not None:
+        install_entrypoints()
+        if backup and backup.exists():
             shutil.rmtree(backup, ignore_errors=True)
-
-    log("installation complete")
-    log(f"trigger: {BIN_DIR / 'dusky_trigger'}")
-    log(f"verification: {BIN_DIR / 'dusky_verify'}")
-    log(f"config: {APP_DIR / 'config.json'}")
-    log(f"service: {SYSTEMD_DIR / SERVICE_NAME}")
-    if args.no_start:
-        log(f"start with: systemctl --user start {SERVICE_NAME}")
-    else:
-        log("service is ready; run dusky_trigger to toggle realtime capture")
-    return 0
+        log_ok(f"Dusky STT installed ({hardware}) at {APP_DIR}.")
+        return 0
+    except KeyboardInterrupt:
+        shutil.rmtree(stage, ignore_errors=True)
+        if backup and backup.exists() and not APP_DIR.exists():
+            backup.rename(APP_DIR)
+        print(f"\n{YELLOW}Installation cancelled by user (Ctrl-C). Stale stage removed; re-run to resume.{RESET}",
+              file=sys.stderr)
+        return 130
+    except BaseException as exc:
+        shutil.rmtree(stage, ignore_errors=True)
+        if backup and backup.exists():
+            try:
+                if not APP_DIR.exists():
+                    backup.rename(APP_DIR)
+                subprocess.run(["systemctl", "--user", "restart", UNIT_NAME], check=False)
+            except BaseException:
+                pass
+        if isinstance(exc, InstallError):
+            print(f"\n{RED}Installation failed: {exc}{RESET}", file=sys.stderr)
+            return 1
+        raise
 
 
 if __name__ == "__main__":
-    try:
-        raise SystemExit(main())
-    except (InstallError, OSError, subprocess.SubprocessError) as exc:
-        print(f"[dusky-installer] ERROR: {exc}", file=sys.stderr)
-        raise SystemExit(1) from exc
+    sys.exit(main(sys.argv[1:]))

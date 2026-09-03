@@ -169,11 +169,17 @@
 
   // ─── shadow UI ────────────────────────────────────────────────────────────
   const UI_CSS = [
-    ":host { all: initial !important; position: fixed !important; top: 0 !important; left: 0 !important; width: 0 !important; height: 0 !important; overflow: visible !important; }",
+    // NOTE: the outer stacking order is decided by the *host* element, not by
+    // anything inside the shadow root. A fixed panel with z-index 2147483647
+    // inside the shadow still paints *below* any page element with a positive
+    // z-index when the host itself is z-index:auto — which is exactly why the
+    // dialog looked "hidden behind" white cards. The host must carry the max
+    // z-index itself, plus pointer-events:none so only panels hit-test.
+    ":host { all: initial !important; display: block !important; position: fixed !important; top: 0 !important; left: 0 !important; width: 0 !important; height: 0 !important; overflow: visible !important; z-index: 2147483647 !important; pointer-events: none !important; isolation: isolate !important; }",
     "* { box-sizing: border-box; }",
-    ".mask { position: fixed; z-index: 2147483646; display: none; pointer-events: none; border-radius: 2px; outline: 2px dashed #e6c280; box-shadow: 0 0 0 200vmax rgba(18, 15, 12, 0.5); }",
-    ".panel { position: fixed; z-index: 2147483647; background: #191614; color: #f5ebe0; border: 1px solid #d4a359; border-radius: 10px; box-shadow: 0 12px 40px rgba(0, 0, 0, 0.75); font: 12px/1.4 system-ui, sans-serif; user-select: none; }",
-    ".bar { top: 12px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 8px; padding: 6px 10px; white-space: nowrap; cursor: grab; }",
+    ".mask { position: fixed; z-index: 2147483646; display: none; pointer-events: none !important; border-radius: 2px; outline: 2px dashed #e6c280; box-shadow: 0 0 0 200vmax rgba(18, 15, 12, 0.5); }",
+    ".panel { position: fixed; z-index: 2147483647; pointer-events: auto; background: #191614; color: #f5ebe0; border: 1px solid #d4a359; border-radius: 10px; box-shadow: 0 12px 40px rgba(0, 0, 0, 0.75); font: 12px/1.4 system-ui, sans-serif; user-select: none; }",
+    ".bar { top: 12px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 8px; padding: 6px 10px; white-space: nowrap; cursor: grab; touch-action: none; max-width: calc(100vw - 24px); }",
     ".grip { opacity: 0.5; padding: 0 2px; cursor: grab; }",
     ".title { font-weight: 700; color: #e6c280; }",
     ".info { max-width: 340px; overflow: hidden; text-overflow: ellipsis; color: #c4b8aa; font: 11px ui-monospace, monospace; }",
@@ -183,9 +189,9 @@
     "button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px solid #e6c280; outline-offset: 1px; }",
     ".x { background: #b8545e; border-color: #b8545e; color: #fff; font-weight: 700; }",
     ".grow { flex: 1; }",
-    ".dlg { top: 64px; right: 16px; width: 390px; padding: 12px; outline: none; transition: opacity 0.15s; }",
-    ".dlg.ghost:not(:hover) { opacity: 0.25; }",
-    ".head { display: flex; align-items: center; gap: 6px; padding-bottom: 8px; margin-bottom: 8px; border-bottom: 1px solid #3d342c; cursor: grab; }",
+    ".dlg { top: 64px; right: 16px; width: 390px; max-width: calc(100vw - 32px); max-height: calc(100vh - 96px); overflow: auto; padding: 12px; outline: none; transition: opacity 0.15s; }",
+    ".dlg.ghost:not(:hover):not(:focus-within) { opacity: 0.25; }",
+    ".head { display: flex; align-items: center; gap: 6px; padding-bottom: 8px; margin-bottom: 8px; border-bottom: 1px solid #3d342c; cursor: grab; touch-action: none; }",
     ".head .title { flex: 1; }",
     ".row { display: flex; align-items: center; gap: 6px; margin: 6px 0; }",
     ".lbl { flex: none; width: 58px; color: #c4b8aa; font-size: 11px; }",
@@ -198,7 +204,7 @@
     ".grid button { display: flex; align-items: center; gap: 7px; text-align: left; padding: 4px 7px; }",
     ".sw { flex: none; width: 13px; height: 13px; border-radius: 50%; border: 1px solid #55493d; }",
     ".hint { margin: 8px 0 0; color: #8f857a; font-size: 10.5px; }",
-    ".drawer { bottom: 16px; right: 16px; width: 380px; max-height: 60vh; padding: 12px; display: flex; flex-direction: column; }",
+    ".drawer { bottom: 16px; right: 16px; width: 380px; max-width: calc(100vw - 32px); max-height: 60vh; padding: 12px; display: flex; flex-direction: column; }",
     ".list { overflow: auto; display: flex; flex-direction: column; gap: 4px; }",
     ".item { display: flex; align-items: center; gap: 6px; padding: 4px 6px; background: #25201c; border: 1px solid #3d342c; border-radius: 6px; }",
     ".item:hover { border-color: #d4a359; }",
@@ -258,10 +264,35 @@
   ].join("");
 
   const host = document.createElement("dusky-picker");
+  // Defense in depth: page stylesheets CAN target the host element itself
+  // (closed shadow DOM does not protect it). Inline !important styles beat any
+  // page rule — e.g. sites with `* { position: static }` or a competing
+  // `dusky-picker { z-index: 0 }` — and keep the picker in the top layer.
+  // Keep in sync with the `:host` rule above.
+  for (const [prop, value] of [
+    ["all", "initial"], ["display", "block"], ["position", "fixed"],
+    ["top", "0"], ["left", "0"], ["width", "0"], ["height", "0"],
+    ["overflow", "visible"], ["z-index", "2147483647"],
+    ["pointer-events", "none"], ["isolation", "isolate"],
+  ]) {
+    try { host.style.setProperty(prop, value, "important"); } catch (_) { /* very old engine */ }
+  }
   const root = host.attachShadow({ mode: "closed" });
   root.innerHTML = "<style>" + UI_CSS + "</style><div class='mask' id='mask'></div>";
   const q = (id) => root.getElementById(id);
-  const isOurs = (e) => e.composedPath().includes(host);
+  const isOurs = (e) => {
+    try {
+      if (e.composedPath().includes(host)) return true;
+    } catch (_) { /* composedPath unavailable — fall through */ }
+    // Fallback for synthetic events: anything whose target lives inside the
+    // shadow root retargets to the host in the light DOM.
+    try {
+      const t = e.target;
+      if (t === host) return true;
+      if (t instanceof Node && t.getRootNode() === root) return true;
+    } catch (_) { /* ignore */ }
+    return false;
+  };
   let bar = null, dialog = null, drawer = null;
 
   function el(tag, attrs, ...children) {
@@ -281,12 +312,15 @@
 
   function drag(panel, handle, onMove) {
     handle.addEventListener("pointerdown", (e) => {
-      if (e.button !== 0 || e.target.closest("button, input, select")) return;
+      if (e.button !== 0 || e.target.closest("button, input, select, textarea, a, [contenteditable]")) return;
+      // Ignore clicks that would start a text selection inside the handle itself.
+      if (e.target.closest("input, select, textarea")) return;
       const r = panel.getBoundingClientRect();
       const ox = e.clientX - r.left, oy = e.clientY - r.top;
+      const w = r.width, h = r.height;
       const move = (ev) => {
-        const x = Math.min(Math.max(0, ev.clientX - ox), innerWidth - r.width);
-        const y = Math.min(Math.max(0, ev.clientY - oy), innerHeight - r.height);
+        const x = Math.min(Math.max(0, ev.clientX - ox), Math.max(0, innerWidth - w));
+        const y = Math.min(Math.max(0, ev.clientY - oy), Math.max(0, innerHeight - h));
         Object.assign(panel.style, { left: x + "px", top: y + "px", right: "auto", bottom: "auto", transform: "none" });
         if (onMove) onMove(x, y);
       };
@@ -294,12 +328,14 @@
         handle.removeEventListener("pointermove", move);
         handle.removeEventListener("pointerup", stop);
         handle.removeEventListener("pointercancel", stop);
+        try { if (handle.hasPointerCapture(e.pointerId)) handle.releasePointerCapture(e.pointerId); } catch (_) { /* already released */ }
       };
-      handle.setPointerCapture(e.pointerId);
+      try { handle.setPointerCapture(e.pointerId); } catch (_) { /* touch/mouse without capture support */ }
       handle.addEventListener("pointermove", move);
       handle.addEventListener("pointerup", stop);
       handle.addEventListener("pointercancel", stop);
       e.preventDefault();
+      e.stopPropagation();
     });
   }
 

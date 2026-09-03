@@ -1,72 +1,66 @@
 [Unit]
-Description=Dusky STT isolated Wayland voice typing engine
-Documentation=https://onnxruntime.ai/docs/execution-providers/CUDA-ExecutionProvider.html
-After=graphical-session.target pipewire.service wireplumber.service
+Description=Dusky STT (CPU daemon with on-demand hardware-matched ASR worker)
+Documentation=file:%h/.local/lib/dusky-stt/README.md
+After=graphical-session.target pipewire.service wireplumber.service pipewire-pulse.service
 Wants=pipewire.service wireplumber.service
 PartOf=graphical-session.target
-StartLimitIntervalSec=120
-StartLimitBurst=5
-ConditionPathExists=%h/.local/lib/dusky-stt/.venv-main/bin/python
-ConditionPathExists=%h/.local/lib/dusky-stt/dusky_main.py
+ConditionEnvironment=XDG_RUNTIME_DIR
 
 [Service]
 Type=notify
 NotifyAccess=main
-ExecStart=%h/.local/lib/dusky-stt/.venv-main/bin/python %h/.local/lib/dusky-stt/dusky_main.py --daemon
 WorkingDirectory=%h/.local/lib/dusky-stt
-RuntimeDirectory=dusky-stt
-RuntimeDirectoryMode=0700
-RuntimeDirectoryPreserve=no
-UMask=0077
-
-Environment=DUSKY_APP_DIR=%h/.local/lib/dusky-stt
-Environment=HF_HOME=%h/.cache/huggingface
-Environment=HF_HUB_OFFLINE=1
-Environment=HF_HUB_DISABLE_TELEMETRY=1
+ExecStartPre=%h/.local/lib/dusky-stt/.venv-main/bin/python %h/.local/lib/dusky-stt/dusky_main.py --config %h/.local/lib/dusky-stt/config.json --check-cpu-isolation
+ExecStart=%h/.local/lib/dusky-stt/.venv-main/bin/python %h/.local/lib/dusky-stt/dusky_main.py --config %h/.local/lib/dusky-stt/config.json
+Environment=CUDA_VISIBLE_DEVICES=-1
 Environment=PYTHONUNBUFFERED=1
 Environment=PYTHONDONTWRITEBYTECODE=1
-Environment=CUDA_VISIBLE_DEVICES=-1
-Environment=CUDA_MODULE_LOADING=LAZY
-
+Environment=PYTHONNOUSERSITE=1
+Environment=HF_HOME=%h/.cache/huggingface
+Environment=HF_HUB_OFFLINE=1
+RuntimeDirectory=dusky-stt
+RuntimeDirectoryMode=0700
+StateDirectory=dusky-stt
+StateDirectoryMode=0700
+UMask=0077
 Restart=on-failure
 RestartSec=2s
-RestartSteps=5
-RestartMaxDelaySec=30s
-TimeoutStartSec=30s
-TimeoutStopSec=20s
+TimeoutStartSec=120s
+TimeoutStopSec=30s
 WatchdogSec=30s
-KillMode=control-group
+KillMode=mixed
+KillSignal=SIGTERM
 OOMPolicy=stop
-
 MemoryHigh=6G
 MemoryMax=8G
 MemorySwapMax=1G
 TasksMax=192
 LimitNOFILE=8192
-
 NoNewPrivileges=yes
-CapabilityBoundingSet=
-LockPersonality=yes
-PrivateTmp=yes
-ProtectClock=yes
-ProtectControlGroups=yes
-ProtectHome=read-only
-ProtectHostname=yes
-ProtectKernelLogs=yes
-ProtectKernelModules=yes
-ProtectKernelTunables=yes
-ProtectProc=invisible
 ProtectSystem=strict
-ProcSubset=pid
-ReadWritePaths=%h/.local/state/dusky-stt %h/.cache/huggingface
-RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_INET AF_INET6
+ProtectHome=read-only
+ReadWritePaths=%h/.local/state/dusky-stt %h/.cache/huggingface %h/.local/share/dusky-stt
+ReadOnlyPaths=%h/.local/lib/dusky-stt
+PrivateTmp=yes
+ProtectProc=invisible
+ProtectClock=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectHostname=yes
 RestrictNamespaces=yes
 RestrictSUIDSGID=yes
+LockPersonality=yes
 SystemCallArchitectures=native
-
-StandardOutput=journal
-StandardError=journal
-SyslogIdentifier=dusky-stt
+RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_INET AF_INET6
+# NOTE: no IPAddressAllow/Deny here on purpose: user units run without the
+# privilege to program the IP firewall (log shows "unit configures an IP
+# firewall, but not running as root"). AF_UNIX+NETLINK+INET via
+# RestrictAddressFamilies plus localhost-only Ollama use is the enforceable part.
+# NVRTC JIT needs WX pages; PipeWire needs RTKit priority.
+MemoryDenyWriteExecute=no
+RestrictRealtime=no
 
 [Install]
-WantedBy=default.target
+WantedBy=graphical-session.target

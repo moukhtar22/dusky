@@ -1,225 +1,252 @@
 #!/usr/bin/env python3
-"""Authoritative SOCK_SEQPACKET control client for Dusky STT."""
+"""Control client for Dusky STT (stdlib only).
+
+Defaults to toggling realtime dictation with zero arguments (hotkey friendly).
+Validates socket ownership/modes before connecting; never trusts permissions alone.
+"""
 
 import argparse
 import json
 import os
-from pathlib import Path
 import socket
 import stat
 import subprocess
 import sys
 import time
+from pathlib import Path
 from typing import Any
 
-
-MIN_PYTHON = (3, 14, 6)
-MAX_PACKET = 64 * 1024
 SERVICE = "dusky_stt.service"
-
-if sys.version_info < MIN_PYTHON:
-    raise SystemExit("Dusky STT requires CPython 3.14.6 or newer")
-if sys.implementation.name != "cpython" or not sys._is_gil_enabled():
-    raise SystemExit("Dusky STT requires the GIL-enabled CPython 3.14 ABI")
+MAX_PACKET = 65536
+DEFAULT_TIMEOUT = 10.0
+WAIT_DEADLINE_S = 4 * 3600  # --wait cap for very long files (Ctrl-C aborts client only)
 
 type JsonObject = dict[str, Any]
 
 
-def runtime_directory() -> Path:
-    raw = os.environ.get("XDG_RUNTIME_DIR")
-    if not raw:
-        raise RuntimeError("XDG_RUNTIME_DIR is required")
-    base = Path(raw)
-    metadata = os.lstat(base)
-    if (
-        not stat.S_ISDIR(metadata.st_mode)
-        or stat.S_ISLNK(metadata.st_mode)
-        or metadata.st_uid != os.getuid()
-    ):
-        raise RuntimeError("XDG_RUNTIME_DIR has an invalid owner or type")
-    return base / "dusky-stt"
+def app_config_path() -> Path:
+    return Path.home() / ".local" / "lib" / "dusky-stt" / "config.json"
+
+
+def transcripts_dir() -> Path:
+    try:
+        cfg = json.loads(app_config_path().read_text(encoding="utf-8"))
+        state = str(cfg.get("state_dir", "~/.local/state/dusky-stt"))
+    except (OSError, ValueError):
+        state = "~/.local/state/dusky-stt"
+    return Path(state).expanduser() / "transcripts"
+
+
+def newest_transcript(after: float | None = None) -> Path | None:
+    d = transcripts_dir()
+    try:
+        cands = [p for p in d.glob("capture-*.txt") if p.is_file()]
+    except OSError:
+        return None
+    if after is not None:
+        cands = [p for p in cands if p.stat().st_mtime > after]
+    return max(cands, key=lambda p: p.stat().st_mtime) if cands else None
 
 
 def control_path() -> Path:
-    return runtime_directory() / "control.sock"
+    rt = os.environ.get("XDG_RUNTIME_DIR")
+    if not rt:
+        raise RuntimeError("XDG_RUNTIME_DIR is unset.")
+    return Path(rt) / "dusky-stt" / "control.sock"
 
 
-def run_systemctl(*arguments: str, check: bool = False) -> subprocess.CompletedProcess[str]:
-    completed = subprocess.run(
-        ["systemctl", "--user", *arguments],
-        text=True,
-        capture_output=True,
-        check=False,
-        timeout=30,
-    )
-    if check and completed.returncode != 0:
-        detail = completed.stderr.strip() or completed.stdout.strip()
-        raise RuntimeError(f"systemctl {' '.join(arguments)} failed: {detail}")
-    return completed
-
-
-def socket_is_secure(path: Path) -> bool:
+def is_socket_secure(p: Path) -> bool:
     try:
-        parent = os.lstat(path.parent)
-        metadata = os.lstat(path)
-    except FileNotFoundError:
+        d_st = p.parent.lstat()
+        f_st = p.lstat()
+    except OSError:
         return False
-    if (
-        not stat.S_ISDIR(parent.st_mode)
-        or stat.S_ISLNK(parent.st_mode)
-        or parent.st_uid != os.getuid()
-        or stat.S_IMODE(parent.st_mode) != 0o700
-    ):
-        raise RuntimeError("control socket directory is not private")
-    if not stat.S_ISSOCK(metadata.st_mode):
-        raise RuntimeError(f"control path is not a socket: {path}")
-    if metadata.st_uid != os.getuid():
-        raise RuntimeError("control socket is owned by another user")
-    if stat.S_IMODE(metadata.st_mode) != 0o600:
-        raise RuntimeError("control socket must have mode 0600")
-    return True
-
-
-def wait_for_socket(timeout: float = 20.0) -> None:
-    deadline = time.monotonic() + timeout
-    path = control_path()
-    while time.monotonic() < deadline:
-        if socket_is_secure(path):
-            return
-        if run_systemctl("is-failed", "--quiet", SERVICE).returncode == 0:
-            break
-        time.sleep(0.1)
-    status = run_systemctl("status", SERVICE, "--no-pager", "--full")
-    detail = status.stdout[-4000:] or status.stderr[-1000:]
-    raise TimeoutError(f"Dusky control socket did not appear\n{detail}")
+    return (d_st.st_uid == os.getuid() and stat.S_IMODE(d_st.st_mode) == 0o700
+            and stat.S_ISSOCK(f_st.st_mode) and f_st.st_uid == os.getuid()
+            and stat.S_IMODE(f_st.st_mode) == 0o600)
 
 
 def ensure_service() -> None:
-    if run_systemctl("is-active", "--quiet", SERVICE).returncode != 0:
-        run_systemctl("start", SERVICE, check=True)
-    wait_for_socket()
+    if is_socket_secure(control_path()):
+        return
+    subprocess.run(["systemctl", "--user", "start", SERVICE], check=False)
+    deadline = time.monotonic() + 20.0
+    while time.monotonic() < deadline:
+        if is_socket_secure(control_path()):
+            return
+        if subprocess.run(["systemctl", "--user", "is-failed", "--quiet", SERVICE], check=False).returncode == 0:
+            break
+        time.sleep(0.1)
+    raise TimeoutError("Dusky STT socket did not appear; check `dusky_trigger --logs`.")
 
 
-def request(payload: JsonObject, *, start_service: bool = True) -> JsonObject:
-    if start_service:
-        ensure_service()
-    path = control_path()
-    if not socket_is_secure(path):
-        raise RuntimeError("Dusky control socket is unavailable")
-    encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    if len(encoded) > MAX_PACKET:
-        raise ValueError("control request is too large")
+def send_command(payload: JsonObject, timeout: float = DEFAULT_TIMEOUT) -> JsonObject:
+    ensure_service()
+    p = control_path()
+    if not is_socket_secure(p):
+        raise RuntimeError(f"Control socket missing/insecure: {p}")
+    blob = json.dumps(payload).encode()
+    if len(blob) > MAX_PACKET:
+        raise ValueError("Request too large for SEQPACKET")
+    with socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET | socket.SOCK_CLOEXEC) as s:
+        s.settimeout(timeout)
+        s.connect(str(p))
+        s.sendmsg([blob])
+        data, _, flags, _ = s.recvmsg(MAX_PACKET)
+        if flags & getattr(socket, "MSG_TRUNC", 0x20):
+            raise RuntimeError("Response truncated")
+        if not data:
+            raise RuntimeError("Daemon closed connection")
+    return json.loads(data.decode())
 
-    connection = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET | socket.SOCK_CLOEXEC)
-    connection.settimeout(10)
+
+def wait_for_transcript(baseline: float) -> JsonObject:
+    """Poll until the daemon returns to idle, then print the transcript.
+
+    Ctrl-C aborts only this client; the daemon keeps transcribing.
+    In on-demand mode the service stops itself after the job: a dead
+    socket then counts as done, and the transcript file is authoritative.
+    """
+    deadline = time.monotonic() + WAIT_DEADLINE_S
+    missed = 0
     try:
-        connection.connect(str(path))
-        sent = connection.send(encoded)
-        if sent != len(encoded):
-            raise OSError(f"short control request send: {sent}/{len(encoded)}")
-        packet, _ancillary, flags, _address = connection.recvmsg(MAX_PACKET)
-        if flags & (socket.MSG_TRUNC | socket.MSG_CTRUNC):
-            raise RuntimeError("truncated control response")
-    finally:
-        connection.close()
-    if not packet:
-        raise RuntimeError("daemon closed the control connection without a response")
-    response = json.loads(packet.decode("utf-8"))
-    if not isinstance(response, dict):
-        raise RuntimeError("daemon returned an invalid response")
-    return response
-
-
-def print_response(response: JsonObject, *, as_json: bool) -> int:
-    if as_json:
-        print(json.dumps(response, ensure_ascii=False, sort_keys=True))
-        return 0 if response.get("ok") else 1
-    if not response.get("ok"):
-        print(f"Dusky STT: {response.get('error', 'request failed')}", file=sys.stderr)
-        return 1
-    for key in (
-        "state",
-        "daemon_pid",
-        "daemon_rss_kib",
-        "worker_pid",
-        "worker_inflight",
-        "backend",
-        "model",
-        "quantization",
-        "file",
-        "session_id",
-    ):
-        if key in response:
-            print(f"{key}: {response[key]}")
-    return 0
+        while time.monotonic() < deadline:
+            try:
+                st = send_command({"command": "status"}, timeout=DEFAULT_TIMEOUT)
+                missed = 0
+            except (OSError, ValueError, TimeoutError):
+                st = None
+                missed += 1
+            if st is None:
+                # Daemon unreachable: either still booting (keep waiting) or
+                # self-stopped after finishing (transcript decides below).
+                # A crash mid-job looks the same, so give up after ~30 s of
+                # continuous silence with no transcript to show for it.
+                if newest_transcript(after=baseline) is not None:
+                    break
+                if missed >= 15:
+                    return {"ok": False, "error": "daemon unreachable for 30s (crashed mid-job?)"}
+                time.sleep(2.0)
+                continue
+            if st.get("state", "idle") == "idle":
+                break
+            time.sleep(2.0)
+        else:
+            return {"ok": False, "error": f"timed out after {WAIT_DEADLINE_S // 3600}h waiting for transcription"}
+    except KeyboardInterrupt:
+        return {"ok": False, "error": "wait interrupted (transcription continues in background)"}
+    path = newest_transcript(after=baseline)
+    if path is None:
+        return {"ok": False, "error": "transcription finished but no transcript file appeared"}
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return {"ok": False, "error": f"cannot read {path}: {exc}"}
+    print(text, end="" if text.endswith("\n") else "\n")
+    return {"ok": True, "event": "transcribed", "path": str(path),
+            "chars": len(text), "words": len(text.split())}
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Control Dusky STT")
-    action = parser.add_mutually_exclusive_group()
-    action.add_argument("--start", action="store_true", help="start recording")
-    action.add_argument("--stop", action="store_true", help="stop and finalize recording")
-    action.add_argument("--status", action="store_true", help="show daemon state")
-    action.add_argument("--file", type=Path, help="transcribe a media file")
-    action.add_argument("--restart", action="store_true", help="restart the user service")
-    action.add_argument("--kill", action="store_true", help="stop the user service")
-    action.add_argument("--logs", action="store_true", help="follow the service journal")
-    mode = parser.add_mutually_exclusive_group()
-    mode.add_argument("--realtime", action="store_true", help="type stable words with wtype")
-    mode.add_argument("--push", action="store_true", help="capture and type once at the end")
-    parser.add_argument("--json", action="store_true", help="emit a machine-readable response")
-    args = parser.parse_args()
+    ap = argparse.ArgumentParser(
+        prog="dusky_trigger",
+        description="Control client for Dusky STT (Parakeet speech-to-text).",
+        epilog="""USAGE
+  dusky_trigger                         toggle realtime dictation (bind this to a hotkey)
+  dusky_trigger --file ~/audio.m4a        transcribe an audio/video file
+  dusky_trigger --file ~/ep.mp3 --wait    transcribe and print the transcript when done
+  dusky_trigger --ACTION
+
+ACTIONS
+  (none) / --toggle   start if idle, else stop and finalize
+                      (tap again mid-drain to chain a fresh take; --stop cancels)
+  --start [--realtime|--push]   begin capture (realtime live-types as you speak)
+  --stop              stop capture and finalize (waits for the last phrase)
+  --pause             pause / resume capture (keeps the session)
+  --status            daemon status
+  --file PATH         transcribe any ffmpeg-readable file (2 h+ supported)
+  --wait              with --file: block until idle, then print the transcript
+  --unload            free GPU VRAM / RAM now (worker exits; respawns on demand)
+  --restart           restart the service
+  --kill              stop the service
+  --logs              follow the daemon log
+
+POWER MODES (follow the systemd unit)
+  enabled   warm-resident: instant dictation, VRAM held, dGPU awake
+  disabled  on-demand: hotkey still works, VRAM mid-job only, auto-offload after
+
+HOTKEY EXAMPLES
+  hyprland:  bind = SUPER, S, exec, dusky_trigger
+  sway:      bindsym $mod+s exec dusky_trigger""",
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    g = ap.add_mutually_exclusive_group()
+    g.add_argument("--start", action="store_true")
+    g.add_argument("--stop", action="store_true")
+    g.add_argument("--pause", action="store_true", help="Pause / resume the current capture")
+    g.add_argument("--toggle", action="store_true")
+    g.add_argument("--status", action="store_true")
+    g.add_argument("--file", type=Path, default=None, help="Transcribe audio/video file")
+    g.add_argument("--unload", action="store_true", help="Unload the ASR worker now (free VRAM/RAM)")
+    g.add_argument("--restart", action="store_true")
+    g.add_argument("--kill", action="store_true")
+    g.add_argument("--logs", action="store_true")
+    m = ap.add_mutually_exclusive_group()
+    m.add_argument("--realtime", action="store_true", default=False)
+    m.add_argument("--push", action="store_true", default=False)
+    ap.add_argument("--wait", action="store_true",
+                    help="With --file: wait for completion, then print the transcript to stdout")
+    ap.add_argument("--json", action="store_true")
+    ap.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT)
+    args = ap.parse_args()
+
+    if args.wait and args.file is None:
+        print("--wait needs --file", file=sys.stderr)
+        return 2
 
     if args.logs:
-        os.execvp(
-            "journalctl",
-            ["journalctl", "--user", "-u", SERVICE, "-n", "100", "-f", "-o", "short-precise"],
-        )
+        os.execvp("journalctl", ["journalctl", "--user", "-u", SERVICE, "-f", "-o", "short-precise"])
     if args.restart:
-        run_systemctl("restart", SERVICE, check=True)
-        wait_for_socket()
-        return print_response(request({"command": "status"}, start_service=False), as_json=args.json)
-    if args.kill:
-        run_systemctl("stop", SERVICE, check=True)
-        if args.json:
-            print('{"ok":true,"state":"stopped"}')
-        else:
-            print("Dusky STT service stopped")
+        subprocess.run(["systemctl", "--user", "restart", SERVICE], check=True)
         return 0
-    if args.status:
-        try:
-            response = request({"command": "status"}, start_service=False)
-        except (OSError, RuntimeError, TimeoutError):
-            active = run_systemctl("is-active", SERVICE)
-            state = active.stdout.strip() or "inactive"
-            response = {"ok": active.returncode == 0, "state": state}
-        return print_response(response, as_json=args.json)
-    if args.file is not None:
-        source = args.file.expanduser().resolve()
-        if not source.is_file():
-            print(f"File not found: {source}", file=sys.stderr)
-            return 2
-        return print_response(
-            request({"command": "file", "path": str(source)}),
-            as_json=args.json,
-        )
+    if args.kill:
+        subprocess.run(["systemctl", "--user", "stop", SERVICE], check=True)
+        return 0
 
-    realtime = not args.push
-    if args.start:
-        command = "start"
+    mode = "push" if args.push else "realtime"
+    if args.status:
+        resp = send_command({"command": "status"}, timeout=args.timeout)
+    elif args.start:
+        resp = send_command({"command": "start", "mode": mode}, timeout=args.timeout)
     elif args.stop:
-        command = "stop"
+        resp = send_command({"command": "stop"}, timeout=max(args.timeout, 180.0))
+    elif args.pause:
+        resp = send_command({"command": "pause"}, timeout=args.timeout)
+    elif args.file is not None:
+        src = args.file.expanduser()
+        if not src.is_file():
+            print(f"File not found: {src}", file=sys.stderr)
+            return 2
+        baseline = time.time()
+        resp = send_command({"command": "file", "path": str(src.resolve())}, timeout=max(args.timeout, 300.0))
+        if args.wait and resp.get("ok"):
+            resp = wait_for_transcript(baseline)
+    elif args.unload:
+        resp = send_command({"command": "unload"}, timeout=args.timeout)
+    else:  # default: toggle (bare hotkey invocation)
+        resp = send_command({"command": "toggle", "mode": mode}, timeout=max(args.timeout, 180.0))
+
+    if args.wait and resp.get("ok") and "path" in resp:
+        # Transcript body already went to stdout; keep it script-clean by
+        # sending the metadata to stderr.
+        print(f"transcribed: {resp['path']} ({resp.get('words', 0)} words)", file=sys.stderr)
+        return 0
+    if args.json:
+        print(json.dumps(resp, indent=2))
     else:
-        command = "toggle"
-    return print_response(
-        request({"command": command, "realtime": realtime}),
-        as_json=args.json,
-    )
+        for k, v in resp.items():
+            print(f"{k:15}: {v}")
+    return 0 if resp.get("ok") else 1
 
 
 if __name__ == "__main__":
-    try:
-        raise SystemExit(main())
-    except (OSError, RuntimeError, TimeoutError, json.JSONDecodeError) as exc:
-        print(f"Dusky STT control error: {exc}", file=sys.stderr)
-        raise SystemExit(1) from exc
+    sys.exit(main())

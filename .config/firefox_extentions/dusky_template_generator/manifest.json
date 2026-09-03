@@ -1,7 +1,7 @@
 {
-  "manifest_version": 2,
+  "manifest_version": 3,
   "name": "Dusky Template Generator",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "Author per-site CSS theme templates for Dusky Sites: map a site's colour variables to your Matugen palette, or pick elements visually.",
   "browser_specific_settings": {
     "gecko": {
@@ -12,13 +12,13 @@
   },
   "permissions": [
     "activeTab",
-    "nativeMessaging"
+    "nativeMessaging",
+    "scripting"
   ],
   "background": {
-    "scripts": ["background.js"],
-    "persistent": false
+    "scripts": ["background.js"]
   },
-  "browser_action": {
+  "action": {
     "default_title": "Dusky Template Generator — theme this site",
     "default_popup": "popup.html"
   },

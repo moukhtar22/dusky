@@ -4,10 +4,10 @@
  * The only privileged broker in the extension:
  *   1. every native-host call goes through one promise chain, so file writes from the
  *      popup and from the picker can never interleave (one host process at a time);
- *   2. content.js is injected on demand with the activeTab grant — nothing runs on a
- *      page until the user asks;
+ *   2. content.js is injected on demand via the scripting API with the activeTab
+ *      grant — nothing runs on a page until the user asks;
  *   3. the Alt+Shift+P command toggles the picker on the current tab.
- * The popup never touches tabs.executeScript, and content scripts never name a domain:
+ * The popup never touches scripting.executeScript directly, and content scripts never name a domain:
  * it is derived from sender.url, so a tab can only ever write its own template.
  */
 "use strict";
@@ -53,7 +53,9 @@ async function page(tabId, msg) {
   try {
     return await browser.tabs.sendMessage(tabId, msg);
   } catch (_) {
-    await browser.tabs.executeScript(tabId, { file: "content.js", runAt: "document_idle" });
+    // MV3: tabs.executeScript was removed — content scripts are injected with
+    // the scripting API (needs the "scripting" permission + activeTab).
+    await browser.scripting.executeScript({ target: { tabId }, files: ["content.js"] });
     return browser.tabs.sendMessage(tabId, msg);
   }
 }

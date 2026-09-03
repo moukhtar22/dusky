@@ -111,8 +111,8 @@ CORE_USER_DEFS = {
         "Local LLM inference daemon (Ollama / llama.cpp wrapper). Handles prompt completion and embeddings for Dusky AI features.",
     ),
     "dusky_stt.service": (
-        "STT Service (dusky_stt)",
-        "Speech-to-text daemon (Whisper / STT pipeline). Captures microphone input and transcribes to text for voice control.",
+        "STT Service (Parakeet GPU)",
+        "Speech-to-text daemon (NVIDIA Parakeet 0.6B, on-demand CUDA worker). ON = warm-resident: model preloaded, instant dictation, VRAM held (plugged-in mode). OFF = on-demand: hotkey still works, VRAM held only mid-job, then worker exits and the service stops itself so the dGPU can sleep (battery mode).",
     ),
 }
 
