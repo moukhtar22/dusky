@@ -665,6 +665,30 @@ hl.window_rule({
     center = true
 })
 
+--- Dusky Downloader: Main Window ---
+hl.window_rule({
+    name = "dusky_downloader_main",
+    match = {
+        class = "^(dusky-downloader)$",
+        title = "^(Dusky Downloader)$"
+    },
+    float = true,
+    size = {920, 700},
+    center = true
+})
+
+--- Dusky Downloader: Dialogs (Playlist Selector & Storage Engine) ---
+hl.window_rule({
+    name = "dusky_downloader_dialogs",
+    match = {
+        class = "^(dusky-downloader)$",
+        title = "^(Select Playlist Items|Storage Pool & Acceleration Engine)$"
+    },
+    float = true,
+    size = {760, 520},
+    center = true
+})
+
 --- terminal clipboard ---
 hl.window_rule({
     name = "terminal_clipboard",

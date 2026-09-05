@@ -732,17 +732,56 @@ case "$MODE" in
             printf "" > "$HEARTBEAT_FILE"
             if [[ -r "$DAEMON_PID_FILE" ]]; then
                 read -r d_pid < "$DAEMON_PID_FILE" 2>/dev/null || d_pid=""
-                if [[ -n "$d_pid" ]] && kill -0 "$d_pid" 2>/dev/null; then
-                    kill -USR1 "$d_pid" 2>/dev/null || true
-                fi
+                case "$d_pid" in
+                    ""|*[!0-9]*) ;;
+                    *)
+                        if kill -0 "$d_pid" 2>/dev/null; then
+                            if exec {_gfd}< "/proc/$d_pid/cmdline" 2>/dev/null; then
+                                IFS= read -r -d '' _g1 <&"$_gfd" 2>/dev/null || _g1=""
+                                IFS= read -r -d '' _g2 <&"$_gfd" 2>/dev/null || _g2=""
+                                exec {_gfd}<&- 2>/dev/null
+                                [[ "$_g2" == *network_meter_daemon* ]] && kill -USR1 "$d_pid" 2>/dev/null
+                            fi
+                        fi
+                        ;;
+                esac
             fi
         fi
         
         while true; do
             [[ -d "$STATE_DIR" ]] && printf "" > "$HEARTBEAT_FILE"
-            
+            if [[ -r "$DAEMON_PID_FILE" ]]; then
+                read -r _gp < "$DAEMON_PID_FILE" 2>/dev/null || _gp=""
+                case "$_gp" in
+                    ""|*[!0-9]*) ;;
+                    *)
+                        if kill -0 "$_gp" 2>/dev/null; then
+                            if exec {_gfd}< "/proc/$_gp/cmdline" 2>/dev/null; then
+                                IFS= read -r -d '' _g1 <&"$_gfd" 2>/dev/null || _g1=""
+                                IFS= read -r -d '' _g2 <&"$_gfd" 2>/dev/null || _g2=""
+                                exec {_gfd}<&- 2>/dev/null
+                                [[ "$_g2" == *network_meter_daemon* ]] && kill -USR1 "$_gp" 2>/dev/null
+                            fi
+                        fi
+                        ;;
+                esac
+                unset _gp _g1 _g2 _gfd
+            fi
             if [[ -r "$STATE_FILE" ]]; then
-                read -r unit up down _ < "$STATE_FILE" || true
+                unit=""; up=""; down=""
+                for ((_rt=0; _rt<5; _rt++)); do
+                    if read -r _u _up _down _c < "$STATE_FILE" 2>/dev/null; then
+                        case "${_u:-}" in
+                            KB|MB|GB|-)
+                                if [[ -n "${_up:-}" && -n "${_down:-}" && -n "${_c:-}" ]]; then
+                                    unit="$_u"; up="$_up"; down="$_down"
+                                    break
+                                fi
+                                ;;
+                        esac
+                    fi
+                done
+                unset _rt _u _up _down _c
                 up="${up:-0}"; down="${down:-0}"; unit="${unit:-B}"
                 short_unit="${unit%B}"
                 send_osd "${up}${short_unit} ${down}${short_unit}"
