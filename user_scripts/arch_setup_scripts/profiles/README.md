@@ -82,6 +82,12 @@ tasks = [ ... ]             # Detailed TOML table entries (see §7, optional)
 
 > If `[git] enabled = true`, the git self-update runs automatically before every
 > execution. `--no-git-update` skips it; `--git-update-only` runs just the update.
+> Inspection commands (`--list`, `--list-scripts`, `--list-once`, `--doctor`,
+> `--dry-run`, and `--explain`) skip package bootstrap and Git updates. Use
+> `--profile` for profile-specific inspection when multiple profiles exist.
+> Safe local edits are restored after updates; conflicting edits, staged content,
+> and untracked collisions are saved in the Git backup directory. Unchanged
+> upstream commits leave local edits intact.
 
 ---
 
@@ -96,6 +102,9 @@ Each line in `scripts = [...]` follows one of these forms:
 ```
 
 **Modes:** `U` = run as regular user. `S` = run with sudo.
+
+After password authentication, user tasks refresh sudo's credential timestamp in
+their own terminal so nested `sudo -n` calls can use the cached credentials.
 
 ```toml
 scripts = [
@@ -129,8 +138,7 @@ every future run.
 | :--- | :--- |
 | **Hardware / Environment** | |
 | `if:wayland` | `WAYLAND_DISPLAY` is set |
-| `if:x11` | `DISPLAY` is set |
-| `if:graphical` | Either Wayland or X11 is active |
+| `if:graphical` | Wayland is active |
 | `if:desktop` | Active graphical session and not a pure SSH login |
 | `if:ssh` | Inside an SSH connection |
 | `if:vm` | Virtual machine (QEMU/KVM, VMware, VirtualBox) |
@@ -325,7 +333,7 @@ fi
 ./orchestrator.sh --profile "Main Setup"          # By display name
 ./orchestrator.sh --profile 3                     # By index number
 ./orchestrator.sh --list                          # List all profiles
-./orchestrator.sh --list-scripts                  # Show task list for selected profile
+./orchestrator.sh --profile 01_main --list-scripts # Show task list
 ```
 
 ### State Management
@@ -346,7 +354,7 @@ fi
 | `--force` | Global force mode (`DUSKY_FORCE=1` + `--force` on all scripts) |
 | `--manual`, `-m` | Prompt before every task |
 | `--stop-on-fail` | Abort on first failure |
-| `--task-timeout SEC` | Global per-task timeout (0 = disabled) |
+| `--task-timeout SEC` | Global per-task timeout, including interactive tasks (0 = disabled) |
 | `--allow-root` | Allow running as root (not recommended) |
 | `--sudo-password PASS` | Provide sudo password non-interactively |
 | `--sudo-password-file FILE` | Read sudo password from a file |
@@ -357,7 +365,7 @@ fi
 | :--- | :--- |
 | `--no-git-update` | Skip git self-update |
 | `--git-update-only` | Run git update and exit |
-| `--offline` | Skip all network-dependent steps |
+| `--offline` | Skip wrapper connectivity checks, dependency downloads, and Git updates; task scripts retain their own network behavior |
 | `--yes`, `-y` | Auto-confirm git update prompts |
 
 ### UI & Notifications
@@ -421,7 +429,7 @@ file only needs to exist when you want to change something. Paths accept relativ
 | `[execution]` | Disk-space reserve, SQLite busy timeout, default interpreter, extension→interpreter map |
 | `[conditions]` | Commands for `package:` / `service_active:` / `user_service_active:` checks, GPU PCI vendor IDs |
 | `[notifications]` | Audio on/off, audio players, sound files, desktop notifications, app name |
-| `[sudo]` | Heartbeat interval, sudoers drop-in dir/prefix/timeout, `env_keep` |
+| `[sudo]` | Heartbeat interval and environment variables passed explicitly to privileged tasks (`env_keep`) |
 | `[git]` | Upstream branch/ref, default repo URL, fetch timeouts/retries, backup retention, env strip/inject |
 | `[prompts]` | Auto-answer rules for interactive prompts (sudo password, pacman `[Y/n]`, PGP imports) |
 

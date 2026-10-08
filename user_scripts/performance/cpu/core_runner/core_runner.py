@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Dusky Core Runner — strict hybrid-aware CPU-affinity launcher.
 
-Target : Arch Linux (rolling 2026+), Linux 7.x, Python 3.14.6+
-Deps   : util-linux taskset, python-rich
+Target : Arch Linux (rolling 2026+), Linux 7.3+, Python 3.14.7+
+Deps   : python-rich
 
 Contract
 --------
@@ -17,9 +17,8 @@ Priority: help -> status -> (no command => TUI on foreground tty, else error)
 
 Guarantees
 ----------
-* argv in, argv out: the target runs under taskset with shell=False.
-  NOTE: util-linux taskset has no end-of-options marker; a COMMAND whose
-  name begins with '-' must be invoked by its path (leading '/' stops getopt).
+* argv in, argv out: the target runs directly with shell=False and inherits
+  a verified CPU mask through Linux's native sched_setaffinity interface.
 * Leading NAME=VALUE assignments are moved into the child environment.
 * Topology detection never toggles CPUs; only explicit launches may wake or
   sleep cores, and exactly the initially-offline subset is restored afterwards.
@@ -60,8 +59,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Final, Literal
 
-if sys.version_info < (3, 14, 6):
-    sys.stderr.write("core_runner: requires Python 3.14.6+\n")
+if sys.version_info < (3, 14, 7):
+    sys.stderr.write("core_runner: requires Python 3.14.7+\n")
     raise SystemExit(1)
 
 try:
@@ -84,7 +83,7 @@ type Json = dict[str, Any]
 
 SYS_CPU: Final = Path("/sys/devices/system/cpu")
 MAX_CPU_ID: Final = 1_048_575
-CACHE_VERSION: Final = 4
+CACHE_VERSION: Final = 5
 SETTINGS_VERSION: Final = 3
 JOB_RECORD_VERSION: Final = 1
 MAX_DATA_BYTES: Final = 1_048_576
@@ -174,11 +173,11 @@ def secure_read(path: Path) -> str | None:
     if meta.st_size > MAX_DATA_BYTES:
         warn(f"data file unexpectedly large: {path}")
         return None
-    fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
     try:
+        fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
         with os.fdopen(fd, "r", encoding="utf-8") as stream:
             return stream.read(MAX_DATA_BYTES + 1)
-    except OSError as exc:
+    except (OSError, UnicodeError) as exc:
         warn(f"cannot read {path}: {exc}")
         return None
 
@@ -191,17 +190,12 @@ def atomic_write_text(path: Path, text: str, mode: int = 0o600) -> None:
         fd = os.open(tmp,
                      os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
                      mode, dir_fd=dir_fd)
-        try:
-            os.write(fd, text.encode())
-            os.fsync(fd)
-        finally:
-            os.close(fd)
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(text)
+            stream.flush()
+            os.fsync(stream.fileno())
         os.replace(tmp, path.name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
-        sync_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
-        try:
-            os.fsync(sync_fd)
-        finally:
-            os.close(sync_fd)
+        os.fsync(dir_fd)
     except BaseException:
         try:
             os.unlink(tmp, dir_fd=dir_fd)
@@ -293,10 +287,9 @@ class Profile:
 def _coerce_cores(raw: Any) -> tuple[int, ...] | None:
     if not isinstance(raw, list):
         return None
-    try:
-        cores = tuple(sorted({int(c) for c in raw}))
-    except (TypeError, ValueError):
+    if any(type(c) is not int for c in raw):
         return None
+    cores = tuple(sorted(set(raw)))
     if not cores or any(c < 0 or c > MAX_CPU_ID for c in cores):
         return None
     return cores
@@ -395,11 +388,11 @@ def present_ids() -> list[int]:
 def online_mask() -> frozenset[int]:
     raw = sysfs_text(SYS_CPU / "online")
     if raw is None:
-        return frozenset(present_ids())
+        raise RunnerError(f"cannot read {SYS_CPU}/online")
     try:
         return frozenset(parse_cpu_list(raw))
-    except UsageError:
-        return frozenset()
+    except UsageError as exc:
+        raise RunnerError(f"invalid kernel online CPU list: {raw!r}") from exc
 
 
 def system_signature(present: list[int]) -> str:
@@ -433,14 +426,6 @@ def _propagate(split: dict[int, Kind], cpu_ids: list[int],
     return filled
 
 
-def _max_split(values: dict[int, int]) -> dict[int, Kind] | None:
-    distinct = set(values.values())
-    if len(distinct) < 2:
-        return None
-    peak = max(distinct)
-    return {cpu: ("P" if val == peak else "E") for cpu, val in values.items()}
-
-
 def _read_int_attr(cpu: int, *parts: str) -> int | None:
     raw = sysfs_text(SYS_CPU / f"cpu{cpu}" / "/".join(parts))
     return int(raw) if raw is not None and raw.isdigit() else None
@@ -460,47 +445,17 @@ def classify_cpus(cpu_ids: list[int], smt: dict[int, tuple[int, ...]]) -> tuple[
         except UsageError:
             pass
 
-    probes: tuple[tuple[Callable[[int], int | None], str], ...] = (
-        (lambda c: _read_int_attr(c, "cpu_capacity"), "scheduler-capacity"),
-        (lambda c: _read_int_attr(c, "acpi_cppc", "highest_perf"), "acpi-cppc-highest-perf"),
-    )
-    for reader, source in probes:
-        values = {c: v for c in cpu_ids if (v := reader(c)) is not None}
-        if (split := _max_split(values)) and (filled := _propagate(split, cpu_ids, smt)):
-            return filled, source
-
-    named: dict[int, Kind] = {}
-    p_names = {"intel_core", "intelcore", "core", "0x40", "64"}
-    e_names = {"intel_atom", "intelatom", "atom", "0x20", "32"}
-    for cpu in cpu_ids:
-        token = (sysfs_text(SYS_CPU / f"cpu{cpu}" / "topology" / "core_type") or "").strip().lower()
-        if token in p_names:
-            named[cpu] = "P"
-        elif token in e_names:
-            named[cpu] = "E"
-    if len(named) == len(cpu_ids) and {"P", "E"} <= set(named.values()):
-        return named, "experimental-core-type"
-
-    freq_values = {
-        c: v for c in cpu_ids
-        if (v := _read_int_attr(c, "cpufreq", "cpuinfo_max_freq")
-            or _policy_freq(c)) is not None
-    }
-    if (split := _max_split(freq_values)) and (filled := _propagate(split, cpu_ids, smt)):
-        return filled, "maximum-frequency"
-
-    sizes = {c: len(smt.get(c, (c,))) for c in cpu_ids}
-    if min(sizes.values()) == 1 and max(sizes.values()) > 1:
-        return ({c: ("P" if sizes[c] > 1 else "E") for c in cpu_ids}, "smt-heuristic")
-
+    # Capacity reflects heterogeneous scheduling; CPPC preferred-core rankings,
+    # frequency bins and disabled SMT do not establish P/E core types.
+    values = {c: v for c in cpu_ids if (v := _read_int_attr(c, "cpu_capacity")) is not None}
+    if values:
+        low, high = min(values.values()), max(values.values())
+        if high > 0 and (high - low) / high >= 0.20:
+            midpoint = (low + high) / 2
+            split = {c: ("P" if v > midpoint else "E") for c, v in values.items()}
+            if filled := _propagate(split, cpu_ids, smt):
+                return filled, "scheduler-capacity"
     return {c: "P" for c in cpu_ids}, "homogeneous"
-
-
-def _policy_freq(cpu: int) -> int | None:
-    raw = sysfs_text(SYS_CPU / "cpufreq" / f"policy{cpu}" / "cpuinfo_max_freq")
-    if raw is None or not raw.isdigit():
-        return None
-    return int(raw)
 
 
 def topology_from_cache(signature: str, present: list[int]) -> Topology | None:
@@ -511,7 +466,6 @@ def topology_from_cache(signature: str, present: list[int]) -> Topology | None:
         data = json.loads(raw)
     except json.JSONDecodeError:
         warn("topology cache corrupt; rebuilding")
-        CACHE_FILE.unlink(missing_ok=True)
         return None
     if not isinstance(data, dict) or data.get("version") != CACHE_VERSION:
         return None
@@ -519,7 +473,6 @@ def topology_from_cache(signature: str, present: list[int]) -> Topology | None:
         return None
     cached = data.get("topology")
     if not isinstance(cached, dict) or not cached:
-        CACHE_FILE.unlink(missing_ok=True)
         return None
     live_online = online_mask()
     topo: Topology = {}
@@ -530,11 +483,9 @@ def topology_from_cache(signature: str, present: list[int]) -> Topology | None:
             kind = item["kind"]
         except (KeyError, TypeError, ValueError):
             warn("topology cache malformed; rebuilding")
-            CACHE_FILE.unlink(missing_ok=True)
             return None
-        if kind not in ("P", "E"):
+        if kind not in ("P", "E") or cpu not in group or not set(group) <= set(present):
             warn("topology cache invalid; rebuilding")
-            CACHE_FILE.unlink(missing_ok=True)
             return None
         source = str(data.get("source") or item.get("source") or "cached")
         topo[cpu] = Core(kind=kind, online=cpu in live_online, smt_group=group, source=source)
@@ -570,6 +521,8 @@ def detect_topology() -> Topology:
         source = "homogeneous-failsafe"
 
     try:
+        if set(present) - live_online:
+            return topo  # Offline CPUs can hide hybrid hints; do not cache a guess.
         atomic_write_json(CACHE_FILE, {
             "version": CACHE_VERSION,
             "signature": signature,
@@ -604,30 +557,34 @@ def helper_path() -> Path:
     return Path(__file__).resolve().parent / "core_helper.py"
 
 
-def change_core_state(cpu_ids: list[int], *, online: bool) -> bool:
-    wanted = sorted({int(c) for c in cpu_ids})
-    if not wanted:
-        return True
+def helper_command(flag: str, cpu_ids: list[int]) -> list[str]:
     helper = helper_path()
     if not helper.is_file():
         fail(f"hotplug helper missing: {helper}")
-        return False
-    flag = "--online" if online else "--offline"
-    spec = ",".join(map(str, wanted))
+        raise RunnerError("hotplug helper is unavailable")
+    spec = format_cpu_list(cpu_ids)
     if os.geteuid() == 0:
         argv = [sys.executable, str(helper), flag, spec]
     else:
         sudo = shutil.which("sudo")
         if sudo is None:
             fail("sudo is not installed; cannot change CPU state")
-            return False
+            raise RunnerError("sudo is unavailable")
         argv = [sudo, "-n", "--", sys.executable, str(helper), flag, spec]
+    return argv
+
+
+def change_core_state(cpu_ids: list[int], *, online: bool) -> bool:
+    wanted = sorted({int(c) for c in cpu_ids})
+    if not wanted:
+        return True
     try:
+        argv = helper_command("--online" if online else "--offline", wanted)
         proc = subprocess.run(argv, capture_output=True, text=True,
                               timeout=HELPER_TIMEOUT_S, check=False,
                               stdin=subprocess.DEVNULL)
-    except FileNotFoundError:
-        fail(f"cannot execute hotplug command: {argv[0]}")
+    except (OSError, RunnerError) as exc:
+        fail(f"cannot execute hotplug command: {exc}")
         return False
     except subprocess.TimeoutExpired:
         fail(f"hotplug helper exceeded its {HELPER_TIMEOUT_S:.0f}s deadline")
@@ -635,9 +592,7 @@ def change_core_state(cpu_ids: list[int], *, online: bool) -> bool:
     if proc.returncode != 0:
         detail = (proc.stderr or proc.stdout or "").strip()
         if "password" in detail.lower() or "sudoers" in detail.lower():
-            fail("sudo requires a password (non-interactive mode). Run 'sudo -v' "
-                 "first, install the helper root-owned at "
-                 "/usr/local/libexec/dusky-core-helper, or add a NOPASSWD rule.")
+            fail("sudo requires authentication; run 'sudo -v' in this terminal first.")
         elif detail:
             fail(detail[:800])
         else:
@@ -657,6 +612,56 @@ def change_core_state(cpu_ids: list[int], *, online: bool) -> bool:
     stuck = [str(c) for c in wanted if (c in online_mask()) != online]
     fail(f"CPUs {','.join(stuck)} did not reach the requested state in time")
     return False
+
+
+@dataclass(slots=True)
+class HotplugHold:
+    """A helper authenticated before detaching restores CPUs on pipe EOF."""
+    proc: subprocess.Popen[str]
+
+    def release(self) -> bool:
+        self.proc.stdin.close()
+        try:
+            if select.select([self.proc.stdout], [], [], HELPER_TIMEOUT_S)[0]:
+                if self.proc.stdout.readline().strip() == "RESTORED":
+                    return True
+                detail = self.proc.stderr.read().strip()
+                fail(detail or "detached hotplug helper failed to restore CPUs")
+            else:
+                fail("detached hotplug restoration timed out")
+            return False
+        finally:
+            self.proc.stdout.close()
+            self.proc.stderr.close()
+
+    def close_parent_copy(self) -> None:
+        # The daemon inherited these descriptors and owns the remaining writer.
+        self.proc.stdin.close()
+        self.proc.stdout.close()
+        self.proc.stderr.close()
+
+
+def hold_cores(cpu_ids: list[int]) -> HotplugHold | None:
+    try:
+        proc = subprocess.Popen(helper_command("--hold-online", cpu_ids),
+                                stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True)
+    except (OSError, RunnerError) as exc:
+        fail(f"cannot start detached hotplug helper: {exc}")
+        return None
+    hold = HotplugHold(proc)
+    if select.select([proc.stdout], [], [], HELPER_TIMEOUT_S)[0]:
+        if proc.stdout.readline().strip() == "READY":
+            return hold
+        fail(proc.stderr.read().strip() or "detached hotplug helper failed")
+    else:
+        fail("detached hotplug helper startup timed out")
+    hold.close_parent_copy()  # EOF also triggers cleanup if READY arrives late.
+    try:
+        proc.wait(timeout=HELPER_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        fail("detached hotplug helper cleanup is still pending")
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -697,7 +702,7 @@ def prepare_command(command: list[str]) -> PreparedCommand:
         found = shutil.which(head, path=env.get("PATH"))
         if found is None:
             raise UsageError(f"command not found on PATH: {head}")
-        executable = found
+        executable = str(Path(found).absolute())
 
     return PreparedCommand(
         argv=(executable, *command[index + 1 :]),
@@ -723,6 +728,7 @@ class KeyReader:
     def __init__(self) -> None:
         self._fd = sys.stdin.fileno()
         self._saved: list[Any] | None = None
+        self._pending = ""
 
     def __enter__(self) -> "KeyReader":
         if not interactive_ready():
@@ -739,12 +745,25 @@ class KeyReader:
                 pass
 
     def key(self) -> str:
+        if self._pending:
+            chunk, self._pending = self._pending, ""
+            return chunk
         chunk = os.read(self._fd, 1).decode("utf-8", errors="ignore")
+        if not chunk:
+            raise Cancelled
         if chunk == "\x1b" and select.select([self._fd], [], [], 0.05)[0]:
-            chunk += os.read(self._fd, 6).decode("utf-8", errors="ignore")
+            chunk += os.read(self._fd, 1).decode("utf-8", errors="ignore")
+            if chunk[-1] in ("[", "O"):
+                while len(chunk) < 16 and select.select([self._fd], [], [], 0.05)[0]:
+                    tail = os.read(self._fd, 1).decode("utf-8", errors="ignore")
+                    chunk += tail
+                    if not tail or "@" <= tail <= "~":
+                        break
             return chunk
         if chunk == "g" and select.select([self._fd], [], [], 0.12)[0]:
             follow = os.read(self._fd, 1).decode("utf-8", errors="ignore")
+            if follow != "g":
+                self._pending = follow
             return "gg" if follow == "g" else chunk
         return chunk
 
@@ -762,7 +781,7 @@ def menu_select(options: list[str], title: str, subtitle: str) -> int:
         return Panel(table, title=title, subtitle=f"[dim]{subtitle}[/dim]",
                      border_style="cyan", expand=False)
 
-    with KeyReader() as keys, Live(panel(), console=console, refresh_per_second=20,
+    with KeyReader() as keys, Live(panel(), console=console, auto_refresh=False,
                                    transient=True) as live:
         while True:
             match keys.key():
@@ -782,7 +801,7 @@ def menu_select(options: list[str], title: str, subtitle: str) -> int:
                     idx = min(len(options) - 1, idx + 5)
                 case "q" | "Q" | "\x03" | "\x1b":
                     raise Cancelled
-            live.update(panel())
+            live.update(panel(), refresh=True)
 
 
 def checklist(topo: Topology, subject: str) -> list[int]:
@@ -818,7 +837,7 @@ def checklist(topo: Topology, subject: str) -> list[int]:
             border_style="cyan",
         )
 
-    with KeyReader() as keys, Live(panel(), console=console, refresh_per_second=20,
+    with KeyReader() as keys, Live(panel(), console=console, auto_refresh=False,
                                    transient=True) as live:
         while True:
             key = keys.key()
@@ -849,7 +868,7 @@ def checklist(topo: Topology, subject: str) -> list[int]:
                         chosen |= group
                 case "q" | "Q" | "\x03" | "\x1b":
                     raise Cancelled
-            live.update(panel())
+            live.update(panel(), refresh=True)
     return sorted(chosen)
 
 
@@ -913,7 +932,7 @@ def show_help() -> None:
     usage = Table(show_header=False, box=None, padding=(0, 2, 0, 0))
     usage.add_row("[bold]core[/bold]", "[dim]interactive launcher (foreground tty)[/dim]")
     usage.add_row("[bold]core[/bold] [white]-s[/white]", "[dim]topology status[/dim]")
-    usage.add_row("[bold]core[/bold] [white]<cpulist> <cmd>…[/white]",
+    usage.add_row("[bold]core[/bold] [white]-c <cpulist> <cmd>…[/white]",
                   "[dim]pin to CPUs: 0-3 · 0,2,4-7 · 0-10:2[/dim]")
     usage.add_row("[bold]core[/bold] [white]-- <cmd>…[/white]",
                   "[dim]escape hatch: next token is the command[/dim]")
@@ -926,7 +945,7 @@ def show_help() -> None:
     flags.add_row("-s, --status", "print topology table and exit")
     flags.add_row("-i, --interactive", "ignore saved profile; force the checklist")
     flags.add_row("-t, --type pcores|ecores|all", "select by detected hybrid class")
-    flags.add_row("-c, --custom CPULIST", "explicit pin (unions with positional specs)")
+    flags.add_row("-c, --custom CPULIST", "explicit pin (repeated lists are unioned)")
     flags.add_row("-d, --detach",
                   "daemonize; reports spawn result, final exit recorded in jobs/")
     flags.add_row("--", "everything after this is the command, verbatim")
@@ -937,10 +956,8 @@ def show_help() -> None:
         f"Cache    : {CACHE_FILE}\n"
         f"Jobs     : {JOBS_DIR}/\n"
         f"Helper   : {helper_path()}   (override: CORE_HELPER_PATH)\n\n"
-        "Hotplug uses `sudo -n`; pre-authenticate with `sudo -v`, install the\n"
-        "helper root-owned at /usr/local/libexec/dusky-core-helper, or add a\n"
-        "NOPASSWD sudoers rule for it.\n"
-        "taskset has no end-of-options marker: launch dash-named binaries by path.[/dim]"
+        "Hotplug uses `sudo -n`; pre-authenticate with `sudo -v` in this terminal.\n"
+        "Affinity is inherited through the native Linux scheduler interface.[/dim]"
     )
 
 
@@ -951,9 +968,41 @@ def normalized_rc(code: int) -> int:
     return 128 - code if code < 0 else code
 
 
-def run_attached(argv: list[str], env: dict[str, str], restore: list[int]) -> int:
+def spawn_target(argv: list[str], env: dict[str, str], cores: list[int]) -> subprocess.Popen[Any]:
+    """Inherit a verified mask without preexec_fn or an intermediate executable."""
+    previous = os.sched_getaffinity(0)
+    proc = None
+    try:
+        os.sched_setaffinity(0, set(cores))
+        actual = os.sched_getaffinity(0)
+        if actual != set(cores):
+            raise RunnerError(f"CPU mask restricted by the current cpuset: {format_cpu_list(actual)}")
+        proc = subprocess.Popen(argv, shell=False, env=env)
+        return proc
+    finally:
+        try:
+            os.sched_setaffinity(0, previous)
+        except OSError:
+            if proc is not None:
+                proc.kill()
+                proc.wait()
+            raise
+
+
+def restore_cores(restore: list[int], hold: HotplugHold | None = None) -> bool:
+    if hold is not None:
+        return hold.release()
+    if not restore:
+        return True
+    warn(f"restoring initially-offline CPUs {format_cpu_list(restore)}")
+    return change_core_state(restore, online=False)
+
+
+def run_attached(argv: list[str], env: dict[str, str], restore: list[int], cores: list[int], hold: HotplugHold | None = None) -> int:
     holder: dict[str, subprocess.Popen[Any] | None] = {"proc": None}
     saved: dict[signal.Signals, Any] = {}
+    pending_signals: list[int] = []
+    rc = 1
 
     def forward(signum: int, _frame: object) -> None:
         proc = holder["proc"]
@@ -962,61 +1011,79 @@ def run_attached(argv: list[str], env: dict[str, str], restore: list[int]) -> in
                 proc.send_signal(signum)
             except ProcessLookupError:
                 pass
+        elif proc is None:
+            pending_signals.append(signum)
 
     try:
-        try:
-            holder["proc"] = proc = subprocess.Popen(argv, shell=False, env=env)
-        except FileNotFoundError as exc:
-            fail(f"execution failed: {exc}")
-            return 127
-        except PermissionError as exc:
-            fail(f"execution failed: {exc}")
-            return 126
-        except OSError as exc:
-            fail(f"execution failed: {exc}")
-            return 1
+        # Install handlers before spawn so cancellation cannot leave an orphan.
         for sig in WATCHED_SIGNALS:
             saved[sig] = signal.getsignal(sig)
             signal.signal(sig, forward)
-        return normalized_rc(proc.wait())
+        holder["proc"] = proc = spawn_target(argv, env, cores)
+        for signum in pending_signals:
+            forward(signum, None)
+        rc = normalized_rc(proc.wait())
+    except FileNotFoundError as exc:
+        fail(f"execution failed: {exc}")
+        rc = 127
+    except PermissionError as exc:
+        fail(f"execution failed: {exc}")
+        rc = 126
+    except (OSError, RunnerError) as exc:
+        fail(f"execution failed: {exc}")
     finally:
+        restored = restore_cores(restore, hold)
         for sig, handler in saved.items():
             signal.signal(sig, handler)
-        if restore:
-            warn(f"restoring initially-offline CPUs {format_cpu_list(restore)}")
-            change_core_state(restore, online=False)
+    return rc if rc or restored else 1
 
 
-def _daemon_fail(ack_w: int, base: Json, path: Path, code: int, error: str) -> None:
-    write_job_record(path, base | {"state": "launch-failed", "error": error})
-    os.write(ack_w, struct.pack("<II", code, 0))
+def _daemon_fail(ack_w: int, base: Json, path: Path, code: int, error: str, restore: list[int], hold: HotplugHold | None) -> None:
+    restored = restore_cores(restore, hold)
+    write_job_record(path, base | {"state": "launch-failed", "error": error,
+                                 "return_code": code, "initially_offline_restored": restored})
+    try:
+        os.write(ack_w, struct.pack("<II", code, 0))
+    except OSError:
+        pass
     os.close(ack_w)
     os._exit(code)
 
 
-def run_detached(argv: list[str], env: dict[str, str], restore: list[int], label: str) -> int:
+def run_detached(argv: list[str], env: dict[str, str], restore: list[int], label: str, cores: list[int], hold: HotplugHold | None = None) -> int:
     try:
         private_dir(JOBS_DIR)
     except (RunnerError, OSError) as exc:
         fail(str(exc))
+        restore_cores(restore, hold)
         return 1
 
-    ack_r, ack_w = os.pipe2(os.O_CLOEXEC)
+    try:
+        ack_r, ack_w = os.pipe2(os.O_CLOEXEC)
+    except OSError as exc:
+        fail(f"cannot create detached acknowledgement pipe: {exc}")
+        restore_cores(restore, hold)
+        return 1
     try:
         middle = os.fork()
     except OSError as exc:
         os.close(ack_r)
         os.close(ack_w)
         fail(f"could not fork detached monitor: {exc}")
+        restore_cores(restore, hold)
         return 1
 
     if middle > 0:
         os.close(ack_w)
+        if hold is not None:
+            hold.close_parent_copy()
         payload = bytearray()
         outcome = 1
         try:
+            deadline = time.monotonic() + ACK_TIMEOUT_S
             while len(payload) < 8:
-                if not select.select([ack_r], [], [], ACK_TIMEOUT_S)[0]:
+                remaining = max(0, deadline - time.monotonic())
+                if not select.select([ack_r], [], [], remaining)[0]:
                     break
                 chunk = os.read(ack_r, 8 - len(payload))
                 if not chunk:
@@ -1027,7 +1094,7 @@ def run_detached(argv: list[str], env: dict[str, str], restore: list[int], label
                 outcome = code
                 if code == 0:
                     err_console.print(
-                        f"[green]detached[/green] pid {child_pid} — final exit: "
+                        f"[green]detached[/green] monitor pid {child_pid} — final exit: "
                         f"{job_path(child_pid)}"
                     )
                 else:
@@ -1042,10 +1109,16 @@ def run_detached(argv: list[str], env: dict[str, str], restore: list[int], label
     os.close(ack_r)
     try:
         os.setsid()
+        if os.fork() > 0:
+            os._exit(0)
     except OSError:
-        pass
-    if os.fork() > 0:
-        os._exit(0)
+        restore_cores(restore, hold)
+        try:
+            os.write(ack_w, struct.pack("<II", 1, 0))
+        except OSError:
+            pass
+        os._exit(1)
+    signal.signal(signal.SIGHUP, signal.SIG_IGN)
 
     daemon_pid = os.getpid()
     record_path = job_path(daemon_pid)
@@ -1054,7 +1127,7 @@ def run_detached(argv: list[str], env: dict[str, str], restore: list[int], label
         "version": JOB_RECORD_VERSION,
         "label": label,
         "started_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-        "affinity": argv[2] if len(argv) > 2 else "",
+        "affinity": format_cpu_list(cores),
         "log": str(log_path),
     }
 
@@ -1066,23 +1139,34 @@ def run_detached(argv: list[str], env: dict[str, str], restore: list[int], label
         os.dup2(log_fd, 2)
         os.close(devnull)
         os.close(log_fd)
-    except OSError as exc:
-        _daemon_fail(ack_w, base, record_path, 1, f"log setup failed: {exc}")
+    except (OSError, RunnerError) as exc:
+        _daemon_fail(ack_w, base, record_path, 1, f"log setup failed: {exc}", restore, hold)
 
     try:
-        proc = subprocess.Popen(argv, shell=False, env=env)
+        proc = spawn_target(argv, env, cores)
     except FileNotFoundError as exc:
-        _daemon_fail(ack_w, base, record_path, 127, str(exc))
+        _daemon_fail(ack_w, base, record_path, 127, str(exc), restore, hold)
     except PermissionError as exc:
-        _daemon_fail(ack_w, base, record_path, 126, str(exc))
-    except OSError as exc:
-        _daemon_fail(ack_w, base, record_path, 1, str(exc))
+        _daemon_fail(ack_w, base, record_path, 126, str(exc), restore, hold)
+    except (OSError, RunnerError) as exc:
+        _daemon_fail(ack_w, base, record_path, 1, str(exc), restore, hold)
 
     write_job_record(record_path, base | {"state": "running", "target_pid": proc.pid})
-    os.write(ack_w, struct.pack("<II", 0, proc.pid))
-    os.close(ack_w)
+    def forward(signum: int, _frame: object) -> None:
+        try:
+            proc.send_signal(signum)
+        except ProcessLookupError:
+            pass
+    for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGQUIT):
+        signal.signal(sig, forward)
+    try:
+        os.write(ack_w, struct.pack("<II", 0, daemon_pid))
+    except OSError:
+        proc.terminate()
+    finally:
+        os.close(ack_w)
     rc = normalized_rc(proc.wait())
-    restored = change_core_state(restore, online=False) if restore else True
+    restored = restore_cores(restore, hold)
     write_job_record(record_path, base | {
         "state": "finished",
         "target_pid": proc.pid,
@@ -1100,8 +1184,8 @@ def job_path(pid: int) -> Path:
 def write_job_record(path: Path, payload: Json) -> None:
     try:
         atomic_write_json(path, payload)
-    except (RunnerError, OSError):
-        pass
+    except (RunnerError, OSError) as exc:
+        warn(f"job record could not be saved: {exc}")
 
 
 def execute(prepared: PreparedCommand, cores: list[int], topo: Topology, *,
@@ -1114,24 +1198,21 @@ def execute(prepared: PreparedCommand, cores: list[int], topo: Topology, *,
     if missing:
         fail(f"selected CPUs not present on this system: {missing}")
         return 1
-    taskset = shutil.which("taskset")
-    if taskset is None:
-        fail("util-linux taskset is required")
-        return 1
-
-    wake = [c for c in cores if c not in online_mask()]
+    initially_online = online_mask()
+    wake = [c for c in cores if c not in initially_online]
+    hold = None
     if wake:
-        warn(f"waking offline targets {format_cpu_list(wake)}")
-        if not change_core_state(wake, online=True):
-            fail("hardware modification failed; refusing to launch")
+        warn(f"holding offline targets online until completion: {format_cpu_list(wake)}")
+        hold = hold_cores(wake)
+        if hold is None:
             return 1
 
     spec = format_cpu_list(cores)
-    argv = [taskset, "-c", spec, *prepared.argv]
+    argv = list(prepared.argv)
     say(f"[bold green]Bounding[/bold green] {prepared.label} to CPUs [white]{spec}[/white]")
     if detach:
-        return run_detached(argv, prepared.env, wake, prepared.label)
-    return run_attached(argv, prepared.env, wake)
+        return run_detached(argv, prepared.env, wake, prepared.label, cores, hold)
+    return run_attached(argv, prepared.env, wake, cores, hold)
 
 
 # ---------------------------------------------------------------------------
@@ -1315,12 +1396,11 @@ def flow_profiles(topo: Topology) -> int | None:
                 except ValueError as exc:
                     fail(f"quoting error: {exc}")
                     continue
-                prepared = PreparedCommand(
-                    argv=(name, *extra),
-                    env=os.environ.copy(),
-                    profile_key=name,
-                    label=profile.label,
-                )
+                try:
+                    prepared = prepare_command([name, *extra])
+                except UsageError as exc:
+                    fail(str(exc))
+                    continue
                 detach = confirm("Run detached?", default=False)
                 return execute(prepared, valid, topo, detach=detach)
     return None
@@ -1425,6 +1505,8 @@ def scan_cli(argv: list[str]) -> Cli:
         i += 1
     if cli.command is None:
         cli.command = []
+    if cli.type_choice is not None and cli.custom is not None:
+        raise UsageError("--type cannot be combined with an explicit CPU list")
     return cli
 
 
@@ -1442,11 +1524,11 @@ def main(argv: list[str] | None = None) -> int:
         show_help()
         return 0
 
-    if shutil.which("taskset") is None:
-        fail("util-linux taskset is required")
+    try:
+        topo = detect_topology()
+    except (RunnerError, OSError) as exc:
+        fail(str(exc))
         return 1
-
-    topo = detect_topology()
 
     if cli.status:
         show_status(topo)
@@ -1462,6 +1544,10 @@ def main(argv: list[str] | None = None) -> int:
         fail("no target command provided and no foreground terminal available")
         return 2
 
+    if cli.interactive and not interactive_ready():
+        fail("--interactive requires a foreground terminal")
+        return 2
+
     try:
         prepared = prepare_command(cli.command)
         cores = resolve_affinity(cli, prepared, topo)
@@ -1471,7 +1557,11 @@ def main(argv: list[str] | None = None) -> int:
     except Cancelled:
         return 130
 
-    return execute(prepared, cores, topo, detach=cli.detach)
+    try:
+        return execute(prepared, cores, topo, detach=cli.detach)
+    except (RunnerError, OSError) as exc:
+        fail(str(exc))
+        return 1
 
 
 if __name__ == "__main__":

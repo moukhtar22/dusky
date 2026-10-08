@@ -23,6 +23,9 @@
 # 1. Preset Inheritance (extends)
 # ------------------------------------------------------------------------------
 # Inherits archetype defaults from presets/*.toml or built-in presets.
+# Can be a single string or an ordered array of presets, e.g.:
+#   extends = "base_native"
+#   extends = ["base_wine_dxvk", "my_custom_preset"]
 # Any key defined in this profile overrides preset values.
 extends = "base_native"
 
@@ -44,14 +47,18 @@ description = "A concise description of the game profile and notes."
 # Variable expansions supported in all path and string fields:
 #   $GAME_DIR         -> Resolved paths.game_dir
 #   $GAME_ID          -> Profile ID (e.g. "example_game")
+#   $PROFILE_ID       -> Profile ID alias (identical to $GAME_ID)
+#   $ROOT             -> Runner engine root directory (/home/dusk/user_scripts/gaming/runner)
 #   $HOME or ~        -> User home directory (/home/<user>)
-#   $ZRAM             -> Resolves to /mnt/zram1
 #   $USER             -> Current username
+#   $ZRAM             -> Resolves to /mnt/zram1 (volatile RAM disk)
 #   $XDG_DATA_HOME    -> ~/.local/share
 #   $XDG_CONFIG_HOME  -> ~/.config
 #   $XDG_CACHE_HOME   -> ~/.cache
 #   $XDG_STATE_HOME   -> ~/.local/state
 #   $XDG_RUNTIME_DIR  -> /run/user/<uid>
+#   $STATE_DIR        -> Engine state directory (~/.local/state/master-game-runner)
+#   $CACHE_DIR        -> Engine cache directory (~/.cache/master-game-runner)
 [paths]
 game_dir = "/mnt/zram1/ExampleGame"            # Base game root directory or container
 
@@ -104,9 +111,11 @@ debug                 = "fixme-all"            # WINEDEBUG channel filter ("-all
 large_address_aware   = true                   # WINE_LARGE_ADDRESS_AWARE=1 (prevents 2GB 32-bit OOM)
 dxvk                  = true                   # Direct3D 9/10/11 -> Vulkan translation (auto-links runtime)
 vkd3d                 = true                   # Direct3D 12 -> Vulkan translation (auto-links runtime)
+vkd3d_config          = ""                     # VKD3D-Proton flags ("force_static_cbv", "upload_hvv", "no_upload_hvv")
 dxvk_nvapi            = false                  # DXVK-NVAPI for DLSS 2/3 Super Resolution & Frame Gen
 disable_menubuilder   = true                   # Suppress winemenubuilder .desktop pollution
 hide_wine             = false                  # WINE_HIDE_VERSION / PROTON_HIDE_NVIDIA_GPU
+reprovision           = false                  # Force re-linking DXVK/VKD3D/NVAPI DLLs and redistributables on launch
 
 # DLL Overrides:
 # Best practice: use "n,b" (native first, built-in fallback) for translation DLLs.
@@ -145,35 +154,42 @@ protonfixes = true                             # Enable community protonfixes da
 #                   Pair with native Vulkan ("-gfx vk") or DXVK ("-dx11") to prevent D3D12 Intel ANV flickering.
 gpu = "auto"
 
-wayland_native      = true                     # Enable Wine-Staging native Wayland driver (waylanddrv)
-prefer_xwayland     = false                    # Force DISPLAY=:0 for archaic engines lacking Wayland
-vulkan_icd          = "auto"                   # Vulkan driver manifest: "auto", "nvidia", "radv", "intel"
-gl_threaded         = true                     # Multithreaded OpenGL (MESA_GL_THREAD / __GL_THREADED_OPTIMIZATIONS)
-vsync               = "default"                # "default", "on", "off"
-hdr                 = false                    # Enable HDR surface presentation (ENABLE_HDR_WSI=1)
-shader_cache        = true                     # Per-game isolated shader cache
-shader_cache_size_gb = 12                      # Maximum shader cache allocation in GiB
+wayland_native       = true                    # Enable Wine-Staging native Wayland driver (waylanddrv)
+prefer_xwayland      = false                   # Force DISPLAY=:0 for archaic engines lacking Wayland
+vulkan_icd           = "auto"                  # Vulkan driver manifest: "auto", "nvidia", "radv", "intel"
+radv_perftest        = ""                      # RADV Vulkan debug/tuning flags (e.g. "sam,rt,aco")
+raytracing           = false                   # Enable DXR ray tracing (auto-sets VKD3D_CONFIG=dxr,dxr11)
+gl_threaded          = true                    # Multithreaded OpenGL (MESA_GL_THREAD / __GL_THREADED_OPTIMIZATIONS)
+vsync                = "default"               # "default", "on", "off"
+hdr                  = false                   # Enable HDR surface presentation (ENABLE_HDR_WSI=1)
+shader_cache         = true                    # Per-game isolated shader cache
+shader_cache_size_gb = 12                     # Maximum shader cache allocation in GiB
 
 # Gamescope Micro-Compositor Sandbox
 [graphics.gamescope]
-enabled         = false                        # Enable Gamescope nested Wayland micro-compositor
-backend         = "wayland"                    # "wayland" (under Hyprland), "drm" (TTY), "sdl", "headless"
-mode            = "borderless"                 # "borderless", "fullscreen", "windowed"
-width           = 0                            # Internal render resolution width (-w, 0 = native display)
-height          = 0                            # Internal render resolution height (-h, 0 = native display)
-output_width    = 0                            # Monitor output width (-W, 0 = native display)
-output_height   = 0                            # Monitor output height (-H, 0 = native display)
-refresh_rate    = 0                            # Refresh rate cap (-r, 0 = native display Hz)
-scaler          = ""                           # "auto", "integer", "fit", "fill", "stretch"
-filter          = ""                           # "linear", "nearest", "fsr", "nis", "pixel"
-fsr_sharpness   = 5                            # FSR sharpness: 0 (sharpest) .. 20 (softest)
-adaptive_sync   = false                        # VRR / Adaptive Sync (--adaptive-sync)
-immediate_flips = false                        # Low-latency tearing (--immediate-flips, DRM backend only)
-realtime        = true                         # Real-time process priority (--rt)
-hdr             = false                        # Enable Gamescope HDR wide-gamut presentation
-expose_wayland  = true                         # Expose wayland socket to native clients (Proton/SDL3)
-mangoapp        = true                         # Use --mangoapp inside Gamescope (avoids double HUD)
-extra_args      = []                           # Custom CLI flags for Gamescope
+enabled           = false                      # Enable Gamescope nested Wayland micro-compositor
+backend           = "wayland"                  # "wayland" (under Hyprland), "drm" (TTY), "sdl", "headless"
+mode              = "borderless"               # "borderless", "fullscreen", "windowed"
+width             = 0                          # Internal render resolution width (-w, 0 = native display)
+height            = 0                          # Internal render resolution height (-h, 0 = native display)
+output_width      = 0                          # Monitor output width (-W, 0 = native display)
+output_height     = 0                          # Monitor output height (-H, 0 = native display)
+refresh_rate      = 0                          # Refresh rate cap (-r, 0 = native display Hz)
+unfocused_refresh = 0                          # Refresh rate cap when window loses focus (-o, 0 = uncapped)
+scaler            = ""                         # "auto", "integer", "fit", "fill", "stretch"
+filter            = ""                         # "linear", "nearest", "fsr", "nis", "pixel"
+fsr_sharpness     = 5                          # FSR sharpness: 0 (sharpest) .. 20 (softest)
+adaptive_sync     = false                      # VRR / Adaptive Sync (--adaptive-sync)
+immediate_flips   = false                      # Low-latency tearing (--immediate-flips, DRM backend only)
+force_grab_cursor = false                      # Force cursor capture/confinement (--force-grab-cursor)
+grab_keyboard     = false                      # Force exclusive keyboard capture (-g)
+realtime          = true                       # Real-time process priority (--rt)
+hdr               = false                      # Enable Gamescope HDR wide-gamut presentation
+hdr_itm           = false                      # Enable Gamescope SDR-to-HDR Inverse Tone Mapping (--hdr-itm-enable)
+expose_wayland    = true                       # Expose wayland socket to native clients (--expose-wayland)
+xwayland_count    = 0                          # Spawn multiple nested Xwayland instances (--xwayland-count)
+mangoapp          = true                       # Use --mangoapp inside Gamescope (avoids double HUD)
+extra_args        = []                         # Custom CLI flags for Gamescope
 
 # ------------------------------------------------------------------------------
 # 7. Performance & Scheduling [performance]
@@ -195,7 +211,7 @@ scope_memory_high = ""                         # Memory throttle threshold, e.g.
 driver        = "pipewire"                     # "pipewire", "pulseaudio", "alsa"
 quantum       = 1024                           # Buffer size in frames (1024/48000 = 21.3 ms latency)
 rate          = 48000                          # Audio sample rate in Hz
-openal_driver = "pipewire"                     # OpenAL driver backend
+openal_driver = ""                             # auto; set only when supported by the game
 
 # ------------------------------------------------------------------------------
 # 9. Gamepad & Input Mapping [input]
@@ -219,6 +235,7 @@ dwarfs_block_allocator  = "mmap"               # "mmap" or "malloc"
 dwarfs_preload_category = ""                   # e.g. "hotness" for mkdwarfs --categorize=hotness
 dwarfs_preload_all      = false                # Preload entire image into cache
 auto_clean_workdir      = true                 # Purge stale .game-root-work on mount
+union_backend           = "fuse-overlayfs"     # Rootless union filesystem driver
 
 # ------------------------------------------------------------------------------
 # 11. Runner Lifecycle & Session Safety [runner]
@@ -233,12 +250,15 @@ inhibit_idle         = true                    # Inhibit desktop screen saver an
 inhibit_sleep        = true                    # Inhibit system sleep and lid suspend during play
 notifications        = true                    # Send desktop notifications via notify-send
 kill_grace_s         = 8.0                     # SIGTERM -> cgroup.kill atomic escalation timeout
+enable_io_shim       = true                    # Preload runner_shim.so for DwarFS / Mono / FNA runtime quirks
+shim_readonly_assets = false                   # Explicitly allow read-only demotion of static asset opens
 
 # ------------------------------------------------------------------------------
 # 12. Sandboxing & Bubblewrap Isolation [sandbox]
 # ------------------------------------------------------------------------------
 [sandbox]
 enabled      = false                           # Run process inside Bubblewrap (bwrap) sandbox
+sandbox_home = ""                              # Custom isolated $HOME (empty = ~/.local/share/game-sandboxes/<game_id>)
 isolate_home = true                            # Restrict $HOME access to dedicated directory
 bind_gpu     = true                            # Passthrough DRM / Vulkan / NVIDIA device nodes
 bind_audio   = true                            # Passthrough PipeWire / PulseAudio sockets
@@ -246,7 +266,38 @@ bind_wayland = true                            # Passthrough Wayland compositor 
 bind_network = false                           # Block network / internet sockets
 
 # ------------------------------------------------------------------------------
-# 13. Lifecycle Hooks [hooks]
+# 13. Declarative Config Patches [[config_patches]]
+# ------------------------------------------------------------------------------
+# Declaratively patch JSON, INI, or CFG game settings files before launch.
+# Automatically resolves relative paths against:
+#   - Windows user AppData (e.g. "AppData/Local/Game/settings.json")
+#   - Wine C: drive (e.g. "drive_c/users/dusk/Saved Games/Game/config.ini")
+#   - Game root directory (e.g. "settings.cfg")
+# Supports dynamic template tokens:
+#   {width}              -> Display resolution width (e.g. "1920")
+#   {height}             -> Display resolution height (e.g. "1080")
+#   {refresh}            -> Display refresh rate in Hz (e.g. "144")
+#   {display_mode}       -> "Borderless" (under gamescope) or "Window" (pure Wayland)
+#   {display_mode_lower} -> "borderless" or "window"
+#   {gpu_name}           -> Active GPU model (e.g. "NVIDIA GeForce RTX 3050 Ti Laptop GPU")
+#   {game_dir}           -> Game base directory
+#   {root_dir}           -> Playable root directory (overlay union or game root)
+#   {prefix_dir}         -> WINEPREFIX path
+#   {user}               -> Current host username
+#
+# Example:
+# [[config_patches]]
+# file = "AppData/Local/GameName/settings.json"
+# format = "json"                              # "json" | "ini" | "cfg"
+# delete = ["AppData/Local/GameName/crash.ini"] # Stale crash/lock files to clean up
+# [config_patches.set]
+# DisplayMode = "{display_mode}"               # Windowed on Wayland avoids Torque3D/Unreal modal hangs
+# Resolution = "{width}x{height}"
+# RefreshRate = "{refresh}"
+# SelectedGPU = "{gpu_name}"
+
+# ------------------------------------------------------------------------------
+# 14. Lifecycle Hooks [hooks]
 # ------------------------------------------------------------------------------
 [hooks]
 pre_mount    = []                              # Commands before mounting FUSE layers
@@ -256,7 +307,7 @@ post_launch  = []                              # Commands immediately after proc
 post_unmount = []                              # Commands after unmounting FUSE layers
 
 # ------------------------------------------------------------------------------
-# 14. Custom Environment Variables [env]
+# 15. Custom Environment Variables [env]
 # ------------------------------------------------------------------------------
 [env]
 # Key-value environment variables injected into the game process pipeline.
@@ -266,12 +317,33 @@ post_unmount = []                              # Commands after unmounting FUSE 
 # VKD3D_CONFIG = "force_static_cbv"
 
 # ------------------------------------------------------------------------------
-# 15. Hardware & Session Conditional Overlays [when.<predicate>]
+# 16. Hardware & Session Conditional Overlays [when.<predicate>]
 # (Applied automatically when the active system satisfies the predicate)
-# Available predicates: nvidia, amd, intel, hybrid, ntsync, hdr_output, hyprland, kernel_ge_7_1
+# Composited in declaration order; any predicate can be negated with "not_" prefix.
+# Available predicates:
+#   - nvidia        -> NVIDIA GPU present in hardware topology
+#   - amd           -> AMD GPU present in hardware topology
+#   - intel         -> Intel GPU present in hardware topology
+#   - hybrid        -> System has multiple non-software GPUs (e.g. Intel Xe + NVIDIA RTX)
+#   - single_gpu    -> System has exactly one GPU
+#   - ntsync        -> /dev/ntsync kernel fast synchronization driver is usable
+#   - hdr_output    -> Focused display output supports HDR presentation
+#   - hyprland      -> Running inside Hyprland Wayland compositor
+#   - kwin          -> Running inside KDE Plasma / KWin
+#   - wayland       -> Running inside any Wayland session (WAYLAND_DISPLAY set)
+#   - kernel_ge_7_1 -> Linux kernel release is 7.1 or higher
+#   - gamescope     -> gamescope compositor binary is installed on system
+#
+# Negation Examples:
+#   [when.not_nvidia]   -> Applied on non-NVIDIA systems
+#   [when.not_hybrid]   -> Applied on single-GPU desktops
+#   [when.not_wayland]  -> Applied under X11 sessions
 # ------------------------------------------------------------------------------
 # [when.nvidia]
 # runtime.wine.dxvk_nvapi = true
 #
 # [when.hybrid]
 # graphics.gpu = "discrete"
+#
+# [when.not_hdr_output]
+# graphics.hdr = false

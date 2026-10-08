@@ -1,6 +1,6 @@
 """Raw keyboard event capture via evdev.
 
-Architecture (Kernel 7.1+ input subsystem, python-evdev):
+Architecture (Kernel 7.3+ input subsystem, python-evdev):
 
 * Single-pass discovery. A device is a keyboard if it reports any
   EV_KEY code < 256. Combo boards (wheel / touch-strip) are accepted;
@@ -33,6 +33,7 @@ import glob
 import logging
 import os
 import struct
+import time
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any, Protocol
@@ -142,6 +143,8 @@ class KeyEventClassifier:
         ts_us: int,
     ) -> KeyPress | None:
         """Feed one EV_KEY event. Returns a KeyPress or None."""
+        if kc.is_button(keycode):
+            return None
         state = self.state_for(device_id)
 
         if kc.is_shortcut_modifier(keycode):
@@ -237,10 +240,6 @@ def _ioc(direction: int, ioc_type: int, nr: int, size: int) -> int:
     return (direction << 30) | (size << 16) | (ioc_type << 8) | nr
 
 
-# _IOW('E', 0x93, struct input_mask) -- 16 bytes on LP64
-_EVIOCSMASK = _ioc(_IOC_WRITE, ord("E"), 0x93, 16)
-
-
 class _InputMask(ctypes.Structure):
     _fields_ = (
         ("type", ctypes.c_uint32),
@@ -249,33 +248,19 @@ class _InputMask(ctypes.Structure):
     )
 
 
-def apply_event_mask(fd: int) -> None:
-    """Deliver only EV_KEY and EV_LED. EV_SYN is always delivered.
+_EVIOCSMASK = _ioc(_IOC_WRITE, ord("E"), 0x93, ctypes.sizeof(_InputMask))
 
-    Empty masks for EV_REL / EV_ABS / EV_MSC etc. stop combo-device
-    motion/scroll events from rotating KEY events out of the evdev ring
-    buffer. We deny every type we don't need (REL, ABS, MSC, SW, SND,
-    REP, FF); only KEY and LED are allowed (SYN is implicit).
+
+def apply_event_mask(fd: int) -> None:
+    """Use EVIOCSMASK type 0 to admit KEY/LED; SYN is always delivered.
+
+    A per-client event-type mask filters all other known types before they
+    enter its ring, including types without individual code masks.
     """
-    allow = (kc.EV_KEY, kc.EV_LED)
-    # EV_SW=0x05, EV_SND=0x12, EV_REP=0x14, EV_FF=0x15 -- deny all.
-    deny = (kc.EV_REL, kc.EV_ABS, kc.EV_MSC, 0x05, 0x12, 0x14, 0x15)
-    nbytes = (kc.KEY_MAX >> 3) + 1
-    for ev_type in allow:
-        buf = (ctypes.c_uint8 * nbytes)(*([0xFF] * nbytes))
-        mask = _InputMask(ev_type, nbytes, ctypes.addressof(buf))
-        fcntl.ioctl(fd, _EVIOCSMASK, mask)
-    empty_n = 32
-    for ev_type in deny:
-        buf = (ctypes.c_uint8 * empty_n)()
-        mask = _InputMask(ev_type, empty_n, ctypes.addressof(buf))
-        try:
-            fcntl.ioctl(fd, _EVIOCSMASK, mask)
-        except OSError as exc:
-            # ENOTTY / EINVAL on kernels that don't support masking a
-            # particular type (e.g., FF on non-FF devices) -- non-fatal.
-            if exc.errno not in (25, 22):
-                raise
+    bits = (1 << kc.EV_KEY) | (1 << kc.EV_LED)
+    buf = ctypes.c_ulong(bits)
+    mask = _InputMask(0, ctypes.sizeof(buf), ctypes.addressof(buf))
+    fcntl.ioctl(fd, _EVIOCSMASK, mask)
 
 
 # ---------------------------------------------------------------------------
@@ -372,7 +357,7 @@ def _event_ts_us(event: Any) -> int:
     usec = int(getattr(event, "usec", 0) or 0)
     ts = sec * 1_000_000 + usec
     if ts <= 0:
-        ts = os.clock_gettime_ns(os.CLOCK_REALTIME) // 1000
+        ts = time.time_ns() // 1000
     return ts
 
 
@@ -428,7 +413,7 @@ class KeyListener:
         for path in _list_device_paths():
             device = None
             try:
-                device = self._InputDevice(path)
+                device = self._InputDevice(path, readonly=True)
                 if self._is_keyboard(device) and self._passes_filter(device.name):
                     found.append(device)
                     logger.info("Discovered keyboard: %s (%s)", device.name, path)
@@ -452,12 +437,6 @@ class KeyListener:
         num_led: bool | None = None
         try:
             active = list(live.device.active_keys(verbose=False))  # type: ignore[call-arg]
-        except TypeError:
-            # python-evdev <1.9 signature has no verbose arg
-            try:
-                active = list(live.device.active_keys())
-            except OSError as exc:
-                logger.debug("EVIOCGKEY failed on %s: %s", live.path, exc)
         except OSError as exc:
             logger.debug("EVIOCGKEY failed on %s: %s", live.path, exc)
         try:
@@ -517,10 +496,7 @@ class KeyListener:
             return
         if self._loop is not None:
             with contextlib.suppress(Exception):
-                try:
-                    self._loop.remove_reader(live.device.fd)
-                except Exception:
-                    pass
+                self._loop.remove_reader(live.device.fd)
         with contextlib.suppress(OSError):
             live.device.close()
         self.classifier.reset(path)
@@ -533,7 +509,7 @@ class KeyListener:
         if not path.startswith("/dev/input/event"):
             return
         try:
-            device = self._InputDevice(path)
+            device = self._InputDevice(path, readonly=True)
         except OSError as exc:
             logger.debug("Could not open %s: %s", path, exc)
             return
@@ -546,14 +522,13 @@ class KeyListener:
         if live is None:
             return
         try:
-            events = live.device.read()
+            for event in live.device.read():
+                self._dispatch(live, event)
         except BlockingIOError:
             return
         except OSError:
             self._detach(path)
             return
-        for event in events:
-            self._dispatch(live, event)
 
     def _dispatch(self, live: _LiveDevice, event: Any) -> None:
         etype = event.type

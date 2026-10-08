@@ -1,11 +1,19 @@
 [Unit]
-Description=Set RAPL energy_uj read permissions for Dusky Glance
-ConditionPathExists=/sys/devices/virtual/powercap
-After=systemd-modules-load.service
+Description=Dusky Glance CPU energy counter access
+Wants=systemd-udevd.service
+After=systemd-udevd.service
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/find /sys/devices/virtual/powercap/ -name "energy_uj" -exec /usr/bin/chmod 444 {} +
+# Install an event rule even when RAPL has not registered yet. StandardInputText
+# supplies tee's input; doubled percent signs preserve udev's path substitutions.
+StandardInputText=ACTION=="add|change", SUBSYSTEM=="powercap", TEST=="energy_uj", RUN+="/usr/bin/chmod 444 %%S%%p/energy_uj"
+ExecStart=/usr/bin/install -d -m 755 /run/udev/rules.d
+ExecStart=/usr/bin/tee /run/udev/rules.d/99-dusky-glance-rapl.rules
+ExecStart=/usr/bin/udevadm control --reload
+ExecStart=/usr/bin/udevadm trigger --action=change --subsystem-match=powercap --settle
+ExecStopPost=/usr/bin/rm -f /run/udev/rules.d/99-dusky-glance-rapl.rules
+ExecStopPost=/usr/bin/udevadm control --reload
 RemainAfterExit=yes
 
 [Install]

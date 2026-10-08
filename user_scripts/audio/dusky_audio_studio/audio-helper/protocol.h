@@ -1,17 +1,17 @@
-/* G-Helper audio helper: shared IPC protocol header.
+/* Dusky Audio Studio: shared IPC protocol header.
  *
  * Binary audio-frame layout written on stdout (little-endian),
  * line-based commands read on stdin.
  *
- * Frame rate: ~60 Hz (every 800 samples at 48 kHz).
- * Packet size: 2596 bytes (16 header + 20 scalars + 2048 waveforms + 512 spectra).
+ * Telemetry timer: 16 ms (~62.5 Hz) while capture frames are arriving.
+ * Packet size: 36 bytes (16 header + 20 scalars).
  *
- * Protocol v2 (WIP, not shipped):
+ * Protocol v4:
  *   - VAD always runs (RNNoise model invoked regardless of bypass flag),
  *     so vad_prob is meaningful even when rnnoise is bypassed.
- *   - noise_reduction_db is the *actual* energy removed by RNNoise
- *     (RMS of input minus RMS of denoised output), not whole-chain Δ.
- *     Reads 0 when RNNoise is bypassed.
+ *   - processing_delta_dbfs is the RMS level of the aligned difference
+ *     between dry input and the final RNNoise-stage blend. It is not noise attenuation.
+ *     Reads -80 dBFS when RNNoise is bypassed.
  *   - VOP command takes 7 args including pitch-follow + transpose.
  */
 #ifndef GHELPER_AUDIO_PROTOCOL_H
@@ -20,10 +20,8 @@
 #include <stdint.h>
 
 #define GHA_MAGIC 0x47484146u /* "GHAF" */
-#define GHA_PROTOCOL_VERSION 2u
+#define GHA_PROTOCOL_VERSION 4u
 
-#define GHA_WAVEFORM_SAMPLES 256
-#define GHA_SPECTRUM_BINS 64
 #define GHA_EQ_BANDS 9
 
 #define GHA_FLAG_RNNOISE_ON     (1u << 0)
@@ -42,19 +40,14 @@ struct gha_frame
     uint32_t magic;   /* GHA_MAGIC */
     uint32_t version; /* GHA_PROTOCOL_VERSION */
     uint32_t seq;     /* monotonically increasing */
-    uint32_t flags;   /* bit 0: rnnoise on, 1: eq on, 2: delay on, 3: reverb on, 4: monitor on, 5: vocoder on, 6: out_rnnoise on */
+    uint32_t flags;   /* GHA_FLAG_* */
 
-    float vad_prob;           /* 0..1 voice-activity prob from rnnoise; ALWAYS computed */
-    float rms_in_db;          /* -inf..0 dBFS RMS of raw input */
-    float rms_out_db;         /* -inf..0 dBFS RMS post-chain */
-    float noise_reduction_db; /* dB RMS of (rnn_in - rnn_out); 0 when rnnoise bypassed */
+    float vad_prob;           /* 0..1 voice activity probability from RNNoise */
+    float rms_in_db;          /* raw input RMS dBFS, floor -80 */
+    float rms_out_db;         /* post-chain RMS dBFS, floor -80; may exceed 0 */
+    float processing_delta_dbfs; /* aligned dry-minus-processed RMS, dBFS */
     float tracked_pitch_hz;   /* detected voice pitch (0 when silence/no track) */
 
-    float waveform_in[GHA_WAVEFORM_SAMPLES]; /* downsampled mono, -1..1 */
-    float waveform_out[GHA_WAVEFORM_SAMPLES];
-
-    float spectrum_in[GHA_SPECTRUM_BINS]; /* log-magnitude dB, -80..0 */
-    float spectrum_out[GHA_SPECTRUM_BINS];
 };
 
 #pragma pack(pop)
@@ -71,9 +64,7 @@ struct gha_frame
  *                       output sink (speakers, headphones, bluetooth).
  *                       "default" or empty arg = let wireplumber choose.
  *
- *   MON <0|1>           monitor: when 1, route processed audio to the
- *                       default sink so the user can hear what their
- *                       virtual mic sounds like.
+ *   MON <0|1>           monitor processed microphone on selected sink
  *
  *   RNN <0|1>           enable/disable microphone rnnoise (Input)
  *   OUT_NOISE <0|1>     enable/disable output speaker/headphone rnnoise (Two-Way)
@@ -83,25 +74,34 @@ struct gha_frame
  *   DLY <0|1>           enable/disable delay
  *   RVB <0|1>           enable/disable reverb
  *
- *   EQB <idx> <type> <freq_hz> <q> <gain_db>
+ *   EQB <idx> <type> <freq_hz> <q_mille> <gain_centidb>
  *                       set EQ band idx (0..8), type 0=peak 1=lowshelf
  *                       2=highshelf 3=highpass 4=lowpass 5=notch
  *
- *   DLP <time_ms> <feedback_0_1> <mix_0_1>
+ *   DLP <time_ms> <feedback_mille> <mix_mille>
  *                       set delay params
  *
- *   RVP <room_0_1> <damp_0_1> <width_0_1> <mix_0_1>
+ *   RVP <room_mille> <damp_mille> <tail_mille> <mix_mille>
  *                       set reverb params (Schroeder)
  *
- *   VOP <mix_0_1> <carrier_hz> <attack_ms> <release_ms> <detune_0_1> <follow_0_1> <shift_semis>
- *                       set vocoder params. mix/detune are per-mille.
+ *   VOP <mix_mille> <carrier_hz> <attack_ms> <release_ms> <detune_mille> <follow_0_1> <shift_semis>
+ *                       set vocoder params.
  *                       follow=1 makes the carrier track detected voice
  *                       pitch; shift_semis (-24..+24) transposes when
  *                       following. carrier_hz is used only when follow=0.
  *
- *   VOL <0..2000>       master gain per-mille for the virtual-source output.
- *                       1000 = unity, 2000 = +6 dB (soft-clipped via tanh).
- *                       Monitor playback is unaffected.
+ *   VOL <0..2000>       master gain per-mille for microphone and monitor.
+ *                       1000 = unity, 2000 = +6 dB; peaks may exceed 0 dBFS.
+ *   AGG <0..1000>       microphone RNNoise dry/wet and residual gate
+ *   EGN <centidb>      microphone EQ post gain (-3600..3600)
+ *   PSH <centisemis>   microphone pitch shift (-2400..2400)
+ *   ATN <0|1> / ATT <hz>  microphone autotune and target (0=chromatic)
+ *   BCR <bits> <hold_samples> / BPF <high_hz> <low_hz>
+ *   STT <hz> <duty_mille> / MTX <intensity_mille>
+ *   OUT_EQ / OUT_EQB / OUT_EGN, OUT_VOC / OUT_VOP / OUT_MTX,
+ *   OUT_PSH / OUT_ATN / OUT_ATT / OUT_BCR / OUT_BPF / OUT_STT,
+ *   OUT_DLY / OUT_DLP / OUT_RVB / OUT_RVP:
+ *                       playback equivalents of microphone controls.
  *
  *   QUIT
  *
@@ -113,6 +113,7 @@ struct gha_frame
  *   bit 4: monitor on
  *   bit 5: vocoder on
  *   bit 6: out_rnnoise on (Output / Two-Way)
+ *   bit 7: output EQ on
  */
 
 #endif

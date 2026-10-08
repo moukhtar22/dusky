@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Dusky Audio Studio & Voice DSP — Bleeding-Edge Audio Engine & GTK3 Control Studio
-Target Specification: Arch Linux (Kernel 7.1+, Python 3.14.7+, PipeWire 1.6.8+)
+Target Specification: Parstix Linux (Kernel 7.3+, Python 3.14.7+)
 Pure bleeding-edge Linux audio architecture with zero legacy shims.
 
 Features:
@@ -16,18 +16,19 @@ Features:
 - 4-Comb + 2-Allpass Schroeder Reverb
 - 9-Band Studio Parametric Equalizer with Uniform Post-Gain Translation
 - Real-Time Hardware Microphone Auto-Discovery (Anti-Loopback / Anti-Deadlock)
-- Live Binary Frame Telemetry & GTK3 Meters (VAD %, Noise Reduction dB, Input/Output Level)
-- Unified UNIX Domain Socket IPC Server (Non-blocking, multi-client, zero-drop)
+- Live Binary Frame Telemetry & GTK3 Meters (VAD %, Denoiser Signal Change, Input/Output Level)
+- Unified UNIX Domain Socket IPC Server (multi-client)
 """
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Final
 import json
+import fcntl
 import os
-import re
 import select
 import shutil
 import signal
@@ -37,6 +38,7 @@ import subprocess
 import sys
 import threading
 import time
+import weakref
 
 # --- Constants & Paths ---
 APP_ID: Final[str] = "org.dusky.audio-studio"
@@ -48,11 +50,27 @@ SOCK_PATH: Final[Path] = STATE_DIR / "dusky_audio.sock"
 PID_FILE: Final[Path] = STATE_DIR / "daemon.pid"
 GUI_PID_FILE: Final[Path] = STATE_DIR / "gui.pid"
 
-# Frame Protocol v2 specification
-FRAME_SIZE: Final[int] = 2596
+# Frame Protocol v4 specification
+FRAME_SIZE: Final[int] = 36
 MAGIC: Final[int] = 0x47484146  # "GHAF"
-PROTOCOL_VERSION: Final[int] = 2
+PROTOCOL_VERSION: Final[int] = 4
 HEADER_STRUCT: Final[struct.Struct] = struct.Struct("<IIIIfffff")  # 36 bytes
+NO_HARDWARE_TARGET: Final[str] = "dusky-no-hardware-device"
+APP_NODE_NAMES: Final[frozenset[str]] = frozenset({
+    "ghelper-audio", "ghelper-audio-sink", "ghelper-audio-capture",
+    "ghelper-audio-sink-out", "ghelper-audio-monitor",
+})
+EQ_BANDS: Final[tuple[tuple[str, int, int, int], ...]] = (
+    ("80 Hz (Sub Bass)", 0, 80, 707),
+    ("120 Hz (Warmth Lowshelf)", 1, 120, 707),
+    ("250 Hz (Low Mid Clean)", 0, 250, 1000),
+    ("400 Hz (Boxiness Mud Cut)", 0, 400, 1000),
+    ("1.5 kHz (Vocal Body)", 0, 1500, 1000),
+    ("3.5 kHz (Presence & Clarity)", 0, 3500, 700),
+    ("6.0 kHz (Vocal Detail)", 0, 6000, 1000),
+    ("9.0 kHz (Air & Sheen Highshelf)", 2, 9000, 700),
+    ("12.0 kHz (Brilliance)", 0, 12000, 1000),
+)
 
 # Sandboxed execution environment
 COMMAND_ENV: Final[dict[str, str]] = os.environ.copy()
@@ -62,14 +80,11 @@ COMMAND_ENV["LANG"] = "C.UTF-8"
 # Dynamic Material You / Matugen GTK3 CSS Theme
 DUSKY_CSS: Final[str] = """
 window.panel-window {
-    background-color: alpha(@theme_bg_color, 0.96);
+    background-color: @theme_bg_color;
     border: 1px solid rgba(255, 255, 255, 0.08);
     border-radius: 12px;
     box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
 }
-
-* { outline: none; }
-*:focus { outline: none; box-shadow: none; }
 
 .header-title {
     font-size: 16px;
@@ -306,12 +321,10 @@ switch.compact-switch:disabled {
     -gtk-icon-source: none;
     -gtk-icon-shadow: none;
     background-image: none;
-    outline: none;
     box-shadow: none;
 }
 
-switch label,
-switch * {
+switch label {
     color: transparent;
     font-size: 0px;
     text-shadow: none;
@@ -332,7 +345,6 @@ switch.compact-switch {
     background-color: alpha(@theme_fg_color, 0.18);
     border: none;
     box-shadow: none;
-    outline: none;
     color: transparent;
 }
 
@@ -361,7 +373,7 @@ switch.compact-switch:checked slider {
 .footer-info {
     font-size: 11px;
     font-weight: 500;
-    color: alpha(@theme_fg_color, 0.4);
+    color: alpha(@theme_fg_color, 0.7);
 }
 
 .warning-banner {
@@ -386,7 +398,7 @@ switch.compact-switch:checked slider {
 """
 
 
-@dataclass(slots=True, kw_only=True)
+@dataclass(slots=True, kw_only=True, weakref_slot=True)
 class AudioConfig:
     # Master (Disabled by default, opt-in only)
     enabled: bool = False
@@ -398,6 +410,8 @@ class AudioConfig:
     # Saved Physical Hardware Defaults for Seamless Restore on Disable/Reboot
     pre_source: str = ""
     pre_sink: str = ""
+    pre_configured_source: str = ""
+    pre_configured_sink: str = ""
 
     # Noise Suppression - Input / Microphone (Enabled by default on fresh install)
     rnnoise_on: bool = True
@@ -495,8 +509,57 @@ class AudioTelemetry:
     vad_prob: float = 0.0
     rms_in_db: float = -80.0
     rms_out_db: float = -80.0
-    noise_reduction_db: float = 0.0
+    processing_delta_dbfs: float = -80.0
     tracked_pitch_hz: float = 0.0
+
+
+CONFIG_BASELINES: dict[int, tuple[weakref.ReferenceType[AudioConfig], dict[str, Any]]] = {}
+
+
+def remember_config_baseline(cfg: AudioConfig) -> None:
+    key = id(cfg)
+    CONFIG_BASELINES[key] = (
+        weakref.ref(cfg, lambda _: CONFIG_BASELINES.pop(key, None)), asdict(cfg))
+
+
+def validate_config(cfg: AudioConfig) -> None:
+    defaults = AudioConfig()
+    for entry in fields(cfg):
+        name = entry.name
+        value = getattr(cfg, name)
+        expected = getattr(defaults, name)
+        if isinstance(expected, bool):
+            valid = type(value) is bool
+        elif isinstance(expected, int):
+            valid = type(value) is int
+        elif isinstance(expected, str):
+            valid = isinstance(value, str) and len(value) <= 255 and "\n" not in value
+        else:
+            valid = (isinstance(value, list) and len(value) == 9
+                     and all(type(x) is int and -1200 <= x <= 1200 for x in value))
+        if not valid:
+            raise ValueError(f"invalid configuration field: {name}")
+        if isinstance(expected, int) and not isinstance(expected, bool):
+            low, high = 0, 100
+            stem = name.removeprefix("out_")
+            if stem == "volume": low, high = 0, 200
+            elif stem == "vocoder_carrier_hz": low, high = 50, 880
+            elif stem == "vocoder_attack_ms": low, high = 1, 200
+            elif stem == "vocoder_release_ms": low, high = 5, 500
+            elif stem == "vocoder_detune": low, high = 0, 200
+            elif stem == "vocoder_pitch_shift": low, high = -24, 24
+            elif stem == "pitch_shift": low, high = -2400, 2400
+            elif stem == "autotune_target_hz": low, high = 0, 1000
+            elif stem == "bitcrush_bits": low, high = 0, 15
+            elif stem == "bitcrush_downsample": low, high = 1, 64
+            elif stem == "bandpass_hpf_hz": low, high = 0, 2000
+            elif stem == "bandpass_lpf_hz": low, high = 0, 20000
+            elif stem == "stutter_hz": low, high = 0, 40
+            elif stem == "delay_ms": low, high = 0, 1000
+            elif stem == "delay_feedback": low, high = 0, 95
+            elif stem == "eq_post_gain": low, high = -3600, 3600
+            if not low <= value <= high:
+                raise ValueError(f"out-of-range configuration field: {name}")
 
 
 # Microphone / Input Equalizer Presets
@@ -776,38 +839,64 @@ PRESETS: Final[dict[str, dict[str, Any]]] = {
 }
 
 
+VOICE_FIELDS: Final[tuple[str, ...]] = (
+    "vocoder_on", "vocoder_mix", "vocoder_carrier_hz", "vocoder_attack_ms",
+    "vocoder_release_ms", "vocoder_detune", "vocoder_follow",
+    "vocoder_pitch_shift", "vocoder_matrix", "pitch_shift", "autotune_on",
+    "autotune_target_hz", "bitcrush_bits", "bitcrush_downsample",
+    "bandpass_hpf_hz", "bandpass_lpf_hz", "stutter_hz",
+)
+
+
+def apply_voice_preset(cfg: AudioConfig, name: str, target: str) -> None:
+    preset = PRESETS[name]
+    defaults = AudioConfig()
+    prefix = "out_" if target == "out" else ""
+    for name_part in VOICE_FIELDS:
+        setattr(cfg, prefix + name_part,
+                preset.get(name_part, getattr(defaults, prefix + name_part)))
+
+
 def find_helper_binary() -> Path | None:
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    with open(STATE_DIR / "helper-build.lock", "a+b") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        return _find_helper_binary_unlocked()
+
+
+def _find_helper_binary_unlocked() -> Path | None:
     script_dir = Path(__file__).resolve().parent
-    local_bin = script_dir / "audio-helper" / "dusky_audio_dsp"
-    if local_bin.is_file() and os.access(local_bin, os.X_OK):
+    helper_dir = script_dir / "audio-helper"
+    local_bin = helper_dir / "dusky_audio_dsp"
+    sources = [helper_dir / name for name in ("main.c", "protocol.h", "Makefile")]
+    if (local_bin.is_file() and os.access(local_bin, os.X_OK)
+            and all(src.is_file() for src in sources)
+            and all(local_bin.stat().st_mtime_ns >= src.stat().st_mtime_ns for src in sources)
+            and helper_protocol_matches(local_bin)):
         return local_bin
 
-    # Auto-compile on the fly if local source Makefile exists
-    helper_dir = script_dir / "audio-helper"
-    if (helper_dir / "Makefile").is_file():
+    if shutil.which("make") and all(src.is_file() for src in sources):
         try:
-            subprocess.run(["make", "-C", str(helper_dir)], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            if local_bin.is_file() and os.access(local_bin, os.X_OK):
+            subprocess.run(["make", "-B", "-C", str(helper_dir)], check=True,
+                           capture_output=True, text=True, timeout=120)
+            if local_bin.is_file() and os.access(local_bin, os.X_OK) and helper_protocol_matches(local_bin):
                 return local_bin
-        except Exception:
-            pass
-
-    candidates: list[Path] = [
-        script_dir / "audio-helper" / "ghelper-audio",
-        CACHE_DIR / "dusky_audio_dsp",
-        STATE_DIR / "dusky_audio_dsp",
-        HOME_DIR / ".cache" / "ghelper" / "libs" / "ghelper-audio",
-        HOME_DIR / "Documents" / "ghelper" / "audio-helper" / "ghelper-audio",
-        HOME_DIR / "Documents" / "ghelper" / "build" / "embedded" / "ghelper-audio",
-        HOME_DIR / ".local" / "bin" / "dusky_audio_dsp",
-        Path("/usr/local/bin/dusky_audio_dsp"),
-        Path("/usr/bin/dusky_audio_dsp"),
-    ]
-    for c in candidates:
-        if c.is_file() and os.access(c, os.X_OK):
-            return c
-
+        except subprocess.CalledProcessError as exc:
+            detail = (exc.stderr or exc.stdout or str(exc)).strip()
+            print(f"[DuskyAudio] Helper build failed:\n{detail}", file=sys.stderr)
+        except (OSError, subprocess.SubprocessError) as exc:
+            print(f"[DuskyAudio] Helper build failed: {exc}", file=sys.stderr)
     return None
+
+
+def helper_protocol_matches(path: Path) -> bool:
+    try:
+        result = subprocess.run([str(path), "--protocol-version"],
+                                capture_output=True, text=True, timeout=2,
+                                check=True)
+        return result.stdout.strip() == str(PROTOCOL_VERSION)
+    except (OSError, subprocess.SubprocessError):
+        return False
 
 
 def send_desktop_notification(
@@ -837,7 +926,8 @@ def check_system_dependencies() -> list[str]:
     missing: list[str] = []
     missing_pkgs: list[str] = []
 
-    if not shutil.which("pw-cli") or not shutil.which("wpctl"):
+    if (not shutil.which("pw-cli") or not shutil.which("pw-dump")
+            or not shutil.which("pw-metadata") or not shutil.which("wpctl")):
         missing_pkgs.extend(["pipewire", "wireplumber"])
 
     bin_path = find_helper_binary()
@@ -857,7 +947,7 @@ def check_system_dependencies() -> list[str]:
         if unique_pkgs:
             missing.append(f"Install required packages: sudo pacman -S {' '.join(unique_pkgs)}")
         else:
-            missing.append("Native Audio DSP engine failed to compile (~/user_scripts/audio/dusky_audio_studio/audio-helper)")
+            missing.append(f"Native Audio DSP engine failed to compile ({Path(__file__).resolve().parent / 'audio-helper'})")
     elif missing_pkgs:
         unique_pkgs = list(dict.fromkeys(missing_pkgs))
         missing.append(f"Install required packages: sudo pacman -S {' '.join(unique_pkgs)}")
@@ -871,47 +961,54 @@ def load_config() -> AudioConfig:
         try:
             with open(CONFIG_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
-                cfg = AudioConfig()
-                for k, v in data.items():
-                    if hasattr(cfg, k):
-                        setattr(cfg, k, v)
-                return cfg
-        except Exception:
-            pass
+            cfg = AudioConfig(**{k: v for k, v in data.items() if k in AudioConfig.__dataclass_fields__})
+            validate_config(cfg)
+            remember_config_baseline(cfg)
+            return cfg
+        except (OSError, ValueError, TypeError, AttributeError) as e:
+            print(f"[DuskyAudio] Invalid configuration: {e}", file=sys.stderr)
 
-    old_config = HOME_DIR / ".config" / "dusky_audio_studio" / "config.json"
-    if old_config.exists():
-        try:
-            with open(old_config, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                cfg = AudioConfig()
-                for k, v in data.items():
-                    if hasattr(cfg, k):
-                        setattr(cfg, k, v)
-                save_config(cfg)
-                return cfg
-        except Exception:
-            pass
-
-    return AudioConfig()
+    cfg = AudioConfig()
+    remember_config_baseline(cfg)
+    return cfg
 
 
 def save_config(cfg: AudioConfig) -> None:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
-    # PID-unique temp name: the GUI and CLI tools can save concurrently, and
-    # a shared temp path would let their writes interleave before the rename.
-    tmp = CONFIG_FILE.with_name(f"{CONFIG_FILE.name}.{os.getpid()}.tmp")
+    validate_config(cfg)
+    lock_path = CONFIG_FILE.with_suffix(".lock")
     try:
-        # Write to a sibling temp file and atomically rename so a crash or
-        # power loss mid-write can never leave a truncated config.json behind.
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(asdict(cfg), f, indent=2)
-        tmp.replace(CONFIG_FILE)
-    except Exception:
-        try:
-            tmp.unlink(missing_ok=True)
-        except Exception:
-            pass
+        with open(lock_path, "a+b") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            current = asdict(cfg)
+            baseline = CONFIG_BASELINES.get(id(cfg))
+            if baseline and baseline[0]() is cfg and CONFIG_FILE.exists():
+                try:
+                    latest_data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+                    latest = AudioConfig(**{k: v for k, v in latest_data.items()
+                                            if k in AudioConfig.__dataclass_fields__})
+                    validate_config(latest)
+                    merged = asdict(latest)
+                    for name, value in current.items():
+                        if value != baseline[1][name]:
+                            merged[name] = value
+                    current = merged
+                except (OSError, ValueError, TypeError, AttributeError):
+                    pass
+            tmp = CONFIG_FILE.with_name(f"{CONFIG_FILE.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+            try:
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(current, f, indent=2)
+                    f.flush()
+                    os.fsync(f.fileno())
+                tmp.replace(CONFIG_FILE)
+                for name, value in current.items():
+                    setattr(cfg, name, value)
+                remember_config_baseline(cfg)
+            finally:
+                tmp.unlink(missing_ok=True)
+    except OSError as e:
+        print(f"[DuskyAudio] Failed to save configuration: {e}", file=sys.stderr)
 
 
 def pid_is_dusky_audio(pid: int) -> bool:
@@ -942,466 +1039,220 @@ def get_daemon_pid() -> int | None:
     return None
 
 
-def enumerate_sources() -> list[tuple[str, str]]:
-    """Enumerate physical audio input sources, filtering out all virtual/monitor nodes."""
-    sources: list[tuple[str, str]] = [("default", "Default System Microphone (Auto-Detected)")]
-    seen_names: set[str] = {"default"}
+def pipewire_audio_snapshot() -> tuple[dict[str, dict[str, Any]], dict[str, str]] | None:
+    """Return live hardware nodes and default metadata from one graph dump."""
     try:
-        out = subprocess.check_output(
-            ["pw-cli", "ls", "Node"],
-            text=True,
-            stderr=subprocess.DEVNULL,
-            env=COMMAND_ENV,
-        )
-        blocks = out.split("\tid ")
-        for b in blocks:
-            if 'media.class = "Audio/Source"' in b:
-                name_m = re.search(r'node\.name = "([^"]+)"', b)
-                desc_m = re.search(r'node\.description = "([^"]+)"', b)
-                name = name_m.group(1) if name_m else None
-                desc = desc_m.group(1) if desc_m else None
-
-                if not name:
-                    continue
-
-                lower_name = name.lower()
-                lower_desc = (desc or "").lower()
-                # Strictly filter out self-nodes and loopback monitors
-                if (
-                    lower_name.startswith(("ghelper", "dusky", "rnnoise"))
-                    or "noise suppressed" in lower_desc
-                    or "audio monitor" in lower_desc
-                    or "audio capture" in lower_desc
-                    or lower_name.endswith(".monitor")
-                    or "loopback" in lower_name
-                ):
-                    continue
-
-                if name not in seen_names:
-                    seen_names.add(name)
-                    sources.append((name, desc or name))
-    except Exception:
-        pass
-    return sources
+        objects = json.loads(subprocess.check_output(
+            ["pw-dump"], text=True, stderr=subprocess.DEVNULL,
+            env=COMMAND_ENV, timeout=2,
+        ))
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+    nodes: dict[str, dict[str, Any]] = {}
+    defaults: dict[str, str] = {}
+    for obj in objects:
+        props = obj.get("info", {}).get("props", {})
+        name = props.get("node.name", "")
+        if (props.get("media.class") in ("Audio/Source", "Audio/Sink")
+                and isinstance(name, str) and name
+                and props.get("device.id") is not None
+                and str(props.get("node.virtual", "false")).lower() != "true"
+                and name not in APP_NODE_NAMES
+                and not name.endswith(".monitor")):
+            nodes[name] = {**props, "id": obj.get("id")}
+        if obj.get("props", {}).get("metadata.name") == "default":
+            for item in obj.get("metadata", []):
+                value = item.get("value")
+                candidate = value.get("name") if isinstance(value, dict) else value
+                if isinstance(candidate, str):
+                    defaults[item.get("key", "")] = candidate
+    return nodes, defaults
 
 
-def enumerate_sinks() -> list[tuple[str, str]]:
-    """Enumerate physical audio output sinks, filtering out virtual/loopback nodes."""
-    sinks: list[tuple[str, str]] = [("default", "Default System Output (Auto-Detected)")]
-    seen_names: set[str] = {"default"}
-    try:
-        out = subprocess.check_output(
-            ["pw-cli", "ls", "Node"],
-            text=True,
-            stderr=subprocess.DEVNULL,
-            env=COMMAND_ENV,
-        )
-        blocks = out.split("\tid ")
-        for b in blocks:
-            if 'media.class = "Audio/Sink"' in b:
-                name_m = re.search(r'node\.name = "([^"]+)"', b)
-                desc_m = re.search(r'node\.description = "([^"]+)"', b)
-                name = name_m.group(1) if name_m else None
-                desc = desc_m.group(1) if desc_m else None
-
-                if not name:
-                    continue
-
-                lower_name = name.lower()
-                lower_desc = (desc or "").lower()
-                # Filter out our own virtual sink and loopback nodes
-                if (
-                    lower_name.startswith(("ghelper", "dusky", "rnnoise"))
-                    or "clean output" in lower_desc
-                    or "loopback" in lower_name
-                    or lower_name.endswith(".monitor")
-                ):
-                    continue
-
-                if name not in seen_names:
-                    seen_names.add(name)
-                    sinks.append((name, desc or name))
-    except Exception:
-        pass
-    return sinks
-
-
-def is_node_alive(node_name: str, media_class: str) -> bool:
-    """Checks if a given PipeWire node is actively connected and alive."""
-    if not node_name or node_name == "default" or not shutil.which("pw-dump"):
-        return False
-    try:
-        out = subprocess.check_output(["pw-dump", "Node"], text=True, stderr=subprocess.DEVNULL, env=COMMAND_ENV)
-        for obj in json.loads(out):
-            props = obj.get("info", {}).get("props", {})
-            if props.get("media.class") == media_class:
-                if props.get("node.name") == node_name or props.get("node.description") == node_name:
-                    return True
-    except Exception:
-        pass
-    return False
+def enumerate_devices() -> tuple[list[tuple[str, str]], list[tuple[str, str]]] | None:
+    sources = [("default", "Default System Microphone (Auto)")]
+    sinks = [("default", "Default System Output (Auto)")]
+    snapshot = pipewire_audio_snapshot()
+    if snapshot is None:
+        return None
+    nodes, _ = snapshot
+    for name, props in sorted(nodes.items(), key=lambda item: item[1].get("node.description") or item[0]):
+        entry = (name, props.get("node.description") or name)
+        if props.get("media.class") == "Audio/Source":
+            sources.append(entry)
+        else:
+            sinks.append(entry)
+    return sources, sinks
 
 
 def resolve_hardware_source(requested: str = "default", fallback_node: str = "") -> str:
-    """
-    Resolves the physical microphone node name to prevent WirePlumber feedback loops.
-    If 'default' is requested, dynamically queries the active physical microphone hardware node.
-    """
-    if requested != "default" and requested.strip():
-        return requested.strip()
-
-    # Priority 1: Check provided fallback_node (e.g. pre_source) if it is actively connected
-    if fallback_node and fallback_node != "default" and is_node_alive(fallback_node, "Audio/Source"):
-        return fallback_node
-
-    # Priority 2: Try to query the active default source from native WirePlumber metadata
-    if shutil.which("pw-dump"):
-        try:
-            out = subprocess.check_output(["pw-dump", "Metadata"], text=True, stderr=subprocess.DEVNULL, env=COMMAND_ENV)
-            metas = json.loads(out)
-            for m_obj in metas:
-                if m_obj.get("props", {}).get("metadata.name") == "default":
-                    for item in m_obj.get("metadata", []):
-                        if item.get("key") in ("default.audio.source", "default.configured.audio.source"):
-                            val = item.get("value")
-                            v_str = val.get("name") if isinstance(val, dict) else (val if isinstance(val, str) else None)
-                            if v_str and not any(v_str.lower().startswith(x) for x in ("ghelper", "dusky", "rnnoise")):
-                                return v_str
-        except Exception:
-            pass
-
-    # Priority 3: Fallback to querying active default source from wpctl status
-    try:
-        out = subprocess.check_output(["wpctl", "status"], text=True, stderr=subprocess.DEVNULL, env=COMMAND_ENV)
-        in_sources = False
-        default_id: str | None = None
-        for line in out.splitlines():
-            if "Sources:" in line:
-                in_sources = True
-                continue
-            if in_sources:
-                if line.strip().startswith(("├─", "└─", "Filters:", "Streams:")):
-                    break
-                m = re.search(r"\*\s+(\d+)\.", line)
-                if m:
-                    default_id = m.group(1)
-                    break
-        if default_id:
-            info = subprocess.check_output(["pw-cli", "info", default_id], text=True, stderr=subprocess.DEVNULL, env=COMMAND_ENV)
-            name_m = re.search(r'node\.name = "([^"]+)"', info)
-            if name_m:
-                node_name = name_m.group(1)
-                lower = node_name.lower()
-                if not lower.startswith(("ghelper", "dusky", "rnnoise")) and not lower.endswith(".monitor") and "loopback" not in lower:
-                    return node_name
-    except Exception:
-        pass
-
-    # Priority 4: Check persisted config pre_source
-    try:
-        persisted = load_config()
-        if persisted.pre_source and persisted.pre_source != "default" and is_node_alive(persisted.pre_source, "Audio/Source"):
-            return persisted.pre_source
-    except Exception:
-        pass
-
-    # Priority 5: Fallback to first non-virtual source in enumerated sources
-    sources = enumerate_sources()
-    for node, _ in sources:
-        if node != "default" and not node.startswith(("ghelper", "dusky")):
-            return node
-    return "default"
+    return resolve_hardware_node("Audio/Source", "source", requested, fallback_node)
 
 
 def resolve_hardware_sink(requested: str = "default", fallback_node: str = "") -> str:
-    """
-    Resolves the physical speaker/headphone node name to prevent WirePlumber feedback loops.
-    If 'default' is requested, dynamically queries the active physical playback hardware node.
-    """
-    if requested != "default" and requested.strip():
-        return requested.strip()
+    return resolve_hardware_node("Audio/Sink", "sink", requested, fallback_node)
 
-    # Priority 1: Check provided fallback_node (e.g. pre_sink) if it is actively connected
-    if fallback_node and fallback_node != "default" and is_node_alive(fallback_node, "Audio/Sink"):
-        return fallback_node
 
-    # Priority 2: Try to query the active default sink from native WirePlumber metadata
-    if shutil.which("pw-dump"):
-        try:
-            out = subprocess.check_output(["pw-dump", "Metadata"], text=True, stderr=subprocess.DEVNULL, env=COMMAND_ENV)
-            metas = json.loads(out)
-            for m_obj in metas:
-                if m_obj.get("props", {}).get("metadata.name") == "default":
-                    for item in m_obj.get("metadata", []):
-                        if item.get("key") in ("default.audio.sink", "default.configured.audio.sink"):
-                            val = item.get("value")
-                            v_str = val.get("name") if isinstance(val, dict) else (val if isinstance(val, str) else None)
-                            if v_str and not any(v_str.lower().startswith(x) for x in ("ghelper", "dusky", "rnnoise")):
-                                return v_str
-        except Exception:
-            pass
+def resolve_hardware_node(media_class: str, direction: str, requested: str,
+                          fallback_node: str = "",
+                          snapshot: tuple[dict[str, dict[str, Any]], dict[str, str]] | None = None) -> str:
+    """Resolve against live nodes. The active default precedes saved choices."""
+    snapshot = snapshot if snapshot is not None else pipewire_audio_snapshot()
+    if snapshot is None:
+        return NO_HARDWARE_TARGET
+    all_nodes, defaults = snapshot
+    nodes = {name: props for name, props in all_nodes.items()
+             if props.get("media.class") == media_class}
 
-    # Priority 3: Fallback to querying active default sink from wpctl status
-    try:
-        out = subprocess.check_output(["wpctl", "status"], text=True, stderr=subprocess.DEVNULL, env=COMMAND_ENV)
-        in_sinks = False
-        default_id: str | None = None
-        for line in out.splitlines():
-            if "Sinks:" in line:
-                in_sinks = True
-                continue
-            if in_sinks:
-                if line.strip().startswith(("├─", "└─", "Sources:", "Filters:", "Streams:")):
-                    break
-                m = re.search(r"\*\s+(\d+)\.", line)
-                if m:
-                    default_id = m.group(1)
-                    break
-        if default_id:
-            info = subprocess.check_output(["pw-cli", "info", default_id], text=True, stderr=subprocess.DEVNULL, env=COMMAND_ENV)
-            name_m = re.search(r'node\.name = "([^"]+)"', info)
-            if name_m:
-                node_name = name_m.group(1)
-                lower = node_name.lower()
-                if (
-                    not lower.startswith(("ghelper", "dusky", "rnnoise"))
-                    and not lower.endswith(".monitor")
-                    and "loopback" not in lower
-                    and "clean output" not in lower
-                ):
-                    return node_name
-    except Exception:
-        pass
+    if requested and requested != "default" and requested in nodes:
+        return requested
 
-    # Priority 4: Check persisted config pre_sink
-    try:
-        persisted = load_config()
-        if persisted.pre_sink and persisted.pre_sink != "default" and is_node_alive(persisted.pre_sink, "Audio/Sink"):
-            return persisted.pre_sink
-    except Exception:
-        pass
-
-    # Priority 5: Fallback to first non-virtual sink in enumerated sinks
-    sinks = enumerate_sinks()
-    for node, _ in sinks:
-        if node != "default" and not node.startswith(("ghelper", "dusky")):
-            return node
-    return "default"
+    for candidate in (defaults.get(f"default.audio.{direction}"),
+                      defaults.get(f"default.configured.audio.{direction}"),
+                      fallback_node):
+        if candidate in nodes:
+            return candidate
+    return next(iter(nodes), NO_HARDWARE_TARGET)
 
 
 def save_previous_default_devices(cfg: AudioConfig) -> None:
-    """
-    Captures the current active physical hardware default source and sink before
-    enabling Dusky virtual nodes, so they can be seamlessly restored on disable or reboot.
-    Utilizes multi-layer detection (PipeWire Metadata -> wpctl status -> hardware enumeration).
-    """
-    if not shutil.which("wpctl"):
+    """Remember active hardware and configured preferences independently."""
+    snapshot = pipewire_audio_snapshot()
+    if snapshot is None:
         return
-
-    src_name: str | None = None
-    snk_name: str | None = None
-
-    # Layer 1: Query native WirePlumber default metadata
-    if shutil.which("pw-dump"):
-        try:
-            out = subprocess.check_output(["pw-dump", "Metadata"], text=True, stderr=subprocess.DEVNULL, env=COMMAND_ENV)
-            metas = json.loads(out)
-            for m_obj in metas:
-                if m_obj.get("props", {}).get("metadata.name") == "default":
-                    for item in m_obj.get("metadata", []):
-                        k = item.get("key")
-                        val = item.get("value")
-                        val_str = val.get("name") if isinstance(val, dict) else (val if isinstance(val, str) else None)
-                        if not val_str or any(val_str.lower().startswith(x) for x in ("ghelper", "dusky", "rnnoise")):
-                            continue
-                        if k in ("default.audio.sink", "default.configured.audio.sink") and not snk_name:
-                            snk_name = val_str
-                        elif k in ("default.audio.source", "default.configured.audio.source") and not src_name:
-                            src_name = val_str
-        except Exception:
-            pass
-
-    # Layer 2: Fallback to wpctl status parsing
-    if not src_name or not snk_name:
-        try:
-            out = subprocess.check_output(["wpctl", "status"], text=True, stderr=subprocess.DEVNULL, env=COMMAND_ENV)
-            in_audio = False
-            in_sinks = False
-            in_sources = False
-            src_id: int | None = None
-            snk_id: int | None = None
-
-            for line in out.splitlines():
-                if line.strip() == "Audio":
-                    in_audio = True
-                    continue
-                if in_audio:
-                    if line.strip().startswith(("Video", "Settings")):
-                        break
-                    if "Sinks:" in line:
-                        in_sinks = True
-                        in_sources = False
-                        continue
-                    elif "Sources:" in line:
-                        in_sources = True
-                        in_sinks = False
-                        continue
-                    elif line.strip().startswith(("Filters:", "Streams:", "Devices:")):
-                        in_sinks = False
-                        in_sources = False
-                        continue
-
-                    if in_sinks and snk_id is None:
-                        m = re.search(r"\*\s+(\d+)\.", line)
-                        if m:
-                            snk_id = int(m.group(1))
-                    elif in_sources and src_id is None:
-                        m = re.search(r"\*\s+(\d+)\.", line)
-                        if m:
-                            src_id = int(m.group(1))
-
-            if src_id is not None and not src_name:
-                info = subprocess.check_output(["pw-cli", "info", str(src_id)], text=True, stderr=subprocess.DEVNULL, env=COMMAND_ENV)
-                name_m = re.search(r'node\.name = "([^"]+)"', info)
-                if name_m:
-                    n_str = name_m.group(1)
-                    if not any(n_str.lower().startswith(x) for x in ("ghelper", "dusky", "rnnoise")):
-                        src_name = n_str
-
-            if snk_id is not None and not snk_name:
-                info = subprocess.check_output(["pw-cli", "info", str(snk_id)], text=True, stderr=subprocess.DEVNULL, env=COMMAND_ENV)
-                name_m = re.search(r'node\.name = "([^"]+)"', info)
-                if name_m:
-                    n_str = name_m.group(1)
-                    if not any(n_str.lower().startswith(x) for x in ("ghelper", "dusky", "rnnoise")):
-                        snk_name = n_str
-        except Exception:
-            pass
-
-    # Layer 3: Fallback to physical hardware enumeration
-    if not src_name:
-        src_name = resolve_hardware_source()
-    if not snk_name:
-        snk_name = resolve_hardware_sink()
-
-    if src_name and not any(src_name.lower().startswith(x) for x in ("ghelper", "dusky", "rnnoise")):
-        cfg.pre_source = src_name
-    if snk_name and not any(snk_name.lower().startswith(x) for x in ("ghelper", "dusky", "rnnoise")):
-        cfg.pre_sink = snk_name
-
+    _, defaults = snapshot
+    source = resolve_hardware_node("Audio/Source", "source", "default", cfg.pre_source, snapshot)
+    sink = resolve_hardware_node("Audio/Sink", "sink", "default", cfg.pre_sink, snapshot)
+    if source != NO_HARDWARE_TARGET:
+        cfg.pre_source = source
+    if sink != NO_HARDWARE_TARGET:
+        cfg.pre_sink = sink
+    for direction in ("source", "sink"):
+        configured = defaults.get(f"default.configured.audio.{direction}", "")
+        if configured not in APP_NODE_NAMES:
+            setattr(cfg, f"pre_configured_{direction}", configured)
     save_config(cfg)
 
 
-def restore_previous_default_devices(cfg: AudioConfig | None = None) -> None:
-    """
-    Restores the previously active physical default source and sink when Dusky Audio is toggled off.
-    Falls back to the first available non-virtual hardware device if previous device is disconnected.
-    """
+def restore_previous_default_devices(cfg: AudioConfig | None = None,
+                                     directions: set[str] | None = None) -> None:
+    """Restore saved hardware defaults, using live physical devices if absent."""
     if not shutil.which("wpctl"):
         return
-
     if cfg is None:
         cfg = load_config()
-
-    target_source = cfg.pre_source if (cfg.pre_source and cfg.pre_source != "default") else resolve_hardware_source()
-    target_sink = cfg.pre_sink if (cfg.pre_sink and cfg.pre_sink != "default") else resolve_hardware_sink()
-
-    src_id: int | None = None
-    snk_id: int | None = None
-
-    if shutil.which("pw-dump"):
-        try:
-            out = subprocess.check_output(["pw-dump", "Node"], text=True, stderr=subprocess.DEVNULL, env=COMMAND_ENV)
-            nodes = json.loads(out)
-            for obj in nodes:
-                props = obj.get("info", {}).get("props", {})
-                media_class = props.get("media.class", "")
-                name = props.get("node.name", "")
-                desc = props.get("node.description", "")
-                nick = props.get("node.nick", "")
-
-                if media_class == "Audio/Source" and src_id is None:
-                    if target_source in (name, desc, nick) or target_source.lower() in (name.lower(), desc.lower()):
-                        src_id = obj.get("id")
-                elif media_class == "Audio/Sink" and snk_id is None:
-                    if target_sink in (name, desc, nick) or target_sink.lower() in (name.lower(), desc.lower()):
-                        snk_id = obj.get("id")
-        except Exception:
-            pass
-
-    # Dynamic fallback if targeted hardware device was disconnected/unplugged
-    if src_id is None:
-        fallback_src = resolve_hardware_source()
-        if fallback_src != "default" and shutil.which("pw-dump"):
-            try:
-                out = subprocess.check_output(["pw-dump", "Node"], text=True, stderr=subprocess.DEVNULL, env=COMMAND_ENV)
-                for obj in json.loads(out):
-                    if obj.get("info", {}).get("props", {}).get("media.class") == "Audio/Source":
-                        n = obj.get("info", {}).get("props", {}).get("node.name", "")
-                        if fallback_src == n:
-                            src_id = obj.get("id")
-                            break
-            except Exception:
-                pass
-
-    if snk_id is None:
-        fallback_snk = resolve_hardware_sink()
-        if fallback_snk != "default" and shutil.which("pw-dump"):
-            try:
-                out = subprocess.check_output(["pw-dump", "Node"], text=True, stderr=subprocess.DEVNULL, env=COMMAND_ENV)
-                for obj in json.loads(out):
-                    if obj.get("info", {}).get("props", {}).get("media.class") == "Audio/Sink":
-                        n = obj.get("info", {}).get("props", {}).get("node.name", "")
-                        if fallback_snk == n:
-                            snk_id = obj.get("id")
-                            break
-            except Exception:
-                pass
-
-    if src_id is not None:
-        subprocess.run(["wpctl", "set-default", str(src_id)], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=COMMAND_ENV)
-    if snk_id is not None:
-        subprocess.run(["wpctl", "set-default", str(snk_id)], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=COMMAND_ENV)
+    snapshot = pipewire_audio_snapshot()
+    if snapshot is None:
+        return
+    nodes, defaults = snapshot
+    for media_class, direction, preferred, configured in (
+        ("Audio/Source", "source", cfg.pre_source, cfg.pre_configured_source),
+        ("Audio/Sink", "sink", cfg.pre_sink, cfg.pre_configured_sink),
+    ):
+        if directions is not None and direction not in directions:
+            continue
+        selected = None
+        for name in (preferred, defaults.get(f"default.audio.{direction}"),
+                     defaults.get(f"default.configured.audio.{direction}"),
+                     *nodes.keys()):
+            props = nodes.get(name or "")
+            if props and props.get("media.class") == media_class:
+                selected = props.get("id")
+                break
+        if selected is not None:
+            result = subprocess.run(["wpctl", "set-default", str(selected)],
+                                    capture_output=True, text=True, env=COMMAND_ENV)
+            if result.returncode:
+                print(f"[DuskyAudio] Could not restore {direction}: {result.stderr.strip()}",
+                      file=sys.stderr)
+                continue
+            if configured and shutil.which("pw-metadata"):
+                result = subprocess.run(
+                    ["pw-metadata", "-n", "default", "0",
+                     f"default.configured.audio.{direction}",
+                     json.dumps({"name": configured}), "Spa:String:JSON"],
+                    capture_output=True, text=True, env=COMMAND_ENV)
+                if result.returncode:
+                    print(f"[DuskyAudio] Could not restore configured {direction}: {result.stderr.strip()}",
+                          file=sys.stderr)
+            elif not configured:
+                subprocess.run(["wpctl", "clear-default", str(selected)],
+                               capture_output=True, text=True, env=COMMAND_ENV)
 
 
-def set_dusky_devices_as_default() -> None:
+def set_dusky_devices_as_default() -> bool:
     """
     Automatically sets Dusky Mic (Source) and Dusky Audio (Sink) as the system's
     active default audio devices in PipeWire / WirePlumber upon engine startup.
     Allows manual override at any time via pavucontrol, wpctl, or desktop applets.
     """
     if not shutil.which("wpctl") or not shutil.which("pw-dump"):
-        return
+        return False
+    cfg = load_config()
+    snapshot = pipewire_audio_snapshot()
+    if snapshot is None:
+        return False
+    source_target = resolve_hardware_node("Audio/Source", "source", cfg.source,
+                                          cfg.pre_source, snapshot)
+    sink_target = resolve_hardware_node("Audio/Sink", "sink", cfg.sink,
+                                        cfg.pre_sink, snapshot)
 
-    for _ in range(12):
+    last_error = "audio nodes or links did not become ready"
+    for _ in range(40):
         try:
-            out = subprocess.check_output(["pw-dump", "Node"], text=True, stderr=subprocess.DEVNULL, env=COMMAND_ENV)
-            nodes = json.loads(out)
-            mic_id = None
-            sink_id = None
-            for obj in nodes:
-                props = obj.get("info", {}).get("props", {})
-                media_class = props.get("media.class", "")
-                node_name = props.get("node.name", "").lower()
-                node_desc = props.get("node.description", "").lower()
-
-                if media_class == "Audio/Source" and ("ghelper-audio" in node_name or "dusky mic" in node_desc):
-                    mic_id = obj.get("id")
-                elif media_class == "Audio/Sink" and ("ghelper-audio-sink" in node_name or "dusky audio" in node_desc):
-                    sink_id = obj.get("id")
-
-            if mic_id is not None and sink_id is not None:
-                subprocess.run(["wpctl", "set-default", str(mic_id)], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=COMMAND_ENV)
-                subprocess.run(["wpctl", "set-default", str(sink_id)], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=COMMAND_ENV)
+            graph = json.loads(subprocess.check_output(
+                ["pw-dump"], text=True, stderr=subprocess.DEVNULL,
+                env=COMMAND_ENV, timeout=2))
+            expected_classes = {
+                "ghelper-audio": "Audio/Source",
+                "ghelper-audio-sink": "Audio/Sink",
+                "ghelper-audio-capture": "Stream/Input/Audio",
+                "ghelper-audio-sink-out": "Stream/Output/Audio",
+            }
+            node_ids = {
+                props.get("node.name"): obj.get("id")
+                for obj in graph if obj.get("type", "").endswith(":Node")
+                for props in (obj.get("info", {}).get("props", {}),)
+                if props.get("node.name") and (
+                    props.get("node.name") not in expected_classes or
+                    props.get("media.class") == expected_classes[props["node.name"]])
+            }
+            links = {
+                (obj.get("info", {}).get("props", {}).get("link.output.node"),
+                 obj.get("info", {}).get("props", {}).get("link.input.node"))
+                for obj in graph if obj.get("type", "").endswith(":Link")
+            }
+            mic_id = node_ids.get("ghelper-audio")
+            virtual_sink_id = node_ids.get("ghelper-audio-sink")
+            capture_id = node_ids.get("ghelper-audio-capture")
+            playback_id = node_ids.get("ghelper-audio-sink-out")
+            if None in (mic_id, virtual_sink_id, capture_id, playback_id):
+                time.sleep(0.05)
+                continue
+            app_ids = {mic_id, virtual_sink_id, capture_id, playback_id}
+            if any(src in app_ids and dst in app_ids for src, dst in links):
+                last_error = "audio graph contains a self-route"
                 break
-            elif mic_id is not None or sink_id is not None:
-                if mic_id is not None:
-                    subprocess.run(["wpctl", "set-default", str(mic_id)], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=COMMAND_ENV)
-                if sink_id is not None:
-                    subprocess.run(["wpctl", "set-default", str(sink_id)], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=COMMAND_ENV)
-        except Exception:
-            pass
-        time.sleep(0.04)
+            if (source_target != NO_HARDWARE_TARGET and
+                    (node_ids.get(source_target), capture_id) not in links):
+                time.sleep(0.05)
+                continue
+            if (sink_target != NO_HARDWARE_TARGET and
+                    (playback_id, node_ids.get(sink_target)) not in links):
+                time.sleep(0.05)
+                continue
+            for available, node_id in ((source_target != NO_HARDWARE_TARGET, mic_id),
+                                       (sink_target != NO_HARDWARE_TARGET, virtual_sink_id)):
+                if available:
+                    subprocess.run(["wpctl", "set-default", str(node_id)],
+                                   check=True, capture_output=True, text=True,
+                                   env=COMMAND_ENV)
+            return True
+        except (OSError, subprocess.SubprocessError, ValueError) as e:
+            last_error = str(e)
+        time.sleep(0.05)
+    print(f"[DuskyAudio] Could not establish audio routing: {last_error}", file=sys.stderr)
+    return False
 
 
 # -----------------------------------------------------------------------------
@@ -1412,22 +1263,34 @@ class AudioDspServer:
         self.bin_path = bin_path
         self.proc: subprocess.Popen[bytes] | None = None
         self.sock: socket.socket | None = None
+        self._owns_socket = False
         self.running = False
         self.telemetry = AudioTelemetry()
         self._lock = threading.Lock()
+        self._command_lock = threading.RLock()
+        self.config: AudioConfig | None = None
+        self._route_source = ""
+        self._route_sink = ""
 
     def start(self) -> bool:
         STATE_DIR.mkdir(parents=True, exist_ok=True)
-        SOCK_PATH.unlink(missing_ok=True)
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        if SOCK_PATH.exists():
+            try:
+                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+                    client.settimeout(0.2)
+                    client.connect(str(SOCK_PATH))
+                    print("[DuskyAudioServer] Another server is running", file=sys.stderr)
+                    return False
+            except OSError:
+                SOCK_PATH.unlink(missing_ok=True)
 
         try:
-            self.proc = subprocess.Popen(
-                [str(self.bin_path)],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                bufsize=0,
-            )
+            with open(CACHE_DIR / "engine.log", "a", encoding="utf-8") as log:
+                self.proc = subprocess.Popen(
+                    [str(self.bin_path)], stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE, stderr=log, bufsize=0,
+                )
         except Exception as e:
             print(f"[DuskyAudioServer] Failed to launch {self.bin_path}: {e}", file=sys.stderr)
             return False
@@ -1436,8 +1299,14 @@ class AudioDspServer:
         threading.Thread(target=self._telemetry_reader, daemon=True).start()
 
         # Create UNIX domain socket
-        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self.sock.bind(str(SOCK_PATH))
+        try:
+            self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            self.sock.bind(str(SOCK_PATH))
+            self._owns_socket = True
+        except OSError as e:
+            print(f"[DuskyAudioServer] Socket startup failed: {e}", file=sys.stderr)
+            self.stop()
+            return False
         # Owner-only: the socket accepts arbitrary DSP commands and must not
         # be reachable by other local users regardless of umask.
         os.chmod(SOCK_PATH, 0o600)
@@ -1451,10 +1320,35 @@ class AudioDspServer:
         try:
             init_cfg = load_config()
             self._apply_full_config(init_cfg)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[DuskyAudioServer] Configuration failed: {e}", file=sys.stderr)
+            self.stop()
+            return False
+
+        threading.Thread(target=self._watch_devices, daemon=True).start()
 
         return True
+
+    def _watch_devices(self) -> None:
+        while self.running:
+            time.sleep(2.0)
+            with self._command_lock:
+                cfg = self.config
+                if not self.running or cfg is None:
+                    continue
+                snapshot = pipewire_audio_snapshot()
+                if snapshot is None:
+                    continue
+                source = resolve_hardware_node("Audio/Source", "source", cfg.source,
+                                               cfg.pre_source, snapshot)
+                sink = resolve_hardware_node("Audio/Sink", "sink", cfg.sink,
+                                             cfg.pre_sink, snapshot)
+                if source != self._route_source:
+                    self.send_cmd(f"SRC {source}")
+                    self._route_source = source
+                if sink != self._route_sink:
+                    self.send_cmd(f"SINK_TGT {sink}")
+                    self._route_sink = sink
 
     def _telemetry_reader(self) -> None:
         if not self.proc or not self.proc.stdout:
@@ -1491,7 +1385,7 @@ class AudioDspServer:
                                 vad_prob=vad_prob,
                                 rms_in_db=rms_in_db,
                                 rms_out_db=rms_out_db,
-                                noise_reduction_db=noise_red_db,
+                                processing_delta_dbfs=noise_red_db,
                                 tracked_pitch_hz=pitch_hz,
                             )
                     else:
@@ -1505,24 +1399,33 @@ class AudioDspServer:
                 break
 
     def send_cmd(self, line: str) -> None:
-        if not self.proc or not self.proc.stdin or self.proc.poll() is not None:
-            return
-        try:
-            self.proc.stdin.write((line.strip() + "\n").encode("utf-8"))
-            self.proc.stdin.flush()
-        except Exception:
-            pass
+        with self._command_lock:
+            if not self.proc or not self.proc.stdin or self.proc.poll() is not None:
+                raise RuntimeError("DSP helper is not running")
+            try:
+                self.proc.stdin.write((line.strip() + "\n").encode("utf-8"))
+                self.proc.stdin.flush()
+            except OSError as e:
+                raise RuntimeError(f"DSP command failed: {e}") from e
 
     def stop(self) -> None:
         self.running = False
-        self.send_cmd("QUIT")
-        time.sleep(0.05)
+        try:
+            self.send_cmd("QUIT")
+        except RuntimeError:
+            pass
         if self.proc and self.proc.poll() is None:
-            self.proc.terminate()
             try:
-                self.proc.wait(timeout=0.3)
-            except Exception:
-                self.proc.kill()
+                self.proc.wait(timeout=1.0)
+            except subprocess.TimeoutExpired:
+                self.proc.terminate()
+                try:
+                    self.proc.wait(timeout=1.0)
+                except subprocess.TimeoutExpired:
+                    self.proc.kill()
+                    self.proc.wait()
+        elif self.proc:
+            self.proc.wait()
 
         if self.sock:
             try:
@@ -1530,8 +1433,9 @@ class AudioDspServer:
             except Exception:
                 pass
 
-        SOCK_PATH.unlink(missing_ok=True)
-        PID_FILE.unlink(missing_ok=True)
+        if self._owns_socket:
+            SOCK_PATH.unlink(missing_ok=True)
+            PID_FILE.unlink(missing_ok=True)
 
     def serve_forever(self) -> None:
         while self.running:
@@ -1544,7 +1448,21 @@ class AudioDspServer:
 
             threading.Thread(target=self._handle_client, args=(conn,), daemon=True).start()
 
+        helper_failed = self.running and self.proc is not None and self.proc.poll() is not None
         self.stop()
+        if helper_failed and self.config is not None:
+            snapshot = pipewire_audio_snapshot()
+            if snapshot is not None:
+                defaults = snapshot[1]
+                directions = {
+                    direction for direction, virtual_name in (
+                        ("source", "ghelper-audio"),
+                        ("sink", "ghelper-audio-sink"),
+                    ) if any(defaults.get(f"default.{prefix}audio.{direction}") == virtual_name
+                             for prefix in ("", "configured."))
+                }
+                if directions:
+                    restore_previous_default_devices(self.config, directions)
 
     def _handle_client(self, conn: socket.socket) -> None:
         conn.settimeout(5.0)
@@ -1570,28 +1488,40 @@ class AudioDspServer:
                                 resp = json.dumps(asdict(self.telemetry)) + "\n"
                             conn.sendall(resp.encode("utf-8"))
                         elif cmd == "PING":
-                            conn.sendall(b"PONG\n")
+                            conn.sendall(b"PONG\n" if self.proc and self.proc.poll() is None else b"ERROR\n")
                         elif cmd == "QUIT":
                             self.running = False
                             conn.sendall(b"OK\n")
                             return
                         elif cmd.startswith("CMD "):
-                            self.send_cmd(cmd[4:])
-                            conn.sendall(b"OK\n")
+                            try:
+                                self.send_cmd(cmd[4:])
+                                conn.sendall(b"OK\n")
+                            except RuntimeError as e:
+                                conn.sendall(f"ERROR {e}\n".encode())
                         elif cmd.startswith("CONFIG_SYNC "):
-                            cfg_dict = json.loads(cmd[12:])
-                            cfg = AudioConfig(**cfg_dict)
-                            self._apply_full_config(cfg)
-                            conn.sendall(b"OK\n")
-        except Exception:
-            pass
+                            try:
+                                cfg_dict = json.loads(cmd[12:])
+                                cfg = AudioConfig(**cfg_dict)
+                                validate_config(cfg)
+                                with self._command_lock:
+                                    self._apply_full_config(cfg)
+                                conn.sendall(b"OK\n")
+                            except (ValueError, TypeError, RuntimeError) as e:
+                                conn.sendall(f"ERROR {e}\n".encode())
+        except OSError as e:
+            print(f"[DuskyAudioServer] Client connection failed: {e}", file=sys.stderr)
 
     def _apply_full_config(self, cfg: AudioConfig) -> None:
+        validate_config(cfg)
+        self.config = cfg
         # Hardware source & sink resolution (eliminates feedback loops)
         target_src = resolve_hardware_source(cfg.source, fallback_node=cfg.pre_source)
         self.send_cmd(f"SRC {target_src}")
+        self._route_source = target_src
         target_sink = resolve_hardware_sink(cfg.sink, fallback_node=cfg.pre_sink)
         self.send_cmd(f"SINK_TGT {target_sink}")
+        self._route_sink = target_sink
         self.send_cmd(f"VOL {cfg.volume * 10}")
         self.send_cmd(f"MON {1 if cfg.monitor else 0}")
 
@@ -1627,17 +1557,16 @@ class AudioDspServer:
         # 9-Band EQ & Uniform Post-Gain (Microphone Input)
         self.send_cmd(f"EQ {1 if (cfg.enabled and cfg.eq_on) else 0}")
         self.send_cmd(f"EGN {cfg.eq_post_gain}")
-        eq_types = [3, 1, 0, 0, 0, 0, 0, 2, 0]
-        eq_freqs = [80, 120, 250, 400, 1500, 3500, 6000, 9000, 12000]
-        eq_q = [707, 707, 1000, 1000, 1000, 700, 1000, 700, 1000]
         for idx, gain in enumerate(cfg.eq_gains):
-            self.send_cmd(f"EQB {idx} {eq_types[idx]} {eq_freqs[idx]} {eq_q[idx]} {gain}")
+            _, kind, hz, q = EQ_BANDS[idx]
+            self.send_cmd(f"EQB {idx} {kind} {hz} {q} {gain}")
 
         # Stereo 9-Band EQ & Uniform Post-Gain (Playback Output)
         self.send_cmd(f"OUT_EQ {1 if (cfg.enabled and cfg.out_eq_on) else 0}")
         self.send_cmd(f"OUT_EGN {cfg.out_eq_post_gain}")
         for idx, gain in enumerate(cfg.out_eq_gains):
-            self.send_cmd(f"OUT_EQB {idx} {eq_types[idx]} {eq_freqs[idx]} {eq_q[idx]} {gain}")
+            _, kind, hz, q = EQ_BANDS[idx]
+            self.send_cmd(f"OUT_EQB {idx} {kind} {hz} {q} {gain}")
 
         # Output Playback Stereo Voice Transformers
         self.send_cmd(f"OUT_VOC {1 if (cfg.enabled and cfg.out_vocoder_on) else 0}")
@@ -1676,6 +1605,19 @@ def send_daemon_cmd(cmd_str: str) -> bool:
         return False
 
 
+def daemon_responds() -> bool:
+    if not get_daemon_pid() or not SOCK_PATH.exists():
+        return False
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.settimeout(0.3)
+            client.connect(str(SOCK_PATH))
+            client.sendall(b"PING\n")
+            return client.recv(16).startswith(b"PONG")
+    except OSError:
+        return False
+
+
 def sync_config_to_daemon(cfg: AudioConfig) -> bool:
     if not SOCK_PATH.exists():
         return False
@@ -1691,39 +1633,73 @@ def sync_config_to_daemon(cfg: AudioConfig) -> bool:
         return False
 
 
+_telemetry_client: socket.socket | None = None
+_telemetry_buffer = b""
+
+
 def fetch_telemetry_from_daemon() -> AudioTelemetry | None:
+    global _telemetry_client, _telemetry_buffer
     if not SOCK_PATH.exists():
+        if _telemetry_client:
+            _telemetry_client.close()
+            _telemetry_client = None
+            _telemetry_buffer = b""
         return None
     try:
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
-            client.settimeout(0.1)
+        if _telemetry_client is None:
+            client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            client.settimeout(0.03)
             client.connect(str(SOCK_PATH))
-            client.sendall(b"GET_TELEMETRY\n")
-            raw = client.recv(1024).decode("utf-8").strip()
-            if raw:
-                d = json.loads(raw)
-                return AudioTelemetry(**d)
-    except Exception:
-        pass
+            _telemetry_client = client
+        _telemetry_client.sendall(b"GET_TELEMETRY\n")
+        while b"\n" not in _telemetry_buffer:
+            chunk = _telemetry_client.recv(1024)
+            if not chunk:
+                raise ConnectionError("telemetry connection closed")
+            _telemetry_buffer += chunk
+            if len(_telemetry_buffer) > 4096:
+                raise ValueError("oversized telemetry")
+        raw, _telemetry_buffer = _telemetry_buffer.split(b"\n", 1)
+        return AudioTelemetry(**json.loads(raw))
+    except (OSError, ValueError, TypeError):
+        if _telemetry_client:
+            _telemetry_client.close()
+            _telemetry_client = None
+            _telemetry_buffer = b""
     return None
 
 
 def start_daemon(cfg: AudioConfig | None = None) -> bool:
-    if cfg is None:
-        cfg = load_config()
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    with open(STATE_DIR / "startup.lock", "a+b") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if cfg is not None:
+            save_config(cfg)
+        current = load_config()
+        ok = _start_daemon_locked(current)
+        if not ok:
+            current.enabled = False
+            save_config(current)
+        return ok
 
-    save_previous_default_devices(cfg)
+
+def _start_daemon_locked(cfg: AudioConfig) -> bool:
+    existing_pid = get_daemon_pid()
+    if not existing_pid:
+        save_previous_default_devices(cfg)
     cfg.enabled = True
     save_config(cfg)
 
-    pid = get_daemon_pid()
+    pid = existing_pid
     if pid and SOCK_PATH.exists():
-        sync_config_to_daemon(cfg)
-        set_dusky_devices_as_default()
-        return True
+        if sync_config_to_daemon(cfg) and set_dusky_devices_as_default():
+            return True
 
-    # Pre-clean stale state
-    stop_daemon(restore_defaults=False)
+    if pid:
+        _stop_daemon_unlocked(restore_defaults=False)
+    else:
+        SOCK_PATH.unlink(missing_ok=True)
+        PID_FILE.unlink(missing_ok=True)
 
     missing = check_system_dependencies()
     if missing:
@@ -1745,19 +1721,24 @@ from dusky_audio_studio import AudioDspServer, Path
 srv = AudioDspServer(Path({repr(str(bin_path))}))
 if srv.start():
     srv.serve_forever()
-"""
-    subprocess.Popen(
-        [sys.executable, "-c", server_code],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        stdin=subprocess.DEVNULL,
-        cwd=str(STATE_DIR),
-        start_new_session=True,
-        env=COMMAND_ENV,
-    )
+    """
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        with open(CACHE_DIR / "server.log", "a", encoding="utf-8") as log:
+            child = subprocess.Popen(
+                [sys.executable, "-c", server_code], stdout=log, stderr=log,
+                stdin=subprocess.DEVNULL, cwd=str(STATE_DIR),
+                start_new_session=True, env=COMMAND_ENV,
+            )
+    except OSError as exc:
+        print(f"[DuskyAudio] Server launch failed: {exc}", file=sys.stderr)
+        return False
 
+    server_ready = False
     for _ in range(40):
         time.sleep(0.04)
+        if child.poll() is not None:
+            break
         if SOCK_PATH.exists():
             try:
                 with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
@@ -1765,16 +1746,44 @@ if srv.start():
                     s.connect(str(SOCK_PATH))
                     s.sendall(b"PING\n")
                     if s.recv(16).startswith(b"PONG"):
-                        sync_config_to_daemon(cfg)
-                        set_dusky_devices_as_default()
-                        return True
+                        server_ready = True
+                        break
             except Exception:
                 pass
 
+    if server_ready and sync_config_to_daemon(cfg) and set_dusky_devices_as_default():
+        return True
+
+    print(f"[DuskyAudio] Server startup failed; see {CACHE_DIR / 'server.log'}", file=sys.stderr)
+    if child.poll() is None:
+        child.terminate()
+        try:
+            child.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            child.kill()
+            child.wait()
+    _stop_daemon_unlocked(restore_defaults=True, cfg=cfg)
     return False
 
 
 def stop_daemon(restore_defaults: bool = True, cfg: AudioConfig | None = None) -> bool:
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    with open(STATE_DIR / "startup.lock", "a+b") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        return _stop_daemon_unlocked(restore_defaults, cfg)
+
+
+def _stop_daemon_unlocked(restore_defaults: bool = True, cfg: AudioConfig | None = None) -> bool:
+    directions: set[str] = set()
+    if restore_defaults:
+        snapshot = pipewire_audio_snapshot()
+        if snapshot is not None:
+            defaults = snapshot[1]
+            for direction, virtual_name in (("source", "ghelper-audio"),
+                                             ("sink", "ghelper-audio-sink")):
+                if any(defaults.get(f"default.{prefix}audio.{direction}") == virtual_name
+                       for prefix in ("", "configured.")):
+                    directions.add(direction)
     pid = get_daemon_pid()
     if SOCK_PATH.exists():
         try:
@@ -1782,33 +1791,35 @@ def stop_daemon(restore_defaults: bool = True, cfg: AudioConfig | None = None) -
                 s.settimeout(0.3)
                 s.connect(str(SOCK_PATH))
                 s.sendall(b"QUIT\n")
+                s.recv(16)
         except Exception:
             pass
 
     if pid:
-        for _ in range(15):
-            time.sleep(0.01)
-            try:
-                os.kill(pid, 0)
-            except OSError:
+        for _ in range(30):
+            time.sleep(0.05)
+            if not pid_is_dusky_audio(pid):
                 break
         else:
             try:
                 os.kill(pid, signal.SIGTERM)
             except OSError:
                 pass
-
-    try:
-        subprocess.run(["pkill", "-x", "dusky_audio_dsp"], stderr=subprocess.DEVNULL)
-        subprocess.run(["pkill", "-x", "ghelper-audio"], stderr=subprocess.DEVNULL)
-    except Exception:
-        pass
+            for _ in range(20):
+                time.sleep(0.05)
+                if not pid_is_dusky_audio(pid):
+                    break
+            else:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except OSError:
+                    pass
 
     PID_FILE.unlink(missing_ok=True)
     SOCK_PATH.unlink(missing_ok=True)
 
-    if restore_defaults:
-        restore_previous_default_devices(cfg)
+    if directions:
+        restore_previous_default_devices(cfg, directions)
 
     return True
 
@@ -1816,7 +1827,8 @@ def stop_daemon(restore_defaults: bool = True, cfg: AudioConfig | None = None) -
 # -----------------------------------------------------------------------------
 #   GTK3 Interface & Reactive Studio Studio
 # -----------------------------------------------------------------------------
-def run_gtk_app() -> None:
+def run_gtk_app(*, open_only: bool = False) -> None:
+    os.environ["GDK_BACKEND"] = "wayland"
     if GUI_PID_FILE.exists():
         try:
             with open(GUI_PID_FILE, "r", encoding="utf-8") as f:
@@ -1845,6 +1857,9 @@ def run_gtk_app() -> None:
         pass
 
     cfg = load_config()
+    if open_only:
+        # Opening settings must reflect the running DSP without starting it.
+        cfg.enabled = bool(get_daemon_pid())
 
     provider = Gtk.CssProvider()
     provider.load_from_data(DUSKY_CSS.encode("utf-8"))
@@ -1855,15 +1870,25 @@ def run_gtk_app() -> None:
     class AudioStudioWindow(Gtk.Window):
         def __init__(self) -> None:
             super().__init__(title="Dusky Audio Studio & Voice DSP")
-            self.set_wmclass("dusky_audio_studio.py", "dusky_audio_studio.py")
-            self.set_default_size(680, 760)
+            self.set_default_size(630, 640)
             self.set_border_width(16)
             self.set_position(Gtk.WindowPosition.CENTER)
             self.get_style_context().add_class("panel-window")
 
             self.cfg = cfg
-            self.sources = enumerate_sources()
-            self.sinks = enumerate_sinks()
+            self._last_status_check = 0.0
+            self._save_timer = 0
+            self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="dusky-ui-control")
+            self._command_lock = threading.Lock()
+            self._command_epoch = 0
+            self._command_serial: dict[str, int] = {}
+            self._engine_target = cfg.enabled
+            self._closed = False
+            self._telemetry_stop = threading.Event()
+            self._latest_telemetry: AudioTelemetry | None = None
+            self._device_refresh_pending = False
+            self.sources = [("default", "Default System Microphone (Auto)")]
+            self.sinks = [("default", "Default System Output (Auto)")]
             self._updating_ui = False
             self.preset_buttons: dict[str, Gtk.Button] = {}
             self.current_voice_target = "mic"
@@ -1904,33 +1929,14 @@ def run_gtk_app() -> None:
             main_vbox.pack_start(header_box, False, False, 0)
 
             # --- Missing Dependencies Warning ---
-            missing = check_system_dependencies()
-            if missing:
-                warn_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
-                warn_box.get_style_context().add_class("warning-banner")
-                warn_title_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-                warn_icon = Gtk.Image.new_from_icon_name("dialog-warning-symbolic", Gtk.IconSize.MENU)
-                warn_title = Gtk.Label(label="Missing System Audio Dependencies:", xalign=0)
-                warn_title.get_style_context().add_class("warning-text")
-                warn_title_box.pack_start(warn_icon, False, False, 0)
-                warn_title_box.pack_start(warn_title, False, False, 0)
-                warn_box.pack_start(warn_title_box, False, False, 0)
-                for m in missing:
-                    item_lbl = Gtk.Label(label=f"  • {m}", xalign=0)
-                    item_lbl.get_style_context().add_class("footer-info")
-                    warn_box.pack_start(item_lbl, False, False, 0)
-                main_vbox.pack_start(warn_box, False, False, 0)
+            self.warning_container = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+            main_vbox.pack_start(self.warning_container, False, False, 0)
 
             # --- Top Control Strip: Microphone Device, Monitor & Master Reset ---
             top_bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
             self.src_combo = Gtk.ComboBoxText()
             self.src_combo.get_style_context().add_class("device-combo")
-            active_idx = 0
-            for idx, (node, desc) in enumerate(self.sources):
-                self.src_combo.append(node, desc)
-                if node == self.cfg.source:
-                    active_idx = idx
-            self.src_combo.set_active(active_idx)
+            self._set_device_combo(self.src_combo, self.sources, self.cfg.source)
             self.src_combo.connect("changed", self.on_source_changed)
             top_bar.pack_start(self.src_combo, True, True, 0)
 
@@ -1970,11 +1976,158 @@ def run_gtk_app() -> None:
             footer_lbl.get_style_context().add_class("footer-info")
             main_vbox.pack_end(footer_lbl, False, False, 0)
 
-            if self.cfg.enabled:
-                start_daemon(self.cfg)
+            if self.cfg.enabled and not open_only:
+                self._queue_engine_state(True)
+            else:
+                threading.Thread(target=self._check_dependencies, daemon=True).start()
 
             # Start 30 Hz Telemetry Polling Timer
+            threading.Thread(target=self._telemetry_loop, daemon=True).start()
             GLib.timeout_add(33, self.poll_telemetry)
+            self.refresh_device_lists()
+            GLib.timeout_add_seconds(5, self.refresh_device_lists)
+
+        def _check_dependencies(self) -> None:
+            GLib.idle_add(self._show_dependency_warning, check_system_dependencies())
+
+        def _show_dependency_warning(self, missing: list[str]) -> bool:
+            if self._closed:
+                return False
+            for child in self.warning_container.get_children():
+                self.warning_container.remove(child)
+            if missing:
+                warn_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+                warn_box.get_style_context().add_class("warning-banner")
+                warn_title_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+                warn_icon = Gtk.Image.new_from_icon_name("dialog-warning-symbolic", Gtk.IconSize.MENU)
+                warn_title = Gtk.Label(label="Missing System Audio Dependencies:", xalign=0)
+                warn_title.get_style_context().add_class("warning-text")
+                warn_title_box.pack_start(warn_icon, False, False, 0)
+                warn_title_box.pack_start(warn_title, False, False, 0)
+                warn_box.pack_start(warn_title_box, False, False, 0)
+                for item in missing:
+                    item_lbl = Gtk.Label(label=f"  • {item}", xalign=0)
+                    item_lbl.get_style_context().add_class("footer-info")
+                    warn_box.pack_start(item_lbl, False, False, 0)
+                self.warning_container.pack_start(warn_box, False, False, 0)
+                self.warning_container.show_all()
+            return False
+
+        def _queue_command(self, command: str) -> None:
+            verb, _, arguments = command.partition(" ")
+            key = (f"{verb}:{arguments.partition(' ')[0]}"
+                   if verb in ("EQB", "OUT_EQB") else verb)
+            with self._command_lock:
+                serial = self._command_serial.get(key, 0) + 1
+                self._command_serial[key] = serial
+                epoch = self._command_epoch
+
+            def send_latest() -> None:
+                with self._command_lock:
+                    if (self._command_epoch != epoch or
+                            self._command_serial.get(key) != serial):
+                        return
+                send_daemon_cmd(command)
+
+            self._executor.submit(send_latest)
+
+        def _queue_config_sync(self) -> None:
+            with self._command_lock:
+                self._command_epoch += 1
+            self._executor.submit(lambda: sync_config_to_daemon(load_config()))
+
+        def _queue_engine_state(self, active: bool) -> None:
+            with self._command_lock:
+                self._command_epoch += 1
+            self._engine_target = active
+            self._executor.submit(self._apply_engine_state, active)
+
+        def _apply_engine_state(self, active: bool) -> None:
+            if self._engine_target != active:
+                return
+            try:
+                current = load_config()
+                current.enabled = active
+                if active:
+                    ok = start_daemon(current)
+                    if ok:
+                        sync_config_to_daemon(load_config())
+                else:
+                    ok = stop_daemon(restore_defaults=True, cfg=current)
+                    save_config(current)
+            except Exception as exc:
+                print(f"[DuskyAudio] Engine state change failed: {exc}", file=sys.stderr)
+                ok = False
+            GLib.idle_add(self._engine_state_finished, active, ok)
+
+        def _engine_state_finished(self, active: bool, ok: bool) -> bool:
+            if self._closed or self._engine_target != active:
+                return False
+            if active and not ok:
+                self._updating_ui = True
+                try:
+                    self.master_switch.set_active(False)
+                finally:
+                    self._updating_ui = False
+                self.cfg.enabled = False
+                save_config(self.cfg)
+                threading.Thread(target=self._check_dependencies, daemon=True).start()
+            self.update_status_label()
+            return False
+
+        def _telemetry_loop(self) -> None:
+            while not self._telemetry_stop.is_set():
+                self._latest_telemetry = fetch_telemetry_from_daemon()
+                self._telemetry_stop.wait(0.033)
+
+        def _set_device_combo(self, combo: Gtk.ComboBoxText,
+                              devices: list[tuple[str, str]], selected: str) -> None:
+            combo.remove_all()
+            for node, description in devices:
+                combo.append(node, description)
+            if selected not in {node for node, _ in devices}:
+                combo.append(selected, "Unavailable; using fallback: " + selected[:32])
+                combo.set_tooltip_text("The selected device is unavailable. Audio uses an available physical device until it returns.\n" + selected)
+            else:
+                combo.set_tooltip_text(None)
+            combo.set_active_id(selected)
+
+        def refresh_device_lists(self) -> bool:
+            if self._device_refresh_pending or self._closed:
+                return True
+            self._device_refresh_pending = True
+            threading.Thread(target=self._load_device_lists, daemon=True).start()
+            return True
+
+        def _load_device_lists(self) -> None:
+            GLib.idle_add(self._apply_device_lists, enumerate_devices())
+
+        def _apply_device_lists(self, devices: tuple[list[tuple[str, str]],
+                                                   list[tuple[str, str]]] | None) -> bool:
+            self._device_refresh_pending = False
+            if self._closed or devices is None:
+                return False
+            sources, sinks = devices
+            if sources != self.sources or sinks != self.sinks:
+                previous = self._updating_ui
+                self._updating_ui = True
+                try:
+                    self.sources, self.sinks = sources, sinks
+                    self._set_device_combo(self.src_combo, sources, self.cfg.source)
+                    self._set_device_combo(self.sink_combo, sinks, self.cfg.sink)
+                finally:
+                    self._updating_ui = previous
+            return False
+
+        def persist_config(self) -> None:
+            if self._save_timer:
+                GLib.source_remove(self._save_timer)
+            self._save_timer = GLib.timeout_add(180, self.flush_config)
+
+        def flush_config(self) -> bool:
+            self._save_timer = 0
+            save_config(self.cfg)
+            return False
 
         def create_tab_label(self, icon_name: str, label_text: str) -> Gtk.Box:
             box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
@@ -2026,6 +2179,7 @@ def run_gtk_app() -> None:
 
             # Master Output Volume
             self.vol_row = self.create_slider_row("Microphone Output Gain", self.cfg.volume, 0, 200, "%", self.on_volume_changed)
+            self.vol_row.set_tooltip_text("Boosts above 100% may clip in recording apps or at the output device.")
             vbox.pack_start(self.vol_row, False, False, 0)
 
             # RNNoise Neural Toggle
@@ -2079,12 +2233,7 @@ def run_gtk_app() -> None:
             sink_lbl.get_style_context().add_class("section-label")
             self.sink_combo = Gtk.ComboBoxText()
             self.sink_combo.get_style_context().add_class("device-combo")
-            sink_active_idx = 0
-            for idx, (node, desc) in enumerate(self.sinks):
-                self.sink_combo.append(node, desc)
-                if node == self.cfg.sink:
-                    sink_active_idx = idx
-            self.sink_combo.set_active(sink_active_idx)
+            self._set_device_combo(self.sink_combo, self.sinks, self.cfg.sink)
             self.sink_combo.connect("changed", self.on_sink_changed)
             sink_box.pack_start(sink_lbl, False, False, 0)
             sink_box.pack_start(self.sink_combo, True, True, 0)
@@ -2136,10 +2285,11 @@ def run_gtk_app() -> None:
             grid.attach(self.vad_bar, 1, 0, 1, 1)
             grid.attach(self.vad_val_lbl, 2, 0, 1, 1)
 
-            # Noise Reduction dB
-            red_lbl = Gtk.Label(label="Active Reduction", xalign=0)
+            # Denoiser signal-change level
+            red_lbl = Gtk.Label(label="Denoiser Signal Change", xalign=0)
+            red_lbl.set_tooltip_text("Level of the difference between aligned dry input and the final denoiser blend; this is not a measure of removed background noise.")
             red_lbl.get_style_context().add_class("meter-label")
-            self.red_val_lbl = Gtk.Label(label="0.0 dB", xalign=1)
+            self.red_val_lbl = Gtk.Label(label="-∞ dBFS", xalign=1)
             self.red_val_lbl.get_style_context().add_class("meter-val")
             self.red_bar = Gtk.ProgressBar()
             grid.attach(red_lbl, 0, 1, 1, 1)
@@ -2192,12 +2342,12 @@ def run_gtk_app() -> None:
             target_box.set_halign(Gtk.Align.CENTER)
             target_box.get_style_context().add_class("segmented-group")
 
-            self.btn_voice_target_mic = Gtk.Button(label="🎙 Microphone Voice FX (Input)")
+            self.btn_voice_target_mic = Gtk.Button(label="Microphone Voice FX")
             self.btn_voice_target_mic.get_style_context().add_class("segmented-btn")
             self.btn_voice_target_mic.get_style_context().add_class("active-preset")
             self.btn_voice_target_mic.connect("clicked", lambda _: self.set_voice_target("mic"))
 
-            self.btn_voice_target_out = Gtk.Button(label="󰓃 Playback Voice FX (Output)")
+            self.btn_voice_target_out = Gtk.Button(label="Playback Voice FX")
             self.btn_voice_target_out.get_style_context().add_class("segmented-btn")
             self.btn_voice_target_out.connect("clicked", lambda _: self.set_voice_target("out"))
 
@@ -2211,7 +2361,7 @@ def run_gtk_app() -> None:
             btn_reset_voice = self.create_icon_button(
                 "edit-undo-symbolic",
                 "Reset Voice (Clean)",
-                "Reset all voice modulation, pitch shift, autotune, and vocoder effects to Natural Clean",
+                "Reset voice effects for the selected microphone or playback target to Natural Clean",
                 "reset-btn",
                 self.reset_voice_fx,
             )
@@ -2304,7 +2454,7 @@ def run_gtk_app() -> None:
 
             # Autotune Switch
             atn_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-            atn_lbl = Gtk.Label(label="Autotune (Pitch Snap / Chromatic)", xalign=0)
+            atn_lbl = Gtk.Label(label="Autotune (Chromatic or Fixed Target)", xalign=0)
             atn_lbl.get_style_context().add_class("section-label")
             self.atn_switch = Gtk.Switch()
             self.atn_switch.get_style_context().add_class("compact-switch")
@@ -2313,6 +2463,15 @@ def run_gtk_app() -> None:
             atn_box.pack_start(atn_lbl, True, True, 0)
             atn_box.pack_end(self.atn_switch, False, False, 0)
             vbox.pack_start(atn_box, False, False, 0)
+
+            self.autotune_target_row = self.create_slider_row(
+                "Autotune Target (0 = Chromatic)", self.cfg.autotune_target_hz,
+                0, 1000, " Hz", self.on_autotune_target_changed,
+            )
+            self.autotune_target_row._formatter = lambda v: "Chromatic" if v == 0 else f"{v} Hz"  # type: ignore[attr-defined]
+            if self.cfg.autotune_target_hz == 0:
+                self.autotune_target_row._val_lbl.set_text("Chromatic")  # type: ignore[attr-defined]
+            vbox.pack_start(self.autotune_target_row, False, False, 0)
 
             # Bitcrusher (0..15 bits)
             self.bitcrush_row = self.create_slider_row(
@@ -2323,7 +2482,17 @@ def run_gtk_app() -> None:
                 " bits",
                 self.on_bitcrush_changed,
             )
+            self.bitcrush_row._formatter = lambda v: "Quantization off" if v == 0 else f"{v} bits"  # type: ignore[attr-defined]
+            if self.cfg.bitcrush_bits == 0:
+                self.bitcrush_row._val_lbl.set_text("Quantization off")  # type: ignore[attr-defined]
             vbox.pack_start(self.bitcrush_row, False, False, 0)
+
+            self.bitcrush_hold_row = self.create_slider_row(
+                "Sample Hold Factor", self.cfg.bitcrush_downsample,
+                1, 64, "×", self.on_bitcrush_hold_changed,
+            )
+            self.bitcrush_hold_row.set_tooltip_text("1× leaves the sample rate unchanged; higher values hold each sample longer.")
+            vbox.pack_start(self.bitcrush_hold_row, False, False, 0)
 
             # Stutter Chopper Gate
             self.stutter_row = self.create_slider_row(
@@ -2353,12 +2522,12 @@ def run_gtk_app() -> None:
             target_box.set_halign(Gtk.Align.CENTER)
             target_box.get_style_context().add_class("segmented-group")
 
-            self.btn_spatial_target_mic = Gtk.Button(label="🎙 Microphone Spatial FX (Input)")
+            self.btn_spatial_target_mic = Gtk.Button(label="Microphone Spatial FX")
             self.btn_spatial_target_mic.get_style_context().add_class("segmented-btn")
             self.btn_spatial_target_mic.get_style_context().add_class("active-preset")
             self.btn_spatial_target_mic.connect("clicked", lambda _: self.set_spatial_target("mic"))
 
-            self.btn_spatial_target_out = Gtk.Button(label="󰓃 Playback Spatial FX (Output)")
+            self.btn_spatial_target_out = Gtk.Button(label="Playback Spatial FX")
             self.btn_spatial_target_out.get_style_context().add_class("segmented-btn")
             self.btn_spatial_target_out.connect("clicked", lambda _: self.set_spatial_target("out"))
 
@@ -2373,7 +2542,7 @@ def run_gtk_app() -> None:
             btn_reset_spatial = self.create_icon_button(
                 "edit-undo-symbolic",
                 "Reset Delay & Reverb",
-                "Disable and reset delay and reverb to clean bypass defaults",
+                "Disable and reset delay and reverb for the selected target",
                 "reset-btn",
                 self.reset_spatial_dsp,
             )
@@ -2383,7 +2552,7 @@ def run_gtk_app() -> None:
 
             # Delay Header
             dly_hdr = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-            self.spatial_dly_lbl = Gtk.Label(label="Stereo Tape Echo / Delay (Microphone Input)", xalign=0)
+            self.spatial_dly_lbl = Gtk.Label(label="Tape Echo / Delay (Microphone Input)", xalign=0)
             self.spatial_dly_lbl.get_style_context().add_class("section-label")
             self.dly_switch = Gtk.Switch()
             self.dly_switch.get_style_context().add_class("compact-switch")
@@ -2417,7 +2586,7 @@ def run_gtk_app() -> None:
 
             self.rvb_room_row = self.create_slider_row("Reverb Room Size", self.cfg.reverb_room, 0, 100, "%", self.on_reverb_room_changed)
             self.rvb_damp_row = self.create_slider_row("Reverb Dampening", self.cfg.reverb_damp, 0, 100, "%", self.on_reverb_damp_changed)
-            self.rvb_width_row = self.create_slider_row("Reverb Stereo Width", self.cfg.reverb_width, 0, 100, "%", self.on_reverb_width_changed)
+            self.rvb_width_row = self.create_slider_row("Reverb Tail Level", self.cfg.reverb_width, 0, 100, "%", self.on_reverb_width_changed)
             self.rvb_mix_row = self.create_slider_row("Reverb Wet/Dry Mix", self.cfg.reverb_mix, 0, 100, "%", self.on_reverb_mix_changed)
 
             vbox.pack_start(self.rvb_room_row, False, False, 0)
@@ -2442,12 +2611,12 @@ def run_gtk_app() -> None:
             target_box.set_halign(Gtk.Align.CENTER)
             target_box.get_style_context().add_class("segmented-group")
 
-            self.btn_eq_target_mic = Gtk.Button(label="🎙 Microphone EQ (Input)")
+            self.btn_eq_target_mic = Gtk.Button(label="Microphone EQ")
             self.btn_eq_target_mic.get_style_context().add_class("segmented-btn")
             self.btn_eq_target_mic.get_style_context().add_class("active-preset")
             self.btn_eq_target_mic.connect("clicked", lambda _: self.set_eq_target("mic"))
 
-            self.btn_eq_target_out = Gtk.Button(label="󰓃 Playback EQ (Output)")
+            self.btn_eq_target_out = Gtk.Button(label="Playback EQ")
             self.btn_eq_target_out.get_style_context().add_class("segmented-btn")
             self.btn_eq_target_out.connect("clicked", lambda _: self.set_eq_target("out"))
 
@@ -2467,7 +2636,7 @@ def run_gtk_app() -> None:
             btn_reset_eq = self.create_icon_button(
                 "edit-undo-symbolic",
                 "Reset EQ (Flat 0 dB)",
-                "Zero out active EQ bands (0.0 dB) and reset post gain offset",
+                "Set the selected target's EQ bands and post gain to 0 dB",
                 "reset-btn",
                 self.reset_eq_flat,
             )
@@ -2495,24 +2664,13 @@ def run_gtk_app() -> None:
                 " dB",
                 self.on_eq_post_gain_changed,
             )
+            self.eq_post_row.set_tooltip_text("Large boosts may exceed digital full scale and clip downstream.")
             vbox.pack_start(self.eq_post_row, False, False, 0)
 
             vbox.pack_start(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL), False, False, 2)
 
-            bands = [
-                ("80 Hz (Sub Bass Highpass)", 0),
-                ("120 Hz (Warmth Lowshelf)", 1),
-                ("250 Hz (Low Mid Clean)", 2),
-                ("400 Hz (Boxiness Mud Cut)", 3),
-                ("1.5 kHz (Vocal Body)", 4),
-                ("3.5 kHz (Presence & Clarity)", 5),
-                ("6.0 kHz (Vocal Detail)", 6),
-                ("9.0 kHz (Air & Sheen Highshelf)", 7),
-                ("12.0 kHz (Brilliance)", 8),
-            ]
-
             self.eq_band_rows = []
-            for name, idx in bands:
+            for idx, (name, _, _, _) in enumerate(EQ_BANDS):
                 val = self.cfg.eq_gains[idx] / 100 if idx < len(self.cfg.eq_gains) else 0
                 row = self.create_slider_row(name, int(val), -12, 12, " dB", lambda s, i=idx: self.on_eq_band_changed(i, s))
                 self.eq_band_rows.append(row)
@@ -2546,11 +2704,17 @@ def run_gtk_app() -> None:
             box.pack_start(hdr, False, False, 0)
 
             scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, min_v, max_v, 1)
+            scale.set_draw_value(False)
             scale.set_value(val)
+
+            box._unit = unit  # type: ignore[attr-defined]
+            box._signed = min_v < 0  # type: ignore[attr-defined]
 
             def on_val(s: Gtk.Scale) -> None:
                 v = int(s.get_value())
-                val_lbl.set_text(f"{v:+d}{unit}" if min_v < 0 else f"{v}{unit}")
+                formatter = getattr(box, "_formatter", None)
+                val_lbl.set_text(formatter(v) if formatter else
+                                 (f"{v:+d}{box._unit}" if box._signed else f"{v}{box._unit}"))
                 if not self._updating_ui:
                     callback(s)
 
@@ -2586,17 +2750,21 @@ def run_gtk_app() -> None:
         # Real-Time Telemetry Polling
         # ---------------------------------------------------------------------
         def poll_telemetry(self) -> bool:
-            tele = fetch_telemetry_from_daemon()
+            now = time.monotonic()
+            if now - self._last_status_check >= 1.0:
+                self._last_status_check = now
+                self.update_status_label()
+            tele = self._latest_telemetry
             if tele:
                 # VAD %
                 vad_pct = int(tele.vad_prob * 100)
                 self.vad_bar.set_fraction(max(0.0, min(1.0, tele.vad_prob)))
                 self.vad_val_lbl.set_text(f"{vad_pct}%")
 
-                # Reduction dB (0..40 dB scale)
-                red_frac = max(0.0, min(1.0, tele.noise_reduction_db / 40.0))
+                # Level of the signal changed by RNNoise, in dBFS.
+                red_frac = max(0.0, min(1.0, (tele.processing_delta_dbfs + 80.0) / 80.0))
                 self.red_bar.set_fraction(red_frac)
-                self.red_val_lbl.set_text(f"{tele.noise_reduction_db:.1f} dB")
+                self.red_val_lbl.set_text(f"{tele.processing_delta_dbfs:.1f} dBFS" if red_frac else "-∞ dBFS")
 
                 # Input RMS (-80..0 dBFS)
                 in_frac = max(0.0, min(1.0, (tele.rms_in_db + 80.0) / 80.0))
@@ -2609,15 +2777,21 @@ def run_gtk_app() -> None:
                 self.out_val_lbl.set_text(f"{tele.rms_out_db:.1f} dB" if tele.rms_out_db > -79.0 else "-inf dB")
 
                 # Tracked Pitch Hz
-                if tele.tracked_pitch_hz > 1.0:
+                if self.current_voice_target == "out":
+                    self.lbl_pitch_track.set_text("Playback pitch: unavailable")
+                elif tele.tracked_pitch_hz > 1.0:
                     self.lbl_pitch_track.set_text(f"Tracked: ~{tele.tracked_pitch_hz:.0f} Hz")
                 else:
                     self.lbl_pitch_track.set_text("Tracked: —")
             else:
                 self.vad_bar.set_fraction(0.0)
                 self.red_bar.set_fraction(0.0)
+                self.red_val_lbl.set_text("-∞ dBFS")
                 self.in_bar.set_fraction(0.0)
                 self.out_bar.set_fraction(0.0)
+                self.vad_val_lbl.set_text("—")
+                self.in_val_lbl.set_text("—")
+                self.out_val_lbl.set_text("—")
                 self.lbl_pitch_track.set_text("Tracked: —")
 
             return True
@@ -2626,10 +2800,19 @@ def run_gtk_app() -> None:
         # Event Handlers & State Synchronization
         # ---------------------------------------------------------------------
         def update_status_label(self) -> None:
-            if self.cfg.enabled:
+            running = bool(get_daemon_pid() and SOCK_PATH.exists())
+            if self.cfg.enabled and running and len(self.sources) > 1 and len(self.sinks) > 1:
                 self.status_lbl.set_text("Active (PipeWire RT Low-Latency DSP ON)")
                 self.status_lbl.get_style_context().remove_class("header-subtitle-inactive")
                 self.status_lbl.get_style_context().add_class("header-subtitle-active")
+            elif self.cfg.enabled and running:
+                self.status_lbl.set_text("Running; physical microphone or output unavailable")
+                self.status_lbl.get_style_context().remove_class("header-subtitle-active")
+                self.status_lbl.get_style_context().add_class("header-subtitle-inactive")
+            elif self.cfg.enabled:
+                self.status_lbl.set_text("Engine stopped — check audio devices or engine log")
+                self.status_lbl.get_style_context().remove_class("header-subtitle-active")
+                self.status_lbl.get_style_context().add_class("header-subtitle-inactive")
             else:
                 self.status_lbl.set_text("Disabled (Direct Hardware Bypass)")
                 self.status_lbl.get_style_context().remove_class("header-subtitle-active")
@@ -2640,20 +2823,17 @@ def run_gtk_app() -> None:
                 return
             active = switch.get_active()
             self.cfg.enabled = active
-            save_config(self.cfg)
+            if self._save_timer:
+                GLib.source_remove(self._save_timer)
+                self.flush_config()
+            else:
+                save_config(self.cfg)
             self.update_status_label()
 
             if active:
-                ok = start_daemon(self.cfg)
-                if not ok:
-                    self._updating_ui = True
-                    switch.set_active(False)
-                    self._updating_ui = False
-                    self.cfg.enabled = False
-                    save_config(self.cfg)
-                    self.update_status_label()
+                self._queue_engine_state(True)
             else:
-                stop_daemon(restore_defaults=True, cfg=self.cfg)
+                self._queue_engine_state(False)
 
         def on_source_changed(self, combo: Gtk.ComboBoxText) -> None:
             if self._updating_ui:
@@ -2662,8 +2842,7 @@ def run_gtk_app() -> None:
             if node:
                 self.cfg.source = node
                 save_config(self.cfg)
-                target = resolve_hardware_source(node)
-                send_daemon_cmd(f"SRC {target}")
+                self._queue_config_sync()
 
         def on_sink_changed(self, combo: Gtk.ComboBoxText) -> None:
             if self._updating_ui:
@@ -2672,38 +2851,47 @@ def run_gtk_app() -> None:
             if node:
                 self.cfg.sink = node
                 save_config(self.cfg)
-                target = resolve_hardware_sink(node)
-                send_daemon_cmd(f"SINK_TGT {target}")
+                self._queue_config_sync()
 
         def on_volume_changed(self, scale: Gtk.Scale) -> None:
+            if self._updating_ui:
+                return
             val = int(scale.get_value())
             self.cfg.volume = val
-            save_config(self.cfg)
-            send_daemon_cmd(f"VOL {val * 10}")
+            self.persist_config()
+            self._queue_command(f"VOL {val * 10}")
 
         def on_rnnoise_toggled(self, switch: Gtk.Switch, _g: Any) -> None:
+            if self._updating_ui:
+                return
             active = switch.get_active()
             self.cfg.rnnoise_on = active
             save_config(self.cfg)
-            send_daemon_cmd(f"RNN {1 if (self.cfg.enabled and active) else 0}")
+            self._queue_command(f"RNN {1 if (self.cfg.enabled and active) else 0}")
 
         def on_agg_changed(self, scale: Gtk.Scale) -> None:
+            if self._updating_ui:
+                return
             val = int(scale.get_value())
             self.cfg.aggressiveness = val
-            save_config(self.cfg)
-            send_daemon_cmd(f"AGG {val * 10}")
+            self.persist_config()
+            self._queue_command(f"AGG {val * 10}")
 
         def on_out_rnnoise_toggled(self, switch: Gtk.Switch, _g: Any) -> None:
+            if self._updating_ui:
+                return
             active = switch.get_active()
             self.cfg.out_rnnoise_on = active
             save_config(self.cfg)
-            send_daemon_cmd(f"OUT_NOISE {1 if active else 0}")
+            self._queue_command(f"OUT_NOISE {1 if active else 0}")
 
         def on_out_agg_changed(self, scale: Gtk.Scale) -> None:
+            if self._updating_ui:
+                return
             val = int(scale.get_value())
             self.cfg.out_aggressiveness = val
-            save_config(self.cfg)
-            send_daemon_cmd(f"OUT_AGG {val * 10}")
+            self.persist_config()
+            self._queue_command(f"OUT_AGG {val * 10}")
 
         def set_voice_target(self, target: str) -> None:
             if self.current_voice_target == target:
@@ -2726,8 +2914,8 @@ def run_gtk_app() -> None:
             if target == "mic":
                 self.btn_spatial_target_mic.get_style_context().add_class("active-preset")
                 self.btn_spatial_target_out.get_style_context().remove_class("active-preset")
-                self.spatial_dly_lbl.set_text("Stereo Tape Echo / Delay (Microphone Input)")
-                self.spatial_rvb_lbl.set_text("Stereo Schroeder Reverb (Microphone Input)")
+                self.spatial_dly_lbl.set_text("Tape Echo / Delay (Microphone Input)")
+                self.spatial_rvb_lbl.set_text("Schroeder Reverb (Microphone Input)")
             else:
                 self.btn_spatial_target_out.get_style_context().add_class("active-preset")
                 self.btn_spatial_target_mic.get_style_context().remove_class("active-preset")
@@ -2736,28 +2924,34 @@ def run_gtk_app() -> None:
             self._refresh_spatial_ui()
 
         def on_pitch_changed(self, scale: Gtk.Scale) -> None:
+            if self._updating_ui:
+                return
             val = int(scale.get_value())
             if self.current_voice_target == "mic":
                 self.cfg.pitch_shift = val * 100
-                send_daemon_cmd(f"PSH {self.cfg.pitch_shift if self.cfg.enabled else 0}")
+                self._queue_command(f"PSH {self.cfg.pitch_shift if self.cfg.enabled else 0}")
             else:
                 self.cfg.out_pitch_shift = val * 100
-                send_daemon_cmd(f"OUT_PSH {self.cfg.out_pitch_shift if self.cfg.enabled else 0}")
-            save_config(self.cfg)
+                self._queue_command(f"OUT_PSH {self.cfg.out_pitch_shift if self.cfg.enabled else 0}")
+            self.persist_config()
             self._clear_active_preset_highlight()
 
         def on_vocoder_toggled(self, switch: Gtk.Switch, _g: Any) -> None:
+            if self._updating_ui:
+                return
             active = switch.get_active()
             if self.current_voice_target == "mic":
                 self.cfg.vocoder_on = active
-                send_daemon_cmd(f"VOC {1 if (self.cfg.enabled and active) else 0}")
+                self._queue_command(f"VOC {1 if (self.cfg.enabled and active) else 0}")
             else:
                 self.cfg.out_vocoder_on = active
-                send_daemon_cmd(f"OUT_VOC {1 if (self.cfg.enabled and active) else 0}")
+                self._queue_command(f"OUT_VOC {1 if (self.cfg.enabled and active) else 0}")
             save_config(self.cfg)
             self._clear_active_preset_highlight()
 
         def on_follow_toggled(self, check: Gtk.CheckButton) -> None:
+            if self._updating_ui:
+                return
             active = check.get_active()
             is_mic = (self.current_voice_target == "mic")
             if is_mic:
@@ -2780,23 +2974,30 @@ def run_gtk_app() -> None:
             save_config(self.cfg)
             self._clear_active_preset_highlight()
 
+            previous_updating = self._updating_ui
             self._updating_ui = True
             if active:
+                self.carrier_row._unit = " st"  # type: ignore[attr-defined]
+                self.carrier_row._signed = True  # type: ignore[attr-defined]
                 self.carrier_row._scale.set_range(-24, 24)  # type: ignore
                 self.carrier_row._scale.set_value(c_shift)  # type: ignore
                 self.carrier_row._title_lbl.set_text("Carrier Pitch Transposition")  # type: ignore
                 self.carrier_row._val_lbl.set_text(f"{c_shift:+d} st")  # type: ignore
             else:
+                self.carrier_row._unit = " Hz"  # type: ignore[attr-defined]
+                self.carrier_row._signed = False  # type: ignore[attr-defined]
                 self.carrier_row._scale.set_range(50, 440)  # type: ignore
                 self.carrier_row._scale.set_value(c_hz)  # type: ignore
                 self.carrier_row._title_lbl.set_text("Carrier Frequency")  # type: ignore
                 self.carrier_row._val_lbl.set_text(f"{c_hz} Hz")  # type: ignore
-            self._updating_ui = False
+            self._updating_ui = previous_updating
 
             prefix = "VOP" if is_mic else "OUT_VOP"
-            send_daemon_cmd(f"{prefix} {mix * 10} {c_hz} {atk} {rel} {det} {1 if active else 0} {c_shift}")
+            self._queue_command(f"{prefix} {mix * 10} {c_hz} {atk} {rel} {det} {1 if active else 0} {c_shift}")
 
         def on_carrier_changed(self, scale: Gtk.Scale) -> None:
+            if self._updating_ui:
+                return
             val = int(scale.get_value())
             is_mic = (self.current_voice_target == "mic")
             if is_mic:
@@ -2824,12 +3025,14 @@ def run_gtk_app() -> None:
                 rel = self.cfg.out_vocoder_release_ms
                 det = self.cfg.out_vocoder_detune
 
-            save_config(self.cfg)
+            self.persist_config()
             self._clear_active_preset_highlight()
             prefix = "VOP" if is_mic else "OUT_VOP"
-            send_daemon_cmd(f"{prefix} {mix * 10} {c_hz} {atk} {rel} {det} {1 if follow else 0} {c_shift}")
+            self._queue_command(f"{prefix} {mix * 10} {c_hz} {atk} {rel} {det} {1 if follow else 0} {c_shift}")
 
         def on_voc_mix_changed(self, scale: Gtk.Scale) -> None:
+            if self._updating_ui:
+                return
             val = int(scale.get_value())
             is_mic = (self.current_voice_target == "mic")
             if is_mic:
@@ -2849,146 +3052,198 @@ def run_gtk_app() -> None:
                 rel = self.cfg.out_vocoder_release_ms
                 det = self.cfg.out_vocoder_detune
 
-            save_config(self.cfg)
+            self.persist_config()
             self._clear_active_preset_highlight()
             prefix = "VOP" if is_mic else "OUT_VOP"
-            send_daemon_cmd(f"{prefix} {val * 10} {c_hz} {atk} {rel} {det} {1 if follow else 0} {c_shift}")
+            self._queue_command(f"{prefix} {val * 10} {c_hz} {atk} {rel} {det} {1 if follow else 0} {c_shift}")
 
         def on_matrix_changed(self, scale: Gtk.Scale) -> None:
+            if self._updating_ui:
+                return
             val = int(scale.get_value())
             if self.current_voice_target == "mic":
                 self.cfg.vocoder_matrix = val
-                send_daemon_cmd(f"MTX {val * 10}")
+                self._queue_command(f"MTX {val * 10}")
             else:
                 self.cfg.out_vocoder_matrix = val
-                send_daemon_cmd(f"OUT_MTX {val * 10}")
-            save_config(self.cfg)
+                self._queue_command(f"OUT_MTX {val * 10}")
+            self.persist_config()
             self._clear_active_preset_highlight()
 
         def on_autotune_toggled(self, switch: Gtk.Switch, _g: Any) -> None:
+            if self._updating_ui:
+                return
             active = switch.get_active()
             if self.current_voice_target == "mic":
                 self.cfg.autotune_on = active
-                send_daemon_cmd(f"ATN {1 if (self.cfg.enabled and active) else 0}")
-                send_daemon_cmd(f"ATT {self.cfg.autotune_target_hz if self.cfg.enabled else 0}")
+                self._queue_command(f"ATN {1 if (self.cfg.enabled and active) else 0}")
+                self._queue_command(f"ATT {self.cfg.autotune_target_hz if self.cfg.enabled else 0}")
             else:
                 self.cfg.out_autotune_on = active
-                send_daemon_cmd(f"OUT_ATN {1 if (self.cfg.enabled and active) else 0}")
-                send_daemon_cmd(f"OUT_ATT {self.cfg.out_autotune_target_hz if self.cfg.enabled else 0}")
+                self._queue_command(f"OUT_ATN {1 if (self.cfg.enabled and active) else 0}")
+                self._queue_command(f"OUT_ATT {self.cfg.out_autotune_target_hz if self.cfg.enabled else 0}")
             save_config(self.cfg)
+            self._clear_active_preset_highlight()
+
+        def on_autotune_target_changed(self, scale: Gtk.Scale) -> None:
+            if self._updating_ui:
+                return
+            value = int(scale.get_value())
+            if self.current_voice_target == "mic":
+                self.cfg.autotune_target_hz = value
+                self._queue_command(f"ATT {value}")
+            else:
+                self.cfg.out_autotune_target_hz = value
+                self._queue_command(f"OUT_ATT {value}")
+            self.persist_config()
             self._clear_active_preset_highlight()
 
         def on_bitcrush_changed(self, scale: Gtk.Scale) -> None:
+            if self._updating_ui:
+                return
             val = int(scale.get_value())
             if self.current_voice_target == "mic":
                 self.cfg.bitcrush_bits = val
-                send_daemon_cmd(f"BCR {val if self.cfg.enabled else 0} {self.cfg.bitcrush_downsample}")
+                self._queue_command(f"BCR {val if self.cfg.enabled else 0} {self.cfg.bitcrush_downsample}")
             else:
                 self.cfg.out_bitcrush_bits = val
-                send_daemon_cmd(f"OUT_BCR {val if self.cfg.enabled else 0} {self.cfg.out_bitcrush_downsample}")
-            save_config(self.cfg)
+                self._queue_command(f"OUT_BCR {val if self.cfg.enabled else 0} {self.cfg.out_bitcrush_downsample}")
+            self.persist_config()
+            self._clear_active_preset_highlight()
+
+        def on_bitcrush_hold_changed(self, scale: Gtk.Scale) -> None:
+            if self._updating_ui:
+                return
+            value = int(scale.get_value())
+            if self.current_voice_target == "mic":
+                self.cfg.bitcrush_downsample = value
+                self._queue_command(f"BCR {self.cfg.bitcrush_bits if self.cfg.enabled else 0} {value}")
+            else:
+                self.cfg.out_bitcrush_downsample = value
+                self._queue_command(f"OUT_BCR {self.cfg.out_bitcrush_bits if self.cfg.enabled else 0} {value}")
+            self.persist_config()
             self._clear_active_preset_highlight()
 
         def on_stutter_changed(self, scale: Gtk.Scale) -> None:
+            if self._updating_ui:
+                return
             val = int(scale.get_value())
             if self.current_voice_target == "mic":
                 self.cfg.stutter_hz = val
-                send_daemon_cmd(f"STT {val if self.cfg.enabled else 0} 500")
+                self._queue_command(f"STT {val if self.cfg.enabled else 0} 500")
             else:
                 self.cfg.out_stutter_hz = val
-                send_daemon_cmd(f"OUT_STT {val if self.cfg.enabled else 0} 500")
-            save_config(self.cfg)
+                self._queue_command(f"OUT_STT {val if self.cfg.enabled else 0} 500")
+            self.persist_config()
             self._clear_active_preset_highlight()
 
         def on_delay_toggled(self, switch: Gtk.Switch, _g: Any) -> None:
+            if self._updating_ui:
+                return
             active = switch.get_active()
             if self.current_spatial_target == "mic":
                 self.cfg.delay_on = active
-                send_daemon_cmd(f"DLY {1 if (self.cfg.enabled and active) else 0}")
+                self._queue_command(f"DLY {1 if (self.cfg.enabled and active) else 0}")
             else:
                 self.cfg.out_delay_on = active
-                send_daemon_cmd(f"OUT_DLY {1 if (self.cfg.enabled and active) else 0}")
+                self._queue_command(f"OUT_DLY {1 if (self.cfg.enabled and active) else 0}")
             save_config(self.cfg)
 
         def on_delay_time_changed(self, scale: Gtk.Scale) -> None:
+            if self._updating_ui:
+                return
             val = int(scale.get_value())
             if self.current_spatial_target == "mic":
                 self.cfg.delay_ms = val
-                send_daemon_cmd(f"DLP {self.cfg.delay_ms} {self.cfg.delay_feedback * 10} {self.cfg.delay_mix * 10}")
+                self._queue_command(f"DLP {self.cfg.delay_ms} {self.cfg.delay_feedback * 10} {self.cfg.delay_mix * 10}")
             else:
                 self.cfg.out_delay_ms = val
-                send_daemon_cmd(f"OUT_DLP {self.cfg.out_delay_ms} {self.cfg.out_delay_feedback * 10} {self.cfg.out_delay_mix * 10}")
-            save_config(self.cfg)
+                self._queue_command(f"OUT_DLP {self.cfg.out_delay_ms} {self.cfg.out_delay_feedback * 10} {self.cfg.out_delay_mix * 10}")
+            self.persist_config()
 
         def on_delay_fb_changed(self, scale: Gtk.Scale) -> None:
+            if self._updating_ui:
+                return
             val = int(scale.get_value())
             if self.current_spatial_target == "mic":
                 self.cfg.delay_feedback = val
-                send_daemon_cmd(f"DLP {self.cfg.delay_ms} {self.cfg.delay_feedback * 10} {self.cfg.delay_mix * 10}")
+                self._queue_command(f"DLP {self.cfg.delay_ms} {self.cfg.delay_feedback * 10} {self.cfg.delay_mix * 10}")
             else:
                 self.cfg.out_delay_feedback = val
-                send_daemon_cmd(f"OUT_DLP {self.cfg.out_delay_ms} {self.cfg.out_delay_feedback * 10} {self.cfg.out_delay_mix * 10}")
-            save_config(self.cfg)
+                self._queue_command(f"OUT_DLP {self.cfg.out_delay_ms} {self.cfg.out_delay_feedback * 10} {self.cfg.out_delay_mix * 10}")
+            self.persist_config()
 
         def on_delay_mix_changed(self, scale: Gtk.Scale) -> None:
+            if self._updating_ui:
+                return
             val = int(scale.get_value())
             if self.current_spatial_target == "mic":
                 self.cfg.delay_mix = val
-                send_daemon_cmd(f"DLP {self.cfg.delay_ms} {self.cfg.delay_feedback * 10} {self.cfg.delay_mix * 10}")
+                self._queue_command(f"DLP {self.cfg.delay_ms} {self.cfg.delay_feedback * 10} {self.cfg.delay_mix * 10}")
             else:
                 self.cfg.out_delay_mix = val
-                send_daemon_cmd(f"OUT_DLP {self.cfg.out_delay_ms} {self.cfg.out_delay_feedback * 10} {self.cfg.out_delay_mix * 10}")
-            save_config(self.cfg)
+                self._queue_command(f"OUT_DLP {self.cfg.out_delay_ms} {self.cfg.out_delay_feedback * 10} {self.cfg.out_delay_mix * 10}")
+            self.persist_config()
 
         def on_reverb_toggled(self, switch: Gtk.Switch, _g: Any) -> None:
+            if self._updating_ui:
+                return
             active = switch.get_active()
             if self.current_spatial_target == "mic":
                 self.cfg.reverb_on = active
-                send_daemon_cmd(f"RVB {1 if (self.cfg.enabled and active) else 0}")
+                self._queue_command(f"RVB {1 if (self.cfg.enabled and active) else 0}")
             else:
                 self.cfg.out_reverb_on = active
-                send_daemon_cmd(f"OUT_RVB {1 if (self.cfg.enabled and active) else 0}")
+                self._queue_command(f"OUT_RVB {1 if (self.cfg.enabled and active) else 0}")
             save_config(self.cfg)
 
         def on_reverb_room_changed(self, scale: Gtk.Scale) -> None:
+            if self._updating_ui:
+                return
             val = int(scale.get_value())
             if self.current_spatial_target == "mic":
                 self.cfg.reverb_room = val
-                send_daemon_cmd(f"RVP {self.cfg.reverb_room * 10} {self.cfg.reverb_damp * 10} {self.cfg.reverb_width * 10} {self.cfg.reverb_mix * 10}")
+                self._queue_command(f"RVP {self.cfg.reverb_room * 10} {self.cfg.reverb_damp * 10} {self.cfg.reverb_width * 10} {self.cfg.reverb_mix * 10}")
             else:
                 self.cfg.out_reverb_room = val
-                send_daemon_cmd(f"OUT_RVP {self.cfg.out_reverb_room * 10} {self.cfg.out_reverb_damp * 10} {self.cfg.out_reverb_width * 10} {self.cfg.out_reverb_mix * 10}")
-            save_config(self.cfg)
+                self._queue_command(f"OUT_RVP {self.cfg.out_reverb_room * 10} {self.cfg.out_reverb_damp * 10} {self.cfg.out_reverb_width * 10} {self.cfg.out_reverb_mix * 10}")
+            self.persist_config()
 
         def on_reverb_damp_changed(self, scale: Gtk.Scale) -> None:
+            if self._updating_ui:
+                return
             val = int(scale.get_value())
             if self.current_spatial_target == "mic":
                 self.cfg.reverb_damp = val
-                send_daemon_cmd(f"RVP {self.cfg.reverb_room * 10} {self.cfg.reverb_damp * 10} {self.cfg.reverb_width * 10} {self.cfg.reverb_mix * 10}")
+                self._queue_command(f"RVP {self.cfg.reverb_room * 10} {self.cfg.reverb_damp * 10} {self.cfg.reverb_width * 10} {self.cfg.reverb_mix * 10}")
             else:
                 self.cfg.out_reverb_damp = val
-                send_daemon_cmd(f"OUT_RVP {self.cfg.out_reverb_room * 10} {self.cfg.out_reverb_damp * 10} {self.cfg.out_reverb_width * 10} {self.cfg.out_reverb_mix * 10}")
-            save_config(self.cfg)
+                self._queue_command(f"OUT_RVP {self.cfg.out_reverb_room * 10} {self.cfg.out_reverb_damp * 10} {self.cfg.out_reverb_width * 10} {self.cfg.out_reverb_mix * 10}")
+            self.persist_config()
 
         def on_reverb_width_changed(self, scale: Gtk.Scale) -> None:
+            if self._updating_ui:
+                return
             val = int(scale.get_value())
             if self.current_spatial_target == "mic":
                 self.cfg.reverb_width = val
-                send_daemon_cmd(f"RVP {self.cfg.reverb_room * 10} {self.cfg.reverb_damp * 10} {self.cfg.reverb_width * 10} {self.cfg.reverb_mix * 10}")
+                self._queue_command(f"RVP {self.cfg.reverb_room * 10} {self.cfg.reverb_damp * 10} {self.cfg.reverb_width * 10} {self.cfg.reverb_mix * 10}")
             else:
                 self.cfg.out_reverb_width = val
-                send_daemon_cmd(f"OUT_RVP {self.cfg.out_reverb_room * 10} {self.cfg.out_reverb_damp * 10} {self.cfg.out_reverb_width * 10} {self.cfg.out_reverb_mix * 10}")
-            save_config(self.cfg)
+                self._queue_command(f"OUT_RVP {self.cfg.out_reverb_room * 10} {self.cfg.out_reverb_damp * 10} {self.cfg.out_reverb_width * 10} {self.cfg.out_reverb_mix * 10}")
+            self.persist_config()
 
         def on_reverb_mix_changed(self, scale: Gtk.Scale) -> None:
+            if self._updating_ui:
+                return
             val = int(scale.get_value())
             if self.current_spatial_target == "mic":
                 self.cfg.reverb_mix = val
-                send_daemon_cmd(f"RVP {self.cfg.reverb_room * 10} {self.cfg.reverb_damp * 10} {self.cfg.reverb_width * 10} {self.cfg.reverb_mix * 10}")
+                self._queue_command(f"RVP {self.cfg.reverb_room * 10} {self.cfg.reverb_damp * 10} {self.cfg.reverb_width * 10} {self.cfg.reverb_mix * 10}")
             else:
                 self.cfg.out_reverb_mix = val
-                send_daemon_cmd(f"OUT_RVP {self.cfg.out_reverb_room * 10} {self.cfg.out_reverb_damp * 10} {self.cfg.out_reverb_width * 10} {self.cfg.out_reverb_mix * 10}")
-            save_config(self.cfg)
+                self._queue_command(f"OUT_RVP {self.cfg.out_reverb_room * 10} {self.cfg.out_reverb_damp * 10} {self.cfg.out_reverb_width * 10} {self.cfg.out_reverb_mix * 10}")
+            self.persist_config()
 
         def set_eq_target(self, target: str) -> None:
             if self.current_eq_target == target:
@@ -3020,28 +3275,28 @@ def run_gtk_app() -> None:
             self.eq_presets_box.show_all()
 
         def apply_eq_preset(self, name: str, data: dict[str, Any]) -> None:
+            previous_updating = self._updating_ui
             self._updating_ui = True
             post_gain = data.get("post_gain", 0)
             gains = list(data.get("gains", [0] * 9))
-            eq_types = [3, 1, 0, 0, 0, 0, 0, 2, 0]
-            eq_freqs = [80, 120, 250, 400, 1500, 3500, 6000, 9000, 12000]
-            eq_q = [707, 707, 1000, 1000, 1000, 700, 1000, 700, 1000]
 
             if self.current_eq_target == "mic":
                 self.cfg.eq_post_gain = post_gain
                 self.cfg.eq_gains = gains
-                send_daemon_cmd(f"EGN {post_gain}")
+                self._queue_command(f"EGN {post_gain}")
                 for idx, g in enumerate(gains):
-                    send_daemon_cmd(f"EQB {idx} {eq_types[idx]} {eq_freqs[idx]} {eq_q[idx]} {g}")
+                    _, kind, hz, q = EQ_BANDS[idx]
+                    self._queue_command(f"EQB {idx} {kind} {hz} {q} {g}")
             else:
                 self.cfg.out_eq_post_gain = post_gain
                 self.cfg.out_eq_gains = gains
-                send_daemon_cmd(f"OUT_EGN {post_gain}")
+                self._queue_command(f"OUT_EGN {post_gain}")
                 for idx, g in enumerate(gains):
-                    send_daemon_cmd(f"OUT_EQB {idx} {eq_types[idx]} {eq_freqs[idx]} {eq_q[idx]} {g}")
+                    _, kind, hz, q = EQ_BANDS[idx]
+                    self._queue_command(f"OUT_EQB {idx} {kind} {hz} {q} {g}")
             save_config(self.cfg)
             self._refresh_eq_ui()
-            self._updating_ui = False
+            self._updating_ui = previous_updating
             for btn_name, btn in self.eq_preset_buttons.items():
                 if btn_name == name:
                     btn.get_style_context().add_class("active-preset")
@@ -3053,84 +3308,81 @@ def run_gtk_app() -> None:
                 btn.get_style_context().remove_class("active-preset")
 
         def on_eq_toggled(self, switch: Gtk.Switch, _g: Any) -> None:
+            if self._updating_ui:
+                return
             active = switch.get_active()
             if self.current_eq_target == "mic":
                 self.cfg.eq_on = active
-                send_daemon_cmd(f"EQ {1 if (self.cfg.enabled and active) else 0}")
+                self._queue_command(f"EQ {1 if (self.cfg.enabled and active) else 0}")
             else:
                 self.cfg.out_eq_on = active
-                send_daemon_cmd(f"OUT_EQ {1 if (self.cfg.enabled and active) else 0}")
+                self._queue_command(f"OUT_EQ {1 if (self.cfg.enabled and active) else 0}")
             save_config(self.cfg)
 
         def on_eq_post_gain_changed(self, scale: Gtk.Scale) -> None:
+            if self._updating_ui:
+                return
             val = int(scale.get_value()) * 100
             if self.current_eq_target == "mic":
                 self.cfg.eq_post_gain = val
-                send_daemon_cmd(f"EGN {val}")
+                self._queue_command(f"EGN {val}")
             else:
                 self.cfg.out_eq_post_gain = val
-                send_daemon_cmd(f"OUT_EGN {val}")
-            save_config(self.cfg)
+                self._queue_command(f"OUT_EGN {val}")
+            self.persist_config()
             self._clear_active_eq_preset_highlight()
 
         def on_eq_band_changed(self, idx: int, scale: Gtk.Scale) -> None:
+            if self._updating_ui:
+                return
             val = int(scale.get_value()) * 100
-            eq_types = [3, 1, 0, 0, 0, 0, 0, 2, 0]
-            eq_freqs = [80, 120, 250, 400, 1500, 3500, 6000, 9000, 12000]
-            eq_q = [707, 707, 1000, 1000, 1000, 700, 1000, 700, 1000]
+            _, kind, hz, q = EQ_BANDS[idx]
 
             if self.current_eq_target == "mic":
                 if idx < len(self.cfg.eq_gains):
                     self.cfg.eq_gains[idx] = val
-                    save_config(self.cfg)
-                    send_daemon_cmd(f"EQB {idx} {eq_types[idx]} {eq_freqs[idx]} {eq_q[idx]} {val}")
+                    self.persist_config()
+                    self._queue_command(f"EQB {idx} {kind} {hz} {q} {val}")
             else:
                 if idx < len(self.cfg.out_eq_gains):
                     self.cfg.out_eq_gains[idx] = val
-                    save_config(self.cfg)
-                    send_daemon_cmd(f"OUT_EQB {idx} {eq_types[idx]} {eq_freqs[idx]} {eq_q[idx]} {val}")
+                    self.persist_config()
+                    self._queue_command(f"OUT_EQB {idx} {kind} {hz} {q} {val}")
             self._clear_active_eq_preset_highlight()
 
         def on_monitor_toggled(self, check: Gtk.CheckButton) -> None:
+            if self._updating_ui:
+                return
             active = check.get_active()
             self.cfg.monitor = active
             save_config(self.cfg)
-            send_daemon_cmd(f"MON {1 if active else 0}")
+            self._queue_command(f"MON {1 if active else 0}")
 
         # ---------------------------------------------------------------------
         # Reset Routines
         # ---------------------------------------------------------------------
         def reset_all_defaults(self, *_: Any) -> None:
+            previous_updating = self._updating_ui
             self._updating_ui = True
-            saved_pre_src = self.cfg.pre_source
-            saved_pre_snk = self.cfg.pre_sink
-            saved_enabled = self.cfg.enabled
-
-            self.cfg.volume = 100
-            self.cfg.rnnoise_on = True
-            self.cfg.aggressiveness = 100
-            self.cfg.out_rnnoise_on = False
-            self.cfg.out_aggressiveness = 70
-            self.cfg.source = "default"
-            self.cfg.sink = "default"
-            self.cfg.monitor = False
-            self.cfg.pre_source = saved_pre_src
-            self.cfg.pre_sink = saved_pre_snk
-            self.cfg.enabled = saved_enabled
-
-            self._reset_voice_state()
-            self._reset_spatial_state()
-            self._reset_eq_state()
+            defaults = AudioConfig(enabled=self.cfg.enabled,
+                                   source=self.cfg.source, sink=self.cfg.sink,
+                                   pre_source=self.cfg.pre_source,
+                                   pre_sink=self.cfg.pre_sink,
+                                   pre_configured_source=self.cfg.pre_configured_source,
+                                   pre_configured_sink=self.cfg.pre_configured_sink)
+            for entry in fields(defaults):
+                setattr(self.cfg, entry.name, getattr(defaults, entry.name))
             save_config(self.cfg)
-            sync_config_to_daemon(self.cfg)
+            self._queue_config_sync()
             self._refresh_all_ui()
-            self._updating_ui = False
+            self._updating_ui = previous_updating
             send_desktop_notification("Dusky Audio Studio", "All audio processing reset to clean factory defaults.")
 
         def reset_voice_fx(self, *_: Any) -> None:
             self.apply_preset_by_name("Natural Clean")
 
         def reset_spatial_dsp(self, *_: Any) -> None:
+            previous_updating = self._updating_ui
             self._updating_ui = True
             if self.current_spatial_target == "mic":
                 self.cfg.delay_on = False
@@ -3153,11 +3405,12 @@ def run_gtk_app() -> None:
                 self.cfg.out_reverb_width = 80
                 self.cfg.out_reverb_mix = 35
             save_config(self.cfg)
-            sync_config_to_daemon(self.cfg)
+            self._queue_config_sync()
             self._refresh_spatial_ui()
-            self._updating_ui = False
+            self._updating_ui = previous_updating
 
         def reset_eq_flat(self, *_: Any) -> None:
+            previous_updating = self._updating_ui
             self._updating_ui = True
             if self.current_eq_target == "mic":
                 self.cfg.eq_on = False
@@ -3168,218 +3421,167 @@ def run_gtk_app() -> None:
                 self.cfg.out_eq_post_gain = 0
                 self.cfg.out_eq_gains = [0, 0, 0, 0, 0, 0, 0, 0, 0]
             save_config(self.cfg)
-            sync_config_to_daemon(self.cfg)
+            self._queue_config_sync()
             self._refresh_eq_ui()
             self._clear_active_eq_preset_highlight()
-            self._updating_ui = False
-
-        def _reset_voice_state(self) -> None:
-            clean = PRESETS["Natural Clean"]
-            for k, v in clean.items():
-                if hasattr(self.cfg, k):
-                    setattr(self.cfg, k, v)
-                out_k = f"out_{k}"
-                if hasattr(self.cfg, out_k):
-                    setattr(self.cfg, out_k, v)
-            self.cfg.vocoder_carrier_hz = 110
-            self.cfg.vocoder_detune = 20
-            self.cfg.vocoder_attack_ms = 5
-            self.cfg.vocoder_release_ms = 30
-            self.cfg.vocoder_follow = True
-            self.cfg.vocoder_pitch_shift = 0
-            self.cfg.vocoder_matrix = 0
-            self.cfg.vocoder_mix = 0
-            self.cfg.out_vocoder_carrier_hz = 110
-            self.cfg.out_vocoder_detune = 20
-            self.cfg.out_vocoder_attack_ms = 5
-            self.cfg.out_vocoder_release_ms = 30
-            self.cfg.out_vocoder_follow = True
-            self.cfg.out_vocoder_pitch_shift = 0
-            self.cfg.out_vocoder_matrix = 0
-            self.cfg.out_vocoder_mix = 0
-
-        def _reset_spatial_state(self) -> None:
-            self.cfg.delay_on = False
-            self.cfg.delay_ms = 250
-            self.cfg.delay_feedback = 35
-            self.cfg.delay_mix = 30
-            self.cfg.reverb_on = False
-            self.cfg.reverb_room = 70
-            self.cfg.reverb_damp = 50
-            self.cfg.reverb_width = 80
-            self.cfg.reverb_mix = 35
-            self.cfg.out_delay_on = False
-            self.cfg.out_delay_ms = 250
-            self.cfg.out_delay_feedback = 35
-            self.cfg.out_delay_mix = 30
-            self.cfg.out_reverb_on = False
-            self.cfg.out_reverb_room = 70
-            self.cfg.out_reverb_damp = 50
-            self.cfg.out_reverb_width = 80
-            self.cfg.out_reverb_mix = 35
-
-        def _reset_eq_state(self) -> None:
-            self.cfg.eq_on = False
-            self.cfg.eq_post_gain = 0
-            self.cfg.eq_gains = [0, 0, 0, 0, 0, 0, 0, 0, 0]
-            self.cfg.out_eq_on = False
-            self.cfg.out_eq_post_gain = 0
-            self.cfg.out_eq_gains = [0, 0, 0, 0, 0, 0, 0, 0, 0]
+            self._updating_ui = previous_updating
 
         def _refresh_all_ui(self) -> None:
-            self.vol_row._scale.set_value(self.cfg.volume)  # type: ignore
-            self.rnn_switch.set_active(self.cfg.rnnoise_on)
-            self.agg_row._scale.set_value(self.cfg.aggressiveness)  # type: ignore
-            self.out_rnn_switch.set_active(self.cfg.out_rnnoise_on)
-            self.out_agg_row._scale.set_value(self.cfg.out_aggressiveness)  # type: ignore
-            sink_idx = 0
-            for idx, (node, _) in enumerate(self.sinks):
-                if node == self.cfg.sink:
-                    sink_idx = idx
-                    break
-            self.sink_combo.set_active(sink_idx)
-            self.mon_btn.set_active(self.cfg.monitor)
-            self._refresh_voice_ui()
-            self._refresh_spatial_ui()
-            self._refresh_eq_ui()
+            previous_updating = self._updating_ui
+            self._updating_ui = True
+            try:
+                self.vol_row._scale.set_value(self.cfg.volume)  # type: ignore
+                self.rnn_switch.set_active(self.cfg.rnnoise_on)
+                self.agg_row._scale.set_value(self.cfg.aggressiveness)  # type: ignore
+                self.out_rnn_switch.set_active(self.cfg.out_rnnoise_on)
+                self.out_agg_row._scale.set_value(self.cfg.out_aggressiveness)  # type: ignore
+                self._set_device_combo(self.src_combo, self.sources, self.cfg.source)
+                self._set_device_combo(self.sink_combo, self.sinks, self.cfg.sink)
+                self.mon_btn.set_active(self.cfg.monitor)
+                self._refresh_voice_ui()
+                self._refresh_spatial_ui()
+                self._refresh_eq_ui()
+            finally:
+                self._updating_ui = previous_updating
 
         def _refresh_voice_ui(self) -> None:
-            is_mic = (self.current_voice_target == "mic")
-            voc_on = self.cfg.vocoder_on if is_mic else self.cfg.out_vocoder_on
-            atn_on = self.cfg.autotune_on if is_mic else self.cfg.out_autotune_on
-            follow = self.cfg.vocoder_follow if is_mic else self.cfg.out_vocoder_follow
-            pshift = self.cfg.pitch_shift if is_mic else self.cfg.out_pitch_shift
-            c_shift = self.cfg.vocoder_pitch_shift if is_mic else self.cfg.out_vocoder_pitch_shift
-            c_hz = self.cfg.vocoder_carrier_hz if is_mic else self.cfg.out_vocoder_carrier_hz
-            matrix = self.cfg.vocoder_matrix if is_mic else self.cfg.out_vocoder_matrix
-            mix = self.cfg.vocoder_mix if is_mic else self.cfg.out_vocoder_mix
-            bc_bits = self.cfg.bitcrush_bits if is_mic else self.cfg.out_bitcrush_bits
-            st_hz = self.cfg.stutter_hz if is_mic else self.cfg.out_stutter_hz
+            previous_updating = self._updating_ui
+            self._updating_ui = True
+            try:
+                is_mic = (self.current_voice_target == "mic")
+                voc_on = self.cfg.vocoder_on if is_mic else self.cfg.out_vocoder_on
+                atn_on = self.cfg.autotune_on if is_mic else self.cfg.out_autotune_on
+                atn_target = self.cfg.autotune_target_hz if is_mic else self.cfg.out_autotune_target_hz
+                follow = self.cfg.vocoder_follow if is_mic else self.cfg.out_vocoder_follow
+                pshift = self.cfg.pitch_shift if is_mic else self.cfg.out_pitch_shift
+                c_shift = self.cfg.vocoder_pitch_shift if is_mic else self.cfg.out_vocoder_pitch_shift
+                c_hz = self.cfg.vocoder_carrier_hz if is_mic else self.cfg.out_vocoder_carrier_hz
+                matrix = self.cfg.vocoder_matrix if is_mic else self.cfg.out_vocoder_matrix
+                mix = self.cfg.vocoder_mix if is_mic else self.cfg.out_vocoder_mix
+                bc_bits = self.cfg.bitcrush_bits if is_mic else self.cfg.out_bitcrush_bits
+                bc_hold = self.cfg.bitcrush_downsample if is_mic else self.cfg.out_bitcrush_downsample
+                st_hz = self.cfg.stutter_hz if is_mic else self.cfg.out_stutter_hz
 
-            self.voc_switch.set_active(voc_on)
-            self.atn_switch.set_active(atn_on)
-            self.check_follow.set_active(follow)
-            if follow:
-                self.carrier_row._scale.set_range(-24, 24)  # type: ignore
-                self.carrier_row._scale.set_value(c_shift)  # type: ignore
-                self.carrier_row._title_lbl.set_text("Carrier Pitch Transposition")  # type: ignore
-                self.carrier_row._val_lbl.set_text(f"{c_shift:+d} st")  # type: ignore
-            else:
-                self.carrier_row._scale.set_range(50, 440)  # type: ignore
-                self.carrier_row._scale.set_value(c_hz)  # type: ignore
-                self.carrier_row._title_lbl.set_text("Carrier Frequency")  # type: ignore
-                self.carrier_row._val_lbl.set_text(f"{c_hz} Hz")  # type: ignore
-            self.pitch_row._scale.set_value(int(pshift / 100))  # type: ignore
-            self.matrix_row._scale.set_value(matrix)  # type: ignore
-            self.voc_mix_row._scale.set_value(mix)  # type: ignore
-            self.bitcrush_row._scale.set_value(bc_bits)  # type: ignore
-            self.stutter_row._scale.set_value(st_hz)  # type: ignore
-            self._clear_active_preset_highlight()
+                self.voc_switch.set_active(voc_on)
+                self.atn_switch.set_active(atn_on)
+                self.autotune_target_row._scale.set_value(atn_target)  # type: ignore[attr-defined]
+                self.check_follow.set_active(follow)
+                if follow:
+                    self.carrier_row._unit = " st"  # type: ignore[attr-defined]
+                    self.carrier_row._signed = True  # type: ignore[attr-defined]
+                    self.carrier_row._scale.set_range(-24, 24)  # type: ignore
+                    self.carrier_row._scale.set_value(c_shift)  # type: ignore
+                    self.carrier_row._title_lbl.set_text("Carrier Pitch Transposition")  # type: ignore
+                    self.carrier_row._val_lbl.set_text(f"{c_shift:+d} st")  # type: ignore
+                else:
+                    self.carrier_row._unit = " Hz"  # type: ignore[attr-defined]
+                    self.carrier_row._signed = False  # type: ignore[attr-defined]
+                    self.carrier_row._scale.set_range(50, 440)  # type: ignore
+                    self.carrier_row._scale.set_value(c_hz)  # type: ignore
+                    self.carrier_row._title_lbl.set_text("Carrier Frequency")  # type: ignore
+                    self.carrier_row._val_lbl.set_text(f"{c_hz} Hz")  # type: ignore
+                self.pitch_row._scale.set_value(int(pshift / 100))  # type: ignore
+                self.matrix_row._scale.set_value(matrix)  # type: ignore
+                self.voc_mix_row._scale.set_value(mix)  # type: ignore
+                self.bitcrush_row._scale.set_value(bc_bits)  # type: ignore
+                self.bitcrush_hold_row._scale.set_value(bc_hold)  # type: ignore[attr-defined]
+                self.stutter_row._scale.set_value(st_hz)  # type: ignore
+                self._clear_active_preset_highlight()
 
-            for p_name, p_data in PRESETS.items():
-                match = True
-                for k, v in p_data.items():
-                    val = getattr(self.cfg, k if is_mic else f"out_{k}", None)
-                    if val != v:
-                        match = False
+                for p_name, p_data in PRESETS.items():
+                    match = True
+                    for k, v in p_data.items():
+                        val = getattr(self.cfg, k if is_mic else f"out_{k}", None)
+                        if val != v:
+                            match = False
+                            break
+                    if match:
+                        if p_name in self.preset_buttons:
+                            self.preset_buttons[p_name].get_style_context().add_class("active-preset")
                         break
-                if match:
-                    if p_name in self.preset_buttons:
-                        self.preset_buttons[p_name].get_style_context().add_class("active-preset")
-                    break
+            finally:
+                self._updating_ui = previous_updating
 
         def _refresh_spatial_ui(self) -> None:
-            is_mic = (self.current_spatial_target == "mic")
-            d_on = self.cfg.delay_on if is_mic else self.cfg.out_delay_on
-            d_ms = self.cfg.delay_ms if is_mic else self.cfg.out_delay_ms
-            d_fb = self.cfg.delay_feedback if is_mic else self.cfg.out_delay_feedback
-            d_mix = self.cfg.delay_mix if is_mic else self.cfg.out_delay_mix
+            previous_updating = self._updating_ui
+            self._updating_ui = True
+            try:
+                is_mic = (self.current_spatial_target == "mic")
+                d_on = self.cfg.delay_on if is_mic else self.cfg.out_delay_on
+                d_ms = self.cfg.delay_ms if is_mic else self.cfg.out_delay_ms
+                d_fb = self.cfg.delay_feedback if is_mic else self.cfg.out_delay_feedback
+                d_mix = self.cfg.delay_mix if is_mic else self.cfg.out_delay_mix
 
-            r_on = self.cfg.reverb_on if is_mic else self.cfg.out_reverb_on
-            r_room = self.cfg.reverb_room if is_mic else self.cfg.out_reverb_room
-            r_damp = self.cfg.reverb_damp if is_mic else self.cfg.out_reverb_damp
-            r_width = self.cfg.reverb_width if is_mic else self.cfg.out_reverb_width
-            r_mix = self.cfg.reverb_mix if is_mic else self.cfg.out_reverb_mix
+                r_on = self.cfg.reverb_on if is_mic else self.cfg.out_reverb_on
+                r_room = self.cfg.reverb_room if is_mic else self.cfg.out_reverb_room
+                r_damp = self.cfg.reverb_damp if is_mic else self.cfg.out_reverb_damp
+                r_width = self.cfg.reverb_width if is_mic else self.cfg.out_reverb_width
+                r_mix = self.cfg.reverb_mix if is_mic else self.cfg.out_reverb_mix
 
-            self.dly_switch.set_active(d_on)
-            self.dly_time_row._scale.set_value(d_ms)  # type: ignore
-            self.dly_fb_row._scale.set_value(d_fb)  # type: ignore
-            self.dly_mix_row._scale.set_value(d_mix)  # type: ignore
+                self.dly_switch.set_active(d_on)
+                self.dly_time_row._scale.set_value(d_ms)  # type: ignore
+                self.dly_fb_row._scale.set_value(d_fb)  # type: ignore
+                self.dly_mix_row._scale.set_value(d_mix)  # type: ignore
 
-            self.rvb_switch.set_active(r_on)
-            self.rvb_room_row._scale.set_value(r_room)  # type: ignore
-            self.rvb_damp_row._scale.set_value(r_damp)  # type: ignore
-            self.rvb_width_row._scale.set_value(r_width)  # type: ignore
-            self.rvb_mix_row._scale.set_value(r_mix)  # type: ignore
+                self.rvb_switch.set_active(r_on)
+                self.rvb_room_row._scale.set_value(r_room)  # type: ignore
+                self.rvb_damp_row._scale.set_value(r_damp)  # type: ignore
+                self.rvb_width_row._scale.set_value(r_width)  # type: ignore
+                self.rvb_mix_row._scale.set_value(r_mix)  # type: ignore
+            finally:
+                self._updating_ui = previous_updating
 
         def _refresh_eq_ui(self) -> None:
-            if self.current_eq_target == "mic":
-                self.eq_lbl.set_text("9-Band Studio Parametric EQ (Microphone Input)")
-                self.eq_switch.set_active(self.cfg.eq_on)
-                self.eq_post_row._scale.set_value(int(self.cfg.eq_post_gain / 100))  # type: ignore
-                for idx, row in enumerate(self.eq_band_rows):
-                    val = int(self.cfg.eq_gains[idx] / 100) if idx < len(self.cfg.eq_gains) else 0
-                    row._scale.set_value(val)  # type: ignore
-            else:
-                self.eq_lbl.set_text("9-Band Stereo Parametric EQ (Playback & Speakers)")
-                self.eq_switch.set_active(self.cfg.out_eq_on)
-                self.eq_post_row._scale.set_value(int(self.cfg.out_eq_post_gain / 100))  # type: ignore
-                for idx, row in enumerate(self.eq_band_rows):
-                    val = int(self.cfg.out_eq_gains[idx] / 100) if idx < len(self.cfg.out_eq_gains) else 0
-                    row._scale.set_value(val)  # type: ignore
+            previous_updating = self._updating_ui
+            self._updating_ui = True
+            try:
+                if self.current_eq_target == "mic":
+                    self.eq_lbl.set_text("9-Band Studio Parametric EQ (Microphone Input)")
+                    self.eq_switch.set_active(self.cfg.eq_on)
+                    self.eq_post_row._scale.set_value(int(self.cfg.eq_post_gain / 100))  # type: ignore
+                    for idx, row in enumerate(self.eq_band_rows):
+                        val = int(self.cfg.eq_gains[idx] / 100) if idx < len(self.cfg.eq_gains) else 0
+                        row._scale.set_value(val)  # type: ignore
+                else:
+                    self.eq_lbl.set_text("9-Band Stereo Parametric EQ (Playback & Speakers)")
+                    self.eq_switch.set_active(self.cfg.out_eq_on)
+                    self.eq_post_row._scale.set_value(int(self.cfg.out_eq_post_gain / 100))  # type: ignore
+                    for idx, row in enumerate(self.eq_band_rows):
+                        val = int(self.cfg.out_eq_gains[idx] / 100) if idx < len(self.cfg.out_eq_gains) else 0
+                        row._scale.set_value(val)  # type: ignore
+            finally:
+                self._updating_ui = previous_updating
 
         def _clear_active_preset_highlight(self) -> None:
             for btn in self.preset_buttons.values():
                 btn.get_style_context().remove_class("active-preset")
 
         def apply_preset_by_name(self, name: str) -> None:
-            p = PRESETS.get(name)
-            if not p:
+            if name not in PRESETS:
                 return
-
+            previous = self._updating_ui
             self._updating_ui = True
-            is_mic = (self.current_voice_target == "mic")
-            if is_mic:
-                for k, v in p.items():
-                    if hasattr(self.cfg, k):
-                        setattr(self.cfg, k, v)
-                self.cfg.vocoder_carrier_hz = p.get("vocoder_carrier_hz", 110)
-                self.cfg.vocoder_detune = p.get("vocoder_detune", 20)
-                self.cfg.vocoder_attack_ms = p.get("vocoder_attack_ms", 5)
-                self.cfg.vocoder_release_ms = p.get("vocoder_release_ms", 30)
-                self.cfg.vocoder_follow = p.get("vocoder_follow", True)
-                self.cfg.vocoder_pitch_shift = p.get("vocoder_pitch_shift", 0)
-                self.cfg.vocoder_matrix = p.get("vocoder_matrix", 0)
-                self.cfg.bitcrush_downsample = p.get("bitcrush_downsample", 1)
-                self.cfg.bandpass_hpf_hz = p.get("bandpass_hpf_hz", 0)
-                self.cfg.bandpass_lpf_hz = p.get("bandpass_lpf_hz", 0)
-            else:
-                for k, v in p.items():
-                    out_k = f"out_{k}"
-                    if hasattr(self.cfg, out_k):
-                        setattr(self.cfg, out_k, v)
-                self.cfg.out_vocoder_carrier_hz = p.get("vocoder_carrier_hz", 110)
-                self.cfg.out_vocoder_detune = p.get("vocoder_detune", 20)
-                self.cfg.out_vocoder_attack_ms = p.get("vocoder_attack_ms", 5)
-                self.cfg.out_vocoder_release_ms = p.get("vocoder_release_ms", 30)
-                self.cfg.out_vocoder_follow = p.get("vocoder_follow", True)
-                self.cfg.out_vocoder_pitch_shift = p.get("vocoder_pitch_shift", 0)
-                self.cfg.out_vocoder_matrix = p.get("vocoder_matrix", 0)
-                self.cfg.out_bitcrush_downsample = p.get("bitcrush_downsample", 1)
-                self.cfg.out_bandpass_hpf_hz = p.get("bandpass_hpf_hz", 0)
-                self.cfg.out_bandpass_lpf_hz = p.get("bandpass_lpf_hz", 0)
-
-            save_config(self.cfg)
-            sync_config_to_daemon(self.cfg)
-            self._refresh_voice_ui()
-            self._clear_active_preset_highlight()
-            if name in self.preset_buttons:
+            try:
+                apply_voice_preset(self.cfg, name, self.current_voice_target)
+                save_config(self.cfg)
+                self._queue_config_sync()
+                self._refresh_voice_ui()
+                self._clear_active_preset_highlight()
                 self.preset_buttons[name].get_style_context().add_class("active-preset")
-            self._updating_ui = False
+            finally:
+                self._updating_ui = previous
 
     win = AudioStudioWindow()
 
     def on_destroy(*_: Any) -> None:
+        win._closed = True
+        win._telemetry_stop.set()
+        if win._save_timer:
+            GLib.source_remove(win._save_timer)
+            win.flush_config()
+        if get_daemon_pid() or win._engine_target:
+            win._queue_config_sync()
+        win._executor.shutdown(wait=False)
         GUI_PID_FILE.unlink(missing_ok=True)
         Gtk.main_quit()
 
@@ -3396,21 +3598,22 @@ def main() -> None:
     args = sys.argv[1:]
     cfg = load_config()
 
-    if not args or args[0] in ("--gui", "-g"):
-        run_gtk_app()
+    if not args or args[0] in ("--gui", "-g", "--gui-only"):
+        run_gtk_app(open_only=bool(args and args[0] == "--gui-only"))
         return
 
     match args[0].lower():
         case "--autostart":
             if cfg.enabled:
-                start_daemon(cfg)
-                print("Dusky Audio DSP autostarted from persisted state (ON).")
+                if start_daemon(cfg):
+                    print("Dusky Audio DSP autostarted from persisted state (ON).")
+                else:
+                    raise SystemExit(1)
             else:
                 print("Dusky Audio DSP persisted state is OFF (skipping autostart).")
         case "--on" | "-1" | "on":
-            cfg.enabled = True
-            save_config(cfg)
-            start_daemon(cfg)
+            if not start_daemon(cfg):
+                raise SystemExit(1)
             send_desktop_notification("Dusky Audio Studio", "Voice DSP & Noise Cancellation turned ON.")
             print("Dusky Audio DSP turned ON (PipeWire RT Low-Latency).")
         case "--off" | "-0" | "off":
@@ -3428,29 +3631,21 @@ def main() -> None:
                 send_desktop_notification("Dusky Audio Studio", "Voice DSP turned OFF (Direct Hardware Bypass).")
                 print("Dusky Audio DSP turned OFF.")
             else:
-                cfg.enabled = True
-                save_config(cfg)
-                start_daemon(cfg)
+                if not start_daemon(cfg):
+                    raise SystemExit(1)
                 send_desktop_notification("Dusky Audio Studio", "Voice DSP & Noise Cancellation turned ON.")
                 print("Dusky Audio DSP turned ON.")
         case "--reset" | "--reset-all" | "-r":
-            cfg = AudioConfig(enabled=cfg.enabled, source=cfg.source, sink=cfg.sink)
+            cfg = AudioConfig(enabled=cfg.enabled, source=cfg.source, sink=cfg.sink,
+                              pre_source=cfg.pre_source, pre_sink=cfg.pre_sink,
+                              pre_configured_source=cfg.pre_configured_source,
+                              pre_configured_sink=cfg.pre_configured_sink)
             save_config(cfg)
             sync_config_to_daemon(cfg)
             print("All audio DSP settings reset to factory defaults.")
         case "--reset-voice":
-            clean = PRESETS["Natural Clean"]
-            for k, v in clean.items():
-                if hasattr(cfg, k):
-                    setattr(cfg, k, v)
-            cfg.vocoder_carrier_hz = 110
-            cfg.vocoder_detune = 20
-            cfg.vocoder_attack_ms = 5
-            cfg.vocoder_release_ms = 30
-            cfg.vocoder_follow = True
-            cfg.vocoder_pitch_shift = 0
-            cfg.vocoder_matrix = 0
-            cfg.vocoder_mix = 0
+            apply_voice_preset(cfg, "Natural Clean", "mic")
+            apply_voice_preset(cfg, "Natural Clean", "out")
             save_config(cfg)
             sync_config_to_daemon(cfg)
             print("Voice FX reset to Natural Clean.")
@@ -3483,25 +3678,37 @@ def main() -> None:
                 print(f"Playback Parametric EQ: {'ON' if cfg.out_eq_on else 'OFF'}")
             else:
                 print("Usage: --out-eq <on|off|toggle>", file=sys.stderr)
+                raise SystemExit(2)
         case "--reset-spatial":
-            cfg.delay_on = False
-            cfg.delay_ms = 250
-            cfg.delay_feedback = 35
-            cfg.delay_mix = 30
-            cfg.reverb_on = False
-            cfg.reverb_room = 70
-            cfg.reverb_damp = 50
-            cfg.reverb_width = 80
-            cfg.reverb_mix = 35
+            defaults = AudioConfig()
+            for prefix in ("", "out_"):
+                for stem in ("delay_on", "delay_ms", "delay_feedback", "delay_mix",
+                             "reverb_on", "reverb_room", "reverb_damp",
+                             "reverb_width", "reverb_mix"):
+                    name = prefix + stem
+                    setattr(cfg, name, getattr(defaults, name))
             save_config(cfg)
             sync_config_to_daemon(cfg)
             print("Delay and Reverb reset to default bypass.")
         case "--status" | "-s" | "status":
             pid = get_daemon_pid()
-            tele = fetch_telemetry_from_daemon()
-            if pid:
-                tele_str = f", VAD: {int(tele.vad_prob * 100)}%, Noise Reduction: {tele.noise_reduction_db:.1f} dB" if tele else ""
-                print(f"ON (PID {pid}, Suppression: {cfg.aggressiveness}%, Volume: {cfg.volume}%, Vocoder: {'ON' if cfg.vocoder_on else 'OFF'}{tele_str})")
+            if pid and daemon_responds():
+                tele = fetch_telemetry_from_daemon()
+                snapshot = pipewire_audio_snapshot()
+                missing = []
+                if snapshot is not None:
+                    if resolve_hardware_node("Audio/Source", "source", cfg.source,
+                                             cfg.pre_source, snapshot) == NO_HARDWARE_TARGET:
+                        missing.append("microphone")
+                    if resolve_hardware_node("Audio/Sink", "sink", cfg.sink,
+                                             cfg.pre_sink, snapshot) == NO_HARDWARE_TARGET:
+                        missing.append("output")
+                tele_str = f", VAD: {int(tele.vad_prob * 100)}%, Denoiser change: {tele.processing_delta_dbfs:.1f} dBFS" if tele else ""
+                condition = "DEGRADED, missing " + ", ".join(missing) if missing else "ON"
+                print(f"{condition} (PID {pid}, Suppression: {cfg.aggressiveness}%, Volume: {cfg.volume}%, Vocoder: {'ON' if cfg.vocoder_on else 'OFF'}{tele_str})")
+            elif pid:
+                print(f"ERROR (server PID {pid}, helper not ready)")
+                raise SystemExit(1)
             else:
                 print("OFF")
         case ("--preset" | "-p") if len(args) > 1:
@@ -3512,46 +3719,51 @@ def main() -> None:
                     match_key = k
                     break
             if match_key:
-                for k, v in PRESETS[match_key].items():
-                    if hasattr(cfg, k):
-                        setattr(cfg, k, v)
+                apply_voice_preset(cfg, match_key, "mic")
                 save_config(cfg)
                 sync_config_to_daemon(cfg)
                 print(f"Applied Character Preset: {match_key}")
             else:
-                print(f"Preset '{p_name}' not found. Available: {', '.join(PRESETS.keys())}")
+                print(f"Preset '{p_name}' not found. Available: {', '.join(PRESETS.keys())}", file=sys.stderr)
+                raise SystemExit(2)
         case ("--set-source" | "--source" | "--src") if len(args) > 1:
             val = " ".join(args[1:])
             cfg.source = val
             save_config(cfg)
             target = resolve_hardware_source(val)
-            send_daemon_cmd(f"SRC {target}")
+            sync_config_to_daemon(cfg)
             print(f"Set Input Microphone Source to '{val}' (target: {target})")
         case ("--set-sink" | "--sink") if len(args) > 1:
             val = " ".join(args[1:])
             cfg.sink = val
             save_config(cfg)
             target = resolve_hardware_sink(val)
-            send_daemon_cmd(f"SINK_TGT {target}")
+            sync_config_to_daemon(cfg)
             print(f"Set Output Playback Device to '{val}' (target: {target})")
         case ("--set-agg" | "--agg") if len(args) > 1:
             try:
-                val = max(0, min(100, int(args[1])))
+                val = int(args[1])
+                if not 0 <= val <= 100:
+                    raise ValueError(val)
                 cfg.aggressiveness = val
                 save_config(cfg)
                 send_daemon_cmd(f"AGG {val * 10}")
                 print(f"Set Input Noise Reduction Aggressiveness to {val}%")
             except ValueError:
                 print("Invalid value for aggressiveness (0-100).", file=sys.stderr)
+                raise SystemExit(2)
         case ("--set-vol" | "--vol") if len(args) > 1:
             try:
-                val = max(0, min(200, int(args[1])))
+                val = int(args[1])
+                if not 0 <= val <= 200:
+                    raise ValueError(val)
                 cfg.volume = val
                 save_config(cfg)
                 send_daemon_cmd(f"VOL {val * 10}")
                 print(f"Set Output Gain to {val}%")
             except ValueError:
                 print("Invalid value for volume (0-200).", file=sys.stderr)
+                raise SystemExit(2)
         case "--noise" if len(args) > 1:
             action = args[1].lower()
             if action == "on":
@@ -3571,6 +3783,7 @@ def main() -> None:
                 print(f"Input Noise Cancellation: {'ON' if cfg.rnnoise_on else 'OFF'}")
             else:
                 print("Usage: --noise <on|off|toggle>", file=sys.stderr)
+                raise SystemExit(2)
         case "--noise-state" | "--noise-status":
             print("yes" if cfg.rnnoise_on else "no")
         case "--out-noise-state" | "--out-noise-status":
@@ -3598,36 +3811,46 @@ def main() -> None:
                 print(f"Output Noise Cancellation: {'ON' if cfg.out_rnnoise_on else 'OFF'}")
             else:
                 print("Usage: --out-noise <on|off|toggle>", file=sys.stderr)
+                raise SystemExit(2)
         case ("--set-out-agg" | "--out-agg") if len(args) > 1:
             try:
-                val = max(0, min(100, int(args[1])))
+                val = int(args[1])
+                if not 0 <= val <= 100:
+                    raise ValueError(val)
                 cfg.out_aggressiveness = val
                 save_config(cfg)
                 send_daemon_cmd(f"OUT_AGG {val * 10}")
                 print(f"Set Output Noise Reduction Aggressiveness to {val}%")
             except ValueError:
                 print("Invalid value for output aggressiveness (0-100).", file=sys.stderr)
+                raise SystemExit(2)
         case "--help" | "-h":
             print(
                 """Usage: dusky_audio_studio.py [COMMAND]
 
 Commands:
   --gui, -g                 Launch complete GTK3 Audio Studio window (default)
+  --gui-only               Open settings without starting persisted DSP
+  --autostart              Start DSP only when the saved setting is ON
   --toggle, -t              Toggle Audio DSP / Noise Cancellation ON / OFF
   --on                      Turn Audio DSP ON
   --off                     Turn Audio DSP OFF
   --reset, -r               Reset all audio settings to clean factory defaults
-  --reset-voice             Reset voice character effects to Natural Clean
+  --reset-voice             Reset microphone and playback voice effects
   --reset-eq                Reset 9-Band EQ to Flat 0 dB
-  --reset-spatial           Reset Delay & Reverb to clean bypass
+  --reset-spatial           Reset microphone and playback Delay & Reverb
   --status, -s              Print current status and live telemetry
-  --preset, -p <name>       Apply voice preset (e.g. "Daft Punk", "Darth Vader", "Sci-Fi Alien")
+  --preset, -p <name>       Apply microphone voice preset
   --set-source <node>       Set hardware capture microphone source
   --set-sink <node>         Set physical playback output device (speakers/headphones)
   --set-agg <0-100>         Set input RNNoise suppression aggressiveness (0 to 100%)
   --set-vol <0-200>         Set microphone volume/gain (0 to 200%)
+  --noise <on|off|toggle>   Toggle microphone RNNoise
+  --out-eq <on|off|toggle>  Toggle playback EQ
   --out-noise <on|off|toggle>  Toggle output noise cancellation (Two-Way)
   --set-out-agg <0-100>     Set output RNNoise suppression aggressiveness (0 to 100%)
+  --noise-state, --out-noise-state  Show saved noise toggles
+  --get-agg, --get-out-agg  Show saved aggressiveness values
   --help, -h                Show this help message
 
 Available Voice Character Presets:
@@ -3635,7 +3858,8 @@ Available Voice Character Presets:
                 + ", ".join(f'"{k}"' for k in PRESETS.keys())
             )
         case _:
-            print(f"Unknown command: {args[0]}. Run with --help for usage.")
+            print(f"Unknown command: {args[0]}. Run with --help for usage.", file=sys.stderr)
+            raise SystemExit(2)
 
 
 if __name__ == "__main__":

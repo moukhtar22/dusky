@@ -180,6 +180,30 @@ FEATURES = [
         "pref": ("toolkit.legacyUserProfileCustomizations.stylesheets", "true"),
         "default": True,
     },
+    {
+        "key": "av1_enabled",
+        "title": "AV1 decoding",
+        "desc": "keep media.av1.enabled=true so sites can serve AV1 (~30-50% bandwidth vs VP9/H.264). NOTE: as of Firefox 156 there is NO 'force/prefer AV1' pref — this only advertises AV1 support; the server (e.g. YouTube) still chooses the codec. True forcing on YouTube needs its account setting 'Always prefer AV1' or an extension (enhanced-h264ify) that blocks other codecs",
+        "selectors": None,
+        "pref": ("media.av1.enabled", "true"),
+        "default": True,
+    },
+    {
+        "key": "av1_hw_decode",
+        "title": "Hardware video decoding",
+        "desc": "keep media.hardware-video-decoding.enabled=true so AV1 uses your GPU decoders (VA-API AV1Profile0) instead of CPU dav1d software fallback",
+        "selectors": None,
+        "pref": ("media.hardware-video-decoding.enabled", "true"),
+        "default": True,
+    },
+    {
+        "key": "av1_ffvpx_hw",
+        "title": "FFVPX hardware decoding",
+        "desc": "keep media.ffvpx-hw.enabled=true — the HW decode path in Firefox 156 (bundled FFVPX ships av1_vaapi/vp9_vaapi hwaccels; the old media.ffmpeg.vaapi.enabled pref from the FF102 era no longer exists in 156 and is ignored)",
+        "selectors": None,
+        "pref": ("media.ffvpx-hw.enabled", "true"),
+        "default": True,
+    },
 ]
 
 

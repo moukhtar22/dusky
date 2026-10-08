@@ -1,22 +1,37 @@
 # =============================================================================
-# Dusky Command Atlas v3.0 (Platinum Edition)
-# Architecture: Zero-fork environment scanning, associative array metadata,
-#               hidden delimiter routing, and interactive Zsh buffer injection.
-# Dependencies: zsh 5.9+, fzf 0.72.0+
+# Dusky Command Atlas v4.1 — zero-fork environment ledger + fzf router
+#
+#   atlas | cmd_atlas   interactive fuzzy index of the live shell environment
+#   The selection is injected into the ZLE buffer with `print -z`.
+#
+#   Requires zsh 5.9+ and fzf >= 0.61
+#     --ghost        fzf 0.61.0
+#     --accept-nth   fzf 0.60.0
+#     --style/--list-border/--input-border  fzf 0.58.0
+#
+#   Forks: 1 (fzf) + 1 once per session (version probe, memoised).
+#   Locale: untouched — fzf needs the user's UTF-8 LC_CTYPE to measure the
+#   widths of │, ❯, ✔ and the Nerd-Font label glyph correctly.
+#
+#   Any module may register documentation at any time:
+#       ZSH_DOCS[myfunc]='what it does'
+#   `+=` below means a re-source never destroys sibling registrations.
 # =============================================================================
 
-# =============================================================================
-# The Global Metadata Dictionary (Extended Environment Edition)
-# =============================================================================
-typeset -g -A ZSH_DOCS
-ZSH_DOCS=(
+zmodload zsh/parameter 2>/dev/null
+
+typeset -g  DUSKY_ATLAS_MIN_FZF=${DUSKY_ATLAS_MIN_FZF:-0.61.0}
+typeset -gA ZSH_DOCS
+
+ZSH_DOCS+=(
     # --- DUSKY CUSTOM TOOLS ---
     "atlas"               "Interactive fuzzy-finder for environment functions and aliases."
+    "cmd_atlas"           "Command Atlas engine behind the 'atlas' alias."
     "batstat"             "Zero-fork battery monitor with live TUI."
     "mon_info"            "Mathematical aspect ratio and display info renderer."
     "pkg"                 "Advanced pacman/expac package querying tool."
     "res_mon"             "Live system resource monitor."
-    
+
     # --- VIRTUALIZATION & KVM ---
     "win"                 "Windows 10 KVM orchestrator with Looking Glass integration."
     "nvidia_bind"         "Binds Nvidia GPU to the VFIO driver for VM passthrough."
@@ -26,8 +41,18 @@ ZSH_DOCS=(
     "git_dusky"           "Core git wrapper locked to the bare repository."
     "git_dusky_add_list"  "Stages specific tracked files from the .git_dusky_list payload."
     "git_dusky_restore"   "Destructive hard reset to revert all local dotfile changes."
+    "git_dusky_push"      "Stage, commit and push a single file into the bare dotfiles repo."
     "gitdelta"            "Stages list files and computes the repository diff against HEAD."
     "lazygit_dusky"       "Launches Lazygit scoped to the Dusky bare repository."
+    "dusky"               "Dusky dotfiles manager dashboard."
+
+    # --- DIFF ENGINE ---
+    "d"                   "NeoDiff proxy: diff files, or a file against its Neovim undo state."
+    "di"                  "Interactive fzf picker over the NeoDiff history."
+
+    # --- NAVIGATION ---
+    "z"                   "Jump to the best-scored directory (zoxide frecency)."
+    "zi"                  "Interactive zoxide jump through fzf."
 
     # --- DEVELOPMENT & EXECUTION ---
     "logs_old"            "Advanced execution wrapper for robust script testing and tracing."
@@ -50,7 +75,7 @@ ZSH_DOCS=(
     "mv"                  "Move or rename files and directories (interactive mode)."
     "rm"                  "Remove files or directories (interactive mode)."
     "cat"                 "Concatenate and print files (often overridden by bat)."
-    
+
     # --- ARCH LINUX / PACMAN / SYSTEM ---
     "pacman"              "Arch Linux package manager."
     "yay"                 "AUR helper and pacman wrapper."
@@ -61,99 +86,133 @@ ZSH_DOCS=(
     "journalctl"          "Query the systemd journal."
 )
 
-cmd_atlas() {
-    # 1. Strict Environment Isolation
+# -----------------------------------------------------------------------------
+# fzf capability gate — exactly one fork per shell session, then memoised.
+# -----------------------------------------------------------------------------
+_atlas_fzf_ok() {
     emulate -L zsh
-    setopt localoptions extendedglob
-    local LC_ALL=C
+    local v
 
-    # Dependency Validation
     if (( ! $+commands[fzf] )); then
-        print -u2 -P "\n%F{red}✖ Error:%f 'fzf' is not installed."
+        print -ru2 -- 'atlas: fzf is not installed  (pacman -S fzf)'
+        return 1
+    fi
+    if [[ -z ${_DUSKY_FZF_VERSION-} ]]; then
+        v=$(fzf --version 2>/dev/null)
+        v=${v%% *}
+        typeset -g _DUSKY_FZF_VERSION=${v:-0}
+    fi
+    (( $+functions[is-at-least] )) || autoload -Uz is-at-least
+    if ! is-at-least $DUSKY_ATLAS_MIN_FZF $_DUSKY_FZF_VERSION; then
+        print -ru2 -- "atlas: fzf $_DUSKY_FZF_VERSION is too old — need >= $DUSKY_ATLAS_MIN_FZF (--ghost, --accept-nth)"
+        return 1
+    fi
+    return 0
+}
+
+# -----------------------------------------------------------------------------
+# The atlas
+# -----------------------------------------------------------------------------
+cmd_atlas() {
+    emulate -L zsh
+    setopt localoptions extendedglob no_nomatch
+
+    zmodload zsh/parameter 2>/dev/null
+    if (( ! $+aliases )); then
+        print -ru2 -- 'atlas: zsh/parameter is unavailable — cannot enumerate the environment.'
+        return 1
+    fi
+    _atlas_fzf_ok || return 1
+
+    local -A kind
+    local -a anames gnames snames fnames rows opts
+    local name desc k choice header
+    local -i pad=7 hpad=0 rc=0
+    local TAB=$'\t' R=$'\e[0m' DIM=$'\e[38;5;242m' BOLD=$'\e[1;37m' TXT=$'\e[38;5;250m'
+    local -A col=(
+        'Alias' $'\e[38;5;114m'
+        'Glob ' $'\e[38;5;180m'
+        'Sufx ' $'\e[38;5;176m'
+        'Func ' $'\e[1;38;5;39m'
+    )
+
+    # --- ledger: aliases are STRICT (documented entries only) -----------------
+    for name in "${(@ok)aliases}"; do
+        [[ -n ${ZSH_DOCS[$name]+x} ]] || continue
+        anames+=( "$name" ); kind[$name]='Alias'
+    done
+    for name in "${(@ok)galiases}"; do
+        [[ -n ${ZSH_DOCS[$name]+x} ]] || continue
+        gnames+=( "$name" ); kind[$name]='Glob '
+    done
+    for name in "${(@ok)saliases}"; do
+        [[ -n ${ZSH_DOCS[$name]+x} ]] || continue
+        snames+=( "$name" ); kind[$name]='Sufx '
+    done
+
+    # --- ledger: functions, documented OR public ------------------------------
+    for name in "${(@ok)functions}"; do
+        if [[ -z ${ZSH_DOCS[$name]+x} ]]; then
+            [[ $name == [_.+]* ]] && continue
+            [[ $name == (*:zle-*|*zle-*|*-widget|TRAP*|*precmd*|*preexec*|azhw:*|prompt_*|comp*) ]] && continue
+            [[ $name == (chpwd|periodic|zshaddhistory|zshexit|is-at-least|add-zsh-hook|edit-command-line) ]] && continue
+        fi
+        fnames+=( "$name" ); kind[$name]='Func '
+    done
+
+    if (( ! $#kind )); then
+        print -ru2 -- 'atlas: nothing to display (ZSH_DOCS is empty and no public functions exist).'
         return 1
     fi
 
-    # 2. State Initialization
-    local -a valid_items
-    local -A item_types
-    local max_len=7 # Hard floor to guarantee safe math for header padding
-    local name desc type_lbl 
-    local -a display_lines=()
+    for name in "${(@k)kind}"; do (( $#name > pad )) && pad=$#name; done
+    (( pad > 35 )) && pad=35
+    (( hpad = pad - 7 ))
 
-    # 3. Memory Ledger Collection (Zero-Fork)
-    # Aliases
-    for name in ${(ok)aliases}; do
-        # STRICT MODE: If the alias is not in the dictionary, do not render it.
-        if [[ -z "${ZSH_DOCS[$name]+isset}" ]]; then continue; fi
-
-        valid_items+=("$name")
-        item_types[$name]="Alias"
-        (( ${#name} > max_len )) && max_len=${#name}
+    # --- rows: "RAW<TAB>VISUAL"; TAB cannot occur inside a command word -------
+    for name in "${anames[@]}" "${gnames[@]}" "${snames[@]}" "${fnames[@]}"; do
+        k=${kind[$name]}
+        desc=${ZSH_DOCS[$name]:-'— no description registered —'}
+        desc=${desc//[$'\t\n\r']/ }
+        rows+=( "${name}${TAB}${DIM}[${R}${col[$k]}${k}${R}${DIM}]${R}  ${BOLD}${(r:pad:)${name[1,pad]}}${R}  ${DIM}│${R}  ${TXT}${desc}${R}" )
     done
 
-    # Functions (with noise filtering)
-    for name in ${(ok)functions}; do
-        if [[ "$name" == _* && -z "${ZSH_DOCS[$name]+isset}" ]]; then continue; fi
-        if [[ "$name" == (chpwd|precmd|preexec|periodic|zshaddhistory) && -z "${ZSH_DOCS[$name]+isset}" ]]; then continue; fi
+    header="   TYPE  COMMAND${(l:hpad:):-}  │  DESCRIPTION"
+    opts=(
+        --ansi
+        --delimiter=$TAB
+        --with-nth='2..'
+        --accept-nth=1
+        --highlight-line
+        --ghost='Filter command atlas...'
+        --prompt="   Search ❯ "
+        --pointer='❯ '
+        --marker='✔ '
+        --layout=reverse
+        --border=rounded
+        --border-label=' 󰘳 Dusky Command Atlas '
+        --border-label-pos=3
+        --padding=1,2
+        --margin=2%,5%
+        --info=inline-right
+        --header=$header
+        --header-first
+        --tiebreak=begin,index
+        --color="${DUSKY_FZF_COLORS:-bg+:#1e1e2e,bg:#11111b,fg:#cdd6f4}"
+    )
 
-        valid_items+=("$name")
-        item_types[$name]="Func "
-        (( ${#name} > max_len )) && max_len=${#name}
-    done
+    # print -rl : raw, so a description can never be escape-processed.
+    choice=$(print -rl -- "${rows[@]}" | fzf "${opts[@]}")
+    rc=$?
+    case $rc in
+        0)      ;;
+        1|130)  return 0 ;;                       # no match / aborted
+        *)      print -ru2 -- "atlas: fzf exited $rc (this module needs fzf >= $DUSKY_ATLAS_MIN_FZF)"
+                return $rc ;;
+    esac
 
-    # Cap visual column width to prevent UI distortion
-    (( max_len > 35 )) && max_len=35
-
-    # 4. Data Stream Construction with Hidden Routing
-    for name in $valid_items; do
-        local type="${item_types[$name]}"
-        desc="${ZSH_DOCS[$name]:-}"
-        [[ -z "$desc" ]] && desc="<No description provided>"
-
-        local disp_name="${name:0:$max_len}"
-        local padded_name="${(r:$max_len:)disp_name}"
-        local color_type=$([[ "$type" == "Alias" ]] && echo "\033[38;5;114m" || echo "\033[1;38;5;39m")
-        
-        # CRITICAL ARCHITECTURE: Format is "RAW_CMD|VISUAL_STRING"
-        # The '|' acts as an unbreakable delimiter for fzf to separate logic from UI.
-        display_lines+=("${name}|\033[38;5;242m[\033[0m${color_type}${type}\033[0m\033[38;5;242m]\033[0m  \033[1;37m${padded_name}\033[0m  \033[38;5;238m│\033[0m  \033[38;5;250m${desc}\033[0m")
-    done
-
-    # 5. Header Mathematics
-    local header_pad
-    header_pad=$(printf '%*s' $((max_len - 7)) '')
-    local visual_header="   TYPE   COMMAND${header_pad} │  DESCRIPTION"
-
-    # 6. FZF Engine Execution
-    local fzf_choice
-    fzf_choice=$(print -l "${display_lines[@]}" | fzf --ansi \
-        --delimiter='\|' \
-        --with-nth=2 \
-        --highlight-line \
-        --ghost="Filter command atlas..." \
-        --prompt="   Search ❯ " \
-        --pointer="❯ " \
-        --marker="✔ " \
-        --layout=reverse \
-        --border=rounded \
-        --border-label=" 󰘳 Dusky Command Atlas " \
-        --border-label-pos=3 \
-        --padding=1,2 \
-        --margin=2%,5% \
-        --info=inline-right \
-        --header="$visual_header" \
-        --header-first \
-        --color="${DUSKY_FZF_COLORS:-bg+:#1e1e2e,bg:#11111b,fg:#cdd6f4}")
-
-    # 7. Action Router (Buffer Injection)
-    # If the user selected an item (didn't press ESC)
-    if [[ -n "$fzf_choice" ]]; then
-        # Natively strip everything from the delimiter onward to isolate the raw command name
-        local cmd="${fzf_choice%%|*}"
-        
-        # Inject the selected command directly onto the active Zsh prompt
-        print -z "$cmd"
-    fi
+    [[ -n $choice ]] && print -rz -- "$choice"
+    return 0
 }
 
 alias atlas='cmd_atlas'

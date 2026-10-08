@@ -1,0 +1,509 @@
+{
+  "tests": {
+    "passed": 86,
+    "seconds": 5.576,
+    "resource_warnings": "errors"
+  },
+  "matrix_benchmark": {
+    "operations": 542,
+    "old_seconds": 11.851019477999216,
+    "new_seconds": 0.02812173399979656,
+    "equivalent": true,
+    "speedup": 421.4185184343522
+  },
+  "configurations": [
+    {
+      "profile": "battery",
+      "target": "local",
+      "passed": true
+    },
+    {
+      "profile": "battery",
+      "target": "kvm",
+      "passed": true
+    },
+    {
+      "profile": "performance",
+      "target": "local",
+      "passed": true
+    },
+    {
+      "profile": "performance",
+      "target": "kvm",
+      "passed": true
+    },
+    {
+      "profile": "extreme_power",
+      "target": "local",
+      "passed": true
+    },
+    {
+      "profile": "extreme_power",
+      "target": "kvm",
+      "passed": true
+    },
+    {
+      "profile": "low_memory",
+      "target": "local",
+      "passed": true
+    },
+    {
+      "profile": "low_memory",
+      "target": "kvm",
+      "passed": true
+    }
+  ],
+  "stock_source": {
+    "files_checked": 95943,
+    "changed": [
+      "Makefile",
+      "scripts/package/PKGBUILD"
+    ],
+    "missing": []
+  },
+  "bundle_roundtrip": {
+    "passed": true,
+    "profile": "remote_workstation_battery",
+    "target_cpu": "alderlake",
+    "target_modules_preserved": true,
+    "native_removed": true
+  },
+  "packages": {
+    "passed": true,
+    "kernelrelease": "7.3.0-rc5-dusky-battery",
+    "module_files": 353,
+    "headers_external_build": true,
+    "packages": [
+      {
+        "file": "linux-dusky-battery-7.3.0rc5_dusky_battery-3-x86_64.pkg.tar.zst",
+        "bytes": 22152992,
+        "members": 552,
+        "dependencies": [
+          "kmod",
+          "python",
+          "systemd",
+          "util-linux"
+        ]
+      },
+      {
+        "file": "linux-dusky-battery-headers-7.3.0rc5_dusky_battery-3-x86_64.pkg.tar.zst",
+        "bytes": 13326585,
+        "members": 8049,
+        "dependencies": [
+          "clang",
+          "lld",
+          "llvm"
+        ]
+      }
+    ]
+  },
+  "builds": [
+    {
+      "kind": "complete package workflow with available objects/caches",
+      "seconds": 1453,
+      "steps": 8265,
+      "journal": "build-battery-20261004T134725Z.log"
+    },
+    {
+      "kind": "final incremental package workflow",
+      "seconds": 142,
+      "steps": 2571,
+      "journal": "build-battery-20261004T142707Z.log"
+    }
+  ],
+  "kvm": {
+    "qemu": "11.1.1",
+    "cpu": "host",
+    "cpus": 2,
+    "memory_mib": 1024,
+    "markers": [
+      "DUSKY_BOOT_OK 7.3.0-rc5-dusky-battery",
+      "DUSKY_VIRTIO_BLOCK_OK"
+    ]
+  },
+  "checkpoint": {
+    "completed": true,
+    "unsaved_marker": false
+  },
+  "limits": [
+    "No physical reboot or target installation",
+    "No production DKMS driver test",
+    "No desktop graphics/workload benchmark",
+    "No FDO recording/conversion"
+  ],
+  "critical_review": {
+    "files_reviewed": [
+      "user_scripts/kernel/dusky_kernel_compiler/DUSKY_KERNEL_VISUAL_MAP.md",
+      "user_scripts/kernel/dusky_kernel_compiler/README.md",
+      "user_scripts/kernel/dusky_kernel_compiler/audit/STOCK_AUDIT_2026-10-04.md",
+      "user_scripts/kernel/dusky_kernel_compiler/audit/STOCK_AUDIT_2026-10-04_evidence.json",
+      "user_scripts/kernel/dusky_kernel_compiler/dusky_kernal_compile.py",
+      "user_scripts/kernel/dusky_kernel_compiler/kernel_profiles/_SCHEMA_GUIDE.md",
+      "user_scripts/kernel/dusky_kernel_compiler/kernel_profiles/battery.toml",
+      "user_scripts/kernel/dusky_kernel_compiler/kernel_profiles/extreme_power.toml",
+      "user_scripts/kernel/dusky_kernel_compiler/kernel_profiles/low_memory.toml",
+      "user_scripts/kernel/dusky_kernel_compiler/kernel_profiles/performance.toml",
+      "user_scripts/kernel/dusky_kernel_compiler/kernel_profiles/schema.py",
+      "user_scripts/kernel/dusky_kernel_compiler/kernel_profiles/settings/kernel_settings.toml",
+      "user_scripts/kernel/dusky_kernel_compiler/kernel_storage.py",
+      "user_scripts/kernel/dusky_kernel_compiler/tests/test_kernel.py",
+      "user_scripts/kernel/dusky_kernel_compiler/tests/test_storage.py"
+    ],
+    "tests": {
+      "passed": 87,
+      "seconds": 5.544,
+      "resource_warnings": "errors"
+    },
+    "configurations": [
+      {
+        "profile": "battery",
+        "target": "local",
+        "ops": 544,
+        "soft": 3,
+        "modules": 351
+      },
+      {
+        "profile": "battery",
+        "target": "kvm",
+        "ops": 559,
+        "soft": 3,
+        "modules": 338
+      },
+      {
+        "profile": "performance",
+        "target": "local",
+        "ops": 540,
+        "soft": 3,
+        "modules": 351
+      },
+      {
+        "profile": "performance",
+        "target": "kvm",
+        "ops": 555,
+        "soft": 3,
+        "modules": 338
+      },
+      {
+        "profile": "extreme_power",
+        "target": "local",
+        "ops": 544,
+        "soft": 3,
+        "modules": 350
+      },
+      {
+        "profile": "extreme_power",
+        "target": "kvm",
+        "ops": 559,
+        "soft": 3,
+        "modules": 337
+      },
+      {
+        "profile": "low_memory",
+        "target": "local",
+        "ops": 537,
+        "soft": 3,
+        "modules": 350
+      },
+      {
+        "profile": "low_memory",
+        "target": "kvm",
+        "ops": 552,
+        "soft": 3,
+        "modules": 337
+      }
+    ],
+    "battery_config_byte_identical_to_built_kernel": true,
+    "zstd_bundle_roundtrip": {
+      "passed": true,
+      "profile": "remote_workstation_battery",
+      "target_cpu": "alderlake",
+      "target_modules_preserved": true,
+      "native_removed": true
+    },
+    "effective_profile_changes": {
+      "battery": {
+        "meta.description": {
+          "before": "Tuned laptop battery profile with gaming and VFIO retained",
+          "after": "Native laptop battery tuning with strict hardware census"
+        },
+        "release.min_version": {
+          "before": "7.2",
+          "after": "7.3-rc1"
+        },
+        "scheduler.scx_enable_class": {
+          "before": true,
+          "after": false
+        },
+        "scheduler.require_patch": {
+          "before": false,
+          "after": "<removed>"
+        },
+        "scheduler.allow_vanilla_fallback": {
+          "before": true,
+          "after": "<removed>"
+        },
+        "scheduler.patch_sources": {
+          "before": [
+            "cachyos",
+            "upstream_author",
+            "tkg"
+          ],
+          "after": "<removed>"
+        },
+        "dusky.patch_sched_inline": {
+          "before": true,
+          "after": "<removed>"
+        },
+        "dusky.patch_evdev_rcu": {
+          "before": true,
+          "after": "<removed>"
+        },
+        "dusky.patch_pci_pme": {
+          "before": true,
+          "after": "<removed>"
+        },
+        "dusky.extra_config": {
+          "before": {
+            "VFIO_DEVICE_CDEV": true,
+            "VFIO_GROUP": true,
+            "VFIO_CONTAINER": true,
+            "VFIO_VIRQFD": true,
+            "VFIO_PCI_INTX": true,
+            "VFIO_PCI_VGA": true,
+            "VFIO_PCI_IGD": true,
+            "VFIO_PCI_DMABUF": true,
+            "IOMMUFD_DRIVER": true,
+            "IOMMUFD_DRIVER_CORE": true,
+            "VIRTIO_MENU": true,
+            "VIRTIO_PCI": "m",
+            "VIRTIO_BLK": true,
+            "VIRTIO_NET": "m",
+            "DRM_VIRTIO_GPU": "m",
+            "DRM_BOCHS": "m"
+          },
+          "after": {}
+        },
+        "memory.zram_recomp_algo": {
+          "before": "lz4",
+          "after": "zstd"
+        },
+        "compiler.polly": {
+          "before": false,
+          "after": "<removed>"
+        },
+        "storage.extra_filesystems": {
+          "before": [
+            "btrfs",
+            "ext4",
+            "vfat",
+            "exfat",
+            "ntfs"
+          ],
+          "after": []
+        },
+        "modules.lmc_keep_extra": {
+          "before": [
+            "drivers/input",
+            "drivers/hid",
+            "sound/pci",
+            "drivers/vfio",
+            "drivers/i2c/busses"
+          ],
+          "after": []
+        },
+        "modules.keep_symbols": {
+          "before": [
+            "ACPI_BATTERY",
+            "ACPI_AC",
+            "TYPEC",
+            "TYPEC_UCSI",
+            "UCSI_ACPI",
+            "USB4",
+            "HID_MULTITOUCH",
+            "I2C_HID_ACPI",
+            "INTEL_HID_EVENT",
+            "IWLWIFI",
+            "IWLMVM",
+            "BT_HCIBTUSB",
+            "BT_INTEL",
+            "ASUS_WMI",
+            "ASUS_NB_WMI",
+            "WIREGUARD",
+            "TUN",
+            "I2C_NVIDIA_GPU",
+            "VFIO",
+            "VFIO_PCI",
+            "VFIO_PCI_CORE",
+            "VFIO_IOMMU_TYPE1",
+            "IOMMUFD",
+            "VIRTIO_PCI",
+            "VIRTIO_NET",
+            "DRM_VIRTIO_GPU",
+            "DRM_BOCHS"
+          ],
+          "after": []
+        },
+        "boot.cmdline_extra": {
+          "before": "pcie_aspm=force",
+          "after": ""
+        },
+        "boot.acs_override": {
+          "before": false,
+          "after": "<removed>"
+        },
+        "verify.optional_symbols": {
+          "before": [
+            "VFIO_PCI_DMABUF"
+          ],
+          "after": []
+        }
+      },
+      "performance": {
+        "release.min_version": {
+          "before": "7.2",
+          "after": "7.3-rc1"
+        },
+        "scheduler.require_patch": {
+          "before": false,
+          "after": "<removed>"
+        },
+        "scheduler.allow_vanilla_fallback": {
+          "before": true,
+          "after": "<removed>"
+        },
+        "scheduler.patch_sources": {
+          "before": [
+            "cachyos",
+            "upstream_author",
+            "tkg"
+          ],
+          "after": "<removed>"
+        },
+        "dusky.patch_sched_inline": {
+          "before": false,
+          "after": "<removed>"
+        },
+        "dusky.patch_evdev_rcu": {
+          "before": false,
+          "after": "<removed>"
+        },
+        "dusky.patch_pci_pme": {
+          "before": false,
+          "after": "<removed>"
+        },
+        "memory.zram_algo": {
+          "before": "lz4",
+          "after": "zstd"
+        },
+        "compiler.polly": {
+          "before": false,
+          "after": "<removed>"
+        },
+        "boot.acs_override": {
+          "before": false,
+          "after": "<removed>"
+        }
+      },
+      "extreme_power": {
+        "release.min_version": {
+          "before": "7.2",
+          "after": "7.3-rc1"
+        },
+        "scheduler.require_patch": {
+          "before": false,
+          "after": "<removed>"
+        },
+        "scheduler.allow_vanilla_fallback": {
+          "before": true,
+          "after": "<removed>"
+        },
+        "scheduler.patch_sources": {
+          "before": [
+            "cachyos",
+            "upstream_author",
+            "tkg"
+          ],
+          "after": "<removed>"
+        },
+        "dusky.patch_sched_inline": {
+          "before": false,
+          "after": "<removed>"
+        },
+        "dusky.patch_evdev_rcu": {
+          "before": false,
+          "after": "<removed>"
+        },
+        "dusky.patch_pci_pme": {
+          "before": false,
+          "after": "<removed>"
+        },
+        "compiler.polly": {
+          "before": false,
+          "after": "<removed>"
+        },
+        "boot.acs_override": {
+          "before": false,
+          "after": "<removed>"
+        }
+      },
+      "low_memory": {
+        "release.min_version": {
+          "before": "7.2",
+          "after": "7.3-rc1"
+        },
+        "scheduler.require_patch": {
+          "before": false,
+          "after": "<removed>"
+        },
+        "scheduler.allow_vanilla_fallback": {
+          "before": true,
+          "after": "<removed>"
+        },
+        "scheduler.patch_sources": {
+          "before": [
+            "cachyos",
+            "upstream_author",
+            "tkg"
+          ],
+          "after": "<removed>"
+        },
+        "dusky.patch_sched_inline": {
+          "before": false,
+          "after": "<removed>"
+        },
+        "dusky.patch_evdev_rcu": {
+          "before": false,
+          "after": "<removed>"
+        },
+        "dusky.patch_pci_pme": {
+          "before": false,
+          "after": "<removed>"
+        },
+        "compiler.polly": {
+          "before": false,
+          "after": "<removed>"
+        },
+        "boot.acs_override": {
+          "before": false,
+          "after": "<removed>"
+        }
+      }
+    },
+    "new_full_compilation": false,
+    "runtime_performance_comparison": "not measured",
+    "corrections": [
+      "performance ZRAM LZ4 override removed; inherits ZSTD",
+      "inactive battery LZ4 recompression override removed; inherits ZSTD",
+      "hardware bundle exports changed from gzip to ZSTD",
+      "THP/runtime documentation corrected"
+    ],
+    "stock_source_rechecked": {
+      "files_checked": 95943,
+      "changed": [
+        "Makefile",
+        "scripts/package/PKGBUILD"
+      ],
+      "missing": []
+    }
+  }
+}

@@ -9,27 +9,17 @@
 # 1. GTK, Qt & Core Theming
 # =============================================================================
 
+# GTK loads user CSS once. Publish complete palettes separately, and reload GTK3
+# using two identically laid-out adw-gtk3 wrappers (one theme change per update).
 [templates.gtk3]
 input_path  = '~/.config/matugen/templates/gtk3-colors.css'
 output_path = '~/.config/matugen/generated/gtk-3.css'
-post_hook   = '''
-  ln -nfs "$HOME/.config/matugen/generated/gtk-3.css" "$HOME/.config/gtk-3.0/gtk.css"
-  gsettings set org.gnome.desktop.interface gtk-theme "Adwaita" || :
-  gsettings set org.gnome.desktop.interface gtk-theme "adw-gtk3-dark" || :
-  # Portal file chooser (xdg-desktop-portal-gtk) caches theme at startup; new
-  # dialogs opened after a matugen switch would otherwise stay teal/cyan until
-  # next login. Cheap try-restart makes the next Select folder pick up pink.
-  systemctl --user try-restart xdg-desktop-portal-gtk >/dev/null 2>&1 || :
-'''
+post_hook   = 'python3 "$HOME/user_scripts/theme_matugen/global/gtk_colors.py" 3'
 
 [templates.gtk4]
 input_path  = '~/.config/matugen/templates/gtk4-colors.css'
 output_path = '~/.config/matugen/generated/gtk-4.css'
-post_hook   = '''
-  ln -nfs "$HOME/.config/matugen/generated/gtk-4.css" "$HOME/.config/gtk-4.0/gtk.css"
-  ln -nfs "/usr/share/themes/adw-gtk3-dark/gtk-4.0/libadwaita.css" "$HOME/.config/gtk-4.0/libadwaita.css"
-  ln -nfs "/usr/share/themes/adw-gtk3-dark/gtk-4.0/libadwaita-tweaks.css" "$HOME/.config/gtk-4.0/libadwaita-tweaks.css"
-'''
+post_hook   = 'python3 "$HOME/user_scripts/theme_matugen/global/gtk_colors.py" 4'
 
 [templates.gtksourceview]
 input_path  = '~/.config/matugen/templates/gtksourceview.xml'
@@ -81,11 +71,14 @@ colors_to_compare = [
 compare_to = "{{ colors.primary.default.hex }}"
 post_hook = '''
   if command -v papirus-folders >/dev/null 2>&1; then
-    nohup sudo -n papirus-folders -C {{ closest_color }} --theme Papirus-Dark -u > /dev/null 2>&1 &
-    sleep 0.35
-    # Refresh icon theme to force file managers to reload (Lab-matched folder color)
-    gsettings set org.gnome.desktop.interface icon-theme "Adwaita" 2>/dev/null || :
-    gsettings set org.gnome.desktop.interface icon-theme "Papirus-Dark" 2>/dev/null || :
+    # Refresh only after recoloring and cache updates finish. A fixed delay
+    # races slow machines and can leave applications showing the old icons.
+    if sudo -n papirus-folders -C {{ closest_color }} --theme Papirus-Dark -u > /dev/null; then
+      gsettings set org.gnome.desktop.interface icon-theme "Adwaita" 2>/dev/null || :
+      gsettings set org.gnome.desktop.interface icon-theme "Papirus-Dark" 2>/dev/null || :
+    else
+      echo "[matugen] papirus-folders failed; retaining the current icon theme" >&2
+    fi
   else
     echo "[matugen] papirus-folders not installed — install via: paru -S papirus-folders" >&2
   fi
@@ -94,28 +87,17 @@ post_hook = '''
 [templates.qt5ct]
 input_path  = '~/.config/matugen/templates/qtct-colors.conf'
 output_path = '~/.config/matugen/generated/qt5ct-colors.conf'
-post_hook   = '''
-  mkdir -p "$HOME/.config/qt5ct/colors"
-  ln -nfs "$HOME/.config/matugen/generated/qt5ct-colors.conf" "$HOME/.config/qt5ct/colors/matugen.conf"
-'''
+post_hook   = 'python3 "$HOME/user_scripts/theme_matugen/global/qt_colors.py" qt5ct'
 
 [templates.qt6ct]
 input_path  = '~/.config/matugen/templates/qtct-colors.conf'
 output_path = '~/.config/matugen/generated/qt6ct-colors.conf'
-post_hook   = '''
-  mkdir -p "$HOME/.config/qt6ct/colors"
-  ln -nfs "$HOME/.config/matugen/generated/qt6ct-colors.conf" "$HOME/.config/qt6ct/colors/matugen.conf"
-'''
+post_hook   = 'python3 "$HOME/user_scripts/theme_matugen/global/qt_colors.py" qt6ct'
 
 [templates.kdeglobals]
 input_path  = '~/.config/matugen/templates/Matugen.colors'
 output_path = '~/.config/matugen/generated/kdeglobals'
-post_hook   = '''
-  mkdir -p "$HOME/.local/share/color-schemes"
-  ln -nfs "$HOME/.config/matugen/generated/kdeglobals" "$HOME/.local/share/color-schemes/Matugen.colors"
-  ln -nfs "$HOME/.config/matugen/generated/kdeglobals" "$HOME/.config/kdeglobals"
-  dbus-send --session --type=signal /KGlobalSettings org.kde.KGlobalSettings.notifyChange int32:0 int32:0 || :
-'''
+post_hook   = 'python3 "$HOME/user_scripts/theme_matugen/global/kde_colors.py"'
 
 [templates.kate_syntax]
 input_path  = '~/.config/matugen/templates/kate-syntax.theme'
@@ -144,16 +126,12 @@ post_hook   = '''
 [templates.kvantum_kvconfig]
 input_path  = '~/.config/matugen/templates/kvantum-colors.kvconfig'
 output_path = '~/.config/matugen/generated/kvantum-matugen.kvconfig'
-post_hook   = '''
-  ln -nfs "$HOME/.config/matugen/generated/kvantum-matugen.kvconfig" "$HOME/.config/Kvantum/matugen/matugen.kvconfig"
-'''
+post_hook   = 'python3 "$HOME/user_scripts/theme_matugen/global/qt_colors.py" kvantum_kvconfig'
 
 [templates.kvantum_svg]
 input_path  = '~/.config/matugen/templates/kvantum-colors.svg'
 output_path = '~/.config/matugen/generated/kvantum-matugen.svg'
-post_hook   = '''
-  ln -nfs "$HOME/.config/matugen/generated/kvantum-matugen.svg" "$HOME/.config/Kvantum/matugen/matugen.svg"
-'''
+post_hook   = 'python3 "$HOME/user_scripts/theme_matugen/global/qt_colors.py" kvantum_svg'
 
 [templates.gimp]
 input_path  = '~/.config/matugen/templates/gimp.css'
@@ -179,6 +157,17 @@ post_hook   = 'hyprctl reload config-only || :'
 [templates.hyprlock]
 input_path  = '~/.config/matugen/templates/hyprlock-colors.conf'
 output_path = '~/.config/matugen/generated/hyprlock-colors.conf'
+
+[templates.dusky_cursor]
+input_path  = '~/.config/matugen/templates/dusky-cursor.env'
+output_path = '~/.config/matugen/generated/dusky-cursor.env'
+post_hook   = 'python3 "$HOME/user_scripts/cursor/color/dusky_cursor.py" --apply --quiet || echo "dusky_cursor: exit $?" >&2'
+
+# The script owns its own rotating log ($XDG_CACHE_HOME/dusky-cursor/hook.log),
+# so no shell redirection is needed. --quiet keeps matugen's terminal clean
+# (errors still reach stderr); a non-zero exit is surfaced instead of swallowed
+# by '|| :' so a broken hook is visible in matugen's output.
+
 
 [templates.waybar]
 input_path  = '~/.config/matugen/templates/colors.css'
@@ -360,7 +349,7 @@ post_hook   = '''
 # post_hook   = '''
 #   if command -v spicetify >/dev/null 2>&1 && [ -d "$HOME/.config/spicetify/Themes/Comfy" ]; then
 #       ln -nfs "$HOME/.config/matugen/generated/spotify-colors.ini" "$HOME/.config/spicetify/Themes/Comfy/color.ini"
-#       spicetify apply -n || :
+#       spicetify apply -n || spicetify backup apply || :
 #       hyprctl dispatch sendshortcut "CTRL_SHIFT, R, class:^(Spotify)$" || :
 #   fi
 # '''

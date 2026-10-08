@@ -8,12 +8,30 @@ templates in ~/.config/dusky_sites/ and ~/.config/dusky/settings/dusky_sites/con
 
 import os
 import json
+import re
 import tempfile
 import threading
 from pathlib import Path
 from typing import Any
 
 from python.frontend.core_types import BaseEngine
+
+_DOMAIN_RE = re.compile(r'domain\(\s*["\']([^"\']+)["\']\s*\)', re.IGNORECASE)
+_URL_HOST_RE = re.compile(r'(?:url|url-prefix)\(\s*["\'](?:https?://)?([^/"\']+)["\']\s*\)', re.IGNORECASE)
+
+
+def _doc_hosts(content: str) -> set[str]:
+    """Hosts a site template declares, mirroring the native host's parsing.
+
+    Covers domain("…") in either quote style plus url()/url-prefix() hosts,
+    lowercased exactly as the host normalises them for disabledSites checks,
+    so toggling a template disables every host the daemon would theme.
+    """
+    hosts = {d.lower() for d in _DOMAIN_RE.findall(content)}
+    hosts.update(h.lower() for h in _URL_HOST_RE.findall(content))
+    # Entries containing ':' (about: URLs, host:port, IPv6) can never equal an
+    # http(s) hostname the daemon themes, so keep them out of disabledSites.
+    return {h for h in hosts if h and ':' not in h}
 
 class DuskySitesEngine(BaseEngine):
     """
@@ -109,9 +127,13 @@ class DuskySitesEngine(BaseEngine):
                 domain = css_file.stem.lower()
                 try:
                     content = css_file.read_text(encoding="utf-8")
-                    match = re.search(r'@-moz-document\s+domain\("([^"]+)"\)', content)
-                    if match:
-                        domain = match.group(1).lower()
+                    m = _DOMAIN_RE.search(content)
+                    if m:
+                        domain = m.group(1).lower()
+                    else:
+                        u = _URL_HOST_RE.search(content)
+                        if u:
+                            domain = u.group(1).lower()
                 except Exception:
                     pass
 
@@ -178,8 +200,7 @@ class DuskySitesEngine(BaseEngine):
                         domains_to_toggle.add(f.stem.lower())
                         try:
                             content = f.read_text(encoding="utf-8")
-                            for m in re.finditer(r'@-moz-document\s+domain\("([^"]+)"\)', content):
-                                domains_to_toggle.add(m.group(1).lower())
+                            domains_to_toggle.update(_doc_hosts(content))
                         except Exception:
                             pass
 

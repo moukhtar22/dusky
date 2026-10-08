@@ -11,8 +11,10 @@ unset _b
 RUNTIME="${XDG_RUNTIME_DIR:-/run/user/${UID:-$(id -u)}}"
 STATE_DIR="$RUNTIME/waybar-net"
 STATE_FILE="$STATE_DIR/state"
+STATE_EXT_FILE="$STATE_DIR/state_ext"
 HEARTBEAT_FILE="$STATE_DIR/heartbeat"
 PID_FILE="$STATE_DIR/daemon.pid"
+SESSION_FILE="$STATE_DIR/conn_session"
 : "${STATE_DIR:?empty}"
 command mkdir -p "$STATE_DIR"
 printf '%s\n' "$$" > "$PID_FILE"
@@ -89,6 +91,47 @@ format_speed() {
         _class="network-kb"
     fi
 }
+format_single_rate() {
+    local -n _res=$1
+    local rate=$2
+    if (( rate >= 1038090240 )); then
+        local x10=$(( (rate * 10 + 536870912) / 1073741824 ))
+        if (( x10 < 100 )); then _res="$((x10 / 10)).$((x10 % 10))G"; else _res="$(( (rate + 536870912) / 1073741824 ))G"; fi
+    elif (( rate >= 1013760 )); then
+        local x10=$(( (rate * 10 + 524288) / 1048576 ))
+        if (( x10 < 100 )); then _res="$((x10 / 10)).$((x10 % 10))M"; else _res="$(( (rate + 524288) / 1048576 ))M"; fi
+    else
+        local kb=$(( (rate + 512) / 1024 ))
+        _res="${kb}K"
+    fi
+}
+format_data_bytes() {
+    local -n _res=$1
+    local -n _unit_out=$2
+    local bytes=$3
+    local mb=$(( (bytes + 524288) / 1048576 ))
+    if (( mb > 9999 )); then
+        local gb_x10=$(( (bytes * 10 + 536870912) / 1073741824 ))
+        if (( gb_x10 < 1000 )); then
+            _res="$(( gb_x10 / 10 )).$(( gb_x10 % 10 ))"
+            _unit_out="GB"
+        elif (( gb_x10 < 10000 )); then
+            _res="$(( (bytes + 536870912) / 1073741824 ))"
+            _unit_out="GB"
+        else
+            local tb_x10=$(( (bytes * 10 + 549755813888) / 1099511627776 ))
+            if (( tb_x10 < 100 )); then
+                _res="$(( tb_x10 / 10 )).$(( tb_x10 % 10 ))"
+            else
+                _res="$(( (bytes + 549755813888) / 1099511627776 ))"
+            fi
+            _unit_out="TB"
+        fi
+    else
+        _res="$mb"
+        _unit_out="MB"
+    fi
+}
 check_heartbeat() {
     local -n _hb_time=$1
     local now=$2
@@ -113,6 +156,20 @@ current_iface=""
 iface_counter=0
 hb_counter=2
 hb_time=0
+session_rx=0
+session_tx=0
+conn_rx_start=-1
+conn_tx_start=-1
+last_carrier_up=-1
+if [[ -r "$SESSION_FILE" ]]; then
+    read -r _s_if _s_cr _s_rx _s_tx < "$SESSION_FILE" 2>/dev/null || true
+    if [[ -n "${_s_if:-}" && "${_s_rx:-}" =~ ^[0-9]+$ && "${_s_tx:-}" =~ ^[0-9]+$ ]]; then
+        conn_rx_start="$_s_rx"
+        conn_tx_start="$_s_tx"
+        last_carrier_up="${_s_cr:--1}"
+        iface="$_s_if"
+    fi
+fi
 while :; do
     printf -v now '%(%s)T' -1
     if (( ++hb_counter >= 3 )); then
@@ -121,9 +178,11 @@ while :; do
     fi
     if (( now - hb_time > 10 )); then
         initialized=0
-        iface=""
         sleep 600 &
-        wait $! || true
+        _sleep_pid=$!
+        wait "$_sleep_pid" || true
+        kill "$_sleep_pid" 2>/dev/null || true
+        wait "$_sleep_pid" 2>/dev/null || true
         hb_counter=10
         continue
     fi
@@ -135,14 +194,32 @@ while :; do
     fi
     if [[ -z "$current_iface" ]]; then
         printf '%s\n' "- - - network-disconnected" > "$STATE_FILE"
+        printf '%s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s\n' \
+            "- -" "- -" "- -" "0" "0" "0" "0" "0" "0" \
+            "network-disconnected" "none" "MB" "MB" "MB" "MB" "MB" "GB" > "$STATE_EXT_FILE"
         rx_prev=0; tx_prev=0; prev_sample_us=0; initialized=0; iface=""
+        session_rx=0; session_tx=0; conn_rx_start=-1; conn_tx_start=-1; last_carrier_up=-1
+        rm -f "$SESSION_FILE" 2>/dev/null || true
         sleep 3 || true
         continue
     fi
     sample_us="${EPOCHREALTIME/./}"
-    if [[ "$current_iface" != "$iface" ]]; then
+    carrier_up=-1
+    if [[ -r "/sys/class/net/$current_iface/carrier_up_count" ]]; then
+        read -r carrier_up < "/sys/class/net/$current_iface/carrier_up_count" 2>/dev/null || carrier_up=-1
+    fi
+    if [[ "$current_iface" != "$iface" ]] || (( last_carrier_up != -1 && carrier_up != -1 && carrier_up != last_carrier_up )); then
         iface="$current_iface"
         initialized=0
+        conn_rx_start=-1
+        conn_tx_start=-1
+        session_rx=0
+        session_tx=0
+        last_carrier_up=$carrier_up
+        rm -f "$SESSION_FILE" 2>/dev/null || true
+    fi
+    if (( last_carrier_up == -1 && carrier_up != -1 )); then
+        last_carrier_up=$carrier_up
     fi
     read -r rx_now < "/sys/class/net/$iface/statistics/rx_bytes" 2>/dev/null || rx_now=0
     read -r tx_now < "/sys/class/net/$iface/statistics/tx_bytes" 2>/dev/null || tx_now=0
@@ -173,9 +250,44 @@ while :; do
     prev_sample_us=$sample_us
     rx_rate=$(( (rx_delta * 1000000 + dt_us / 2) / dt_us ))
     tx_rate=$(( (tx_delta * 1000000 + dt_us / 2) / dt_us ))
+    total_rate=$(( rx_rate + tx_rate ))
+
+    if (( conn_rx_start == -1 )); then
+        conn_rx_start=$rx_now
+        conn_tx_start=$tx_now
+        printf '%s %s %s %s\n' "$iface" "$carrier_up" "$conn_rx_start" "$conn_tx_start" > "$SESSION_FILE" 2>/dev/null || true
+    fi
+    session_rx=$(( rx_now - conn_rx_start ))
+    session_tx=$(( tx_now - conn_tx_start ))
+    if (( session_rx < 0 )); then session_rx=0; conn_rx_start=$rx_now; fi
+    if (( session_tx < 0 )); then session_tx=0; conn_tx_start=$tx_now; fi
+    session_total=$(( session_rx + session_tx ))
+    boot_rx=$rx_now
+    boot_tx=$tx_now
+    boot_total=$(( rx_now + tx_now ))
+
     format_speed unit tx_fmt rx_fmt class "$rx_rate" "$tx_rate"
+    format_single_rate rx_speed_fmt "$rx_rate"
+    format_single_rate tx_speed_fmt "$tx_rate"
+    format_single_rate total_speed_fmt "$total_rate"
+    format_data_bytes session_rx_fmt s_rx_u "$session_rx"
+    format_data_bytes session_tx_fmt s_tx_u "$session_tx"
+    format_data_bytes session_total_fmt s_tot_u "$session_total"
+    format_data_bytes boot_rx_fmt b_rx_u "$boot_rx"
+    format_data_bytes boot_tx_fmt b_tx_u "$boot_tx"
+    format_data_bytes boot_total_fmt b_tot_u "$boot_total"
+
     # shellcheck disable=SC2154
     printf '%s %s %s %s\n' "$unit" "$tx_fmt" "$rx_fmt" "$class" > "$STATE_FILE"
+    printf '%s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s\n' \
+        "$rx_speed_fmt" "$tx_speed_fmt" "$total_speed_fmt" \
+        "$session_rx_fmt" "$session_tx_fmt" "$session_total_fmt" \
+        "$boot_rx_fmt" "$boot_tx_fmt" "$boot_total_fmt" \
+        "$class" "$iface" \
+        "$s_rx_u" "$s_tx_u" "$s_tot_u" \
+        "$b_rx_u" "$b_tx_u" "$b_tot_u" > "$STATE_DIR/state_ext.tmp" 2>/dev/null && \
+        mv -f "$STATE_DIR/state_ext.tmp" "$STATE_EXT_FILE" 2>/dev/null || true
+
     end_time="${EPOCHREALTIME/./}"
     sleep_us=$(( 1000000 - (end_time - sample_us) ))
     if (( sleep_us <= 0 )); then

@@ -1,137 +1,143 @@
-# DwarFS Universal Toolkit — Arch Linux (Aug 2026)
+# DwarFS compression and game toolkit
 
-**One engine for any directory or game.** Compress once, mount instantly (no extract), writes go to `overlay-storage` (saves/mods persist, base image stays immutable). Replaces `FitGirl` `FreeArc` hours with milliseconds.
+Linux, Bash, Python (stdlib TOML), DwarFS and FUSE3. Audited with DwarFS
+0.15.7, Bash 5.3.20, Python 3.14.7 and fuse-overlayfs 1.18. Verify the final
+ISO package versions before release. Games optionally use Wine, bubblewrap
+and gamescope. No Xorg compatibility setup is included.
 
-Upstream: `mhx/dwarfs` `0.15.7` (`https://github.com/mhx/dwarfs`, `/mnt/zram1/dwarfs-main`). JC141 (`-jc141`) is a curated distro of this + `fuse-overlayfs` + `bubblewrap`.
+## Compress any directory
 
----
-
-## Layout
-
-```
-01_universal_actions/actions.sh   # THE engine — 10 cmds: mount/unmount/extract/compress/verify/recompress/info (universal [src] [dst], game is just a profile)
-02_templates/start.sh             # Single auto-detect launcher (native ELF vs Wine EXE)
-02_templates/generic/             # Reference templates (copy, don't edit code)
-  local.config.template           # Per-game overrides (all tunables, remove # to enable)
-  profile.toml.template           # Compression + game runner profile (all options documented)
-03_tools/mkdwarfs_auto.sh         # Profile-aware wrapper: --profile fast/balanced/max
-03_tools/profiles/                # 7 profiles — no code edits needed
-  balanced.toml  # default l7 64M zstd22 nilsimsa
-  fast.toml      # l3 quick
-  max.toml       # l9 lzma max ratio
-  reproducible.toml # bit-identical
-  game.toml      # alias to balanced (game = profile, not hardcoded)
-  game_ue.toml   # l5 for .pak-heavy UE
-  audio.toml     # pcmaudio (flac)
-```
-
-No hardcoded `dusk`/`12700H` — everything `$(id -u)`, `$(nproc)`, `MemTotal`, `$HOME`.
-
----
-
-## Requirements (Arch `doctor` passes)
-
-`dwarfs`, `fuse-overlayfs`, `fuse3`, `bubblewrap`, `psmisc` (`fuser`), `tree` (optional), `wine-staging` (wine games), `gamescope`/`gamemode` (optional).
-
----
-
-## Quick Start
-
-### Any folder (universal)
+Run from the toolkit directory:
 
 ```bash
-# Compress any dir
-bash 01_universal_actions/actions.sh dwarfs-compress ~/Documents ~/Documents.dwarfs
-# Or via wrapper with profile
-bash 03_tools/mkdwarfs_auto.sh ~/Documents --profile balanced  # → ~/Documents.dwarfs
-
-# Mount (no extract)
-mkdir /tmp/mnt && dwarfs ~/Documents.dwarfs /tmp/mnt && ls /tmp/mnt
-# Or overlay (writable)
-mkdir -p /tmp/game/files && cp -a ~/Documents /tmp/game/files/game-root
-cp 01_universal_actions/actions.sh /tmp/game/ && cp /usr/bin/dwarfs /tmp/game/files/dwarfs-binary
-cd /tmp/game && bash actions.sh dwarfs-compress && rm -rf files/game-root
-bash actions.sh dwarfs-mount && ls files/game-root && bash actions.sh dwarfs-unmount
+bash 03_tools/mkdwarfs_auto.sh ~/Documents --profile balanced
+# Output: ~/Documents.dwarfs
+bash 03_tools/mkdwarfs_auto.sh --profile fast ~/Documents --output ~/Documents-fast.dwarfs
+bash 01_universal_actions/actions.sh dwarfs-compress ~/Documents ~/archive.dwarfs
+DWARFS_IMAGE=~/archive.dwarfs bash 01_universal_actions/actions.sh dwarfs-verify
+DWARFS_IMAGE=~/archive.dwarfs bash 01_universal_actions/actions.sh dwarfs-info
+DWARFS_IMAGE=~/archive.dwarfs bash 01_universal_actions/actions.sh dwarfs-recompress 5
 ```
 
-### Game (native or Wine)
+Options can appear before or after the source: `-l N`, `--level N`, `-lN`,
+`--profile NAME`, `--output IMAGE`, `--reproducible`, `--par2`. A source containing
+`files/game-root` is treated as a game bundle; otherwise the directory itself
+is compressed. Explicit CLI choices override configuration defaults.
+A level override takes precedence over the profile's level;
+explicit profile codec and block settings still apply.
+
+Existing outputs produce an error. Output must be outside the source tree.
+Empty directories are supported. Partial images and interrupted extractions
+stay in temporary sibling directories and are cleaned on ordinary failure or
+handled signals. Signal forwarding stops workers and waits for cleanup before
+the command returns. SIGKILL or power loss can leave these temporary directories;
+the final image is published only after compression completes. Recompression
+verifies the temporary image before replacing the original. Publication by
+`mv --no-copy` must succeed as a rename; it cannot fall back to a partial copy.
+
+## Game bundle
 
 ```bash
-# 1. Prepare installed game (GOG/Steam/Lutris) → /tmp/MyGame/files/game-root
-mkdir -p /tmp/MyGame/files/game-root && cp -a ~/Games/MyGame/* /tmp/MyGame/files/game-root/
-
-# 2. Add engine + launcher
-cp 01_universal_actions/actions.sh /tmp/MyGame/
+mkdir -p /tmp/MyGame/files/game-root
+cp -a ~/Games/MyGame/. /tmp/MyGame/files/game-root/
+cp 01_universal_actions/actions.sh /tmp/MyGame/actions.sh
 cp 02_templates/start.sh /tmp/MyGame/start.sh
-cp /usr/bin/dwarfs /tmp/MyGame/files/dwarfs-binary && chmod +x /tmp/MyGame/files/dwarfs-binary
-
-# 3. Compress (game is just balanced profile)
-cd /tmp/MyGame && bash actions.sh dwarfs-compress
-# Generic alternative: bash ../../03_tools/mkdwarfs_auto.sh /tmp/MyGame --profile game
-
-# 4. Run (auto-detects ./Game.x86_64 vs steamclient_loader_x64.exe vs *.exe)
+cp 03_tools/profiles/balanced.toml /tmp/MyGame/balanced.toml
+cp 02_templates/generic/local.config.template /tmp/MyGame/local.config
+cd /tmp/MyGame
+bash actions.sh dwarfs-compress
+bash actions.sh dwarfs-verify
+# After verification, move the original game-root elsewhere to enable mounting.
 bash start.sh
-# Config: cp 02_templates/generic/local.config.template local.config && edit CUSTOM_CMD, GAMESCOPE, ISOLATE
 ```
 
-### Master Runner (Python TOML, for library)
+System DwarFS tools are used by default. An optional `files/dwarfs-binary`
+can be a universal executable (`--tool=...`), standalone FUSE driver, or
+standalone compressor; other tools come from PATH. A copied engine needs a profile
+TOML beside it or `DWARFS_PROFILES_DIR` pointing to the toolkit's profiles.
 
-```bash
-cp 02_templates/generic/profile.toml.template ~/user_scripts/gaming/runner/profiles/my_game.toml
-# edit game_dir, executable, extends = "base_wine_dxvk" / "base_native"
-python3 ~/user_scripts/gaming/runner/master_runner.py validate my_game
-python3 ~/user_scripts/gaming/runner/master_runner.py run my_game
-```
+The launcher prefers `steamclient_loader_x64.exe`, then an executable
+`*.x86_64`, then an EXE, searching at most three directory levels. Set
+`CUSTOM_CMD=("./My Game" "--option")` when discovery is ambiguous. Strings
+support shell quoting but no expansion. Launcher arguments are appended.
+Automatic Wine launch uses the absolute EXE path and honors `SYSWINE` and
+`WINEPREFIX`; Wine initializes a missing prefix. A custom Wine command should
+set `WINEPREFIX` and `ISOLATION_TYPE=wine` explicitly if isolation is enabled.
 
----
+## Mounting and extraction
 
-## Profiles — No Code Edits
+`dwarfs-mount` mounts the image read-only and adds a writable fuse-overlayfs
+layer at `files/game-root`. Writes persist in `files/overlay-storage`, with
+`files/.game-root-work` on the same filesystem. The block cache limit is 25%
+of physical RAM per mounted image; DwarFS uses its documented cache tidying
+options. Paths for overlays cannot contain commas, colons or backslashes (option delimiters).
 
-Add a game or folder by **copying a TOML**, not editing code:
+Mounting is idempotent. Directory locks serialize mount/unmount/extraction
+transitions for each `GAME_DIR`. A launcher holds the lock for its session; a
+second launcher for the same directory fails immediately. Standalone mount and
+unmount commands wait for that session to finish. FUSE daemons do not inherit
+the lock. Local Linux filesystems with working `flock` are required.
+Existing extracted files are used as-is. Unmounting uses normal FUSE3 unmounts, reports busy mounts, retains backing directories
+on failure, and removes only empty mountpoint directories. It never kills
+unrelated game processes or recursively deletes backing directories.
+The launcher forwards signals to the launched process group, then cleans up
+only a mount it created and only with `UNMOUNT=1`.
+If mounting fails, it attempts a clean unmount before extraction.
 
-```bash
-cp 03_tools/profiles/balanced.toml 03_tools/profiles/my.toml
-# edit level, block_size_bits, categorize
-DWARFS_PROFILE=my bash actions.sh dwarfs-compress ~/MyFolder ~/MyFolder.dwarfs
-# Or: bash 03_tools/mkdwarfs_auto.sh ~/MyGame --profile my
-```
+`dwarfs-extract` extracts into a sibling temporary directory before publishing
+`files/game-root`. A nonempty existing extracted directory is treated as
+already installed; move incomplete pre-existing extractions aside to retry.
+`dwarfs-extract-language` uses `_LANGUAGE` from `language.config`.
+When selected, a language image takes precedence over the base mount.
+Compression with no source arguments also compresses visible language
+subdirectories; explicit source arguments operate on that source only.
 
-| Profile | Use |
+## Profiles and configuration
+
+| Profile | Settings |
 |---|---|
-| `balanced` | Default `l7` 64M — games, docs |
-| `fast` | `l3` quick test |
-| `max` | `l9` lzma — archival |
-| `reproducible` | Bit-identical (`--set-time=0 --num-workers=1`) |
-| `game` | Alias to `balanced` (game = profile) |
-| `game_ue` | `l5` for `.pak` (UE, already compressed) |
-| `audio` | `pcmaudio` flac for `.wav` |
+| balanced | Level 7, 16MiB blocks, zstd22, nilsimsa, one-block lookback |
+| game | Level 7, 16MiB blocks, nilsimsa; game path convention |
+| fast | Level 3, 2MiB blocks, lz4hc9 |
+| max | Level 9, 64MiB blocks, lzma9; slower reads |
+| reproducible | Level 7, fixed time, no creation timestamp/history, one worker |
+| game_ue | Level 5, 8MiB blocks, zstd19, incompressible category with null codec |
+| audio | Level 7, zstd22; PCM waveforms use FLAC |
 
-Env overrides (alternative to profile): `DWARFS_REPRODUCIBLE=1`, `DWARFS_AUTOCATEGORIZE=1`, `DWARFS_OWNER=1000`, `DWARFS_PROFILE=game`, `DWARFS_FILTER="-*.tmp"`.
+Profiles are parsed with `tomllib`; malformed TOML, unknown keys and invalid
+basic types fail before compression. `input`/`output` in game profiles are
+descriptive; command arguments and path environment variables select paths.
+`profile.toml.template` includes commented runner examples; the separate
+Python game runner is not required by this toolkit.
 
----
+Configuration loads in order: `~/.jc141rc`, `GAME_DIR/local.config`, then
+`GAME_DIR/language.config`. These are trusted Bash files. No configuration
+files are automatically generated. Paths default to the directory containing
+`actions.sh`. Configured paths resolve against `GAME_DIR`; explicit relative
+source/image arguments use the calling working directory.
+See `local.config.template` for launcher options and overrides.
 
-## How It Works
+Compression preserves source permissions and timestamps unless the profile
+or reproducible mode overrides them; image ownership defaults to the current
+UID/GID. `DWARFS_REPRODUCIBLE=1` fixes time and worker settings and removes the
+creation timestamp. Reproducibility requires unchanged input, profile and tool
+build; it is not a guarantee across DwarFS or codec upgrades.
+`DWARFS_AUTOCATEGORIZE=1` scans filenames once: more than five WAVs enables
+PCM categorization; over 500MiB of PAK/ZIP/MP4/BIN files enables incompressible
+categorization. Automatic categorization puts `incompressible` last, allowing
+specialized categorizers to inspect files first. `DWARFS_PAR2=1` requires `par2`.
 
-1. **Compress:** `mkdwarfs -l7 -B26 -S26 --order=nilsimsa` → `game-root.dwarfs` (dedup + similarity, 64M blocks, `zstd22`). `tree` → `dwarfs-tree`.
-2. **Mount:** `dwarfs image mnt -o cachesize=25%RAM,clone_fd,tidy_strategy=time` (kernel cache) + `fuse-overlayfs` (`lowerdir=mnt,upperdir=overlay-storage,workdir=.work` → `game-root`). Base is read-only, writes go to `upperdir` (saves survive remount).
-3. **Verify:** `dwarfs-verify` = `dwarfsck --check-integrity`.
-4. **Recompress:** `dwarfs-recompress 5` = `mkdwarfs --recompress -l5` (no rescan).
+`DWARFS_EXTRA_OPTS`, `DWARFSEXTRACT_EXTRA`, and `ADDITIONAL_FLAGS` accept quoted
+argument strings. `ENV` is trusted shell setup executed before the command.
+`ISOLATE=1` uses bubblewrap with writable game files and Wine prefix; native
+launches use `JC_DIRECTORY/native-docs` as the writable home. Narrow game binds
+follow the home bind so games under `$HOME` stay visible.
+An external `GAME_ROOT` is also writable. The existing Wayland/audio runtime
+sockets remain visible. `GAMESCOPE=1` wraps the launch.
+These optional graphical paths require testing in the target desktop session.
 
----
+`dwarfs-verify` checks integrity of every image block. Optional
+`DWARFS_VERIFY_CHECKSUM=1` also prints SHA-256 checksums of image files; these
+are not automatically compared against the host's source files.
 
-## Config (local.config.template)
-
-All tunables in one file — `local.config` per game overrides `~/.jc141rc` global. See `02_templates/generic/local.config.template` for every option (`UNMOUNT`, `EXTRACT`, `SYSWINE`, `ISOLATE`, `BLOCK_NET`, `GAMESCOPE`, `DWARFS_*`). Remove `#` to enable.
-
----
-
-## Verify
-
-```bash
-bash 01_universal_actions/actions.sh dwarfs-compress ~/Documents ~/Documents.dwarfs
-dwarfsck -i ~/Documents.dwarfs --check-integrity && echo OK
-dwarfs ~/Documents.dwarfs /tmp/mnt && ls /tmp/mnt && fusermount3 -u /tmp/mnt
-```
-
-Years from now: `README` + `local.config.template` + `profile.toml.template` are your only docs — everything configurable lives there.
-
+Upstream reference: https://github.com/mhx/dwarfs/blob/main/doc/mkdwarfs.md

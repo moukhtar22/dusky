@@ -15,7 +15,7 @@ shopt -s extglob
 # CONFIGURATION
 # =============================================================================
 
-declare -r GIT_DIR="${HOME}/dusky/"
+declare -r GIT_DIR="${HOME}/dusky"
 declare -r WORK_TREE="${HOME}"
 declare -r STATE_FILE="${HOME}/.config/dusky/settings/dusky_update_behind_commit"
 declare -r STATE_DIR="${STATE_FILE%/*}"
@@ -43,14 +43,66 @@ declare -ri MIN_TERM_ROWS=$(( MAX_DISPLAY_ROWS + 9 ))
 # Debug mode
 declare _debug_env="${DEBUG:-0}"
 declare -i DEBUG=0
-[[ $_debug_env =~ ^[1-9][0-9]*$ ]] && DEBUG=$_debug_env
+if [[ $_debug_env =~ ^[1-9][0-9]*$ ]]; then
+    DEBUG=$_debug_env
+fi
 unset _debug_env
 
 # Default refspec for --fix-config
 declare -r FETCH_REFSPEC='+refs/heads/*:refs/remotes/origin/*'
 
-# Git command
-declare -ra GIT_CMD=(/usr/bin/git --git-dir="$GIT_DIR" --work-tree="$WORK_TREE")
+# Git command with safe.directory override to prevent dubious ownership halts
+declare -ra GIT_CMD=(/usr/bin/git -c "safe.directory=*" --git-dir="$GIT_DIR" --work-tree="$WORK_TREE")
+
+# ANSI ESCAPE CODES
+declare _hbuf=''
+printf -v _hbuf '%*s' "$BOX_INNER_WIDTH" ''
+declare -r H_LINE="${_hbuf// /─}"
+unset _hbuf
+
+declare -r C_RESET=$'\e[0m'     C_CYAN=$'\e[1;36m'    C_GREEN=$'\e[1;32m'
+declare -r C_YELLOW=$'\e[1;33m' C_MAGENTA=$'\e[1;35m' C_WHITE=$'\e[1;37m'
+declare -r C_GREY=$'\e[1;30m'   C_RED=$'\e[1;31m'     C_INVERSE=$'\e[7m'
+
+declare -r CLR_EOL=$'\e[K'      CLR_EOS=$'\e[J'       CLR_SCREEN=$'\e[2J'
+declare -r CUR_HOME=$'\e[H'     CUR_HIDE=$'\e[?25l'   CUR_SHOW=$'\e[?25h'
+declare -r MOUSE_ON=$'\e[?1000h\e[?1002h\e[?1006h'
+declare -r MOUSE_OFF=$'\e[?1000l\e[?1002l\e[?1006l'
+
+# TUI STATE
+declare -i SELECTED_ROW=0 SCROLL_OFFSET=0
+declare -i TOTAL_COMMITS=0 BEHIND_COUNT=0 LOCAL_REV=0 REMOTE_REV=0
+declare -i TERM_ROWS=0 TERM_COLS=0
+declare -i TUI_ACTIVE=0
+declare -i GLOBAL_LOCK_FD=-1
+declare -a COMMIT_HASHES=() COMMIT_MSGS=()
+declare ORIGINAL_STTY="" FETCH_STATUS="OK" FETCH_INFO=""
+
+# =============================================================================
+# CLEANUP & TRAPS (Registered early so ANY failure is caught and exits 0)
+# =============================================================================
+
+cleanup() {
+    # Disable traps to avoid recursion during shutdown
+    trap - ERR EXIT INT TERM HUP 2>/dev/null || true
+
+    if (( TUI_ACTIVE )); then
+        printf '%s%s%s\n' "$MOUSE_OFF" "$CUR_SHOW" "$C_RESET" 2>/dev/null || true
+    fi
+    if [[ -n ${ORIGINAL_STTY:-} ]]; then
+        /usr/bin/stty "$ORIGINAL_STTY" 2>/dev/null || true
+    fi
+    if (( GLOBAL_LOCK_FD >= 0 )); then
+        exec {GLOBAL_LOCK_FD}>&- 2>/dev/null || true
+        GLOBAL_LOCK_FD=-1
+    fi
+    exit 0
+}
+
+trap 'cleanup' EXIT
+trap 'cleanup' INT TERM HUP
+trap 'cleanup' ERR
+trap 'true' WINCH
 
 # =============================================================================
 # UTILITIES
@@ -59,23 +111,51 @@ declare -ra GIT_CMD=(/usr/bin/git --git-dir="$GIT_DIR" --work-tree="$WORK_TREE")
 _debug() {
     (( DEBUG )) || return 0
     printf '[DEBUG] %s\n' "$*" >&2
+    return 0
 }
 
 _sleep() {
-    /usr/bin/sleep "${1:-1}"
+    /usr/bin/sleep "${1:-1}" 2>/dev/null || true
+    return 0
 }
 
-# Fast offline probe: 3s max vs 34s fetch timeout. Uses bash /dev/tcp (no ICMP)
-# and falls back to ping if /dev/tcp is blocked. Returns 0 if online.
+# Fast offline probe: checks routing table first (0ms), then raw IP TCP ping (30ms).
+# Returns 0 if online, 1 if definitively offline.
 _has_network() {
-    # TCP probe to github.com:443 (most reliable, no ICMP filtering) - 2s timeout
-    if /usr/bin/timeout 2 bash -c 'exec 3<>/dev/tcp/github.com/443' 2>/dev/null; then
+    # 1. Immediate kernel route table check (~0ms, no network packets)
+    local ip_cmd
+    ip_cmd=$(command -v /usr/bin/ip || command -v ip || true)
+    if [[ -n "$ip_cmd" ]]; then
+        if ! "$ip_cmd" route show default 2>/dev/null | grep -q default && \
+           ! "$ip_cmd" route get 1.1.1.1 &>/dev/null; then
+            _debug "No network route found via ip route"
+            return 1
+        fi
+    fi
+
+    # 2. Proxy environment variable check
+    if [[ -n ${http_proxy:-} || -n ${https_proxy:-} || -n ${HTTP_PROXY:-} || -n ${HTTPS_PROXY:-} || -n ${ALL_PROXY:-} ]]; then
+        _debug "Proxy environment detected, assuming online"
         return 0
     fi
-    # Fallback ICMP probe for environments where /dev/tcp is filtered (2s)
+
+    # 3. Direct TCP probes to high-availability DNS root IPs (bypasses DNS resolution)
+    if /usr/bin/timeout 2 bash -c 'exec 3<>/dev/tcp/1.1.1.1/53' 2>/dev/null || \
+       /usr/bin/timeout 2 bash -c 'exec 3<>/dev/tcp/8.8.8.8/53' 2>/dev/null || \
+       /usr/bin/timeout 2 bash -c 'exec 3<>/dev/tcp/1.1.1.1/443' 2>/dev/null; then
+        return 0
+    fi
+
+    # 4. Host probe fallback
+    if /usr/bin/timeout 3 bash -c 'exec 3<>/dev/tcp/github.com/443' 2>/dev/null; then
+        return 0
+    fi
+
+    # 5. ICMP probe fallback
     if /usr/bin/timeout 2 /usr/bin/ping -q -c1 -W1 1.1.1.1 >/dev/null 2>&1; then
         return 0
     fi
+
     return 1
 }
 
@@ -90,6 +170,7 @@ _strip_ansi() {
         str="${BASH_REMATCH[2]}"
     done
     _out_ref+="$str"
+    return 0
 }
 
 _sanitize_terminal_text() {
@@ -99,6 +180,7 @@ _sanitize_terminal_text() {
     _strip_ansi "$1" stripped
     stripped=${stripped//[[:cntrl:]]/ }
     _out_ref=$stripped
+    return 0
 }
 
 _ellipsize() {
@@ -116,6 +198,7 @@ _ellipsize() {
             _out_ref="${_out_ref:0:max_len-1}…"
         fi
     fi
+    return 0
 }
 
 _redact_url() {
@@ -128,6 +211,7 @@ _redact_url() {
     elif [[ $url =~ ^[^/@]+@([^:]+:.+)$ ]]; then
         _out_ref="***@${BASH_REMATCH[1]}"
     fi
+    return 0
 }
 
 origin_to_https_url() {
@@ -136,7 +220,7 @@ origin_to_https_url() {
 
     _out_ref=''
 
-    if [[ $origin_url =~ ^https://.+$ ]]; then
+    if [[ $origin_url =~ ^https?://.+$ ]]; then
         _out_ref=$origin_url
         return 0
     fi
@@ -164,35 +248,36 @@ get_lock_file() {
 
     if [[ -n ${XDG_RUNTIME_DIR:-} && -d ${XDG_RUNTIME_DIR:-} && -w ${XDG_RUNTIME_DIR:-} ]]; then
         lock_dir=$XDG_RUNTIME_DIR
-    else
+    elif [[ -d $STATE_DIR && -w $STATE_DIR ]] || mkdir -p -m 700 -- "$STATE_DIR" 2>/dev/null; then
         lock_dir=$STATE_DIR
-        if [[ -e $lock_dir && ! -d $lock_dir ]]; then
-            return 1
-        fi
-        [[ -d $lock_dir ]] || mkdir -p -m 700 -- "$lock_dir"
+    else
+        lock_dir="/tmp"
     fi
 
     printf '%s/%s' "$lock_dir" "$LOCK_BASENAME"
+    return 0
 }
 
 git_fetch() {
-    local ssh_cmd="/usr/bin/ssh -oBatchMode=yes -oStrictHostKeyChecking=yes -oConnectTimeout=${TIMEOUT_SEC}"
+    local ssh_cmd="/usr/bin/ssh -oBatchMode=yes -oStrictHostKeyChecking=accept-new -oConnectTimeout=${TIMEOUT_SEC}"
 
-    GIT_TERMINAL_PROMPT=0 \
-    GIT_ASKPASS=/usr/bin/false \
-    SSH_ASKPASS=/usr/bin/false \
-    GIT_SSH_COMMAND="$ssh_cmd" \
-        /usr/bin/timeout --kill-after="$TIMEOUT_KILL_SEC" "$TIMEOUT_SEC" \
-        "${GIT_CMD[@]}" \
-        -c credential.interactive=never \
-        fetch \
-        --atomic \
-        --quiet \
-        --prune \
-        --no-write-fetch-head \
-        --no-auto-gc \
-        "$@" \
-        2>/dev/null
+    if GIT_TERMINAL_PROMPT=0 \
+       GIT_ASKPASS="" \
+       SSH_ASKPASS="" \
+       GIT_SSH_COMMAND="$ssh_cmd" \
+       /usr/bin/timeout --kill-after="$TIMEOUT_KILL_SEC" "$TIMEOUT_SEC" \
+       "${GIT_CMD[@]}" \
+       -c credential.interactive=never \
+       fetch \
+       --quiet \
+       --prune \
+       --no-write-fetch-head \
+       --no-auto-gc \
+       "$@" \
+       2>/dev/null; then
+        return 0
+    fi
+    return 1
 }
 
 _git_rev_count() {
@@ -206,35 +291,36 @@ _git_rev_count() {
 
     [[ $_raw_count =~ ^[0-9]+$ ]] || return 1
     _out_ref=$_raw_count
+    return 0
 }
 
 write_state_file() {
     local value=$1
     local tmp=''
 
-    [[ -d "$STATE_DIR" ]] || mkdir -p "$STATE_DIR"
+    [[ -d "$STATE_DIR" ]] || mkdir -p "$STATE_DIR" 2>/dev/null || true
 
-    tmp=$(/usr/bin/mktemp --tmpdir="$STATE_DIR" '.dusky_update_behind_commit.XXXXXX') || return 1
-
-    if ! printf '%s\n' "$value" > "$tmp"; then
-        /usr/bin/rm -f -- "$tmp" || true
-        return 1
+    if tmp=$(/usr/bin/mktemp --tmpdir="$STATE_DIR" '.dusky_update_behind_commit.XXXXXX' 2>/dev/null); then
+        if printf '%s\n' "$value" > "$tmp" 2>/dev/null && /usr/bin/mv -f -- "$tmp" "$STATE_FILE" 2>/dev/null; then
+            return 0
+        fi
+        /usr/bin/rm -f -- "$tmp" 2>/dev/null || true
     fi
 
-    if ! /usr/bin/mv -f -- "$tmp" "$STATE_FILE"; then
-        /usr/bin/rm -f -- "$tmp" || true
-        return 1
-    fi
+    # Fallback to direct write if mktemp fails
+    printf '%s\n' "$value" > "$STATE_FILE" 2>/dev/null || return 1
+    return 0
 }
 
 read_state_value() {
     local value=''
 
     [[ -r "$STATE_FILE" ]] || return 1
-    IFS= read -r value < "$STATE_FILE" || return 1
+    IFS= read -r value < "$STATE_FILE" 2>/dev/null || return 1
     [[ $value =~ ^-?[0-9]+$ ]] || return 1
 
     printf '%s' "$value"
+    return 0
 }
 
 get_terminal_size() {
@@ -269,11 +355,11 @@ validate_environment() {
         return 1
     fi
 
-    for cmd in /usr/bin/git /usr/bin/timeout /usr/bin/flock /usr/bin/mktemp /usr/bin/mv /usr/bin/rm /usr/bin/sleep /usr/bin/ssh; do
-        [[ -x $cmd ]] || {
+    for cmd in git timeout flock mktemp mv rm sleep ssh; do
+        if ! command -v "$cmd" &>/dev/null && ! [[ -x "/usr/bin/$cmd" ]]; then
             printf 'ERROR: Required command not found: %s\n' "$cmd" >&2
             return 1
-        }
+        fi
     done
 
     [[ -d "$WORK_TREE" ]] || {
@@ -300,10 +386,10 @@ validate_environment() {
 }
 
 validate_terminal() {
-    [[ -x /usr/bin/stty ]] || {
-        printf 'ERROR: Required command not found: /usr/bin/stty\n' >&2
+    if ! command -v /usr/bin/stty &>/dev/null && ! command -v stty &>/dev/null; then
+        printf 'ERROR: Required command not found: stty\n' >&2
         return 1
-    }
+    fi
 
     [[ -t 0 && -t 1 ]] || {
         printf 'ERROR: Interactive mode requires a terminal.\n' >&2
@@ -324,8 +410,6 @@ validate_terminal() {
 # ROBUST FETCH LOGIC
 # =============================================================================
 
-declare FETCH_INFO=""
-
 get_fetch_remote() {
     local head_branch='' remote=''
 
@@ -342,11 +426,9 @@ get_fetch_remote() {
         return 0
     fi
 
-    # No tracking config and no literal 'origin' remote: with exactly one
-    # remote configured there is no ambiguity, so use it instead of erroring.
     local -a remotes=()
     mapfile -t remotes < <("${GIT_CMD[@]}" remote 2>/dev/null)
-    if (( ${#remotes[@]} == 1 )) && [[ -n ${remotes[0]} ]]; then
+    if (( ${#remotes[@]} == 1 )) && [[ -n ${remotes[0]:-} ]]; then
         printf '%s' "${remotes[0]}"
         return 0
     fi
@@ -366,9 +448,9 @@ robust_fetch() {
         shift
     fi
 
-    # Fast offline check: fail in ~2-3s instead of blocking 2×17s fetch timeouts.
+    # Fast offline check
     if ! _has_network; then
-        FETCH_INFO="Network unavailable (offline check failed)"
+        FETCH_INFO="Network unavailable (offline)"
         _debug "Offline probe failed - skipping fetch"
         return 1
     fi
@@ -397,27 +479,26 @@ robust_fetch() {
         return 1
     fi
 
-    if ! exec {lock_fd}> "$lock_file"; then
+    if ! exec {lock_fd}> "$lock_file" 2>/dev/null; then
         FETCH_INFO="Cannot open fetch lock file"
         _debug "Failed to open fetch lock: $lock_file"
         return 1
     fi
+    GLOBAL_LOCK_FD=$lock_fd
 
-    # TUI uses short wait (3s) so it never blocks 35s on a
-    # background --num job. Background mode keeps full wait to avoid
-    # flapping when two timers race. Explicit --tui flag is preferred;
-    # fallback to tty check for any direct calls.
     local -i _lock_wait=$LOCK_WAIT_SEC
-    if [[ $_fetch_mode == "tui" ]]; then
-        _lock_wait=$LOCK_WAIT_TUI_SEC
-    elif [[ -t 0 && -t 1 ]]; then
+    if [[ $_fetch_mode == "tui" ]] || [[ -t 0 && -t 1 ]]; then
         _lock_wait=$LOCK_WAIT_TUI_SEC
     fi
     _debug "Lock wait: ${_lock_wait}s (mode=${_fetch_mode})"
+
     if ! /usr/bin/flock -w "$_lock_wait" "$lock_fd"; then
         FETCH_INFO="Another update check is already running"
         _debug "Could not acquire fetch lock: $lock_file"
-        exec {lock_fd}>&-
+        if (( GLOBAL_LOCK_FD >= 0 )); then
+            exec {GLOBAL_LOCK_FD}>&- 2>/dev/null || true
+            GLOBAL_LOCK_FD=-1
+        fi
         return 1
     fi
 
@@ -432,8 +513,6 @@ robust_fetch() {
             FETCH_INFO="Primary fetch failed and no HTTPS fallback is available"
             _debug "URL format not recognized"
         elif [[ $https_url == "$remote_url" ]]; then
-            # Already HTTPS: retrying the identical URL would just burn the
-            # full timeout again for zero benefit.
             FETCH_INFO="Primary fetch failed"
             _debug "HTTPS fallback identical to primary URL - skipped"
         else
@@ -450,7 +529,10 @@ robust_fetch() {
         fi
     fi
 
-    exec {lock_fd}>&-
+    if (( GLOBAL_LOCK_FD >= 0 )); then
+        exec {GLOBAL_LOCK_FD}>&- 2>/dev/null || true
+        GLOBAL_LOCK_FD=-1
+    fi
     return "$rc"
 }
 
@@ -459,20 +541,36 @@ robust_fetch() {
 # =============================================================================
 
 get_upstream_ref() {
-    local tracking=''
+    local tracking='' head_branch='' remote=''
 
+    # 1. Explicit upstream tracking branch
     if tracking=$("${GIT_CMD[@]}" rev-parse --abbrev-ref '@{upstream}' 2>/dev/null) &&
-       [[ -n $tracking ]]; then
+       [[ -n $tracking && $tracking != '@{upstream}' ]]; then
         printf '%s' "$tracking"
         return 0
     fi
 
+    # 2. Remote tracking HEAD symbolic ref
     if tracking=$("${GIT_CMD[@]}" symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null) &&
        [[ -n $tracking ]]; then
         printf '%s' "$tracking"
         return 0
     fi
 
+    # 3. Detect current branch and probe matching remote branch
+    head_branch=$("${GIT_CMD[@]}" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+    if [[ -n $head_branch ]]; then
+        for remote in origin "$("${GIT_CMD[@]}" remote 2>/dev/null | head -n 1 || true)"; do
+            [[ -n $remote ]] || continue
+            if "${GIT_CMD[@]}" rev-parse --verify --quiet "refs/remotes/${remote}/${head_branch}" &>/dev/null || \
+               "${GIT_CMD[@]}" rev-parse --verify --quiet "${remote}/${head_branch}" &>/dev/null; then
+                printf '%s/%s' "$remote" "$head_branch"
+                return 0
+            fi
+        done
+    fi
+
+    # 4. Probe common main/master branches on origin
     local ref=''
     for ref in origin/main origin/master; do
         if "${GIT_CMD[@]}" rev-parse --verify --quiet "$ref" &>/dev/null; then
@@ -481,11 +579,10 @@ get_upstream_ref() {
         fi
     done
 
-    # Single-remote repos whose remote isn't named 'origin': probe the same
-    # candidates under the actual remote name before giving up.
+    # 5. Single-remote repos whose remote isn't named 'origin'
     local -a remotes=()
     mapfile -t remotes < <("${GIT_CMD[@]}" remote 2>/dev/null)
-    if (( ${#remotes[@]} == 1 )); then
+    if (( ${#remotes[@]} == 1 )) && [[ -n ${remotes[0]:-} ]]; then
         local single=${remotes[0]}
         if tracking=$("${GIT_CMD[@]}" symbolic-ref -q --short "refs/remotes/${single}/HEAD" 2>/dev/null) &&
            [[ -n $tracking ]]; then
@@ -510,7 +607,7 @@ get_upstream_ref() {
 run_background_check() {
     local previous_state=''
     local -i have_previous_state=0
-    local -i previous_count=-2147483648
+    local -i previous_count=0
     local upstream=''
     local -i count=0
 
@@ -521,30 +618,28 @@ run_background_check() {
 
     if ! validate_environment; then
         _debug "validate_environment failed"
-        if (( have_previous_state )); then
-            _debug "Preserving previous state ${previous_count} (validate failed)"
-        else
-            write_state_file -1 || true
+        if (( ! have_previous_state )); then
+            write_state_file 0 || true
         fi
         exit 0
     fi
 
     if ! robust_fetch; then
         _debug "Fetch failed: $FETCH_INFO"
-        if (( have_previous_state )); then
-            _debug "Preserving previous state ${previous_count} (fetch failed: $FETCH_INFO)"
-        else
-            write_state_file -1 || true
+        if (( ! have_previous_state )); then
+            if upstream=$(get_upstream_ref 2>/dev/null) && _git_rev_count count "HEAD..${upstream}" 2>/dev/null; then
+                write_state_file "$count" || true
+            else
+                write_state_file 0 || true
+            fi
         fi
         exit 0
     fi
 
     if ! upstream=$(get_upstream_ref); then
         _debug "No upstream found"
-        if (( have_previous_state )); then
-            _debug "Preserving previous state ${previous_count} (no upstream)"
-        else
-            write_state_file -2 || true
+        if (( ! have_previous_state )); then
+            write_state_file 0 || true
         fi
         exit 0
     fi
@@ -552,22 +647,16 @@ run_background_check() {
 
     if ! _git_rev_count count "HEAD..${upstream}"; then
         _debug "Failed to count commits behind"
-        if (( have_previous_state )); then
-            _debug "Preserving previous state ${previous_count} (rev-count failed)"
-        else
-            write_state_file -1 || true
+        if (( ! have_previous_state )); then
+            write_state_file 0 || true
         fi
         exit 0
     fi
     _debug "Commits behind: $count"
 
-    # Failure-tolerant: a broken state file must never abort the run (set -e)
-    # nor suppress the user-facing desktop notification below.
     write_state_file "$count" || true
 
-    # Notify on every fresh crossing of the threshold. Negative sentinels
-    # (-1 error / -2 no-upstream) count as "not yet alerted" so a recovered
-    # check still alerts instead of staying silent forever.
+    # Desktop notification on threshold crossing
     if (( count >= NOTIFY_THRESHOLD )) &&
        (( ! have_previous_state || previous_count < NOTIFY_THRESHOLD )) &&
        [[ -x /usr/bin/notify-send ]]; then
@@ -586,10 +675,15 @@ run_background_check() {
 # =============================================================================
 
 parse_arguments() {
+    if (( $# == 0 )); then
+        return 0
+    fi
+
     while (( $# > 0 )); do
         case "$1" in
             --num)
                 run_background_check
+                exit 0
                 ;;
             --debug)
                 DEBUG=1
@@ -597,11 +691,14 @@ parse_arguments() {
                 shift
                 ;;
             --fix-config)
-                validate_environment || exit 1
-                printf 'Setting fetch refspec in git config...\n'
-                "${GIT_CMD[@]}" config --replace-all remote.origin.fetch "$FETCH_REFSPEC"
-                printf 'Done. Current value:\n'
-                "${GIT_CMD[@]}" config --get-all remote.origin.fetch
+                if validate_environment; then
+                    printf 'Setting fetch refspec in git config...\n'
+                    "${GIT_CMD[@]}" config --replace-all remote.origin.fetch "$FETCH_REFSPEC" 2>/dev/null || true
+                    printf 'Done. Current value:\n'
+                    "${GIT_CMD[@]}" config --get-all remote.origin.fetch 2>/dev/null || true
+                else
+                    printf 'ERROR: Cannot fix config, environment invalid.\n' >&2
+                fi
                 exit 0
                 ;;
             --help|-h)
@@ -613,53 +710,13 @@ parse_arguments() {
                 exit 0
                 ;;
             *)
-                printf 'Unknown option: %s\n' "$1" >&2
-                exit 1
+                printf 'Unknown option: %s (ignoring)\n' "$1" >&2
+                shift
                 ;;
         esac
     done
+    return 0
 }
-
-parse_arguments "$@"
-
-# =============================================================================
-# ANSI ESCAPE CODES
-# =============================================================================
-
-declare _hbuf=''
-printf -v _hbuf '%*s' "$BOX_INNER_WIDTH" ''
-declare -r H_LINE="${_hbuf// /─}"
-unset _hbuf
-
-declare -r C_RESET=$'\e[0m'     C_CYAN=$'\e[1;36m'    C_GREEN=$'\e[1;32m'
-declare -r C_YELLOW=$'\e[1;33m' C_MAGENTA=$'\e[1;35m' C_WHITE=$'\e[1;37m'
-declare -r C_GREY=$'\e[1;30m'   C_RED=$'\e[1;31m'     C_INVERSE=$'\e[7m'
-
-declare -r CLR_EOL=$'\e[K'      CLR_EOS=$'\e[J'       CLR_SCREEN=$'\e[2J'
-declare -r CUR_HOME=$'\e[H'     CUR_HIDE=$'\e[?25l'   CUR_SHOW=$'\e[?25h'
-declare -r MOUSE_ON=$'\e[?1000h\e[?1002h\e[?1006h'
-declare -r MOUSE_OFF=$'\e[?1000l\e[?1002l\e[?1006l'
-
-# =============================================================================
-# TUI STATE
-# =============================================================================
-
-declare -i SELECTED_ROW=0 SCROLL_OFFSET=0
-declare -i TOTAL_COMMITS=0 LOCAL_REV=0 REMOTE_REV=0
-declare -i TERM_ROWS=0 TERM_COLS=0
-declare -i TUI_ACTIVE=0
-declare -a COMMIT_HASHES=() COMMIT_MSGS=()
-declare ORIGINAL_STTY="" FETCH_STATUS="OK"
-
-cleanup() {
-    if (( TUI_ACTIVE )); then
-        printf '%s%s%s\n' "$MOUSE_OFF" "$CUR_SHOW" "$C_RESET" || true
-    fi
-    [[ -n ${ORIGINAL_STTY:-} ]] && /usr/bin/stty "$ORIGINAL_STTY" 2>/dev/null || true
-}
-
-trap cleanup EXIT
-trap 'exit 130' INT TERM HUP
 
 # =============================================================================
 # DATA LOADING
@@ -668,6 +725,10 @@ trap 'exit 130' INT TERM HUP
 load_commits() {
     COMMIT_HASHES=()
     COMMIT_MSGS=()
+    TOTAL_COMMITS=0
+    BEHIND_COUNT=0
+    LOCAL_REV=0
+    REMOTE_REV=0
 
     if ! _git_rev_count LOCAL_REV HEAD; then
         COMMIT_HASHES=("ERR")
@@ -676,7 +737,7 @@ load_commits() {
         FETCH_STATUS="GIT_ERROR"
         LOCAL_REV=0
         REMOTE_REV=0
-        return
+        return 0
     fi
 
     if [[ $FETCH_STATUS == FAIL ]]; then
@@ -684,7 +745,7 @@ load_commits() {
         COMMIT_HASHES=("ERR")
         COMMIT_MSGS=("Fetch failed - cannot verify remote status")
         TOTAL_COMMITS=1
-        return
+        return 0
     fi
 
     local upstream=''
@@ -694,7 +755,7 @@ load_commits() {
         TOTAL_COMMITS=1
         FETCH_STATUS="NO_UPSTREAM"
         REMOTE_REV=0
-        return
+        return 0
     fi
 
     if ! _git_rev_count REMOTE_REV "$upstream"; then
@@ -703,7 +764,7 @@ load_commits() {
         TOTAL_COMMITS=1
         FETCH_STATUS="GIT_ERROR"
         REMOTE_REV=0
-        return
+        return 0
     fi
 
     local -i count=0
@@ -712,26 +773,26 @@ load_commits() {
         COMMIT_MSGS=("Failed to compare HEAD against ${upstream}")
         TOTAL_COMMITS=1
         FETCH_STATUS="GIT_ERROR"
-        return
+        return 0
     fi
 
     _debug "load_commits: HEAD=$LOCAL_REV, upstream=$REMOTE_REV, behind=$count"
+    BEHIND_COUNT=$count
 
     if (( count == 0 )); then
         COMMIT_HASHES=("HEAD")
         COMMIT_MSGS=("Dusky is up to date!")
         TOTAL_COMMITS=1
-        return
+        return 0
     fi
 
     local -ri max_len=$(( BOX_INNER_WIDTH - ITEM_PADDING - 6 ))
     local -a raw_commits=()
     local line='' hash='' msg='' safe_msg=''
 
-    # Limit log to visible rows: TOTAL_COMMITS is already known via
-    # rev-list count above, so fetching 100s of commits is wasteful.
+    # Fetch up to 500 behind commits so scrolling works smoothly without clipping at 14
     mapfile -t raw_commits < <(
-        "${GIT_CMD[@]}" --no-pager log --max-count="$MAX_DISPLAY_ROWS" "HEAD..${upstream}" \
+        "${GIT_CMD[@]}" --no-pager log --max-count=500 "HEAD..${upstream}" \
             --no-color --pretty=format:'%h|%s' 2>/dev/null
     ) || true
 
@@ -748,21 +809,17 @@ load_commits() {
         COMMIT_MSGS+=("$msg")
     done
 
-    # Preserve true behind-count for the header, but ensure we have
-    # at least something to display when behind >0.
     if (( ${#COMMIT_HASHES[@]} == 0 )); then
         COMMIT_HASHES=("WARN")
         COMMIT_MSGS=("Detected $count updates but log was empty")
         TOTAL_COMMITS=1
     else
-        # If we are behind more than we fetched (log was capped), keep
-        # the true count for the header while hashes hold only the visible slice.
-        if (( count > ${#COMMIT_HASHES[@]} )); then
-            TOTAL_COMMITS=$count
-        else
-            TOTAL_COMMITS=${#COMMIT_HASHES[@]}
-        fi
+        # TOTAL_COMMITS matches the exact number of entries in COMMIT_HASHES,
+        # ensuring array indexing in draw_ui and nav functions never goes out of bounds.
+        TOTAL_COMMITS=${#COMMIT_HASHES[@]}
     fi
+
+    return 0
 }
 
 # =============================================================================
@@ -775,6 +832,7 @@ draw_terminal_too_small() {
         "$MIN_TERM_COLS" "$MIN_TERM_ROWS" "$TERM_COLS" "$TERM_ROWS" "$C_RESET"
     printf '%sResize the terminal or press q to quit.%s%s' \
         "$C_CYAN" "$C_RESET" "$CLR_EOS"
+    return 0
 }
 
 draw_ui() {
@@ -830,8 +888,9 @@ draw_ui() {
                     plain_stats="Status: Error"
                     ;;
                 *)
-                    stats="${C_YELLOW}Commits Behind: ${TOTAL_COMMITS}${C_RESET}"
-                    plain_stats="Commits Behind: ${TOTAL_COMMITS}"
+                    local -i display_count=${BEHIND_COUNT:-$TOTAL_COMMITS}
+                    stats="${C_YELLOW}Commits Behind: ${display_count}${C_RESET}"
+                    plain_stats="Commits Behind: ${display_count}"
                     ;;
             esac
             ;;
@@ -867,8 +926,9 @@ draw_ui() {
     fi
 
     for (( i = vstart; i < vend; i++ )); do
-        h=${COMMIT_HASHES[i]}
-        m=${COMMIT_MSGS[i]}
+        h="${COMMIT_HASHES[i]:-}"
+        m="${COMMIT_MSGS[i]:-}"
+        [[ -n "$h" ]] || continue
         printf -v ph "%-${ITEM_PADDING}s" "$h"
 
         if (( i == SELECTED_ROW )); then
@@ -902,6 +962,7 @@ draw_ui() {
     buf+="${C_CYAN} Repo: ${C_WHITE}${repo_display}${C_RESET}${CLR_EOL}${CLR_EOS}"
 
     printf '%s' "$buf"
+    return 0
 }
 
 # =============================================================================
@@ -910,15 +971,15 @@ draw_ui() {
 
 nav_step() {
     local -i d=$1
-    (( TOTAL_COMMITS == 0 )) && return
+    (( TOTAL_COMMITS == 0 )) && return 0
     SELECTED_ROW=$(( (SELECTED_ROW + d + TOTAL_COMMITS) % TOTAL_COMMITS ))
+    return 0
 }
 
 nav_page() {
     local -i d=$1
     (( TOTAL_COMMITS == 0 )) && return 0
     SELECTED_ROW=$(( SELECTED_ROW + d * MAX_DISPLAY_ROWS ))
-    # NOTE: never end on a bare false test - set -e would kill the TUI (rc=1).
     if (( SELECTED_ROW < 0 )); then
         SELECTED_ROW=0
     elif (( SELECTED_ROW >= TOTAL_COMMITS )); then
@@ -928,11 +989,12 @@ nav_page() {
 }
 
 nav_edge() {
-    (( TOTAL_COMMITS == 0 )) && return
-    case $1 in
+    (( TOTAL_COMMITS == 0 )) && return 0
+    case ${1:-} in
         home) SELECTED_ROW=0 ;;
         end)  SELECTED_ROW=$(( TOTAL_COMMITS - 1 )) ;;
     esac
+    return 0
 }
 
 handle_mouse() {
@@ -960,6 +1022,7 @@ handle_mouse() {
             esac
         fi
     fi
+    return 0
 }
 
 # =============================================================================
@@ -967,8 +1030,17 @@ handle_mouse() {
 # =============================================================================
 
 main() {
-    validate_environment || exit 1
-    validate_terminal || exit 1
+    parse_arguments "$@"
+
+    if ! validate_environment; then
+        _debug "validate_environment failed in main"
+        exit 0
+    fi
+
+    if ! validate_terminal; then
+        _debug "validate_terminal failed in main (non-interactive)"
+        exit 0
+    fi
 
     printf '\n%sFetching updates...%s\n' "$C_CYAN" "$C_RESET"
 
@@ -1000,8 +1072,6 @@ main() {
             draw_terminal_too_small
         fi
 
-        # Poll with a 1s ceiling instead of blocking forever: a read timeout
-        # (rc > 128) loops back so terminal resizes get picked up and repainted.
         key=''
         read_rc=0
         IFS= read -rsn1 -t 1 key || read_rc=$?
@@ -1034,7 +1104,7 @@ main() {
                     '[6~')       nav_page 1 ;;
                     '[H'|'[1~')  nav_edge home ;;
                     '[F'|'[4~')  nav_edge end ;;
-                    '['*'<'+([0-9])';'+([0-9])';'+([0-9])+([Mm]))
+                    '['*'<'*[Mm])
                         handle_mouse "$seq"
                         ;;
                     *)
@@ -1065,5 +1135,8 @@ main() {
                 ;;
         esac
     done
+
+    exit 0
 }
+
 main "$@"

@@ -47,10 +47,12 @@
 --   layout_opts     (table)   -- Layout-specific options (see §8 for details).
 --   gaps_in         (number)  -- Inner gap override (px).
 --   gaps_out        (number)  -- Outer gap override (px).
+--   float_gaps      (number)  -- Gaps for floating windows (px).
 --   no_border       (bool)    -- Disable all window borders on this workspace.
 --   border_size     (number)  -- Override border thickness (px).
 --   no_rounding     (bool)    -- Disable corner rounding on this workspace.
 --   decorate        (bool)    -- Enable/disable decorations (shadows, etc.).
+--   no_shadow       (bool)    -- Disable window shadows on this workspace.
 --   animation       (string)  -- Override workspace switch animation style.
 -- ==============================================================================
 hl.workspace_rule({ workspace = "1", layout = nil, persistent = false })
@@ -258,9 +260,11 @@ hl.config({
         allow_small_split             = false,
         slave_count_for_center_master = 2,
         center_master_fallback        = "left",
+        center_ignores_reserved       = false,
         smart_resizing                = true,
         drop_at_cursor                = true,
         always_keep_position          = false,
+        focus_master_on_close         = false,
         -- scale of windows in special workspaces
         special_scale_factor          = 1.0,
     },
@@ -271,9 +275,11 @@ hl.config({
         direction                = "right",
         -- single-column workspace fills screen
         fullscreen_on_one_column = true,
-        column_width             = 0.5,
-        focus_fit_method         = 1,
+        column_width             = 0.9,
+        -- 0 = center (previews adjacent windows on both left & right) | 1 = fit (preview right only)
+        focus_fit_method         = 0,
         follow_focus             = true,
+        -- Require 40% window visibility before mouse hover auto-scrolls; prevents runaway scrolling on edge previews
         follow_min_visible       = 0.4,
         explicit_column_widths   = "0.333, 0.5, 0.667, 1.0",
         wrap_focus               = true,

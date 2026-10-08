@@ -11,8 +11,7 @@ set -euo pipefail
 shopt -s inherit_errexit 2>/dev/null || true
 
 # --- Constants ---
-declare -r SCRIPT_NAME="${0##*/}"
-declare -r LOCKFILE="/var/lock/${SCRIPT_NAME}.lock"
+declare -r LOCKFILE="/var/lock/01_tailscale_setup.sh.lock"
 declare -r NM_CONF="/etc/NetworkManager/conf.d/96-tailscale.conf"
 
 # --- Colors ---
@@ -36,14 +35,13 @@ die() {
 
 cleanup() {
     local exit_code=$?
-    if (( EUID == 0 )); then
-        rm -f "$LOCKFILE" 2>/dev/null || true
-    fi
     if (( exit_code != 0 )); then
         printf "\n%s[FATAL]%s Script terminated with error code %d.\n" "$R" "$W" "$exit_code" >&2
     fi
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 cmd_exists() { command -v "$1" &>/dev/null; }
 pkg_installed() { pacman -Q "$1" &>/dev/null; }
@@ -57,12 +55,8 @@ if (( EUID != 0 )); then
     exec sudo --preserve-env=TERM bash "$script_path" "$@"
 fi
 
-if [[ -f "$LOCKFILE" ]]; then
-    if kill -0 "$(<"$LOCKFILE")" 2>/dev/null; then
-        die "Another instance is running."
-    fi
-fi
-echo $$ > "$LOCKFILE"
+exec 9> "$LOCKFILE"
+flock -n 9 || die "Another Tailscale setup or teardown is running."
 
 # --- Logic ---
 
@@ -97,12 +91,12 @@ if systemctl is-active --quiet tailscaled; then
     
     tailscale down --accept-risk=lose-ssh 2>/dev/null || true
     
-    log_info "Stopping tailscaled service..."
-    systemctl stop tailscaled
-    systemctl disable tailscaled
-    log_succ "Service stopped and disabled."
 else
     log_info "Tailscale service is not running."
+fi
+if pkg_installed tailscale; then
+    systemctl disable --now tailscaled
+    log_succ "Service stopped and disabled."
 fi
 
 if [[ "$MODE" == "DISABLE" ]]; then
@@ -129,8 +123,8 @@ log_info "Cleaning network configs..."
 
 # Firewall
 if cmd_exists firewall-cmd && systemctl is-active --quiet firewalld; then
-    firewall-cmd --zone=trusted --remove-interface=tailscale0 --permanent >/dev/null 2>&1 || true
-    firewall-cmd --reload >/dev/null 2>&1 || true
+    firewall-cmd --zone=trusted --remove-interface=tailscale0 >/dev/null 2>&1 || true
+    firewall-cmd --permanent --zone=trusted --remove-interface=tailscale0 >/dev/null 2>&1 || true
 elif cmd_exists ufw && systemctl is-active --quiet ufw; then
     ufw delete allow in on tailscale0 >/dev/null 2>&1 || true
 fi
@@ -158,5 +152,7 @@ if pkg_installed tailscale; then
 else
     log_warn "Tailscale package not found (already removed?)."
 fi
+
+rm -f /etc/modules-load.d/99-tailscale-uinput.conf
 
 printf "\n%s[SUCCESS]%s Tailscale has been fully removed.\n" "$G" "$W"

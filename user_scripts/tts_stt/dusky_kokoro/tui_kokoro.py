@@ -17,7 +17,9 @@ Features:
 """
 
 import sys
+import os
 import subprocess
+import shlex
 from pathlib import Path
 
 _DUSKY_TUI_ROOT = Path.home() / "user_scripts" / "dusky_tui"
@@ -30,7 +32,7 @@ from python.frontend.core_types import ConfigItem
 # 1. CORE APPLICATION ROUTING & METADATA
 # =============================================================================
 ENGINE_TYPE = "kokoro"
-TARGET_FILE = "~/.config/dusky-kokoro/config.toml"
+TARGET_FILE = os.environ.get("DUSKY_CONFIG") or str(Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "dusky-kokoro/config.toml")
 APP_TITLE = "Dusky Kokoro TTS"
 
 DEFAULT_MODE = "auto"
@@ -38,7 +40,7 @@ THEME_FILE = "~/.config/matugen/generated/dusky_tui.json"
 ENABLE_USER_PRESETS = True
 USER_PRESETS_TAB = "Presets"
 
-_TRIGGER_CMD = str(Path.home() / "user_scripts" / "tts_stt" / "dusky_kokoro" / "trigger.sh")
+_TRIGGER_CMD = shlex.quote(str(Path(__file__).resolve().with_name("trigger.sh")))
 
 # =============================================================================
 # 2. VOICE DEFINITIONS & HINTS CATALOG (54 VOICES FROM VOICES.MD)
@@ -343,7 +345,16 @@ SCHEMA = {
             type_="bool",
             default=True,
             group="Playback Controls",
-            extended_help="**Mini Player Window**\n\nShows a compact floating mpv window displaying playback progress and waveform. Allows `[Space]` pause and `[q]` stop hotkeys.",
+            extended_help="**Mini Player Window**\n\nShows a compact floating mpv window with playback controls. Allows `[Space]` pause and `[q]` stop hotkeys.",
+        ),
+        ConfigItem(
+            label="User MPV Config",
+            key="use_user_mpv_config",
+            scope="playback",
+            type_="bool",
+            default=True,
+            group="Playback Controls",
+            extended_help="**Load MPV User Configuration**\n\nLoads `~/.config/mpv/` (user scripts, shaders, themes, and Dusky Player UI). When disabled, runs with bare `--no-config`.",
         ),
         ConfigItem(
             label="Window Geometry",
@@ -409,10 +420,10 @@ SCHEMA = {
             key="provider",
             scope="engine",
             type_="cycle",
-            default="cuda",
-            options=["cuda", "cpu", "rocm", "openvino", "auto"],
+            default="auto",
+            options=["cuda", "cpu", "migraphx", "openvino", "auto"],
             group="Hardware Backend",
-            extended_help="**Compute Execution Provider**\n\n- `cuda`: NVIDIA Tensor Cores (12.2x real time)\n- `cpu`: CPU inference\n- `rocm`: AMD ROCm GPUs\n- `openvino`: Intel Iris / Arc / NPU\n- `auto`: Auto-detect available GPU accelerator",
+            extended_help="**Compute Execution Provider**\n\n- `cuda`: NVIDIA GPUs supported by the installed CUDA runtime\n- `cpu`: CPU inference\n- `migraphx`: AMD GPUs with a matching MIGraphX runtime\n- `openvino`: Intel Iris / Arc / NPU\n- `auto`: Auto-detect available GPU accelerator",
         ),
         ConfigItem(
             label="Model Precision",
@@ -422,7 +433,7 @@ SCHEMA = {
             default="auto",
             options=["fp16-gpu", "int8", "f32", "fp16", "auto"],
             group="Hardware Backend",
-            extended_help="**Model Weight Precision**\n\n- `fp16-gpu` (Recommended for GPU): 177 MB, compiled natively for GPU Tensor Cores (12x real time).\n- `int8` (Recommended for CPU): 92 MB, optimized for AVX-512 VNNI CPU instructions.\n- `auto`: Selects fp16-gpu on CUDA/ROCm, int8 on CPU.",
+            extended_help="**Model Weight Precision**\n\n- `fp16-gpu`: 177 MB; tested fast default on CPU and CUDA.\n- `int8`: 92 MB, compact export; not necessarily faster on CPU.\n- `auto`: Prefers the tested fp16-gpu export on CPU/CUDA and f32 on OpenVINO.",
         ),
         ConfigItem(
             label="GPU VRAM Limit (MB)",
@@ -434,7 +445,7 @@ SCHEMA = {
             max_val=8192,
             step=256,
             group="Hardware Backend",
-            extended_help="**VRAM Memory Cap**\n\nLimits CUDA/ROCm memory allocation arena to prevent GPU out-of-memory errors. 0 = unlimited.",
+            extended_help="**VRAM Memory Cap**\n\nLimits the execution provider memory arena. Total VRAM can exceed this cap because driver and other allocations are separate. 0 = unlimited.",
         ),
         ConfigItem(
             label="Model Warmup JIT",
@@ -476,7 +487,7 @@ SCHEMA = {
             type_="bool",
             default=True,
             group="Power Management & Laptop Battery",
-            extended_help="**Socket-Activated Standby**\n\nWhen enabled, the daemon exits when idle and relies on `dusky-kokoro.socket` to relaunch on demand with 0% idle CPU and zero battery drain.",
+            extended_help="**Socket-Activated Standby**\n\nWhen enabled, the daemon exits when idle and relies on `dusky_kokoro.socket` to relaunch on demand with 0% idle CPU and zero battery drain.",
         ),
         ConfigItem(
             label="Default Queue Mode",
@@ -504,7 +515,7 @@ SCHEMA = {
             type_="action",
             default=f"{_TRIGGER_CMD} --restart",
             group="Daemon Controls",
-            extended_help="**Daemon Restart**\n\nExecutes `systemctl --user restart dusky-kokoro.service` directly.",
+            extended_help="**Daemon Restart**\n\nExecutes `systemctl --user restart dusky_kokoro.service` directly.",
         ),
         ConfigItem(
             label="Reload Daemon Config",

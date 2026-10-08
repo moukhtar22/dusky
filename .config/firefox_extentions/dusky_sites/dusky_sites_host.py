@@ -1,917 +1,918 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S python3 -u
 """
-🦊 Dusky Sites Native Messaging Host (Arch Linux / Python 3.12+ / Firefox 115+)
-=============================================================================
-Event-driven Native Messaging Host with inotify watcher & wake-pipe IPC.
-Guarantees low-latency FETCH_NOW and single-source-of-truth config persistence.
+Dusky Sites — native-messaging host v6.2
+Python 3.14+ · Linux only (inotify via libc) · single thread · wire v3 (delta)
+
+Hot path per matugen tick: one stat, one 3.6 KB regex parse, one BLAKE2b, one ~4 KB frame.
+The 174 KB site-rule map is re-parsed only when the directory signature changes and is sent
+only when the extension's `known.websitesRev` differs. Dark-Reader-format fallback configs are
+parsed lazily on the first GET_DOMAIN_FIX and cached by stat signature.
+
+Framing (MDN Native messaging): uint32 length in native byte order + UTF-8 JSON; app→extension
+frames ≤ 1 MiB — larger payloads are split into CHUNK frames and reassembled by background.js.
+
+  ← HELLO {wire, extension, known:{websitesRev}}     → HELLO_ACK {wire, pid, peerWire}
+  ← SET_CONFIG {config}                               → (persist config.json) + MATUGEN_UPDATE
+  ← FETCH_NOW {known:{websitesRev}}                   → MATUGEN_UPDATE
+  ← GET_DOMAIN_FIX {rid, domain}                      → DOMAIN_FIX_RESPONSE {rid, domain, css, isDarkSite, hints}
+  ← LIVE_THEME_RESPONSE {theme}                       → (write live_theme_cache.json)
+  ← PING {at} / PONG                                  → PONG {at} / —
+  → MATUGEN_UPDATE {data:{colors, colorsRev, websitesRev, websites?, disabledSites,
+                          webThemeEnabled, forceUnthemedWebsites, status, ok, timestamp}}
+  → PING {at}          every 20 s while keepAlive is on (keeps the MV3 event page warm)
+  → QUERY_LIVE_THEME   1.5 s after a settled palette change, or on SIGUSR1
+  → CHUNK {id, seq, total, part}
+
+Exit: stdin EOF (Firefox closed the port) or SIGTERM/SIGINT/SIGHUP. Config lives in
+~/.config/dusky/settings/dusky_sites/config.json (camelCase keys, atomic writes).
 """
 
-from __future__ import annotations
-
-import sys
-import json
-import struct
-import os
-import time
-import re
-import hashlib
-import threading
-import traceback
 import ctypes
-import ctypes.util
+import hashlib
+import json
+import os
+import re
 import select
+import selectors
+import signal
+import struct
+import sys
+import time
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from pathlib import Path
 
-# Firefox native messaging: max message size from native app is 1 MiB
-MAX_NATIVE_MSG = 1 * 1024 * 1024
+WIRE = 3
+MAX_MSG = 1 << 20                 # Gecko app→extension cap
+MAX_INBOUND = 64 << 20            # sanity cap (the spec allows 4 GiB)
+CHUNK_CHARS = 200_000             # ≤ ~800 KiB UTF-8 per CHUNK frame in the worst case
+QUIET_S = 0.120                   # collapse write bursts: fire 120 ms after the latest relevant event …
+MAX_WAIT_S = 0.300                # … with an immovable 300 ms deadline from the first event
+SETTLE_S = 1.5                    # QUERY_LIVE_THEME after a settled change
+KEEPALIVE_S = 20.0                # PING cadence (event-page idle timeout is 30 s)
+POLL_S = 60.0                     # stat-poll safety net (inotify cannot see every filesystem)
+WATCH_RETRY_S = 5.0
 
-# Linux inotify flags
-IN_CLOEXEC = 0x80000
-IN_NONBLOCK = 0x800
-IN_ATTRIB = 0x00000004
-IN_MODIFY = 0x00000002
-IN_CLOSE_WRITE = 0x00000008
-IN_MOVED_TO = 0x00000080
-IN_CREATE = 0x00000100
-IN_DELETE = 0x00000200
+HOME = Path.home()
+SETTINGS_DIR = HOME / ".config" / "dusky" / "settings" / "dusky_sites"
+CONFIG_PATH = SETTINGS_DIR / "config.json"
+LIVE_THEME_PATH = SETTINGS_DIR / "live_theme_cache.json"
 
-CONFIG_PATH = Path.home() / ".config" / "dusky" / "settings" / "dusky_sites" / "config.json"
+DEBUG = False
 
-# Cross-thread wakeup pipe for main select() loop (Linux atomic pipe2)
-_wake_r, _wake_w = os.pipe2(os.O_NONBLOCK | os.O_CLOEXEC)
 
-def wake_main() -> None:
-    """Wakes the main select() loop instantly across threads."""
+def log(*parts: object) -> None:
+    if DEBUG:
+        print("[dusky_sites]", *parts, file=sys.stderr, flush=True)
+
+
+def err(*parts: object) -> None:
+    print("[dusky_sites]", *parts, file=sys.stderr, flush=True)
+
+
+def digest(text: str) -> str:
+    return hashlib.blake2b(text.encode("utf-8"), digest_size=16).hexdigest()
+
+
+def canon(obj: object) -> str:
+    return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def stat_sig(path: Path) -> tuple[int, int, int] | None:
     try:
-        os.write(_wake_w, b"\0")
+        st = path.stat()
     except OSError:
-        pass
+        return None
+    return (st.st_mtime_ns, st.st_size, st.st_ino)
 
-def drain_fd(fd: int, chunk: int = 65536) -> None:
-    """Drains pending bytes from a non-blocking file descriptor."""
-    while True:
-        try:
-            data = os.read(fd, chunk)
-            if not data:
-                break
-        except (BlockingIOError, OSError):
-            break
 
-# --- Linux Inotify Event Watcher ---
-class InotifyWatcher:
-    """Non-blocking Linux inotify watcher integrated with wake-pipe select()."""
+def atomic_write(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
 
-    def __init__(self) -> None:
-        self.fd: int = -1
-        self.watches: dict[str, int] = {}
-        self.libc: ctypes.CDLL | None = None
-        try:
-            libname = ctypes.util.find_library("c") or "libc.so.6"
-            self.libc = ctypes.CDLL(libname, use_errno=True)
-            self.libc.inotify_init1.argtypes = [ctypes.c_int]
-            self.libc.inotify_init1.restype = ctypes.c_int
-            self.libc.inotify_add_watch.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_uint32]
-            self.libc.inotify_add_watch.restype = ctypes.c_int
-            self.libc.inotify_rm_watch.argtypes = [ctypes.c_int, ctypes.c_int]
-            self.libc.inotify_rm_watch.restype = ctypes.c_int
-            self.libc.close.argtypes = [ctypes.c_int]
-            self.libc.close.restype = ctypes.c_int
-            fd = self.libc.inotify_init1(IN_CLOEXEC | IN_NONBLOCK)
-            self.fd = fd if fd >= 0 else -1
-        except Exception:
-            self.fd = -1
-            self.libc = None
 
-    def is_available(self) -> bool:
-        return self.fd >= 0 and self.libc is not None
+# ── Configuration ─────────────────────────────────────────────────────────────
+CAMEL = {
+    "colorsPath": "colors_path",
+    "websitesDir": "websites_dir",
+    "webThemeEnabled": "web_theme_enabled",
+    "forceUnthemedWebsites": "force_unthemed_websites",
+    "disabledSites": "disabled_sites",
+    "keepAlive": "keep_alive",
+    "debug": "debug",
+}
 
-    def _watch_dir_for(self, path_str: str) -> Path | None:
-        if not path_str:
-            return None
-        path = Path(path_str).expanduser()
-        watch_dir = path if path.is_dir() else path.parent
-        if not watch_dir.exists():
-            try:
-                watch_dir.mkdir(parents=True, exist_ok=True)
-            except OSError:
-                return None
-        try:
-            return watch_dir.resolve()
-        except OSError:
-            return watch_dir
 
-    def sync_watches(self, path_strs: list[str]) -> None:
-        """Syncs active inotify watch descriptors to match target directories."""
-        desired: set[str] = set()
-        for p in path_strs:
-            d = self._watch_dir_for(p)
-            if d is not None:
-                desired.add(str(d))
+@dataclass(slots=True)
+class Config:
+    colors_path: str = "~/.config/matugen/generated/dusky_sites.css"
+    websites_dir: str = "~/.config/dusky_sites"
+    web_theme_enabled: bool = False
+    force_unthemed_websites: bool = False
+    disabled_sites: list[str] = field(default_factory=list)
+    keep_alive: bool = True
+    debug: bool = False
 
-        if self.is_available():
-            for old, wd in list(self.watches.items()):
-                if old not in desired:
-                    try:
-                        self.libc.inotify_rm_watch(self.fd, wd)
-                    except Exception:
-                        pass
-                    self.watches.pop(old, None)
+    def apply(self, updates: dict) -> bool:
+        """Typed, allow-listed merge. Returns True when something changed."""
+        changed = False
+        for camel, attr in CAMEL.items():
+            if camel not in updates:
+                continue
+            val = updates[camel]
+            match attr:
+                case "colors_path" | "websites_dir":
+                    if not isinstance(val, str) or not val.strip() or "\0" in val or len(val) > 4096:
+                        continue
+                    val = val.strip()
+                case "disabled_sites":
+                    if not isinstance(val, list):
+                        continue
+                    val = sorted({s.strip().lower() for s in val if isinstance(s, str) and s.strip()})[:512]
+                case _:
+                    if not isinstance(val, bool):
+                        continue
+            if getattr(self, attr) != val:
+                setattr(self, attr, val)
+                changed = True
+        return changed
 
-            mask = IN_MODIFY | IN_CLOSE_WRITE | IN_MOVED_TO | IN_CREATE | IN_DELETE | IN_ATTRIB
-            for watch_str in desired:
-                if watch_str not in self.watches:
-                    try:
-                        wd = self.libc.inotify_add_watch(self.fd, watch_str.encode("utf-8"), mask)
-                        if wd >= 0:
-                            self.watches[watch_str] = wd
-                    except Exception:
-                        pass
+    def to_json(self) -> dict:
+        return {camel: getattr(self, attr) for camel, attr in CAMEL.items()}
 
-    def wait(self, timeout: float = 60.0) -> None:
-        """Blocks until inotify event, wake_main() call, or timeout."""
-        fds = [_wake_r]
-        if self.is_available() and self.watches:
-            fds.append(self.fd)
-        try:
-            readable, _, _ = select.select(fds, [], [], timeout)
-        except Exception:
-            time.sleep(min(timeout, 2.0))
-            return
+    @property
+    def colors_file(self) -> Path:
+        return Path(self.colors_path).expanduser()
 
-        if _wake_r in readable:
-            drain_fd(_wake_r)
-        if self.fd in readable and self.fd >= 0:
-            drain_fd(self.fd)
+    @property
+    def sites_dir(self) -> Path:
+        return Path(self.websites_dir).expanduser()
 
-    def close(self) -> None:
-        if self.is_available():
-            for wd in list(self.watches.values()):
-                try:
-                    self.libc.inotify_rm_watch(self.fd, wd)
-                except Exception:
-                    pass
-            self.watches.clear()
-            try:
-                self.libc.close(self.fd)
-            except Exception:
-                pass
-        self.fd = -1
 
-# --- Configuration & Persistence ---
-def _as_bool(raw: object) -> bool:
-    if isinstance(raw, str):
-        return raw.strip().lower() in {"1", "true", "yes", "on"}
-    return bool(raw)
-
-def _norm_sites(sites: object) -> list[str]:
-    if not isinstance(sites, list):
-        return []
-    return sorted({str(s).strip().lower() for s in sites if s})
-
-def default_config() -> dict:
-    return {
-        "colors_file": str(Path.home() / ".config/matugen/generated/dusky_sites.css"),
-        "websites_dir": str(Path.home() / ".config/dusky_sites"),
-        "web_theme_enabled": False,
-        "force_unthemed_websites": False,
-        "browser_theme_enabled": True,
-        "eco_mode": True,
-        "disabled_sites": [],
-    }
-
-def load_config_file() -> dict:
-    cfg = default_config()
-    if not CONFIG_PATH.is_file():
-        return cfg
+def load_config() -> Config:
+    cfg = Config()
     try:
-        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        if not isinstance(data, dict):
-            return cfg
-        if data.get("colorsPath"):
-            cfg["colors_file"] = str(Path(data["colorsPath"]).expanduser())
-        if data.get("websitesDir"):
-            cfg["websites_dir"] = str(Path(data["websitesDir"]).expanduser())
-        if "webThemeEnabled" in data:
-            cfg["web_theme_enabled"] = _as_bool(data["webThemeEnabled"])
-        if "forceUnthemedWebsites" in data:
-            cfg["force_unthemed_websites"] = _as_bool(data["forceUnthemedWebsites"])
-        if "browserThemeEnabled" in data:
-            cfg["browser_theme_enabled"] = _as_bool(data["browserThemeEnabled"])
-        if "ecoMode" in data:
-            cfg["eco_mode"] = _as_bool(data["ecoMode"])
-        if "disabledSites" in data:
-            cfg["disabled_sites"] = _norm_sites(data.get("disabledSites"))
-    except Exception:
-        pass
+        raw = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return cfg
+    except OSError, ValueError:                       # PEP 758
+        err(f"config unreadable: {CONFIG_PATH}")
+        return cfg
+    if isinstance(raw, dict):
+        cfg.apply(raw)
     return cfg
 
-def persist_config(cfg: dict) -> None:
-    """Write-through merges host configuration to disk cleanly outside locks."""
+
+def save_config(cfg: Config) -> None:
     try:
-        CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        existing: dict = {}
-        if CONFIG_PATH.is_file():
-            try:
-                loaded = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-                if isinstance(loaded, dict):
-                    existing = loaded
-            except Exception:
-                existing = {}
-        existing["colorsPath"] = cfg["colors_file"]
-        existing["websitesDir"] = cfg["websites_dir"]
-        existing["webThemeEnabled"] = bool(cfg["web_theme_enabled"])
-        existing["forceUnthemedWebsites"] = bool(cfg.get("force_unthemed_websites", False))
-        existing["disabledSites"] = list(cfg["disabled_sites"])
+        atomic_write(CONFIG_PATH, json.dumps(cfg.to_json(), indent=4) + "\n")
+    except OSError as e:
+        err(f"config write failed: {e}")
 
-        tmp = CONFIG_PATH.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(existing, indent=2) + "\n", encoding="utf-8")
-        tmp.replace(CONFIG_PATH)
-    except Exception as e:
-        print(f"Dusky Sites host error (persist_config): {e}", file=sys.stderr)
 
-config_lock = threading.Lock()
-config = load_config_file()
-fetch_lock = threading.Lock()
-fetch_requested: bool = False
-stdout_lock = threading.Lock()
-running: bool = True
+# ── Palette + site rules (stat-signature cached) ─────────────────────────────
+_COLOR_RE = re.compile(r"(--[\w-]+)\s*:\s*([^;{}]+?)\s*(?:!important)?\s*;", re.IGNORECASE)
+_MOZ_DOC_RE = re.compile(r"@-moz-document\s+(?P<specs>[^{]+)\{", re.IGNORECASE)
+_DOMAIN_SPEC_RE = re.compile(r"""domain\(\s*["']?([^"')\s]+)["']?\s*\)""", re.IGNORECASE)
+_URL_SPEC_RE = re.compile(r"""(?:url|url-prefix)\(\s*["']?(?:https?://)?([^/"')\s]+)""", re.IGNORECASE)
 
-# --- Filesystem State ---
-def get_dir_state(dirpath: str) -> dict[str, float]:
-    p = Path(dirpath).expanduser() if dirpath else None
-    if not p or not p.is_dir():
+
+def parse_colors(path: Path) -> dict[str, str]:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError, UnicodeDecodeError:
         return {}
-    state: dict[str, float] = {}
-    try:
-        for f in p.glob("*.css"):
-            try:
-                state[f.name] = f.stat().st_mtime
-            except OSError:
-                continue
-    except OSError:
-        pass
-    return state
+    # CSS uses private names so unrelated userChrome palettes cannot override it.
+    # Keep the existing native-message palette keys consumed by the signed XPI.
+    return {name.replace("--dusky-palette-", "--", 1): value.strip()
+            for name, value in _COLOR_RE.findall(text)}
 
-# --- Native Messaging Binary Protocol ---
-def get_message() -> dict | str | None:
-    raw_length = sys.stdin.buffer.read(4)
-    if len(raw_length) == 0:
-        return "EOF"
-    if len(raw_length) < 4:
-        return None
-    message_length = struct.unpack("=I", raw_length)[0]
-    if message_length == 0 or message_length > MAX_NATIVE_MSG:
-        return None
-    msg_bytes = sys.stdin.buffer.read(message_length)
-    if len(msg_bytes) < message_length:
-        return "EOF"
-    try:
-        return json.loads(msg_bytes.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        return "DECODE_ERROR"
 
-def send_message(message_content: dict) -> bool:
-    """Send one NMH message. Returns True only if fully written to stdout."""
-    try:
-        def _encode(obj: dict) -> bytes:
-            return json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-
-        encoded_content = _encode(message_content)
-
-        if len(encoded_content) > MAX_NATIVE_MSG:
-            if message_content.get("type") == "MATUGEN_UPDATE" and isinstance(message_content.get("data"), dict):
-                slim = dict(message_content)
-                slim_data = dict(message_content["data"])
-                slim_data["websites"] = {}
-                status = list(slim_data.get("status") or [])
-                status.append("websites omitted: exceeded 1MiB native messaging limit")
-                slim_data["status"] = status
-                slim_data["ok"] = bool(slim_data.get("colors"))
-                slim["data"] = slim_data
-                encoded_content = _encode(slim)
-
-        if len(encoded_content) > MAX_NATIVE_MSG:
-            print("Dusky Sites host error: outbound message exceeds 1MiB native limit", file=sys.stderr)
-            return False
-
-        encoded_length = struct.pack("=I", len(encoded_content))
-        with stdout_lock:
-            sys.stdout.buffer.write(encoded_length)
-            sys.stdout.buffer.write(encoded_content)
-            sys.stdout.buffer.flush()
-        return True
-    except Exception as e:
-        print(f"Dusky Sites host error (send_message): {e}", file=sys.stderr)
-        return False
-
-# --- CSS Parsers ---
-_COLOR_RE = re.compile(r"(--[\w-]+)\s*:\s*([^;]+?)\s*(?:!important)?\s*;", re.IGNORECASE)
-_MOZ_DOMAIN_RE = re.compile(r"@-moz-document\s+(?P<specs>[^{]+)\{", re.IGNORECASE)
-_DOMAIN_SPEC_RE = re.compile(r'domain\(\s*["\']([^"\']+)["\']\s*\)', re.IGNORECASE)
-
-def _extract_balanced_block(content: str, open_brace_idx: int) -> str:
-    brace_count = 0
-    in_string = False
-    string_char = ""
-    in_block_comment = False
-    in_line_comment = False
-    i = open_brace_idx
-    n = len(content)
+def balanced_block(text: str, start: int) -> str:
+    """text[start] == '{'. Returns the inner body; string- and comment-aware."""
+    depth = 0
+    i, n = start, len(text)
     while i < n:
-        ch = content[i]
-        nxt = content[i + 1] if i + 1 < n else ""
-        if in_block_comment:
-            if ch == "*" and nxt == "/":
-                in_block_comment = False
-                i += 2
-                continue
-        elif in_line_comment:
-            if ch == "\n":
-                in_line_comment = False
-        elif in_string:
-            if ch == "\\":
-                i += 2
-                continue
-            if ch == string_char:
-                in_string = False
-        else:
-            if ch == "/" and nxt == "*":
-                in_block_comment = True
-                i += 2
-                continue
-            if ch == "/" and nxt == "/":
-                in_line_comment = True
-                i += 2
-                continue
-            if ch in ("'", '"'):
-                in_string = True
-                string_char = ch
-            elif ch == "{":
-                brace_count += 1
-            elif ch == "}":
-                brace_count -= 1
-                if brace_count == 0:
-                    return content[open_brace_idx + 1 : i].strip()
+        c = text[i]
+        if c == "/" and text.startswith("/*", i):
+            j = text.find("*/", i + 2)
+            i = n if j < 0 else j + 2
+            continue
+        if c in "\"'":
+            j = i + 1
+            while j < n and text[j] != c:
+                j += 2 if text[j] == "\\" else 1
+            i = j + 1
+            continue
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start + 1:i].strip()
         i += 1
-    return content[open_brace_idx + 1 :].strip()
+    return text[start + 1:].strip()
 
-def parse_colors(colors_file: str) -> dict[str, str]:
-    p = Path(colors_file).expanduser() if colors_file else None
-    if not p or not p.is_file():
-        return {}
-    try:
-        content = p.read_text(encoding="utf-8")
-        return {name.strip(): value.strip() for name, value in _COLOR_RE.findall(content)}
-    except Exception:
-        return {}
 
-COMMON_TLDS = ["com", "org", "net", "gov", "edu", "co.uk", "co.in", "ca", "de", "fr", "it", "es", "com.au", "io", "dev", "ai"]
+def parse_site_file(path: Path, out: dict[str, str]) -> None:
+    """@-moz-document domain(...) blocks → per-domain bodies; files without one map to their stem.
+    Several files targeting the same domain are concatenated (v5 silently kept the last one)."""
+    text = path.read_text(encoding="utf-8")
+    stem = path.stem.lower()
+    blocks = list(_MOZ_DOC_RE.finditer(text))
+    if not blocks:
+        out[stem] = text.strip()
+        return
+    for m in blocks:
+        specs = m.group("specs")
+        domains = [d.lower() for d in _DOMAIN_SPEC_RE.findall(specs)] or [d.lower() for d in _URL_SPEC_RE.findall(specs)]
+        body = balanced_block(text, m.end() - 1)
+        if not domains:
+            out[stem] = body or text.strip()
+        for d in domains:
+            out[d] = f"{out[d]}\n{body}" if d in out else body
 
-def expand_domain_pattern(pattern: str) -> list[str]:
-    pattern = pattern.lower().strip()
-    if not pattern:
-        return []
-    if "*" not in pattern:
-        return [pattern]
-    expanded = []
-    if "google." in pattern:
-        for tld in COMMON_TLDS:
-            expanded.append(f"google.{tld}")
-            expanded.append(f"www.google.{tld}")
-    else:
-        for tld in ("com", "org", "net"):
-            expanded.append(pattern.replace("*.", "").replace("*", tld))
-    return expanded
 
-def parse_dynamic_theme_fixes(fixes_path: Path) -> dict[str, str]:
-    if not fixes_path or not fixes_path.is_file():
-        return {}
-    fixes: dict[str, str] = {}
-    try:
-        content = fixes_path.read_text(encoding="utf-8")
-        sections = content.split("================================")
-        for sec in sections:
-            sec = sec.strip()
-            if not sec:
-                continue
-            lines = sec.splitlines()
-            domains: list[str] = []
-            css_lines: list[str] = []
-            invert_selectors: list[str] = []
-            mode = None
-            for line in lines:
-                l = line.strip()
-                if not l:
-                    continue
-                if l in ("INVERT", "CSS", "IGNORE INLINE STYLE", "IGNORE IMAGE ANALYSIS", "IGNORE CSS URL"):
-                    mode = l
-                    continue
-                if mode == "CSS":
-                    css_lines.append(line)
-                elif mode == "INVERT":
-                    invert_selectors.append(l)
-                elif mode is None:
-                    expanded = expand_domain_pattern(l)
-                    domains.extend(expanded)
+@dataclass(slots=True)
+class Palette:
+    path: Path
+    sig: tuple[int, int, int] | None = None
+    colors: dict[str, str] = field(default_factory=dict)
+    rev: str = digest("{}")
 
-            built_css_parts: list[str] = []
-            if invert_selectors:
-                built_css_parts.append(",\n".join(invert_selectors) + " {\n  filter: invert(100%) hue-rotate(180deg) !important;\n}")
-            if css_lines:
-                raw_css = "\n".join(css_lines)
-                css = (raw_css
-                    .replace("var(--darkreader-neutral-background)", "var(--background, var(--surface, #181a1b))")
-                    .replace("var(--darkreader-neutral-text)", "var(--on_background, var(--on_surface, #e0e0e0))")
-                    .replace("var(--darkreader-selection-background)", "var(--primary_container, #364765)")
-                    .replace("var(--darkreader-selection-text)", "var(--on_primary_container, #ffffff)")
-                    .replace("var(--darkreader-inline-background)", "var(--surface, #181a1b)")
-                    .replace("var(--darkreader-inline-color)", "var(--on_surface, #e0e0e0)")
-                )
-                css = re.sub(r"\$\{[^}]+\}", "var(--surface_container, var(--primary, #8ab4f8))", css)
-                built_css_parts.append(css)
-            if built_css_parts and domains:
-                final_domain_css = "\n\n".join(built_css_parts)
-                for domain in domains:
-                    if domain:
-                        if domain in fixes:
-                            fixes[domain] += "\n\n" + final_domain_css
-                        else:
-                            fixes[domain] = final_domain_css
-    except Exception:
-        pass
-    return fixes
+    def refresh(self) -> bool:
+        sig = stat_sig(self.path)
+        if sig == self.sig:
+            return False
+        colors = parse_colors(self.path) if sig else {}
+        if sig and not colors and self.colors:
+            return False              # truncated mid-write: keep the last good palette; CLOSE_WRITE re-arms us
+        self.sig = sig
+        rev = digest(canon(colors))
+        changed = rev != self.rev
+        self.colors, self.rev = colors, rev
+        return changed
 
-def parse_websites(websites_dir: str, disabled_sites: list[str] | None = None) -> dict[str, str]:
-    p = Path(websites_dir).expanduser() if websites_dir else None
-    if not p or not p.is_dir():
-        return {}
-    disabled_set = {s.lower() for s in (disabled_sites or []) if s}
-    websites: dict[str, str] = {}
-    try:
-        for filepath in p.glob("*.css"):
+
+@dataclass(slots=True)
+class SiteRules:
+    dir: Path
+    sig: tuple = ()
+    sites: dict[str, str] = field(default_factory=dict)
+    rev: str = digest("{}")
+
+    def signature(self) -> tuple:
+        entries: list[tuple[str, int, int]] = []
+        try:
+            with os.scandir(self.dir) as it:
+                for e in it:
+                    if e.name.endswith(".css") and e.is_file():
+                        st = e.stat()
+                        entries.append((e.name, st.st_mtime_ns, st.st_size))
+        except OSError:
+            return ()
+        entries.sort()
+        return tuple(entries)
+
+    def refresh(self) -> bool:
+        sig = self.signature()
+        if sig == self.sig:
+            return False
+        self.sig = sig
+        t0 = time.perf_counter()
+        sites: dict[str, str] = {}
+        for name, _, _ in sig:
             try:
-                stem = filepath.stem.lower()
-                if stem in disabled_set:
-                    continue
-                content = filepath.read_text(encoding="utf-8")
-                matches = list(_MOZ_DOMAIN_RE.finditer(content))
-                if not matches:
-                    websites[stem] = content.strip()
-                    continue
-                for m in matches:
-                    domains = [d.lower() for d in _DOMAIN_SPEC_RE.findall(m.group("specs"))]
-                    body = _extract_balanced_block(content, m.end() - 1)
-                    for domain in domains:
-                        if domain in disabled_set:
-                            continue
-                        websites[domain] = body
-            except Exception:
+                parse_site_file(self.dir / name, sites)
+            except OSError, UnicodeDecodeError:
+                err(f"site file skipped: {name}")
+        rev = digest(canon(sites))
+        changed = rev != self.rev
+        self.sites, self.rev = sites, rev
+        log(f"site rules: {len(sig)} files → {len(sites)} keys in {(time.perf_counter() - t0) * 1000:.1f} ms")
+        return changed
+
+
+# ── Fallback (Dark-Reader-format configs; forceUnthemedWebsites only; lazy) ──
+_SEP_RE = re.compile(r"^\s*={5,}\s*$", re.MULTILINE)
+_SECTION_RE = re.compile(r"^[A-Z][A-Z ]{1,30}$")
+_HEX_RE = re.compile(r"^#(?:[0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})$", re.IGNORECASE)
+_SLOT_RE = re.compile(r"\$\{([^}]*)\}")
+_DR_VAR_RE = re.compile(r"var\(\s*--darkreader-([a-z-]+)\s*\)")
+DR_VARS = {
+    "neutral-background": "var(--surface)",
+    "neutral-text": "var(--on_surface)",
+    "selection-background": "var(--primary_container)",
+    "selection-text": "var(--on_primary_container)",
+}
+INVERT_DECL = "filter: invert(1) hue-rotate(180deg) !important;"
+DYNAMIC_DECLS = {"INVERT": INVERT_DECL}
+STATIC_DECLS = {
+    "NEUTRAL BG": "background-color: var(--surface) !important;",
+    "NEUTRAL BG ACTIVE": "background-color: var(--surface_container_high) !important;",
+    "NEUTRAL TEXT": "color: var(--on_surface) !important;",
+    "NEUTRAL TEXT ACTIVE": "color: var(--primary) !important;",
+    "NEUTRAL BORDER": "border-color: var(--outline_variant) !important;",
+    "RED BG": "background-color: var(--error_container) !important;",
+    "RED BG ACTIVE": "background-color: var(--error) !important;",
+    "RED TEXT": "color: var(--error) !important;",
+    "RED TEXT ACTIVE": "color: var(--on_error_container) !important;",
+    "RED BORDER": "border-color: var(--error) !important;",
+    "GREEN BG": "background-color: var(--tertiary_container) !important;",
+    "GREEN BG ACTIVE": "background-color: var(--tertiary) !important;",
+    "GREEN TEXT": "color: var(--tertiary) !important;",
+    "GREEN TEXT ACTIVE": "color: var(--on_tertiary_container) !important;",
+    "GREEN BORDER": "border-color: var(--tertiary) !important;",
+    "BLUE BG": "background-color: var(--primary_container) !important;",
+    "BLUE BG ACTIVE": "background-color: var(--primary) !important;",
+    "BLUE TEXT": "color: var(--primary) !important;",
+    "BLUE TEXT ACTIVE": "color: var(--on_primary_container) !important;",
+    "BLUE BORDER": "border-color: var(--primary) !important;",
+    "FADE BG": "background-color: var(--surface_container_low) !important;",
+    "FADE TEXT": "color: var(--on_surface_variant) !important;",
+    "TRANSPARENT BG": "background-color: transparent !important;",
+    "NO IMAGE": "background-image: none !important;",
+    "INVERT": INVERT_DECL,
+}
+
+type Block = tuple[list[str], dict[str, list[str]]]
+
+
+def parse_blocks(text: str) -> list[Block]:
+    """Blocks separated by ===== lines: domain lines first, then UPPERCASE section headers."""
+    blocks: list[Block] = []
+    for chunk in _SEP_RE.split(text):
+        domains: list[str] = []
+        sections: dict[str, list[str]] = {}
+        cur: str | None = None
+        for line in chunk.splitlines():
+            s = line.strip()
+            if not s:
                 continue
-    except Exception:
-        pass
-    return websites
+            if _SECTION_RE.match(s):
+                cur = s
+                sections.setdefault(cur, [])
+            elif cur is None:
+                domains.append(s.split("/", 1)[0].lower())
+            else:
+                sections[cur].append(line.rstrip())
+        if domains:
+            blocks.append((domains, sections))
+    return blocks
 
-def get_theme_data(colors_file: str, websites_dir: str, web_theme_enabled: bool | None = None, force_unthemed_websites: bool = False, disabled_sites: list[str] | None = None, browser_theme_enabled: bool = True, eco_mode: bool = True) -> dict:
-    status: list[str] = []
-    p_colors = Path(colors_file).expanduser() if colors_file else None
-    p_sites = Path(websites_dir).expanduser() if websites_dir else None
 
-    if not p_colors or not p_colors.is_file():
-        status.append(f"Colors file not found: {colors_file}")
-    if p_sites and not p_sites.is_dir():
-        status.append(f"Websites dir not found: {websites_dir}")
+def domain_score(host: str, pattern: str) -> int:
+    """0 = no match; larger = more specific. '*' is the common block and never scores here."""
+    p = pattern.strip().lower().rstrip(".")
+    if not p or p == "*":
+        return 0
+    if p.startswith("*."):
+        p = p[2:]
+    if p.endswith(".*"):
+        base = p[:-2]
+        return len(base) + 2 if base in host.split(".")[:-1] else 0
+    if host == p:
+        return len(p) + 100
+    if host.endswith("." + p):
+        return len(p) + 50
+    return 0
 
-    disabled = _norm_sites(disabled_sites)
-    colors = parse_colors(colors_file)
-    websites = parse_websites(websites_dir, disabled)
 
-    fallback_fixes: dict[str, str] = {}
-    if p_sites:
-        fixes_file = p_sites / "dynamic-theme-fixes.config"
-        if not fixes_file.is_file():
-            fixes_file = Path.home() / ".config" / "dusky" / "settings" / "dusky_sites" / "dynamic-theme-fixes.config"
-        if fixes_file.is_file():
-            fallback_fixes = parse_dynamic_theme_fixes(fixes_file)
-
-    if not colors and not any("not found" in s.lower() for s in status):
-        status.append(f"Colors empty or unreadable: {colors_file}")
-
-    return {
-        "colors": colors,
-        "websites": websites,
-        "disabledSites": disabled,
-        "webThemeEnabled": bool(web_theme_enabled),
-        "forceUnthemedWebsites": bool(force_unthemed_websites),
-        "browserThemeEnabled": bool(browser_theme_enabled),
-        "ecoMode": bool(eco_mode),
-        "status": status if status else ["OK"],
-        "ok": bool(colors),
-    }
-
-def get_data_hash(data: dict) -> str:
-    payload = {k: v for k, v in data.items() if k != "timestamp"}
-    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")).hexdigest()
-
-def apply_set_config(new_config: dict) -> bool:
-    changed = False
-    snapshot: dict | None = None
-    with config_lock:
-        if new_config.get("colorsPath"):
-            v = str(Path(new_config["colorsPath"]).expanduser())
-            if config["colors_file"] != v:
-                config["colors_file"] = v
-                changed = True
-        if new_config.get("websitesDir"):
-            v = str(Path(new_config["websitesDir"]).expanduser())
-            if config["websites_dir"] != v:
-                config["websites_dir"] = v
-                changed = True
-        if "webThemeEnabled" in new_config:
-            v = _as_bool(new_config["webThemeEnabled"])
-            if config["web_theme_enabled"] != v:
-                config["web_theme_enabled"] = v
-                changed = True
-        if "forceUnthemedWebsites" in new_config:
-            v = _as_bool(new_config["forceUnthemedWebsites"])
-            if config.get("force_unthemed_websites") != v:
-                config["force_unthemed_websites"] = v
-                changed = True
-        if isinstance(new_config.get("disabledSites"), list):
-            v = _norm_sites(new_config["disabledSites"])
-            if config["disabled_sites"] != v:
-                config["disabled_sites"] = v
-                changed = True
-        if changed:
-            snapshot = {
-                "colors_file": config["colors_file"],
-                "websites_dir": config["websites_dir"],
-                "web_theme_enabled": config["web_theme_enabled"],
-                "force_unthemed_websites": config.get("force_unthemed_websites", False),
-                "disabled_sites": list(config["disabled_sites"]),
-            }
-    if snapshot is not None:
-        persist_config(snapshot)
-    return changed
-
-def resolve_fallback_file(p_sites: Path | None, filename: str) -> Path | None:
-    if p_sites:
-        f1 = p_sites / "fallback" / filename
-        if f1.is_file():
-            return f1
-        f2 = p_sites / filename
-        if f2.is_file():
-            return f2
-    f3 = Path.home() / ".config" / "dusky" / "settings" / "dusky_sites" / "fallback" / filename
-    if f3.is_file():
-        return f3
-    f4 = Path.home() / ".config" / "dusky" / "settings" / "dusky_sites" / filename
-    if f4.is_file():
-        return f4
+def tone(token: str) -> str | None:
+    t = token.strip().lower()
+    if _HEX_RE.match(t):
+        h = t[1:]
+        if len(h) in (3, 4):
+            r, g, b = (int(c * 2, 16) for c in h[:3])
+        else:
+            r, g, b = (int(h[i:i + 2], 16) for i in (0, 2, 4))
+        return "light" if (0.2126 * r + 0.7152 * g + 0.0722 * b) > 128 else "dark"
+    if t in {"white", "whitesmoke", "snow", "ivory"}:
+        return "light"
+    if t == "black":
+        return "dark"
     return None
 
-def is_native_dark_site(domain: str, p_sites: Path | None) -> bool:
-    if not domain:
-        return False
-    dark_sites_file = resolve_fallback_file(p_sites, "dark-sites.config")
-    if not dark_sites_file or not dark_sites_file.is_file():
-        return False
-    try:
-        lines = [line.strip().lower() for line in dark_sites_file.read_text(encoding="utf-8", errors="replace").splitlines() if line.strip() and not line.startswith("#")]
-        d = domain.lower()
-        for pat in lines:
-            clean_pat = pat[2:] if pat.startswith("*.") else (pat[1:] if pat.startswith("*") else pat)
-            if d == clean_pat or d.endswith("." + clean_pat):
-                return True
-    except Exception:
-        pass
-    return False
 
-def parse_static_theme_fixes(fixes_path: Path) -> dict[str, str]:
-    if not fixes_path or not fixes_path.is_file():
-        return {}
-    fixes: dict[str, str] = {}
-    try:
-        content = fixes_path.read_text(encoding="utf-8")
-        sections = content.split("================================")
-        for sec in sections:
-            sec = sec.strip()
-            if not sec:
-                continue
-            lines = sec.splitlines()
-            domains: list[str] = []
-            css_rules: list[str] = []
-            current_mode = None
-            selectors: list[str] = []
+def substitute_css(css: str) -> str:
+    """${colour} slots → palette roles by tone; --darkreader-* variables → palette roles."""
+    def slot(m: re.Match[str]) -> str:
+        match tone(m.group(1)):
+            case "light":
+                return "var(--surface)"
+            case "dark":
+                return "var(--on_surface)"
+            case _:
+                return m.group(1)
+    css = _SLOT_RE.sub(slot, css)
+    return _DR_VAR_RE.sub(lambda m: DR_VARS.get(m.group(1), "inherit"), css)
 
-            def flush_mode():
-                nonlocal current_mode, selectors, css_rules
-                if not current_mode or not selectors:
-                    return
-                sel_str = ",\n".join(selectors)
-                if current_mode == "NEUTRAL BG":
-                    css_rules.append(f"{sel_str} {{\n  background-color: var(--background, var(--surface, #181a1b)) !important;\n}}")
-                elif current_mode == "NEUTRAL TEXT":
-                    css_rules.append(f"{sel_str} {{\n  color: var(--on_background, var(--on_surface, #e0e0e0)) !important;\n}}")
-                elif current_mode in ("RED TEXT", "GREEN TEXT", "BLUE TEXT ACTIVE"):
-                    css_rules.append(f"{sel_str} {{\n  color: var(--primary, #8ab4f8) !important;\n}}")
-                elif current_mode in ("BLUE BG ACTIVE", "GREEN BG ACTIVE"):
-                    css_rules.append(f"{sel_str} {{\n  background-color: var(--primary_container, #364765) !important;\n}}")
-                selectors = []
 
-            for line in lines:
-                l = line.strip()
-                if not l:
+def block_css(sections: dict[str, list[str]], decls: dict[str, str]) -> str:
+    parts: list[str] = []
+    for name, lines in sections.items():
+        if name == "CSS":
+            parts.append(substitute_css("\n".join(lines)))
+        elif name in decls:
+            sel = ", ".join(l.strip() for l in lines if l.strip())
+            if sel:
+                parts.append(f"{sel} {{ {decls[name]} }}")
+    return "\n".join(p for p in parts if p)
+
+
+class Fallback:
+    """Lookup order: sites/fallback, sites, settings/fallback, settings. Parsed lazily, cached by signature.
+    inversion-fixes.config is intentionally not used: its INVERT lists only make sense under a
+    page-level invert filter, which this engine never applies."""
+
+    FILES = {
+        "dark": "dark-sites.config",
+        "hints": "detector-hints.config",
+        "dynamic": "dynamic-theme-fixes.config",
+        "static": "static-themes.config",
+    }
+
+    def __init__(self, sites_dir: Callable[[], Path]) -> None:
+        self._sites_dir = sites_dir
+        self._cache: dict[str, tuple[tuple | None, object]] = {}
+
+    def locate(self, name: str) -> Path | None:
+        d = self._sites_dir()
+        for p in (d / "fallback" / name, d / name, SETTINGS_DIR / "fallback" / name, SETTINGS_DIR / name):
+            if p.is_file():
+                return p
+        return None
+
+    def load(self, key: str, parser: Callable[[str], object]) -> object:
+        p = self.locate(self.FILES[key])
+        sig = None
+        if p is not None:
+            s = stat_sig(p)
+            if s is not None:
+                sig = (str(p), *s)
+        hit = self._cache.get(key)
+        if hit is not None and hit[0] == sig:
+            return hit[1]
+        text = ""
+        if sig is not None:
+            try:
+                text = p.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                text = ""
+        t0 = time.perf_counter()
+        data = parser(text)
+        log(f"parsed {self.FILES[key]} ({len(text)} B) in {(time.perf_counter() - t0) * 1000:.1f} ms")
+        self._cache[key] = (sig, data)
+        return data
+
+    def domain_fix(self, host: str) -> dict:
+        dark = self.load("dark", lambda t: [l.strip().lower() for l in t.splitlines() if l.strip() and not l.startswith("#")])
+        is_dark = any(domain_score(host, d) for d in dark)
+        hints: list[str] = []
+        for domains, sections in self.load("hints", parse_blocks):
+            if any(domain_score(host, d) for d in domains):
+                hints.extend(l.strip() for l in sections.get("MATCH", []) if l.strip())
+        css: list[str] = []
+        for key, decls in (("dynamic", DYNAMIC_DECLS), ("static", STATIC_DECLS)):
+            common = None
+            best, best_score = None, 0
+            for domains, sections in self.load(key, parse_blocks):
+                if "*" in domains:
+                    common = sections
                     continue
-                if l in ("NEUTRAL BG", "NEUTRAL TEXT", "RED TEXT", "GREEN TEXT", "BLUE BG ACTIVE", "BLUE TEXT ACTIVE", "BLUE BORDER", "FADE BG", "FADE TEXT", "NO IMAGE", "CSS"):
-                    flush_mode()
-                    current_mode = l
-                    continue
+                score = max((domain_score(host, d) for d in domains), default=0)
+                if score > best_score:
+                    best, best_score = sections, score
+            if key == "static" and best is None:
+                continue                                   # static themes are opt-in per site
+            if common is not None and (best is None or "NO COMMON" not in best):
+                css.append(block_css(common, decls))
+            if best is not None:
+                css.append(block_css(best, decls))
+        return {"css": "\n".join(p for p in css if p), "isDarkSite": is_dark, "hints": hints[:16]}
 
-                if current_mode == "CSS":
-                    css_rules.append(line)
-                elif current_mode:
-                    selectors.append(l)
-                else:
-                    expanded = expand_domain_pattern(l)
-                    domains.extend(expanded)
 
-            flush_mode()
+# ── Wire (NMH framing over non-blocking stdin) ───────────────────────────────
+class Wire:
+    def __init__(self) -> None:
+        self._in = bytearray()
+        self._buf = bytearray(1 << 16)
+        self._view = memoryview(self._buf)
+        self._chunk_seq = 0
 
-            if css_rules and domains:
-                final_css = "\n\n".join(css_rules)
-                final_css = (final_css
-                    .replace("var(--darkreader-neutral-background)", "var(--background, var(--surface, #181a1b))")
-                    .replace("var(--darkreader-neutral-text)", "var(--on_background, var(--on_surface, #e0e0e0))")
-                )
-                for domain in domains:
-                    if domain:
-                        if domain in fixes:
-                            fixes[domain] += "\n\n" + final_css
-                        else:
-                            fixes[domain] = final_css
-    except Exception:
-        pass
-    return fixes
-
-def parse_detector_hints(hints_path: Path) -> dict[str, list[str]]:
-    if not hints_path or not hints_path.is_file():
-        return {}
-    hints: dict[str, list[str]] = {}
-    try:
-        content = hints_path.read_text(encoding="utf-8", errors="replace")
-        sections = content.split("================================")
-        for sec in sections:
-            sec = sec.strip()
-            if not sec:
-                continue
-            lines = sec.splitlines()
-            domains: list[str] = []
-            matches: list[str] = []
-            in_match = False
-            for line in lines:
-                l = line.strip()
-                if not l:
-                    continue
-                if l == "MATCH":
-                    in_match = True
-                    continue
-                if l in ("TARGET", "NO DARK THEME"):
-                    in_match = False
-                    continue
-                if in_match:
-                    matches.append(l)
-                else:
-                    expanded = expand_domain_pattern(l)
-                    domains.extend(expanded)
-
-            if matches and domains:
-                for domain in domains:
-                    if domain:
-                        if domain not in hints:
-                            hints[domain] = []
-                        hints[domain].extend(matches)
-    except Exception:
-        pass
-    return hints
-
-def get_domain_fix_css(domain: str, websites_dir: str) -> dict:
-    if not domain:
-        return {"css": "", "isDarkSite": False, "detectorHints": []}
-    p_sites = Path(websites_dir).expanduser() if websites_dir else Path.home() / ".config" / "dusky_sites"
-    
-    if is_native_dark_site(domain, p_sites):
-        return {"css": "", "isDarkSite": True, "detectorHints": []}
-
-    combined_css_parts: list[str] = []
-    detector_hints: list[str] = []
-
-    # 1. Load dynamic-theme-fixes.config
-    dt_file = resolve_fallback_file(p_sites, "dynamic-theme-fixes.config")
-    if dt_file and dt_file.is_file():
-        dt_fixes = parse_dynamic_theme_fixes(dt_file)
-        if dt_fixes.get(domain.lower()):
-            combined_css_parts.append(dt_fixes[domain.lower()])
-
-    # 2. Load inversion-fixes.config
-    inv_file = resolve_fallback_file(p_sites, "inversion-fixes.config")
-    if inv_file and inv_file.is_file():
-        inv_fixes = parse_dynamic_theme_fixes(inv_file)
-        if inv_fixes.get(domain.lower()):
-            combined_css_parts.append(inv_fixes[domain.lower()])
-
-    # 3. Load static-themes.config
-    st_file = resolve_fallback_file(p_sites, "static-themes.config")
-    if st_file and st_file.is_file():
-        st_fixes = parse_static_theme_fixes(st_file)
-        if st_fixes.get(domain.lower()):
-            combined_css_parts.append(st_fixes[domain.lower()])
-
-    # 4. Load detector-hints.config
-    dh_file = resolve_fallback_file(p_sites, "detector-hints.config")
-    if dh_file and dh_file.is_file():
-        dh_hints = parse_detector_hints(dh_file)
-        if dh_hints.get(domain.lower()):
-            detector_hints = dh_hints[domain.lower()]
-
-    return {"css": "\n\n".join(combined_css_parts), "isDarkSite": False, "detectorHints": detector_hints}
-
-def message_handler() -> None:
-    global running, fetch_requested
-    error_count = 0
-    while running:
-        try:
-            msg = get_message()
-            if msg == "EOF":
-                running = False
-                wake_main()
+    def read(self) -> list[dict] | None:
+        """Drain stdin. Returns decoded frames, or None on EOF (Firefox closed the port)."""
+        while True:
+            try:
+                n = os.readinto(0, self._view)
+            except BlockingIOError:
                 break
-            if msg in ("DECODE_ERROR", None):
-                error_count += 1
-                if error_count > 10:
-                    running = False
-                    wake_main()
-                    break
-                time.sleep(0.5)
-                continue
-
-            error_count = 0
-            if not isinstance(msg, dict):
-                continue
-
-            msg_type = msg.get("type")
-
-            if msg_type == "SET_CONFIG":
-                apply_set_config(msg.get("config", {}) or {})
-                with fetch_lock:
-                    fetch_requested = True
-                wake_main()
-
-            elif msg_type == "FETCH_NOW":
-                with fetch_lock:
-                    fetch_requested = True
-                wake_main()
-
-            elif msg_type == "LIVE_THEME_RESPONSE":
-                theme_data = msg.get("theme", {})
-                cache_file = Path.home() / ".config/dusky/settings/dusky_sites/live_theme_cache.json"
-                try:
-                    cache_file.parent.mkdir(parents=True, exist_ok=True)
-                    tmp = cache_file.with_suffix(".json.tmp")
-                    tmp.write_text(json.dumps(theme_data, indent=2) + "\n", encoding="utf-8")
-                    tmp.replace(cache_file)
-                except Exception:
-                    pass
-
-            elif msg_type == "GET_DOMAIN_FIX":
-                domain = msg.get("domain", "")
-                with config_lock:
-                    w_dir = config.get("websites_dir", "")
-                res_dict = get_domain_fix_css(domain, w_dir)
-                send_message({
-                    "type": "DOMAIN_FIX_RESPONSE",
-                    "domain": domain,
-                    "css": res_dict.get("css", ""),
-                    "isDarkSite": res_dict.get("isDarkSite", False),
-                    "detectorHints": res_dict.get("detectorHints", [])
-                })
-
-            elif msg_type in {"GET_PROFILE_PATHS", "WRITE_USER_CHROME", "WRITE_USER_CONTENT", "SET_FONT_SIZE", "QUERY_LIVE_THEME"}:
-                send_message({
-                    "type": "HOST_RESPONSE",
-                    "ok": False,
-                    "error": f"unsupported_message:{msg_type}",
-                    "echo": msg_type,
-                })
-
-        except Exception as e:
-            print(f"Dusky Sites host error (handler): {e}", file=sys.stderr)
-            traceback.print_exc(file=sys.stderr)
-
-def main() -> None:
-    global running, fetch_requested
-    threading.Thread(target=message_handler, daemon=True).start()
-
-    watcher = InotifyWatcher()
-    last_hash = ""
-    last_colors_mtime = -1.0
-    last_websites_state: dict[str, float] | None = None
-    last_config_mtime = -1.0
-    force_send = True
-
-    while running:
-        try:
-            current_config_mtime = -1.0
-            if CONFIG_PATH.is_file():
-                try:
-                    current_config_mtime = CONFIG_PATH.stat().st_mtime
-                except OSError:
-                    pass
-
-            if current_config_mtime != last_config_mtime:
-                last_config_mtime = current_config_mtime
-                disk_cfg = load_config_file()
-                with config_lock:
-                    config.update(disk_cfg)
-                force_send = True
-
-            with config_lock:
-                colors_file = config["colors_file"]
-                websites_dir = config["websites_dir"]
-                web_enabled = bool(config["web_theme_enabled"])
-                force_unthemed = bool(config.get("force_unthemed_websites", False))
-                browser_theme_enabled = bool(config.get("browser_theme_enabled", True))
-                eco_mode = bool(config.get("eco_mode", True))
-                disabled_sites = list(config["disabled_sites"])
-
-            watcher.sync_watches([str(CONFIG_PATH), colors_file, websites_dir])
-
-            should_update = force_send
-
-            with fetch_lock:
-                if fetch_requested:
-                    should_update = True
-                    force_send = True
-                    fetch_requested = False
-
-            current_colors_mtime = -1.0
-            p_colors = Path(colors_file).expanduser() if colors_file else None
-            if p_colors and p_colors.is_file():
-                try:
-                    current_colors_mtime = p_colors.stat().st_mtime
-                except OSError:
-                    pass
-            if current_colors_mtime != last_colors_mtime:
-                last_colors_mtime = current_colors_mtime
-                should_update = True
-
-            current_websites_state = get_dir_state(websites_dir)
-            if current_websites_state != last_websites_state:
-                last_websites_state = current_websites_state
-                should_update = True
-
-            send_failed = False
-            if should_update or not last_hash:
-                data = get_theme_data(colors_file, websites_dir, web_enabled, force_unthemed, disabled_sites, browser_theme_enabled, eco_mode)
-                current_hash = get_data_hash(data)
-                if current_hash != last_hash or force_send:
-                    data["timestamp"] = time.time()
-                    if send_message({"type": "MATUGEN_UPDATE", "data": data}):
-                        last_hash = current_hash
-                        force_send = False
-                    else:
-                        force_send = True
-                        send_failed = True
-                else:
-                    force_send = False
-
-            if not running:
+            if n == 0:
+                return None
+            self._in += self._view[:n]
+            if n < len(self._buf):
                 break
+        frames: list[dict] = []
+        while len(self._in) >= 4:
+            length = int.from_bytes(self._in[:4], sys.byteorder)
+            if length > MAX_INBOUND:
+                raise ValueError(f"inbound frame of {length} B exceeds cap")
+            if len(self._in) < 4 + length:
+                break
+            body = bytes(self._in[4:4 + length])
+            del self._in[:4 + length]
+            try:
+                msg = json.loads(body)
+            except ValueError as e:
+                err(f"bad frame: {e}")
+                continue
+            if isinstance(msg, dict):
+                frames.append(msg)
+        return frames
 
-            if send_failed:
-                watcher.wait(timeout=1.0)
-            else:
-                watcher.wait(timeout=60.0)
-                if not running:
-                    break
-                deadline = time.monotonic() + 0.05
-                while running and time.monotonic() < deadline:
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        break
-                    watcher.wait(timeout=remaining)
+    def send(self, msg: dict) -> bool:
+        text = json.dumps(msg, ensure_ascii=False, separators=(",", ":"))
+        data = text.encode("utf-8")
+        if len(data) <= MAX_MSG - 64:
+            return self._write(data)
+        if len(data) > 8 * MAX_MSG:
+            err(f"frame of {len(data)} B exceeds the 8 MiB chunk budget; dropped ({msg.get('type')})")
+            return False
+        self._chunk_seq += 1
+        cid = f"{os.getpid()}-{self._chunk_seq}"
+        parts = [text[i:i + CHUNK_CHARS] for i in range(0, len(text), CHUNK_CHARS)]
+        for seq, part in enumerate(parts):
+            frame = {"type": "CHUNK", "id": cid, "seq": seq, "total": len(parts), "part": part}
+            if not self._write(json.dumps(frame, ensure_ascii=False, separators=(",", ":")).encode("utf-8")):
+                return False
+        return True
 
-        except Exception as e:
-            print(f"Dusky Sites host error (main): {e}", file=sys.stderr)
-            time.sleep(5.0)
+    @staticmethod
+    def _write(data: bytes) -> bool:
+        view = memoryview(len(data).to_bytes(4, sys.byteorder) + data)
+        try:
+            while view:
+                try:
+                    view = view[os.write(1, view):]
+                except BlockingIOError:
+                    # stdout shares a non-blocking description with stdin when the browser hands us a
+                    # socketpair instead of two pipes: wait for writability instead of dropping the frame.
+                    select.select([], [1], [], 5.0)
+            return True
+        except BrokenPipeError:
+            raise SystemExit(0) from None
+        except OSError as e:
+            err(f"stdout write failed: {e}")
+            return False
 
-    watcher.close()
+
+# ── inotify (man 7 inotify) ──────────────────────────────────────────────────
+IN_MODIFY, IN_ATTRIB, IN_CLOSE_WRITE = 0x2, 0x4, 0x8
+IN_MOVED_FROM, IN_MOVED_TO, IN_CREATE, IN_DELETE = 0x40, 0x80, 0x100, 0x200
+IN_DELETE_SELF, IN_MOVE_SELF = 0x400, 0x800
+IN_Q_OVERFLOW, IN_IGNORED = 0x4000, 0x8000
+IN_ONLYDIR, IN_EXCL_UNLINK = 0x0100_0000, 0x0400_0000
+WATCH_MASK = (IN_MODIFY | IN_ATTRIB | IN_CLOSE_WRITE | IN_MOVED_FROM | IN_MOVED_TO | IN_CREATE | IN_DELETE
+              | IN_DELETE_SELF | IN_MOVE_SELF | IN_ONLYDIR | IN_EXCL_UNLINK)
+_EVENT = struct.Struct("iIII")      # struct inotify_event { int wd; uint32_t mask, cookie, len; char name[]; }
+
+
+class Inotify:
+    def __init__(self) -> None:
+        libc = ctypes.CDLL("libc.so.6", use_errno=True)
+        libc.inotify_init1.argtypes = (ctypes.c_int,)
+        libc.inotify_init1.restype = ctypes.c_int
+        libc.inotify_add_watch.argtypes = (ctypes.c_int, ctypes.c_char_p, ctypes.c_uint32)
+        libc.inotify_add_watch.restype = ctypes.c_int
+        libc.inotify_rm_watch.argtypes = (ctypes.c_int, ctypes.c_int)
+        libc.inotify_rm_watch.restype = ctypes.c_int
+        self._libc = libc
+        self.fd = libc.inotify_init1(os.O_NONBLOCK | os.O_CLOEXEC)   # IN_NONBLOCK / IN_CLOEXEC share these values
+        if self.fd < 0:
+            e = ctypes.get_errno()
+            raise OSError(e, f"inotify_init1: {os.strerror(e)}")
+        self._by_wd: dict[int, Path] = {}
+        self._by_dir: dict[Path, int] = {}
+
+    def sync(self, wanted: set[Path]) -> bool:
+        """Watch exactly `wanted`; False when a directory does not exist yet (caller retries)."""
+        for d in [d for d in self._by_dir if d not in wanted]:
+            self._libc.inotify_rm_watch(self.fd, self._by_dir[d])
+            self._by_wd.pop(self._by_dir.pop(d), None)
+        ok = True
+        for d in wanted:
+            if d in self._by_dir:
+                continue
+            wd = self._libc.inotify_add_watch(self.fd, os.fsencode(d), WATCH_MASK)
+            if wd < 0:
+                ok = False
+                continue
+            self._by_wd[wd] = d
+            self._by_dir[d] = wd
+        return ok
+
+    def drain(self) -> list[tuple[Path | None, int, str]]:
+        out: list[tuple[Path | None, int, str]] = []
+        while True:
+            try:
+                buf = os.read(self.fd, 1 << 16)
+            except BlockingIOError:
+                return out
+            off = 0
+            while off + _EVENT.size <= len(buf):
+                wd, mask, _cookie, ln = _EVENT.unpack_from(buf, off)
+                off += _EVENT.size
+                name = buf[off:off + ln].split(b"\0", 1)[0].decode("utf-8", "surrogateescape")
+                off += ln
+                if mask & IN_Q_OVERFLOW:
+                    out.append((None, mask, ""))
+                    continue
+                d = self._by_wd.get(wd)
+                if d is None:
+                    continue
+                if mask & IN_IGNORED:
+                    self._by_wd.pop(wd, None)
+                    self._by_dir.pop(d, None)
+                out.append((d, mask, name))
+
+
+# ── Host ─────────────────────────────────────────────────────────────────────
+class Host:
+    def __init__(self) -> None:
+        global DEBUG
+        SETTINGS_DIR.mkdir(parents=True, exist_ok=True)   # config watch must never have to retry
+        self.cfg = load_config()
+        DEBUG = self.cfg.debug
+        self.cfg_sig = stat_sig(CONFIG_PATH)
+        self.palette = Palette(self.cfg.colors_file)
+        self.sites = SiteRules(self.cfg.sites_dir)
+        self.fallback = Fallback(lambda: self.cfg.sites_dir)
+        self.wire = Wire()
+        self.ino = Inotify()
+
+        self.sel = selectors.DefaultSelector()
+        self.sel.register(0, selectors.EVENT_READ, "stdin")
+        self.sel.register(self.ino.fd, selectors.EVENT_READ, "inotify")
+        r, w = os.pipe()
+        os.set_blocking(r, False)
+        os.set_blocking(w, False)
+        self.sel.register(r, selectors.EVENT_READ, "signal")
+        self._sig_r = r
+        signal.set_wakeup_fd(w, warn_on_full_buffer=False)
+        for s in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+            signal.signal(s, self._on_stop)
+        signal.signal(signal.SIGUSR1, self._on_usr1)
+
+        self.stop = False
+        self.query_live = False
+        self.sent_sites_rev: str | None = None
+        self.dirty = {"palette": False, "sites": False, "config": False}
+        self.force = False
+        now = time.monotonic()
+        self.t_update: float | None = None
+        self.t_hard: float | None = None
+        self.t_settle: float | None = None
+        self.t_keepalive = now + KEEPALIVE_S
+        self.t_poll = now + POLL_S
+        self.t_watch = 0.0
+        self.watch_ok = False
+
+        self.sync_watches()
+        self.palette.refresh()          # pre-warm: the first FETCH_NOW answers from memory
+        self.sites.refresh()
+
+    def _on_stop(self, *_: object) -> None:
+        self.stop = True
+
+    def _on_usr1(self, *_: object) -> None:
+        self.query_live = True
+
+    # transport ------------------------------------------------------------
+    def send(self, msg: dict) -> bool:
+        ok = self.wire.send(msg)
+        if ok:
+            self.t_keepalive = time.monotonic() + KEEPALIVE_S
+        return ok
+
+    # watches --------------------------------------------------------------
+    def sync_watches(self) -> None:
+        self.watch_ok = self.ino.sync({self.palette.path.parent, self.sites.dir, CONFIG_PATH.parent})
+        if not self.watch_ok:
+            self.t_watch = time.monotonic() + WATCH_RETRY_S
+
+    def schedule_update(self) -> None:
+        t = time.monotonic()
+        if self.t_hard is None:
+            self.t_hard = t + MAX_WAIT_S
+        self.t_update = min(t + QUIET_S, self.t_hard)
+
+    def on_inotify(self) -> None:
+        for d, mask, name in self.ino.drain():
+            if mask & IN_Q_OVERFLOW:
+                self.dirty.update(palette=True, sites=True, config=True)
+                self.schedule_update()
+                continue
+            if mask & (IN_IGNORED | IN_DELETE_SELF | IN_MOVE_SELF):
+                self.watch_ok = False
+                self.t_watch = time.monotonic() + 1.0
+            if d == self.palette.path.parent and name == self.palette.path.name:
+                self.dirty["palette"] = True
+                self.schedule_update()
+            if d == self.sites.dir and (not name or name.endswith(".css")):
+                self.dirty["sites"] = True
+                self.schedule_update()
+            if d == CONFIG_PATH.parent and name == CONFIG_PATH.name:
+                self.dirty["config"] = True
+                self.schedule_update()
+
+    # timers ---------------------------------------------------------------
+    def next_timeout(self) -> float:
+        deadlines = [self.t_poll]
+        if self.t_update is not None:
+            deadlines.append(self.t_update)
+        if self.t_settle is not None:
+            deadlines.append(self.t_settle)
+        if self.cfg.keep_alive:
+            deadlines.append(self.t_keepalive)
+        if not self.watch_ok:
+            deadlines.append(self.t_watch)
+        return max(0.0, min(deadlines) - time.monotonic())
+
+    def run_timers(self) -> None:
+        t = time.monotonic()
+        if self.t_update is not None and t >= self.t_update:
+            self.t_update = self.t_hard = None
+            self.tick()
+        if self.t_settle is not None and t >= self.t_settle:
+            self.t_settle = None
+            self.send({"type": "QUERY_LIVE_THEME"})
+        if self.query_live:
+            self.query_live = False
+            self.send({"type": "QUERY_LIVE_THEME"})
+        if self.cfg.keep_alive and t >= self.t_keepalive:
+            self.send({"type": "PING", "at": int(time.time() * 1000)})
+            self.t_keepalive = t + KEEPALIVE_S           # even if the write failed, do not spin
+        if t >= self.t_poll:
+            self.t_poll = t + POLL_S
+            self.dirty.update(palette=True, sites=True, config=True)
+            self.tick()
+        if not self.watch_ok and t >= self.t_watch:
+            self.sync_watches()
+
+    # state ----------------------------------------------------------------
+    def tick(self) -> None:
+        t0 = time.perf_counter()
+        changed = self.force
+        self.force = False
+        if self.dirty["config"]:
+            self.dirty["config"] = False
+            changed |= self.reload_config()
+        if self.dirty["palette"]:
+            self.dirty["palette"] = False
+            changed |= self.palette.refresh()
+        if self.dirty["sites"]:
+            self.dirty["sites"] = False
+            changed |= self.sites.refresh()
+        if changed:
+            self.send_update()
+        log(f"tick {'sent' if changed else 'no-op'} in {(time.perf_counter() - t0) * 1000:.2f} ms")
+
+    def reload_config(self) -> bool:
+        global DEBUG
+        sig = stat_sig(CONFIG_PATH)
+        if sig == self.cfg_sig:
+            return False
+        self.cfg_sig = sig
+        fresh = load_config()
+        changed = fresh.to_json() != self.cfg.to_json()
+        self.cfg = fresh
+        DEBUG = fresh.debug
+        self.retarget()
+        return changed
+
+    def retarget(self) -> None:
+        if self.palette.path != self.cfg.colors_file:
+            self.palette = Palette(self.cfg.colors_file)
+            self.dirty["palette"] = True
+        if self.sites.dir != self.cfg.sites_dir:
+            self.sites = SiteRules(self.cfg.sites_dir)
+            self.dirty["sites"] = True
+        self.sync_watches()
+
+    def send_update(self) -> None:
+        cfg = self.cfg
+        status: list[str] = []
+        if self.palette.sig is None:
+            status.append(f"Colors file not found: {cfg.colors_path}")
+        elif not self.palette.colors:
+            status.append(f"Colors empty or unreadable: {cfg.colors_path}")
+        if not self.sites.dir.is_dir():
+            status.append(f"Websites dir not found: {cfg.websites_dir}")
+        include_sites = self.sites.rev != self.sent_sites_rev
+        data: dict[str, object] = {
+            "colors": self.palette.colors,
+            "colorsRev": self.palette.rev,
+            "websitesRev": self.sites.rev,
+            "disabledSites": cfg.disabled_sites,
+            "webThemeEnabled": cfg.web_theme_enabled,
+            "forceUnthemedWebsites": cfg.force_unthemed_websites,
+            "status": status or ["OK"],
+            "ok": bool(self.palette.colors),
+            "timestamp": int(time.time() * 1000),
+        }
+        if include_sites:
+            data["websites"] = self.sites.sites
+        if self.send({"type": "MATUGEN_UPDATE", "data": data}):
+            if include_sites:
+                self.sent_sites_rev = self.sites.rev
+            self.t_settle = time.monotonic() + SETTLE_S
+            log(f"MATUGEN_UPDATE colours={len(self.palette.colors)} rev={self.palette.rev} sites={'sent' if include_sites else 'known'}")
+        else:
+            self.sent_sites_rev = None
+            self.force = True
+            self.t_update = time.monotonic() + 1.0
+            self.t_hard = None
+
+    def note_known(self, known: object) -> None:
+        rev = known.get("websitesRev") if isinstance(known, dict) else None
+        self.sent_sites_rev = rev if isinstance(rev, str) else None
+
+    def write_live_theme(self, theme: object) -> None:
+        try:
+            atomic_write(LIVE_THEME_PATH, json.dumps({"theme": theme, "timestamp": int(time.time() * 1000)}, indent=2) + "\n")
+        except OSError as e:
+            err(f"live theme cache write failed: {e}")
+
+    # protocol -------------------------------------------------------------
+    def handle(self, m: dict) -> None:
+        global DEBUG
+        match m.get("type"):
+            case "HELLO":
+                self.note_known(m.get("known"))
+                self.send({"type": "HELLO_ACK", "wire": WIRE, "pid": os.getpid(), "peerWire": m.get("wire")})
+            case "FETCH_NOW":
+                self.note_known(m.get("known"))
+                self.force = True
+                self.dirty.update(palette=True, sites=True, config=True)
+                self.t_update = time.monotonic()
+                self.t_hard = None
+            case "SET_CONFIG":
+                cfg = m.get("config")
+                if isinstance(cfg, dict) and self.cfg.apply(cfg):
+                    save_config(self.cfg)
+                    self.cfg_sig = stat_sig(CONFIG_PATH)
+                    DEBUG = self.cfg.debug
+                    self.retarget()
+                    self.force = True
+                    self.t_update = time.monotonic()
+                    self.t_hard = None
+            case "GET_DOMAIN_FIX":
+                domain = str(m.get("domain") or "").strip().lower()[:253]
+                fix = self.fallback.domain_fix(domain) if domain else {"css": "", "isDarkSite": False, "hints": []}
+                self.send({"type": "DOMAIN_FIX_RESPONSE", "rid": m.get("rid"), "domain": domain, **fix})
+            case "LIVE_THEME_RESPONSE":
+                self.write_live_theme(m.get("theme"))
+            case "PING":
+                self.send({"type": "PONG", "at": m.get("at")})
+            case "PONG":
+                pass
+            case other:
+                self.send({"type": "HOST_RESPONSE", "ok": False, "error": "unsupported", "of": other, "rid": m.get("rid")})
+
+    def run(self) -> int:
+        while not self.stop:
+            for key, _ in self.sel.select(self.next_timeout()):
+                match key.data:
+                    case "stdin":
+                        frames = self.wire.read()
+                        if frames is None:
+                            log("stdin closed by Firefox; exiting")
+                            return 0
+                        for frame in frames:
+                            self.handle(frame)
+                    case "inotify":
+                        self.on_inotify()
+                    case "signal":
+                        try:
+                            os.read(self._sig_r, 4096)
+                        except BlockingIOError:
+                            pass
+            self.run_timers()
+        return 0
+
+
+def main() -> int:
+    os.set_blocking(0, False)
     try:
-        os.close(_wake_r)
-        os.close(_wake_w)
-    except OSError:
-        pass
-    sys.exit(0)
+        return Host().run()
+    except KeyboardInterrupt:
+        return 0
+    except Exception as e:                        # last-resort diagnostics land in the Browser Console
+        err(f"fatal: {e!r}")
+        return 1
+
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

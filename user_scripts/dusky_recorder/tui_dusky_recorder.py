@@ -2,22 +2,30 @@
 """
 ===============================================================================
 DUSKY TUI: GPU SCREEN RECORDER SCHEMA (NATIVE INI)
-Targets: Pure Wayland | Arch Linux | GPU Screen Recorder 5.13+
+Targets: Pure Wayland | Arch Linux | GPU Screen Recorder 6.1.3+
 ===============================================================================
 """
 
+import os
 import subprocess
 import sys
 from pathlib import Path
 
-_dusky_root = Path.home() / "user_scripts" / "dusky_tui"
-if str(_dusky_root) not in sys.path:
-    sys.path.insert(0, str(_dusky_root))
-
-import sys
-from pathlib import Path
-
 _DUSKY_TUI_ROOT = Path.home() / "user_scripts" / "dusky_tui"
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from recorder_config import CONFIG_FILE, DEFAULTS, ensure_config
+
+ensure_config()
+
+# Hand off before loading the schema so hardware discovery runs once, in the router.
+if __name__ == "__main__":
+    main_router = _DUSKY_TUI_ROOT / "python" / "main" / "main.py"
+    if not main_router.is_file():
+        print(f"[-] Error: Main Dusky TUI router not found at {main_router}", file=sys.stderr)
+        sys.exit(1)
+    os.execv(sys.executable, [sys.executable, str(main_router), str(Path(__file__).resolve()), *sys.argv[1:]])
+
 if str(_DUSKY_TUI_ROOT) not in sys.path:
     sys.path.insert(0, str(_DUSKY_TUI_ROOT))
 
@@ -27,7 +35,7 @@ from python.frontend.core_types import ConfigItem
 # 1. CORE APPLICATION ROUTING
 # =============================================================================
 ENGINE_TYPE = "ini"
-TARGET_FILE = "~/.config/dusky_recorder/config.conf"
+TARGET_FILE = str(CONFIG_FILE)
 APP_TITLE   = "GPU Screen Recorder"
 
 # =============================================================================
@@ -41,40 +49,34 @@ USER_PRESETS_TAB    = "Profiles"
 # =============================================================================
 # 3. DYNAMIC HARDWARE DISCOVERY
 # =============================================================================
-def fetch_audio_devices():
-    """Polls gpu-screen-recorder for active hardware to populate TUI Pickers."""
+def fetch_audio_devices() -> tuple[list[str], list[str], list[str], list[str]]:
+    """Discover PulseAudio/PipeWire sources, keeping defaults when unavailable."""
     out_opts = ["none", "default_output"]
     out_hints = ["No Output", "Default Desktop Audio"]
     in_opts = ["none", "default_input"]
     in_hints = ["No Input", "Default Microphone"]
-    
     try:
-        # Run command with strict timeout to prevent UI blocking if GSR hangs
-        res = subprocess.run(
-            ["gpu-screen-recorder", "--list-audio-devices"], 
-            capture_output=True, text=True, timeout=1.5, check=False
+        result = subprocess.run(
+            ["gpu-screen-recorder", "--list-audio-devices"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=1.5, check=True,
         )
-        
-        for line in res.stdout.strip().split('\n'):
-            if '|' not in line: 
-                continue
-                
-            dev_id, dev_desc = line.split('|', 1)
-            
-            if not dev_id or dev_id in ('default_output', 'default_input'): 
-                continue
-            if not dev_desc:
-                dev_desc = dev_id
-                
-            if 'output' in dev_id:
-                out_opts.append(dev_id)
-                out_hints.append(dev_desc)
-            elif 'input' in dev_id:
-                in_opts.append(dev_id)
-                in_hints.append(dev_desc)
-    except Exception:
-        pass # Gracefully fall back to 'none' and 'default' if parsing fails
-        
+    except (OSError, subprocess.SubprocessError):
+        return out_opts, out_hints, in_opts, in_hints
+
+    seen = {"none", "default_output", "default_input"}
+    for line in result.stdout.splitlines():
+        dev_id, separator, description = line.partition("|")
+        if not separator or not dev_id or dev_id in seen:
+            continue
+        seen.add(dev_id)
+        # Monitor sources capture sinks; other sources include physical and virtual mics.
+        if dev_id.endswith(".monitor"):
+            out_opts.append(dev_id)
+            out_hints.append(description or dev_id)
+        else:
+            in_opts.append(dev_id)
+            in_hints.append(description or dev_id)
     return out_opts, out_hints, in_opts, in_hints
 
 OUT_OPTS, OUT_HINTS, IN_OPTS, IN_HINTS = fetch_audio_devices()
@@ -104,26 +106,26 @@ SCHEMA = {
             key="window",
             scope="DEFAULT",
             type_="cycle",
-            default="region",
+            default=DEFAULTS["window"],
             options=["screen", "portal", "region"],
             group="Target",
-            extended_help="**Capture Target** (`-w`)\n\n`screen` captures the primary Wayland output. `portal` uses the native Wayland picker. `region` utilizes Slurp to draw a custom area."
+            extended_help="**Capture Target** (`-w`)\n\n`screen` captures the first output reported by the recorder. `portal` uses the native Wayland picker. `region` utilizes Slurp to draw a custom area."
         ),
         ConfigItem(
             label="Region",
             key="region",
             scope="DEFAULT",
             type_="string",
-            default="",
+            default=DEFAULTS["region"],
             group="Target",
-            extended_help="**Region String**\n\nSpecify exact coordinates (e.g., `1280x720+100+50`). If left blank, Slurp will automatically execute so you can draw the capture zone."
+            extended_help="**Region String**\n\nSpecify logical Wayland coordinates (e.g., `1280x720+100+50`); the recorder applies output scaling. If left blank, Slurp will automatically execute so you can draw the capture zone."
         ),
         ConfigItem(
             label="FPS",
             key="fps",
             scope="DEFAULT",
             type_="int",
-            default=60,
+            default=DEFAULTS["fps"],
             min_val=1,
             max_val=360,
             step=1,
@@ -135,7 +137,7 @@ SCHEMA = {
             key="cursor",
             scope="DEFAULT",
             type_="cycle",
-            default="yes",
+            default=DEFAULTS["cursor"],
             options=["yes", "no"],
             group="Playback",
             extended_help="**Show Cursor** (`-cursor`)\n\nToggle whether your mouse cursor is visible in the final output file."
@@ -145,7 +147,7 @@ SCHEMA = {
             key="show_indicator",
             scope="DEFAULT",
             type_="cycle",
-            default="yes",
+            default=DEFAULTS["show_indicator"],
             options=["yes", "no"],
             group="Playback",
             extended_help="**Recording Indicator**\n\nToggle the blinking red dot notification that appears while recording."
@@ -161,17 +163,17 @@ SCHEMA = {
             key="encoder",
             scope="DEFAULT",
             type_="cycle",
-            default="gpu",
+            default=DEFAULTS["encoder"],
             options=["gpu", "cpu"],
             group="Hardware",
-            extended_help="**Encoder Device** (`-encoder`)\n\n`gpu` strictly forces NVENC/VAAPI/AMF for zero-overhead capture. `cpu` falls back to software encoding."
+            extended_help="**Encoder Device** (`-encoder`)\n\n`gpu` uses a supported hardware encoder. `cpu` selects software H.264 encoding; choose auto or h264 as the codec."
         ),
         ConfigItem(
             label="Tune",
             key="tune",
             scope="DEFAULT",
             type_="cycle",
-            default="performance",
+            default=DEFAULTS["tune"],
             options=["performance", "quality"],
             group="Hardware",
             extended_help="**Encoder Tuning** (`-tune`)\n\nNVIDIA ONLY. Adjusts the silicon bias towards raw encoding speed or visual fidelity."
@@ -181,49 +183,48 @@ SCHEMA = {
             key="low_power",
             scope="DEFAULT",
             type_="cycle",
-            default="no",
+            default=DEFAULTS["low_power"],
             options=["yes", "no"],
             group="Hardware",
-            extended_help="**Low Power Mode** (`-low-power`)\n\nAMD ONLY. Allows the GPU to enter a lower power state during recording. Best used alongside the 'content' Timing mode."
+            extended_help="**Low Power Mode** (`-low-power`)\n\nCurrently affects AMD GPUs. Allows a lower power state during recording, subject to driver behavior. For portal capture, content timing can further reduce encoding work when idle."
         ),
         ConfigItem(
             label="Codec",
             key="codec",
             scope="DEFAULT",
             type_="picker",
-            default="auto",
+            default=DEFAULTS["codec"],
             options=[
                 "auto", "h264", "hevc", "av1", "vp8", "vp9",
                 "hevc_hdr", "av1_hdr", "hevc_10bit", "av1_10bit",
-                "h264_vulkan", "hevc_vulkan", "av1_vulkan", 
+                "h264_vulkan", "hevc_vulkan", "av1_vulkan",
                 "hevc_10bit_vulkan", "av1_10bit_vulkan", "av1_hdr_vulkan"
             ],
             hints=[
                 "Automatic", "Max Compatibility", "H.265 (Efficiency)", "AV1 (Compression)", "Open WebM", "Open WebM High",
                 "HEVC + HDR", "AV1 + HDR", "HEVC 10-bit", "AV1 10-bit",
-                "Fixes Nvidia downclock", "Vulkan HEVC", "Vulkan AV1",
+                "Experimental Vulkan H.264", "Vulkan HEVC", "Vulkan AV1",
                 "Vulkan HEVC 10-bit", "Vulkan AV1 10-bit", "Vulkan AV1 HDR"
             ],
             group="Format",
-            extended_help="**Video Codec** (`-k`)\n\nVulkan codecs are highly recommended for NVIDIA Wayland users to prevent the 'cuda p2 state' GPU downclock bug."
+            extended_help="**Video Codec** (`-k`)\n\nVulkan codecs are experimental and depend on GPU and driver support. They can avoid CUDA downclocking on affected NVIDIA drivers."
         ),
-ConfigItem(
+        ConfigItem(
             label="Quality",
             key="quality",
             scope="DEFAULT",
             type_="string",
-            default="very_high",
-            options=["ultra", "very_high", "high", "medium", "low", "40000", "80000"],
+            default=DEFAULTS["quality"],
+            options=["ultra", "very_high", "high", "medium", "40000", "80000"],
             group="Format",
-            warning_msg="CRITICAL: If you type a custom numeric bitrate here, you MUST change the Bitrate Mode below to 'cbr' or the recorder will crash.",
-            extended_help="**Quality / Bitrate** (`-q`)\n\nIf Bitrate is 'auto/vbr', select a text preset (e.g., 'very_high'). If Bitrate is 'cbr', type a raw numeric value in kbps (e.g., '40000')."
+            extended_help="**Quality / Bitrate** (`-q`)\n\nUse a text quality preset or a positive numeric bitrate in kbps. Numeric values automatically select CBR when recording starts. CBR requires a numeric value."
         ),
         ConfigItem(
             label="Bitrate",
             key="bitrate_mode",
             scope="DEFAULT",
             type_="cycle",
-            default="auto",
+            default=DEFAULTS["bitrate_mode"],
             options=["auto", "qp", "vbr", "cbr"],
             group="Format",
             extended_help="**Bitrate Mode** (`-bm`)\n\n`cbr` (Constant Bitrate) is heavily recommended when using the Replay Buffer to strictly govern RAM usage."
@@ -233,37 +234,37 @@ ConfigItem(
             key="frame_mode",
             scope="DEFAULT",
             type_="cycle",
-            default="vfr",
+            default=DEFAULTS["frame_mode"],
             options=["vfr", "cfr", "content"],
             group="Format",
-            extended_help="**Frame Rate Mode** (`-fm`)\n\n`content` syncs the video exactly to captured screen updates to minimize idle resource usage."
+            extended_help="**Frame Rate Mode** (`-fm`)\n\n`content` follows captured updates where supported (including portal capture). The recorder ignores this setting for direct Wayland monitor capture."
         ),
         ConfigItem(
             label="Range",
             key="color_range",
             scope="DEFAULT",
             type_="cycle",
-            default="limited",
+            default=DEFAULTS["color_range"],
             options=["limited", "full"],
             group="Format",
-            extended_help="**Color Range** (`-cr`)\n\n`full` provides deeper colors but may cause washed-out blacks on incompatible web players. `limited` is universally safe."
+            extended_help="**Color Range** (`-cr`)\n\nChoose limited or full signal range to match your playback workflow. Full range does not increase color depth; mismatched interpretation can change blacks and whites."
         ),
         ConfigItem(
             label="Container",
             key="container",
             scope="DEFAULT",
             type_="cycle",
-            default="mp4",
+            default=DEFAULTS["container"],
             options=["mp4", "mkv", "flv", "webm"],
             group="Output",
-            extended_help="**Container Format** (`-c`)\n\n`mkv` is fundamentally safer against system crashes and file corruption. `mp4` possesses broader web compatibility."
+            extended_help="**Container Format** (`-c`)\n\nMP4 offers broad compatibility; MKV can be easier to recover after interrupted recording. WebM needs GPU encoding with VP8, VP9, or AV1; auto selects an available encoder. FLV uses H.264/AAC."
         ),
         ConfigItem(
             label="Directory",
             key="output_dir",
             scope="DEFAULT",
             type_="string",
-            default="~/Videos",
+            default=DEFAULTS["output_dir"],
             group="Output",
             extended_help="**Output Directory** (`-o`)\n\nThe absolute destination folder. The backend shell wrapper automatically enforces tilde (`~`) expansion."
         ),
@@ -278,7 +279,7 @@ ConfigItem(
             key="audio_output",
             scope="DEFAULT",
             type_="picker",
-            default="default_output",
+            default=DEFAULTS["audio_output"],
             options=OUT_OPTS,
             hints=OUT_HINTS,
             group="Routing",
@@ -289,7 +290,7 @@ ConfigItem(
             key="audio_input",
             scope="DEFAULT",
             type_="picker",
-            default="none",
+            default=DEFAULTS["audio_input"],
             options=IN_OPTS,
             hints=IN_HINTS,
             group="Routing",
@@ -300,17 +301,17 @@ ConfigItem(
             key="audio_codec",
             scope="DEFAULT",
             type_="cycle",
-            default="opus",
-            options=["opus", "aac", "flac"],
+            default=DEFAULTS["audio_codec"],
+            options=["opus", "aac"],
             group="Encoding",
-            extended_help="**Audio Codec** (`-ac`)\n\n`opus` is the modern default and vastly superior codec for MP4/MKV containers."
+            extended_help="**Audio Codec** (`-ac`)\n\nOpus is the recorder default for MP4/MKV and works in WebM. AAC offers broad MP4 playback compatibility. FLAC is disabled in the installed recorder baseline."
         ),
         ConfigItem(
             label="Kbps",
             key="audio_bitrate",
             scope="DEFAULT",
             type_="int",
-            default=128,
+            default=DEFAULTS["audio_bitrate"],
             min_val=0,
             max_val=512,
             step=32,
@@ -328,41 +329,41 @@ ConfigItem(
             key="replay_buffer",
             scope="DEFAULT",
             type_="int",
-            default=0,
+            default=DEFAULTS["replay_buffer"],
             min_val=0,
             max_val=86400,
             step=10,
             is_parent=True,
             expanded=True,
             group="Buffer",
-            extended_help="**Replay Buffer Size** (`-r`)\n\nRolling buffer duration in seconds. Set to `0` to completely disable the Instant Replay daemon."
+            extended_help="**Replay Buffer Size** (`-r`)\n\nRolling buffer duration: use 2–86400 seconds, or `0` to disable replay. Starting a recording with replay enabled starts the rolling buffer; save a clip with the replay action."
         ),
         ConfigItem(
             label="Storage",
             key="replay_storage",
             scope="DEFAULT",
             type_="cycle",
-            default="ram",
+            default=DEFAULTS["replay_storage"],
             options=["ram", "disk"],
             parent_ref="replay_buffer",
-            extended_help="**Storage Medium** (`-replay-storage`)\n\nRAM is significantly faster but eats system memory. Disk saves RAM but continuously thrashes your SSD lifespan."
+            extended_help="**Storage Medium** (`-replay-storage`)\n\nRAM stores the rolling buffer in memory. Disk reduces RAM usage by continuously writing the buffer to storage."
         ),
         ConfigItem(
             label="Restart",
             key="restart_replay",
             scope="DEFAULT",
             type_="cycle",
-            default="no",
+            default=DEFAULTS["restart_replay"],
             options=["yes", "no"],
             parent_ref="replay_buffer",
-            extended_help="**Restart On Save** (`-restart-replay-on-save`)\n\nIf enabled, completely clears the rolling buffer immediately after a clip is dumped to storage."
+            extended_help="**Restart On Save** (`-restart-replay-on-save`)\n\nClear the rolling buffer after saving the whole replay buffer."
         ),
         ConfigItem(
             label="Folders",
             key="date_folders",
             scope="DEFAULT",
             type_="cycle",
-            default="no",
+            default=DEFAULTS["date_folders"],
             options=["yes", "no"],
             parent_ref="replay_buffer",
             extended_help="**Organize By Date** (`-df`)\n\nForces saved replays into dynamically generated date-based subdirectories."
@@ -387,7 +388,7 @@ ConfigItem(
                 "bitrate_mode": "auto",
                 "frame_mode": "vfr"
             },
-            extended_help="**Vulkan Override**\n\nInstantly configures the pipeline to use the experimental Vulkan HEVC codec, bypassing the notorious Nvidia CUDA downclock bug."
+            extended_help="**Vulkan Override**\n\nInstantly configures the pipeline to use the experimental Vulkan HEVC codec, which may avoid CUDA downclocking on affected NVIDIA drivers. Requires Vulkan video support."
         ),
         ConfigItem(
             label="Replay",
@@ -406,19 +407,3 @@ ConfigItem(
         ),
     ]
 }
-
-# =============================================================================
-# DIRECT EXECUTION HANDLER
-# =============================================================================
-if __name__ == "__main__":
-    import sys, subprocess
-    from pathlib import Path
-
-    script_path = Path(__file__).resolve()
-    main_router = Path.home() / "user_scripts" / "dusky_tui" / "python" / "main" / "main.py"
-
-    if main_router.exists():
-        sys.exit(subprocess.run([sys.executable, str(main_router), str(script_path)] + sys.argv[1:]).returncode)
-    else:
-        print(f"[-] Error: Main Dusky TUI router not found at {main_router}", file=sys.stderr)
-        sys.exit(1)

@@ -1,0 +1,4 @@
+TARGET old-intel HARD []
+TARGET amd HARD []
+TARGET kvm HARD []
+Configuration-only checks; synthetic hardware facts. No target kernel compiled or executed.

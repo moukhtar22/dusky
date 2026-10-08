@@ -7,13 +7,7 @@ Target: ~/.config/dusky/settings/way_layers/visualizer/visualizer.json
 Engine: json_engine
 """
 
-import sys
-from pathlib import Path
-
-_dusky_root = Path.home() / "user_scripts" / "dusky_tui"
-if str(_dusky_root) not in sys.path:
-    sys.path.insert(0, str(_dusky_root))
-
+import os
 import sys
 from pathlib import Path
 
@@ -21,20 +15,22 @@ _DUSKY_TUI_ROOT = Path.home() / "user_scripts" / "dusky_tui"
 if str(_DUSKY_TUI_ROOT) not in sys.path:
     sys.path.insert(0, str(_DUSKY_TUI_ROOT))
 
+_CONFIG_ROOT = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+
 from python.frontend.core_types import ConfigItem
 
 # =============================================================================
 # 1. CORE APPLICATION ROUTING
 # =============================================================================
 ENGINE_TYPE = "json"
-TARGET_FILE = "~/.config/dusky/settings/way_layers/visualizer/visualizer.json"
+TARGET_FILE = str(_CONFIG_ROOT / "dusky/settings/way_layers/visualizer/visualizer.json")
 APP_TITLE = "Dusky Visualizer"
 
 # =============================================================================
 # 2. UI & ENVIRONMENT BEHAVIOR
 # =============================================================================
 DEFAULT_MODE = "auto"
-THEME_FILE = "~/.config/matugen/generated/dusky_tui.json"
+THEME_FILE = str(_CONFIG_ROOT / "matugen/generated/dusky_tui.json")
 
 # =============================================================================
 # 3. TABS DEFINITION
@@ -59,7 +55,7 @@ SCHEMA = {
             key="style",
             scope="DEFAULT",
             type_="cycle",
-            options=["bars", "dots", "line", "wave", "segments", "radial", "circle", "spectrum", "aurora", "psychedelic", "kaleidoscope", "lightning", "perimeter"],
+            options=["bars", "dots", "line", "wave", "segments", "monitor", "radial", "circle", "spectrum", "aurora", "psychedelic", "kaleidoscope", "lightning", "perimeter"],
             default="bars",
             group="Appearance",
             extended_help="Choose the geometric rendering style for the visualizer.",

@@ -318,7 +318,7 @@ class HyprlandLuaEngine(BaseEngine):
                 val_str = new_value[7:]
             elif item_type == "bool":
                 val_str = "true" if str(new_value).lower() in ("true", "1", "yes", "on", "t", "y") else "false"
-            elif item_type in ("int", "float") or self._is_raw_lua_val(str(new_value)):
+            elif item_type in ("int", "float") or (item_type != "string" and self._is_raw_lua_val(str(new_value))):
                 val_str = new_value
             else:
                 val_str = json.dumps(new_value, ensure_ascii=False)

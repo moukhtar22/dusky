@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
 Dusky CPU Core Engine
-High-Performance Core Hotplug and Systemd CPU Affinity Manager for Arch Linux (Kernel 7.2+)
+High-Performance Core Hotplug and Systemd CPU Affinity Manager for Arch Linux (Kernel 7.3+)
 """
 import os
 import pwd
-import sys
 import json
-import shutil
+import re
+import tempfile
 import subprocess
 import time
 from pathlib import Path
@@ -32,6 +32,8 @@ def get_user_home() -> Path:
             return Path(pwd.getpwuid(int(pkexec_uid)).pw_dir)
         except (KeyError, ValueError):
             pass
+    if os.getuid() != 0:
+        return Path(pwd.getpwuid(os.getuid()).pw_dir)
     home_env = os.environ.get("HOME")
     if home_env and home_env != "/root" and Path(home_env).is_dir():
         return Path(home_env)
@@ -84,7 +86,7 @@ def ensure_real_user_ownership(path: Path) -> None:
             st = home.stat()
             uid, gid = st.st_uid, st.st_gid
         
-        if uid is not None and gid is not None and uid != 0:
+        if uid is not None and gid is not None and uid != 0 and path.is_relative_to(home):
             curr = path
             while curr != home and curr != curr.parent:
                 try:
@@ -114,6 +116,26 @@ def safe_write(path: Path, val: str) -> bool:
         return True
     except OSError:
         return False
+
+
+def atomic_write(path: Path, content: str, user_owned: bool = False) -> None:
+    """Replace a small configuration file without exposing a partial write."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if user_owned:
+        ensure_real_user_ownership(path.parent)
+    fd, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    tmp = Path(name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        tmp.chmod(0o644)
+        if user_owned:
+            ensure_real_user_ownership(tmp)
+        tmp.replace(path)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def format_cpu_list(cores: list[int] | set[int]) -> str:
@@ -151,14 +173,17 @@ def parse_cpu_list(val: str, max_core: int | None = None) -> tuple[bool, str, se
         return True, "all", set()
 
     parsed: set[int] = set()
-    parts = [p.strip() for p in raw.split(",") if p.strip()]
+    raw = re.sub(r"\s*-\s*", "-", raw)
+    if raw.startswith(",") or raw.endswith(",") or re.search(r",\s*,", raw):
+        return False, "Empty CPU token", set()
+    parts = re.split(r"[\s,]+", raw)
     if not parts:
         return False, "No valid CPU tokens found", set()
 
     for part in parts:
         if "-" in part:
             sub = [s.strip() for s in part.split("-")]
-            if len(sub) != 2 or not sub[0].isdigit() or not sub[1].isdigit():
+            if len(sub) != 2 or not re.fullmatch(r"[0-9]+", sub[0]) or not re.fullmatch(r"[0-9]+", sub[1]):
                 return False, f"Invalid range format: '{part}'", set()
             start, end = int(sub[0]), int(sub[1])
             if start > end:
@@ -167,7 +192,7 @@ def parse_cpu_list(val: str, max_core: int | None = None) -> tuple[bool, str, se
                 return False, f"Range '{part}' exceeds hardware bounds (0-{max_core})", set()
             parsed.update(range(start, end + 1))
         else:
-            if not part.isdigit():
+            if not re.fullmatch(r"[0-9]+", part):
                 return False, f"Invalid CPU ID: '{part}'", set()
             cid = int(part)
             if max_core is not None and (cid < 0 or cid > max_core):
@@ -191,7 +216,7 @@ def detect_topology() -> tuple[list[int], list[int], set[int]]:
     """
     cpu_sysfs = Path("/sys/devices/system/cpu")
     cpu_nodes = sorted(
-        [node for node in cpu_sysfs.glob("cpu[0-9]*") if node.is_dir()],
+        [node for node in cpu_sysfs.glob("cpu[0-9]*") if node.is_dir() and node.name[3:].isascii() and node.name[3:].isdigit()],
         key=lambda p: int(p.name[3:])
     )
     total_cpus = len(cpu_nodes)
@@ -202,8 +227,8 @@ def detect_topology() -> tuple[list[int], list[int], set[int]]:
         cpu_id = int(node.name[3:])
         if not (node / "online").exists():
             locked_cores.add(cpu_id)
-    if not locked_cores and cpu_nodes:
-        locked_cores.add(int(cpu_nodes[0].name[3:]))
+    if any(n.name == "cpu0" for n in cpu_nodes):
+        locked_cores.add(0)
 
     # Check persistent cache
     cache_path = get_user_home() / ".config" / "dusky" / "settings" / "cpu_topology.json"
@@ -212,42 +237,18 @@ def detect_topology() -> tuple[list[int], list[int], set[int]]:
             data = json.loads(cache_path.read_text(encoding="utf-8"))
             cached_model = data.get("cpu_model")
             curr_model = get_cpu_model()
-            if not (cached_model and curr_model != "Generic CPU" and cached_model != curr_model):
+            if data.get("version") == 2 and cached_model == curr_model:
                 cached_p = [int(c) for c in data.get("p_cores", [])]
                 cached_e = [int(c) for c in data.get("e_cores", [])]
-                cached_locked = set(int(c) for c in data.get("locked_cores", []))
                 all_cached = set(cached_p + cached_e)
                 all_hw = set(int(n.name[3:]) for n in cpu_nodes)
-                if all_cached == all_hw and len(all_cached) == total_cpus:
-                    final_locked = locked_cores | cached_locked
-                    return sorted(cached_p), sorted(cached_e), final_locked
+                if all_cached == all_hw and not set(cached_p) & set(cached_e) and len(cached_p + cached_e) == total_cpus:
+                    return sorted(cached_p), sorted(cached_e), locked_cores
         except Exception:
             pass
 
     p_cores: list[int] = []
     e_cores: list[int] = []
-    original_states: dict[int, str] = {}
-
-    # If running with root and some cores are offline, temporarily bring them online
-    # to allow reading ACPI CPPC and topology registers
-    if os.geteuid() == 0:
-        for node in cpu_nodes:
-            cpu_id = int(node.name[3:])
-            online_file = node / "online"
-            if not online_file.exists():
-                continue
-            cur_state = safe_read(online_file)
-            original_states[cpu_id] = cur_state
-            if cur_state == "0":
-                try:
-                    online_file.write_text("1", encoding="utf-8")
-                    top_dir = node / "topology"
-                    for _ in range(20):
-                        if top_dir.exists() and (top_dir / "core_cpus_list").exists():
-                            break
-                        time.sleep(0.005)
-                except OSError:
-                    pass
 
     # 1. Check PMU hybrid classification (e.g. Intel /sys/devices/cpu_core and cpu_atom)
     pmu_core_file = Path("/sys/devices/cpu_core/cpus")
@@ -258,28 +259,11 @@ def detect_topology() -> tuple[list[int], list[int], set[int]]:
         if ok_core and ok_atom and (core_set or atom_set):
             all_known_pmu = core_set | atom_set
             all_hw = set(int(n.name[3:]) for n in cpu_nodes)
-            if all_known_pmu == all_hw:
+            if all_known_pmu == all_hw and not core_set & atom_set:
                 p_cores = sorted(core_set)
                 e_cores = sorted(atom_set)
 
-    # 2. Check sysfs core_type (intel_atom / 1 / 0x10 vs intel_core / 2 / 0x20)
-    if not p_cores and not e_cores:
-        ct_p, ct_e = [], []
-        has_core_type = False
-        for node in cpu_nodes:
-            cpu_id = int(node.name[3:])
-            ct_val = safe_read(node / "topology" / "core_type").lower()
-            if ct_val in ("1", "0x10", "intel_atom"):
-                ct_e.append(cpu_id)
-                has_core_type = True
-            elif ct_val in ("2", "0x20", "intel_core"):
-                ct_p.append(cpu_id)
-                has_core_type = True
-        if has_core_type and (len(ct_p) + len(ct_e) == total_cpus):
-            p_cores = sorted(ct_p)
-            e_cores = sorted(ct_e)
-
-    # 3. Check ARM / generic cpu_capacity (e.g. 1024 vs 440)
+    # 2. Check ARM / generic cpu_capacity (e.g. 1024 vs 440)
     if not p_cores and not e_cores:
         caps: dict[int, int] = {}
         for node in cpu_nodes:
@@ -287,7 +271,7 @@ def detect_topology() -> tuple[list[int], list[int], set[int]]:
             cap_val = safe_read(node / "cpu_capacity")
             if cap_val.isdigit():
                 caps[cpu_id] = int(cap_val)
-        if len(caps) == total_cpus:
+        if caps and len(caps) == total_cpus:
             min_c = min(caps.values())
             max_c = max(caps.values())
             if max_c > 0 and (max_c - min_c) / max_c >= 0.20:
@@ -298,55 +282,9 @@ def detect_topology() -> tuple[list[int], list[int], set[int]]:
                     else:
                         e_cores.append(cid)
 
-    # 4. Check ACPI CPPC highest_perf (Intel & AMD hybrid)
-    if not p_cores and not e_cores:
-        cppc_perf: dict[int, int] = {}
-        for node in cpu_nodes:
-            cpu_id = int(node.name[3:])
-            perf_str = safe_read(node / "acpi_cppc" / "highest_perf")
-            if perf_str.isdigit():
-                cppc_perf[cpu_id] = int(perf_str)
-
-        if len(cppc_perf) == total_cpus:
-            unique_perfs = sorted(set(cppc_perf.values()))
-            min_p = unique_perfs[0]
-            max_p = unique_perfs[-1]
-            if max_p > 0 and (max_p - min_p) / max_p >= 0.20:
-                midpoint = (min_p + max_p) / 2.0
-                for cpu_id in [int(n.name[3:]) for n in cpu_nodes]:
-                    if cppc_perf[cpu_id] > midpoint:
-                        p_cores.append(cpu_id)
-                    else:
-                        e_cores.append(cpu_id)
-
-    # 5. Check SMT asymmetry fallback (e.g. where P has 2 threads, E has 1 thread)
-    if not p_cores and not e_cores:
-        smt_siblings: dict[int, list[int]] = {}
-        for node in cpu_nodes:
-            cpu_id = int(node.name[3:])
-            top_dir = node / "topology"
-            core_cpus = safe_read(top_dir / "core_cpus_list")
-            siblings: list[int] = []
-            if core_cpus:
-                for part in core_cpus.split(","):
-                    part = part.strip()
-                    if "-" in part:
-                        try:
-                            s, e = map(int, part.split("-"))
-                            siblings.extend(range(s, e + 1))
-                        except ValueError:
-                            pass
-                    elif part.isdigit():
-                        siblings.append(int(part))
-            smt_siblings[cpu_id] = siblings or [cpu_id]
-
-        multithread_cores = [cid for cid, s_list in smt_siblings.items() if len(s_list) > 1]
-        singlethread_cores = [cid for cid, s_list in smt_siblings.items() if len(s_list) == 1]
-        if multithread_cores and singlethread_cores:
-            p_cores = sorted(multithread_cores)
-            e_cores = sorted(singlethread_cores)
-
-    # 6. Default / Homogeneous fallback: All cores are Performance Cores
+    # SMT and CPPC preferred-core rankings do not reliably identify core types.
+    # A homogeneous fallback is preferable to inventing a hybrid topology.
+    # Default: keep all logical CPUs manageable when no hybrid split is known.
     if not p_cores and not e_cores:
         p_cores = [int(n.name[3:]) for n in cpu_nodes]
         e_cores = []
@@ -354,55 +292,42 @@ def detect_topology() -> tuple[list[int], list[int], set[int]]:
         p_cores = e_cores
         e_cores = []
 
-    # Restore any cores that were temporarily brought online
-    for cpu_id, orig_state in original_states.items():
-        if orig_state == "0":
-            try:
-                (cpu_sysfs / f"cpu{cpu_id}" / "online").write_text("0", encoding="utf-8")
-            except OSError:
-                pass
-
     res_p = sorted(set(p_cores))
     res_e = sorted(set(e_cores))
 
     # Save cache if complete
-    if len(res_p + res_e) == total_cpus:
+    if total_cpus and len(res_p + res_e) == total_cpus and all(safe_read(n / "online", "1") == "1" for n in cpu_nodes):
         try:
             cache_path.parent.mkdir(parents=True, exist_ok=True)
             ensure_real_user_ownership(cache_path.parent)
             cache_data = {
+                "version": 2,
                 "cpu_model": get_cpu_model(),
                 "total_cores": total_cpus,
                 "p_cores": res_p,
                 "e_cores": res_e,
                 "locked_cores": sorted(locked_cores),
             }
-            tmp_cache = cache_path.parent / f".cpu_topology.tmp-{os.getpid()}"
-            tmp_cache.write_text(json.dumps(cache_data, indent=2), encoding="utf-8")
-            ensure_real_user_ownership(tmp_cache)
-            tmp_cache.replace(cache_path)
-            ensure_real_user_ownership(cache_path)
-        except Exception:
-            if "tmp_cache" in locals() and tmp_cache.exists():
-                try:
-                    tmp_cache.unlink(missing_ok=True)
-                except OSError:
-                    pass
+            atomic_write(cache_path, json.dumps(cache_data, indent=2), user_owned=True)
+        except OSError:
+            pass
 
     return res_p, res_e, locked_cores
 
 
 def get_core_status(cpu_id: int) -> bool:
     """Returns True if the core is online or locked (BSP)."""
-    online_file = Path(f"/sys/devices/system/cpu/cpu{cpu_id}/online")
-    if not online_file.exists():
-        return True
-    return safe_read(online_file, default="1") == "1"
+    node = Path(f"/sys/devices/system/cpu/cpu{cpu_id}")
+    return node.is_dir() and safe_read(node / "online", "1") == "1"
 
 
 def set_core_status(cpu_id: int, enable: bool) -> tuple[bool, str]:
     """Sets a core's online status via sysfs hotplug."""
     online_file = Path(f"/sys/devices/system/cpu/cpu{cpu_id}/online")
+    if cpu_id < 0 or not online_file.parent.is_dir():
+        return False, f"CPU {cpu_id} does not exist"
+    if cpu_id == 0 and not enable:
+        return False, "CPU 0 is kernel locked"
     target_state = "1" if enable else "0"
     if not online_file.exists():
         if enable:
@@ -412,6 +337,15 @@ def set_core_status(cpu_id: int, enable: bool) -> tuple[bool, str]:
     if safe_read(online_file) == target_state:
         return True, "Already in target state"
 
+    if not enable:
+        # Offlining the final CPU in a constrained slice can defeat its cpuset.
+        online_ok, _, online = parse_cpu_list(safe_read(Path("/sys/devices/system/cpu/online")))
+        if online_ok:
+            for unit in ("user.slice", "system.slice"):
+                raw = safe_read(Path("/sys/fs/cgroup") / unit / "cpuset.cpus")
+                ok, _, allowed = parse_cpu_list(raw)
+                if ok and allowed & online == {cpu_id}:
+                    return False, f"CPU {cpu_id} is the last online CPU allowed by {unit}; change affinity first"
     if safe_write(online_file, target_state):
         for _ in range(10):
             if safe_read(online_file) == target_state:
@@ -456,6 +390,7 @@ class FastEnergyReader:
             data = os.read(self.fd, 32).decode(errors="replace").strip()
             return int(data) if data.isdigit() else None
         except (OSError, ValueError):
+            self.close()
             return None
 
     def close(self) -> None:
@@ -489,7 +424,8 @@ class CpuCoreEngine(BaseEngine):
         self.reader = FastEnergyReader(self.energy_file)
         self.last_e = self.reader.read()
         self.last_t = time.perf_counter()
-        self.max_energy = int(safe_read(self.domain / "max_energy_range_uj", "0")) or 0 if self.domain else 0
+        energy_range = safe_read(self.domain / "max_energy_range_uj") if self.domain else ""
+        self.max_energy = int(energy_range) if energy_range.isdigit() else 0
 
     @property
     def target_path(self) -> str:
@@ -511,22 +447,23 @@ class CpuCoreEngine(BaseEngine):
         return None
 
     def get_systemd_affinity(self) -> str:
-        """Reads the currently configured CPUAffinity from the systemd drop-in file."""
-        dropin = self.systemd_dropin_path
-        if dropin.is_file():
-            try:
-                for line in dropin.read_text(encoding="utf-8", errors="replace").splitlines():
-                    line_s = line.strip()
-                    if line_s.startswith("#") or line_s.startswith(";"):
-                        continue
-                    if "=" in line_s:
-                        k, v = line_s.split("=", 1)
-                        if k.strip() == "CPUAffinity":
-                            val = v.strip()
-                            return val if val else "unset"
-            except Exception:
-                pass
-        return "unset"
+        """Read Dusky's configured manager affinity (assignments accumulate)."""
+        masks: list[str] = []
+        section = ""
+        for line in safe_read(self.systemd_dropin_path).splitlines():
+            line = line.strip()
+            if line.startswith("["):
+                section = line
+            elif section == "[Manager]" and line.startswith("CPUAffinity="):
+                value = line.split("=", 1)[1].strip()
+                if not value:
+                    masks.clear()
+                else:
+                    masks.append(value)
+        if not masks:
+            return "unset"
+        ok, _, cores = parse_cpu_list(" ".join(masks), self.max_core_id)
+        return format_cpu_list(cores) if ok else " ".join(masks)
 
     def get_effective_affinity(self) -> str:
         """Reads the live effective allowed CPUs from cgroup user.slice, or PID 1 status."""
@@ -570,7 +507,11 @@ class CpuCoreEngine(BaseEngine):
         val_clean = str(val).strip()
         if not val_clean:
             return False, "Affinity string cannot be empty"
-        ok, msg, _ = parse_cpu_list(val_clean, max_core=self.max_core_id)
+        ok, msg, cores = parse_cpu_list(val_clean, max_core=self.max_core_id)
+        if val_clean.lower() == "all":
+            return True, "Valid"
+        if ok and cores - set(self.all_cores):
+            return False, "Mask includes CPUs absent from this machine"
         return ok, msg
 
     def set_systemd_affinity(
@@ -579,80 +520,75 @@ class CpuCoreEngine(BaseEngine):
         run_daemon_reexec: bool = True,
         save_state: bool = True
     ) -> tuple[bool, str]:
-        """
-        Applies or removes systemd CPUAffinity via atomic drop-in configuration
-        and live cgroups v2 slice enforcement across user.slice and system.slice.
-        """
-        dropin = self.systemd_dropin_path
-        val_clean = str(val).strip()
-
-        # 1. Unset / All Cores
-        if val_clean.lower() in ("unset", "__delete__", "", "all"):
-            if dropin.exists():
-                try:
-                    dropin.unlink()
-                except OSError as e:
-                    return False, f"Failed to remove drop-in {dropin}: {e}"
-
-            if os.geteuid() == 0:
-                try:
-                    os.sched_setaffinity(1, set(self.all_cores))
-                except OSError:
-                    pass
-
-            if run_daemon_reexec:
-                try:
-                    subprocess.run(["systemctl", "revert", "user.slice", "system.slice"], capture_output=True, timeout=10)
-                    for ctrl_dir in (Path("/etc/systemd/system.control/user.slice.d"), Path("/etc/systemd/system.control/system.slice.d")):
-                        if ctrl_dir.exists():
-                            shutil.rmtree(ctrl_dir, ignore_errors=True)
-                    subprocess.run(["systemctl", "daemon-reload"], capture_output=True, timeout=10)
-                except Exception as e:
-                    return False, f"systemctl reset error: {e}"
-
-            if save_state:
-                self.save_persistent_state()
-            return True, "Removed systemd CPU affinity drop-in and slice limits (all cores active)"
-
-        # 2. Validation & Normalization
-        ok, msg, parsed_cores = parse_cpu_list(val_clean, max_core=self.max_core_id)
+        """Apply manager defaults and live slice cpusets; never revert other properties."""
+        clean = str(val).strip()
+        unset = clean.lower() in ("unset", "none", "__delete__", "all", "")
+        ok, msg, cores = parse_cpu_list("unset" if unset else clean, self.max_core_id)
         if not ok:
             return False, msg
-        normalized_mask = format_cpu_list(sorted(parsed_cores))
-
-        # 3. Write drop-in atomically for boot persistence
+        if cores - set(self.all_cores):
+            return False, "Mask includes CPUs absent from this machine"
+        online = {c for c in self.all_cores if get_core_status(c)}
+        if not online:
+            return False, "Cannot determine any online CPUs"
+        if not unset and not cores & online:
+            return False, "Affinity must include at least one online CPU"
+        normalized = "" if unset else format_cpu_list(cores)
+        dropin = self.systemd_dropin_path
         try:
-            dropin.parent.mkdir(parents=True, exist_ok=True)
-            content = (
-                "# Generated by Dusky CPU Core Manager\n"
-                "# Configures systemd PID 1 and descendant service/session CPU affinity\n"
-                "[Manager]\n"
-                f"CPUAffinity={normalized_mask}\n"
-            )
-            temp_file = dropin.parent / f".{dropin.name}.tmp-{os.getpid()}"
-            temp_file.write_text(content, encoding="utf-8")
-            temp_file.replace(dropin)
-        except OSError as e:
-            return False, f"Failed to write drop-in {dropin}: {e}"
-
-        # 4. Apply live PID 1, cgroups v2 slice enforcement
-        if os.geteuid() == 0:
+            previous = dropin.read_text() if dropin.exists() else None
+        except OSError as exc:
+            return False, f"Cannot read existing affinity configuration: {exc}"
+        slice_previous: dict[str, str] = {}
+        pid_previous: set[int] | None = None
+        try:
+            pid_previous = os.sched_getaffinity(1)
+            for unit in ("user.slice", "system.slice"):
+                result = subprocess.run(["/usr/bin/systemctl", "show", unit, "--property=AllowedCPUs", "--value"],
+                                        capture_output=True, text=True, timeout=15, check=True)
+                slice_previous[unit] = result.stdout.strip()
+            if unset:
+                dropin.unlink(missing_ok=True)
+            else:
+                atomic_write(dropin, "# Generated by Dusky CPU Core Manager\n[Manager]\n"
+                             f"CPUAffinity=\nCPUAffinity={normalized}\n")
+            # set-property updates only AllowedCPUs and persists it across boots.
+            for unit in ("user.slice", "system.slice"):
+                subprocess.run(["/usr/bin/systemctl", "set-property", unit,
+                                f"AllowedCPUs={normalized}"], capture_output=True,
+                               text=True, timeout=15, check=True)
+            os.sched_setaffinity(1, online if unset else cores)
+            if run_daemon_reexec:
+                subprocess.run(["/usr/bin/systemctl", "daemon-reexec"], capture_output=True,
+                               text=True, timeout=20, check=True)
+        except (OSError, subprocess.SubprocessError) as exc:
+            rollback_errors = []
             try:
-                os.sched_setaffinity(1, parsed_cores)
-            except OSError:
-                pass
-
-        if run_daemon_reexec:
-            try:
-                subprocess.run(["systemctl", "set-property", "user.slice", f"AllowedCPUs={normalized_mask}"], capture_output=True, timeout=10)
-                subprocess.run(["systemctl", "set-property", "system.slice", f"AllowedCPUs={normalized_mask}"], capture_output=True, timeout=10)
-                subprocess.run(["systemctl", "daemon-reload"], capture_output=True, timeout=10)
-            except Exception as e:
-                return False, f"systemctl execution error: {e}"
-
+                if previous is None:
+                    dropin.unlink(missing_ok=True)
+                else:
+                    atomic_write(dropin, previous)
+            except OSError as rollback_exc:
+                rollback_errors.append(str(rollback_exc))
+            for unit, old in slice_previous.items():
+                try:
+                    subprocess.run(["/usr/bin/systemctl", "set-property", unit, f"AllowedCPUs={old}"],
+                                   capture_output=True, text=True, timeout=15, check=True)
+                except (OSError, subprocess.SubprocessError) as rollback_exc:
+                    rollback_errors.append(str(rollback_exc))
+            if pid_previous is not None:
+                try:
+                    os.sched_setaffinity(1, pid_previous)
+                except OSError as rollback_exc:
+                    rollback_errors.append(str(rollback_exc))
+            detail = getattr(exc, "stderr", None) or str(exc)
+            return False, f"Affinity application failed: {detail}" + (f"; rollback incomplete: {'; '.join(rollback_errors)}" if rollback_errors else "")
         if save_state:
-            self.save_persistent_state()
-        return True, f"Successfully applied live and persistent CPU affinity: {normalized_mask}"
+            try:
+                self.save_persistent_state()
+            except OSError as exc:
+                return False, f"Affinity applied but persistence failed: {exc}"
+        return True, f"Applied manager affinity and live slice limits: {normalized or 'unset'}"
 
     def load_state(self) -> dict[str, Any]:
         state: dict[str, Any] = {}
@@ -667,119 +603,91 @@ class CpuCoreEngine(BaseEngine):
         return state
 
     def write_value(self, target_key: str, target_scope: str, new_value: str, item_type: str = "string") -> tuple[bool, str, str]:
-        if target_key == "systemd_cpu_affinity":
-            ok, msg = self.set_systemd_affinity(new_value)
-            return ok, msg, ""
-
-        if not target_key.startswith("cpu") or not target_key[3:].isdigit():
-            return False, f"Invalid key: {target_key}", ""
-
-        core_id = int(target_key[3:])
-        enable = str(new_value).lower() in ("true", "1", "yes")
-
-        if core_id in self.locked_cores:
-            if enable:
-                return True, f"CPU {core_id} is locked (BSP) and already online", ""
-            return False, f"CPU {core_id} is locked (BSP) and cannot be disabled", ""
-
-        success, msg = set_core_status(core_id, enable)
-        if success:
-            self.save_persistent_state()
-            return True, f"Successfully set CPU {core_id} {'online' if enable else 'offline'}", ""
-        return False, f"Failed to toggle CPU {core_id}: {msg}", ""
+        return self.write_batch([(target_key, target_scope, new_value, item_type)])
 
     def write_batch(self, changes: list[tuple[str, str, str, str]]) -> tuple[bool, str, str]:
-        success_count = 0
-        failed_keys: list[str] = []
-        last_debug = ""
-        has_affinity_change = False
-
-        for key, scope, val, itype in changes:
+        operations: list[tuple[int, bool]] = []
+        affinity: str | None = None
+        for key, scope, val, _ in changes:
             if key == "systemd_cpu_affinity":
-                ok, msg = self.set_systemd_affinity(val, run_daemon_reexec=False)
-                if ok:
-                    success_count += 1
-                    has_affinity_change = True
-                else:
-                    failed_keys.append(key)
+                ok, msg = self.validate_affinity_mask(val)
+                if not ok:
+                    return False, msg, ""
+                affinity = val
                 continue
-
-            if not key.startswith("cpu") or not key[3:].isdigit():
-                failed_keys.append(key)
-                continue
-
-            core_id = int(key[3:])
-            enable = str(val).lower() in ("true", "1", "yes")
-            if core_id in self.locked_cores:
-                if enable:
-                    success_count += 1
-                else:
-                    failed_keys.append(key)
-                continue
-
-            ok, _ = set_core_status(core_id, enable)
-            if ok:
-                success_count += 1
-            else:
-                failed_keys.append(key)
-
-        # Batch write persistent state ONCE at the end
-        self.save_persistent_state()
-
-        if has_affinity_change:
+            if not key.startswith("cpu") or not re.fullmatch(r"[0-9]+", key[3:]) or int(key[3:]) not in self.all_cores:
+                return False, f"Invalid CPU key: {key}", ""
+            clean = str(val).strip().lower()
+            if clean not in ("true", "1", "yes", "on", "false", "0", "no", "off"):
+                return False, f"Invalid boolean: {val}", ""
+            cpu = int(key[3:])
+            enable = clean in ("true", "1", "yes", "on")
+            if cpu in self.locked_cores and not enable:
+                return False, f"CPU {cpu} is kernel locked and cannot be disabled", ""
+            operations.append((cpu, enable))
+        failures = []
+        # Enable CPUs first, apply the new mask, then disable CPUs.
+        for cpu, enable in operations:
+            if enable:
+                ok, msg = set_core_status(cpu, True)
+                if not ok:
+                    failures.append(f"cpu{cpu}: {msg}")
+        if affinity is not None and not failures:
+            ok, msg = self.set_systemd_affinity(affinity, save_state=False)
+            if not ok:
+                failures.append(msg)
+        if not failures:
+            for cpu, enable in operations:
+                if not enable:
+                    ok, msg = set_core_status(cpu, False)
+                    if not ok:
+                        failures.append(f"cpu{cpu}: {msg}")
+        if changes:
             try:
-                subprocess.run(["systemctl", "daemon-reload"], capture_output=True, timeout=10)
-                subprocess.run(["systemctl", "daemon-reexec"], capture_output=True, timeout=15)
-            except Exception:
-                pass
-
-        if success_count == len(changes):
-            return True, f"Successfully batched {success_count} writes.", last_debug
-        return False, f"Batch wrote {success_count}/{len(changes)}. Failed keys: {', '.join(failed_keys)}", last_debug
+                self.save_persistent_state()
+            except OSError as exc:
+                failures.append(f"Persistence failed: {exc}")
+        return not failures, "; ".join(failures) if failures else f"Applied {len(changes)} settings", ""
 
     def save_persistent_state(self) -> None:
-        try:
-            home = get_user_home()
-            config_dir = home / ".config" / "dusky" / "settings"
-            config_dir.mkdir(parents=True, exist_ok=True)
-            ensure_real_user_ownership(config_dir)
-            state_file = config_dir / "dusky_cores"
-
-            cores_state: dict[str, Any] = {"cpu_model": get_cpu_model()}
-            for core in self.all_cores:
-                cores_state[f"cpu{core}"] = get_core_status(core)
-            cores_state["systemd_cpu_affinity"] = self.get_systemd_affinity()
-
-            temp_file = config_dir / f".dusky_cores.tmp-{os.getpid()}"
-            temp_file.write_text(json.dumps(cores_state, indent=2), encoding="utf-8")
-            ensure_real_user_ownership(temp_file)
-            temp_file.replace(state_file)
-            ensure_real_user_ownership(state_file)
-        except Exception:
-            pass
+        config_dir = get_user_home() / ".config" / "dusky" / "settings"
+        state = {"cpu_model": get_cpu_model(),
+                 **{f"cpu{c}": get_core_status(c) for c in self.all_cores},
+                 "systemd_cpu_affinity": self.get_systemd_affinity()}
+        atomic_write(config_dir / "dusky_cores", json.dumps(state, indent=2), user_owned=True)
 
     def restore_state(self) -> bool:
-        try:
-            home = get_user_home()
-            state_file = home / ".config" / "dusky" / "settings" / "dusky_cores"
-            if not state_file.exists():
-                return False
-            cores_state = json.loads(state_file.read_text(encoding="utf-8"))
-
-            cached_model = cores_state.get("cpu_model")
-            curr_model = get_cpu_model()
-            if cached_model and curr_model != "Generic CPU" and cached_model != curr_model:
-                return False
-
-            for k, v in cores_state.items():
-                if k.startswith("cpu") and k[3:].isdigit():
-                    core_id = int(k[3:])
-                    if core_id in self.all_cores and core_id not in self.locked_cores:
-                        set_core_status(core_id, bool(v))
-                elif k == "systemd_cpu_affinity":
-                    self.set_systemd_affinity(v if v else "unset", run_daemon_reexec=False, save_state=False)
+        state_file = get_user_home() / ".config" / "dusky" / "settings" / "dusky_cores"
+        if not state_file.exists():
             return True
-        except Exception:
+        try:
+            state = json.loads(state_file.read_text())
+            if not isinstance(state, dict) or state.get("cpu_model") != get_cpu_model():
+                return False
+            operations = []
+            for key, value in state.items():
+                if key.startswith("cpu") and re.fullmatch(r"[0-9]+", key[3:]):
+                    cpu = int(key[3:])
+                    if cpu not in self.all_cores or not isinstance(value, bool):
+                        return False
+                    if cpu not in self.locked_cores:
+                        operations.append((cpu, value))
+            ok = True
+            for cpu, enable in operations:
+                if enable:
+                    applied, _ = set_core_status(cpu, True)
+                    ok = applied and ok
+            if "systemd_cpu_affinity" in state and ok:
+                applied, _ = self.set_systemd_affinity(state["systemd_cpu_affinity"],
+                                                      run_daemon_reexec=False, save_state=False)
+                ok = applied and ok
+            if ok:
+                for cpu, enable in operations:
+                    if not enable:
+                        applied, _ = set_core_status(cpu, False)
+                        ok = applied and ok
+            return ok
+        except (OSError, ValueError, TypeError):
             return False
 
     def get_telemetry(self) -> str:

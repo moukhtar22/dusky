@@ -3,12 +3,9 @@
 
 Owns capture, stateful Silero VAD, append-only typing, file transcription,
 and the control plane. ASR runs in an on-demand worker (.venv-worker) whose
-EP matches config hardware: CUDA / CPU (+opportunistic MIGraphX/ROCM on
-AMD). Audio crosses via sealed memfds over SOCK_SEQPACKET.
-
-Transcripts are pure Parakeet output: the model already emits punctuated,
-capitalized text at ~6% WER, so there is deliberately no LLM cleanup stage
-(no Ollama server, no extra VRAM/RAM, no rewrite risk, no added latency).
+EP matches config hardware: CUDA / CPU. A custom AMD wheel may supply
+MIGraphX. Audio crosses via sealed memfds over SOCK_SEQPACKET.
+Transcripts contain the model's output without an LLM cleanup stage.
 """
 
 import argparse
@@ -17,6 +14,7 @@ import fcntl
 import importlib.metadata
 import json
 import logging
+import math
 import mmap
 import os
 import queue
@@ -33,7 +31,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-MIN_PYTHON = (3, 14, 6)
+MIN_PYTHON = (3, 14, 7)
 SAMPLE_RATE = 16000
 VAD_FRAME_SAMPLES = 512
 VAD_CONTEXT_SAMPLES = 64
@@ -42,7 +40,7 @@ MAX_PACKET = 65536
 MAX_INLINE = 57344
 
 if sys.version_info < MIN_PYTHON:
-    raise SystemExit("Dusky STT requires CPython 3.14.6+")
+    raise SystemExit("Dusky STT requires CPython 3.14.7+")
 _gil = getattr(sys, "_is_gil_enabled", None)
 if _gil is None or not _gil():
     raise SystemExit("Dusky STT requires GIL-enabled CPython")
@@ -54,6 +52,7 @@ F_SEAL_EXEC = 0x0020
 
 os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
 os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
+os.environ["ORT_DISABLE_TELEMETRY"] = "1"  # Avoid background uploads/device-ID writes.
 
 import numpy as np
 import onnxruntime as ort
@@ -181,7 +180,7 @@ class RingBuffer:
     def append(self, frame: np.ndarray) -> None:
         count = int(frame.size)
         if count >= self._cap:
-            self.dropped_samples += count - self._cap
+            self.dropped_samples += self._len + count - self._cap
             self._buf[:] = frame[-self._cap:]
             self._start = 0
             self._len = self._cap
@@ -236,8 +235,9 @@ class StatefulSileroVad:
 
 
 class WorkerManager:
-    def __init__(self, config: JsonObject) -> None:
+    def __init__(self, config: JsonObject, config_path: Path | None = None) -> None:
         self.config = config
+        self.config_path = config_path or APP_DIR / "config.json"
         # Warm mode (service unit enabled): the worker is pre-spawned at
         # boot and never released after sessions, so dictation is instant.
         # The daemon sets this from unit_is_enabled(); the flag reaches the
@@ -299,11 +299,16 @@ class WorkerManager:
             env[NO_IDLE_EXIT_ENV] = "1"
         worker_py = APP_DIR / str(self.config.get("worker_python", ".venv-worker/bin/python"))
         worker_script = APP_DIR / str(self.config.get("worker_script", "dusky_worker.py"))
-        cfg = APP_DIR / "config.json"
-        proc = subprocess.Popen([str(worker_py), str(worker_script), "--config", str(cfg),
-                                 "--fd", str(child.fileno())],
-                                cwd=APP_DIR, env=env, close_fds=True, pass_fds=(child.fileno(),))
-        child.close()
+        cfg = self.config_path
+        try:
+            proc = subprocess.Popen([str(worker_py), str(worker_script), "--config", str(cfg),
+                                     "--fd", str(child.fileno())],
+                                    cwd=APP_DIR, env=env, close_fds=True, pass_fds=(child.fileno(),))
+        except BaseException:
+            parent.close()
+            raise
+        finally:
+            child.close()
         self._gen += 1
         self._spawns += 1
         self._proc = proc
@@ -316,7 +321,10 @@ class WorkerManager:
         with self._cv:
             for req_id, g in list(self._inflight.items()):
                 if g == gen and req_id not in self._results:
-                    self._results[req_id] = {"ok": False, "request_id": req_id, "error": reason}
+                    if req_id in self._discarded:
+                        self._discarded.discard(req_id)
+                    else:
+                        self._results[req_id] = {"ok": False, "request_id": req_id, "error": reason}
                     # Free the slot: without this two worker crashes pin
                     # len(_inflight) == limit forever and the next
                     # submit(force=True) spins forever (extended-session deadlock).
@@ -389,6 +397,7 @@ class WorkerManager:
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 proc.kill()
+                proc.wait()
             with self._cv:
                 if gen == self._gen:
                     self._proc = None
@@ -396,12 +405,21 @@ class WorkerManager:
                 self._cv.notify_all()
             sock.close()
 
-    def submit(self, pcm: np.ndarray, meta: JsonObject, *, force: bool) -> str | None:
+    def submit(self, pcm: np.ndarray, meta: JsonObject, *, force: bool,
+               stop: threading.Event | None = None) -> str | None:
+        deadline = time.monotonic() + float(self.config.get("finalize_timeout_seconds", 120.0))
         with self._cv:
             limit = int(self.config.get("max_inflight_requests", 2))
             while len(self._inflight) >= limit:
-                if not force:
+                if not force or (stop is not None and stop.is_set()):
                     return None
+                if time.monotonic() >= deadline:
+                    if self._proc is not None and self._proc.poll() is None:
+                        try:
+                            self._proc.kill()
+                        except OSError:
+                            pass
+                    raise TimeoutError("Worker request queue did not drain")
                 self._cv.wait(0.1)
             self._spawn_locked()
             assert self._sock is not None
@@ -420,8 +438,14 @@ class WorkerManager:
                     self._sock.close()
                 except OSError:
                     pass
+                if self._proc is not None and self._proc.poll() is None:
+                    try:
+                        self._proc.kill()
+                    except OSError:
+                        pass
                 self._proc = None
                 self._sock = None
+                self._cv.notify_all()
                 raise
             finally:
                 os.close(fd)
@@ -435,23 +459,30 @@ class WorkerManager:
                     self._discarded.add(req_id)
                     if len(self._discarded) > 128:
                         self._discarded.pop()
-                    self._inflight.pop(req_id, None)
                     return None
                 rem = deadline - time.monotonic()
                 if rem <= 0:
                     self._discarded.add(req_id)
                     if len(self._discarded) > 128:
                         self._discarded.pop()
-                    self._inflight.pop(req_id, None)
+                    # A timeout must retire the stuck generation. Otherwise
+                    # retries can queue indefinitely behind the same request.
+                    if self._proc is not None and self._proc.poll() is None:
+                        LOG.warning("Worker request timed out; restarting worker.")
+                        try:
+                            self._proc.kill()
+                        except OSError:
+                            pass
                     return None
                 self._cv.wait(min(rem, 0.2))
             self._inflight.pop(req_id, None)
             return self._results.pop(req_id)
 
     def poll(self, req_id: str) -> JsonObject | None:
-        """Non-blocking collect: return the result if it has arrived, else
-        None. Never discards, never waits: the capture loop calls this once
-        per 32 ms audio frame so the microphone stalls for exactly 0 s."""
+        """Collect an available result without waiting for inference.
+
+        The capture loop polls this once per audio frame.
+        """
         with self._cv:
             if req_id not in self._results:
                 return None
@@ -470,7 +501,8 @@ class WorkerManager:
                 self._discarded.add(req_id)
                 if len(self._discarded) > 128:
                     self._discarded.pop()
-                self._inflight.pop(req_id, None)
+                # Keep the slot until its reply arrives: cancellation cannot
+                # remove a request already queued in the worker process.
             self._cv.notify_all()
 
     def prewarm(self) -> None:
@@ -483,12 +515,12 @@ class WorkerManager:
     def stop(self) -> None:
         with self._cv:
             sock = self._sock
+            proc = self._proc
         if sock:
             try:
                 sock.sendmsg([b'{"op":"shutdown"}'])
             except OSError:
                 pass
-        proc = self._proc
         if proc:
             try:
                 proc.wait(timeout=5)
@@ -506,6 +538,7 @@ class StableSuffixTyper:
         self.emitted: list[str] = []
         self.diverged = False
         self.disabled = False
+        self._has_output = False
 
     def reset(self) -> None:
         self.emitted = []
@@ -528,14 +561,36 @@ class StableSuffixTyper:
             return
         target = len(words) if final else max(0, len(words) - self.holdback)
         if target > len(self.emitted):
-            chunk = (" " if self.emitted else "") + " ".join(words[len(self.emitted):target])
+            chunk = (" " if self._has_output else "") + " ".join(words[len(self.emitted):target])
             try:
-                subprocess.run(["wtype", "-"], input=chunk.encode(), check=False, timeout=5)
-            except (OSError, subprocess.SubprocessError):
+                result = subprocess.run(["wtype", "-"], input=chunk.encode(), check=False, timeout=5)
+                if result.returncode != 0:
+                    raise RuntimeError(f"wtype exited {result.returncode}")
+            except (OSError, RuntimeError, subprocess.SubprocessError):
                 self.disabled = True
                 LOG.warning("wtype failed; live typing disabled for session.")
                 return
             self.emitted.extend(words[len(self.emitted):target])
+            self._has_output = True
+
+
+def quiet_chunk_boundary(pcm: np.ndarray) -> int:
+    """Prefer a 120 ms quiet passage within the last three seconds.
+
+    No samples overlap or disappear. Continuous speech still uses the bounded
+    maximum length; background noise may prevent finding a quiet boundary.
+    """
+    frame = 320  # 20 ms at 16 kHz
+    start = max(0, pcm.size - 3 * SAMPLE_RATE)
+    tail = pcm[start:].astype(np.float32)
+    frames = tail.size // frame
+    if frames < 6:
+        return pcm.size
+    power = np.mean(tail[:frames * frame].reshape(-1, frame) ** 2, axis=1)
+    quiet = np.flatnonzero(np.convolve(power, np.ones(6) / 6, mode="valid") < 300 ** 2)
+    if not quiet.size:
+        return pcm.size
+    return start + (int(quiet[-1]) + 3) * frame
 
 
 def decode_file_to_pcm(path: Path, chunk_seconds: float) -> "collections.abc.Iterator[np.ndarray]":
@@ -553,14 +608,16 @@ def decode_file_to_pcm(path: Path, chunk_seconds: float) -> "collections.abc.Ite
     proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     assert proc.stdout and proc.stderr
-    errs: list[bytes] = []
+    errs: collections.deque[bytes] = collections.deque(maxlen=4)
     def drain() -> None:
         try:
-            errs.append(proc.stderr.read() or b"")
+            while block := proc.stderr.read(4096):
+                errs.append(block)
         except OSError:
             pass
     t = threading.Thread(target=drain, daemon=True)
     t.start()
+    exhausted = False
     try:
         carry = b""
         while True:
@@ -569,16 +626,19 @@ def decode_file_to_pcm(path: Path, chunk_seconds: float) -> "collections.abc.Ite
                 break
             carry += buf
             while len(carry) >= per_bytes:
-                piece, carry = carry[:per_bytes], carry[per_bytes:]
+                samples = np.frombuffer(carry[:per_bytes], dtype="<i2")
+                boundary = quiet_chunk_boundary(samples) * BYTES_PER_SAMPLE
+                piece, carry = carry[:boundary], carry[boundary:]
                 yield np.frombuffer(piece, dtype="<i2").copy()
         if carry:
             # Odd trailing byte cannot form a sample; drop it.
             carry = carry[:len(carry) & ~1]
             if carry:
                 yield np.frombuffer(carry, dtype="<i2").copy()
+        exhausted = True
     finally:
         try:
-            if proc.poll() is None:
+            if not exhausted and proc.poll() is None:
                 proc.kill()
         except OSError:
             pass
@@ -591,7 +651,10 @@ def decode_file_to_pcm(path: Path, chunk_seconds: float) -> "collections.abc.Ite
             except OSError:
                 pass
             rc = proc.wait(timeout=30)
-        if rc != 0:
+        proc.stdout.close()
+        t.join(timeout=1)
+        proc.stderr.close()
+        if exhausted and rc != 0:
             raise RuntimeError(f"ffmpeg failed ({rc}): {b''.join(errs)[-1000:].decode(errors='replace')}")
 
 
@@ -607,8 +670,12 @@ class RecordingSession:
         self.ring = RingBuffer(cap)
         self.pre_roll: collections.deque[np.ndarray] = collections.deque(
             maxlen=max(1, round(float(self.config.get("pre_roll_seconds", 0.32)) * SAMPLE_RATE / VAD_FRAME_SAMPLES)))
-        self.typer = StableSuffixTyper(int(self.config.get("stable_holdback_words", 2))) if realtime else None
+        self.typer = (StableSuffixTyper(int(self.config.get("stable_holdback_words", 2)))
+                      if realtime and self.config.get("output_mode", "realtime-both") != "clipboard" else None)
         self.phrases: list[str] = []
+        self.errors: collections.deque[str] = collections.deque(maxlen=32)
+        self.transcript_path: str | None = None
+        self.is_file = False
         self.phrase_id = 0
         # Set by the "pause" control command (indicator pause button):
         # while set, mic frames are read-and-discarded so the stream never
@@ -621,18 +688,22 @@ class RecordingSession:
         # Live-typing state is touched from the capture thread (interim) and
         # the finalizer thread (final): always hold this around typer calls.
         self._typer_lock = threading.Lock()
-        # Phrase finals are transcribed off the capture thread so hours-long
-        # continuous speech never stalls the microphone (see run()).
+        self._finals_lock = threading.Lock()
+        self._typed_phrase_id = 0
+        self._finals_pending = 0
+        # Phrase finals are transcribed off the capture thread so their
+        # inference does not block microphone reads (see run()).
         self._final_q: queue.Queue[tuple[int, np.ndarray] | None] = queue.Queue(maxsize=8)
         self._final_thread: threading.Thread | None = None
+        self._final_abort = threading.Event()
 
     # Typing 20k words (~120 KB) via wtype would flood the focused window
     # for tens of minutes and wedge the session thread; file transcripts
     # always land on disk + clipboard, typing is only for short captures.
     MAX_TYPE_CHARS = 2000
 
-    def _publish(self, final_text: str) -> str:
-        if not final_text:
+    def _publish(self, final_text: str, *, complete: bool = True) -> str:
+        if not final_text and not self.is_file and complete:
             # A tap with no detected speech previously ended in total
             # silence, which reads as "the keybind is broken". Say so.
             if self.config.get("notifications", True):
@@ -646,20 +717,31 @@ class RecordingSession:
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         out_dir = Path(str(self.config.get("state_dir", "~/.local/state/dusky-stt"))).expanduser() / "transcripts"
         out_dir.mkdir(parents=True, exist_ok=True)
-        atomic_write_text(out_dir / f"capture-{stamp}-{self.session_id[:8]}.txt", final_text + "\n")
+        target = out_dir / f"capture-{stamp}-{self.session_id}.txt"
+        atomic_write_text(target, final_text + "\n")
+        self.transcript_path = str(target)
+        output_errors: list[str] = []
         try:
-            if not self.realtime and self.config.get("push_type_at_end", True) and len(final_text) <= self.MAX_TYPE_CHARS:
-                subprocess.run(["wtype", "-"], input=final_text.encode(), check=False, timeout=30)
+            if (not self.is_file and not self.realtime and self.config.get("output_mode") != "clipboard"
+                    and self.config.get("push_type_at_end", True) and len(final_text) <= self.MAX_TYPE_CHARS):
+                subprocess.run(["wtype", "-"], input=final_text.encode(), check=True, timeout=30)
             elif not self.realtime and len(final_text) > self.MAX_TYPE_CHARS:
                 LOG.info("Transcript too long for typing (%d chars); kept file+clipboard.", len(final_text))
-            subprocess.run(["wl-copy", "--type", "text/plain;charset=utf-8"], input=final_text.encode(),
-                           check=False, timeout=10)
         except (OSError, subprocess.SubprocessError) as exc:
-            LOG.warning("Publish helper failed: %s", exc)
+            output_errors.append("typing failed")
+            LOG.warning("Typing failed; transcript saved: %s", exc)
+        try:
+            subprocess.run(["wl-copy", "--type", "text/plain;charset=utf-8"], input=final_text.encode(),
+                           check=True, timeout=10)
+        except (OSError, subprocess.SubprocessError) as exc:
+            output_errors.append("clipboard failed")
+            LOG.warning("Clipboard failed; transcript saved: %s", exc)
         if self.config.get("notifications", True):
             try:
                 subprocess.run(["notify-send", "-a", "Dusky STT", "-t", "3500",
-                                "Transcription complete", final_text[:220]], check=False, timeout=5)
+                                ("Transcript saved · " + ", ".join(output_errors)) if output_errors else
+                                "Transcription complete" if complete else "Partial transcription",
+                                final_text[:220]], check=False, timeout=5)
             except (OSError, subprocess.SubprocessError) as exc:
                 LOG.warning("notify-send failed: %s", exc)
         return final_text
@@ -671,12 +753,11 @@ class RecordingSession:
         ~3-5 s of GPU time, and stalling stream.read() that long overflows
         PortAudio and deletes the start of the next phrase. So finals go
         through this FIFO while capture keeps reading the mic. Runs until a
-        None sentinel; plain (non-stop-aware) waits are correct here because
-        nothing time-critical shares this thread, and draining the backlog
-        on --stop preserves the last words instead of dropping them.
+        None sentinel. A normal stop drains the backlog to preserve trailing
+        speech; the abort event interrupts waits if that drain times out.
         """
         per_request = float(self.config.get("finalize_timeout_seconds", 120.0))
-        while True:
+        while not self._final_abort.is_set():
             item = self._final_q.get()
             if item is None:
                 return
@@ -687,14 +768,14 @@ class RecordingSession:
             for attempt in (1, 2):
                 try:
                     req = self.daemon.worker.submit(pcm, {"session_id": self.session_id,
-                        "phrase_id": phrase_id, "final": True}, force=True)
+                        "phrase_id": phrase_id, "final": True}, force=True, stop=self._final_abort)
                 except OSError as exc:
                     LOG.warning("Phrase %d submit failed (attempt %d): %s", phrase_id, attempt, exc)
                     req = None
                     continue
                 if req:
-                    res = self.daemon.worker.wait_result(req, per_request)
-                if res and res.get("text") and res.get("ok", True):
+                    res = self.daemon.worker.wait_result(req, per_request, stop=self._final_abort)
+                if res and res.get("ok") is True:
                     break
                 if res and not res.get("ok", True):
                     LOG.warning("Phrase %d failed (attempt %d): %s", phrase_id, attempt, res.get("error"))
@@ -703,45 +784,63 @@ class RecordingSession:
                 txt = res["text"].strip()
                 if self.typer:
                     with self._typer_lock:
+                        if self._typed_phrase_id != phrase_id:
+                            self.typer.reset()
+                            self._typed_phrase_id = phrase_id
                         self.typer.update(txt, final=True)
                 self.phrases.append(txt)
-            elif not self.stop_event.is_set():
-                LOG.error("Phrase %d skipped after retries; continuing session.", phrase_id)
+            elif not (res and res.get("ok") is True):
+                self.errors.append(f"phrase {phrase_id} failed after retries")
+                LOG.error("Phrase %d skipped after retries; result will be marked partial.", phrase_id)
+            with self._finals_lock:
+                self._finals_pending -= 1
 
     def _offer_final(self, phrase_id: int, pcm: np.ndarray) -> None:
         """Hand a snapshot to the finalizer without stalling the mic.
 
-        Bounded blocking put (never endless): dropping a phrase after 10 s
-        against a wedged worker is better than wedging capture forever.
-        Deliberately stop-agnostic so the trailing-phrase flush on --stop
-        still lands in the queue for the drain.
+        A full queue marks the transcript partial; blocking here would also
+        lose incoming microphone audio. Stopping still flushes trailing speech.
         """
         try:
-            self._final_q.put((phrase_id, pcm), timeout=10.0)
+            with self._finals_lock:
+                self._final_q.put_nowait((phrase_id, pcm))
+                self._finals_pending += 1
         except queue.Full:
+            self.errors.append(f"phrase {phrase_id} dropped: final queue full")
             LOG.warning("Phrase %d dropped: final queue full (worker wedged?).", phrase_id)
 
     def run(self) -> str:
         self._final_thread = threading.Thread(target=self._finalizer_loop,
                                               name=f"dusky-final-{self.session_id[:8]}", daemon=True)
         self._final_thread.start()
+        capture_error: Exception | None = None
         try:
             self._capture_loop()
+        except Exception as exc:
+            capture_error = exc
+            self.errors.append(str(exc))
         finally:
             # Drain finals (preserves trailing speech on --stop), then publish.
+            deadline = time.monotonic() + float(self.config.get("finalize_timeout_seconds", 120.0)) + 30.0
             while True:
                 try:
                     self._final_q.put(None, timeout=0.2)
                     break
                 except queue.Full:
-                    if self._final_thread is not None and not self._final_thread.is_alive():
+                    if time.monotonic() >= deadline or not self._final_thread.is_alive():
                         break
                     continue
             if self._final_thread is not None:
-                self._final_thread.join(timeout=float(self.config.get("finalize_timeout_seconds", 120.0)) + 30.0)
+                self._final_thread.join(timeout=max(0.0, deadline - time.monotonic()))
                 if self._final_thread.is_alive():
+                    self._final_abort.set()
+                    self._final_thread.join(timeout=1.0)
+                    self.errors.append("finalizer did not drain")
                     LOG.warning("Finalizer did not drain; publishing partial transcript.")
-        return self._publish(" ".join(self.phrases).strip())
+        result = self._publish(" ".join(self.phrases).strip(), complete=not self.errors)
+        if capture_error is not None:
+            raise RuntimeError(f"Capture failed: {capture_error}; partial transcript: {self.transcript_path}") from capture_error
+        return result
 
     def _capture_loop(self) -> None:
         dev = self.config.get("input_device")
@@ -749,6 +848,7 @@ class RecordingSession:
         with sd.RawInputStream(samplerate=SAMPLE_RATE, blocksize=VAD_FRAME_SAMPLES, channels=1,
                                dtype="int16", latency="low", device=dev) as stream:
             active = False
+            continued = False
             onset = silence = 0
             onset_target = max(1, round(float(self.config.get("vad_onset_seconds", 0.096)) * SAMPLE_RATE / VAD_FRAME_SAMPLES))
             silence_target = max(1, round(float(self.config.get("phrase_silence_seconds", 0.80)) * SAMPLE_RATE / VAD_FRAME_SAMPLES))
@@ -757,6 +857,7 @@ class RecordingSession:
             while not self.stop_event.is_set():
                 raw, overflowed = stream.read(VAD_FRAME_SAMPLES)
                 if overflowed:
+                    self.errors.append("microphone input overflow")
                     LOG.warning("PortAudio input overflow: audio lost before VAD (system under load?).")
                 frame = np.frombuffer(raw, dtype="<i2").copy()
                 if self.paused.is_set():
@@ -765,43 +866,46 @@ class RecordingSession:
                         if pending_interim is not None:
                             self.daemon.worker.cancel(pending_interim)
                             pending_interim = None
-                        if active and len(self.ring) >= min_speech:
+                        if active and (len(self.ring) >= min_speech or (continued and len(self.ring))):
                             self._offer_final(self.phrase_id, self.ring.read())
                         active = False
                         onset = silence = 0
                         self.pre_roll.clear()
                         self.vad.reset()
-                        if self.typer:
-                            with self._typer_lock:
-                                self.typer.reset()
                     continue
                 prob = self.vad.probability(frame)
-                # Collect any finished interim result without blocking: the
-                # mic stalls for exactly 0 s waiting on inference now.
+                # Collect completed recognition without waiting for inference
+                # or another phrase's final typing.
                 if pending_interim is not None:
                     res = self.daemon.worker.poll(pending_interim)
                     if res is not None:
                         pending_interim = None
                         if res.get("text") and res.get("ok", True) and self.typer:
-                            with self._typer_lock:
-                                self.typer.update(res["text"], final=False)
+                            if self._typer_lock.acquire(blocking=False):
+                                try:
+                                    if not self._finals_pending:
+                                        if self._typed_phrase_id != self.phrase_id:
+                                            self.typer.reset()
+                                            self._typed_phrase_id = self.phrase_id
+                                        self.typer.update(res["text"], final=False)
+                                finally:
+                                    self._typer_lock.release()
                 if not active:
                     self.pre_roll.append(frame)
                     onset = onset + 1 if prob >= float(self.config.get("vad_start_threshold", 0.50)) else 0
                     if onset >= onset_target:
                         active = True
+                        continued = False
                         self.phrase_id += 1
                         self.ring.reset()
                         for p in self.pre_roll:
                             self.ring.append(p)
-                        if self.typer:
-                            with self._typer_lock:
-                                self.typer.reset()
                 else:
                     self.ring.append(frame)
                     silence = silence + 1 if prob < float(self.config.get("vad_end_threshold", 0.35)) else 0
                     now = time.monotonic()
-                    if self.realtime and pending_interim is None and (now - last_interim) >= float(self.config.get("realtime_interval_seconds", 1.2)):
+                    if (self.realtime and not self._finals_pending and pending_interim is None
+                            and (now - last_interim) >= float(self.config.get("realtime_interval_seconds", 1.2))):
                         last_interim = now
                         if len(self.ring) >= min_speech:
                             # Fire-and-forget: force=False drops (rather than
@@ -809,18 +913,33 @@ class RecordingSession:
                             # result is polled above on later frames.
                             pending_interim = self.daemon.worker.submit(self.ring.read(), {"session_id": self.session_id,
                                 "phrase_id": self.phrase_id, "final": False}, force=False)
-                    max_samples = int(float(self.config.get("max_phrase_seconds", 15.0)) * SAMPLE_RATE)
+                    # Reserve one capture frame so a configured 30 s phrase
+                    # cannot round past the worker's 480,000-sample limit.
+                    max_samples = min(int(float(self.config.get("max_phrase_seconds", 15.0)) * SAMPLE_RATE),
+                                      30 * SAMPLE_RATE - VAD_FRAME_SAMPLES)
                     if silence >= silence_target or len(self.ring) >= max_samples:
-                        active = False
-                        onset = silence = 0
                         if pending_interim is not None:
                             # A late interim for the closing phrase is stale;
                             # the final carries the authoritative hypothesis.
                             self.daemon.worker.cancel(pending_interim)
                             pending_interim = None
-                        if len(self.ring) >= min_speech:
-                            self._offer_final(self.phrase_id, self.ring.read())
-                        self.vad.reset()
+                        pcm = self.ring.read()
+                        if silence >= silence_target:
+                            if pcm.size >= min_speech or (continued and pcm.size):
+                                self._offer_final(self.phrase_id, pcm)
+                            active = False
+                            onset = silence = 0
+                            self.pre_roll.clear()
+                            self.vad.reset()
+                        else:
+                            # Continuous speech: preserve every sample and VAD
+                            # state instead of replaying stale onset pre-roll.
+                            boundary = quiet_chunk_boundary(pcm)
+                            self._offer_final(self.phrase_id, pcm[:boundary])
+                            self.phrase_id += 1
+                            continued = True
+                            self.ring.reset()
+                            self.ring.append(pcm[boundary:])
                         if self.ring.dropped_samples:
                             LOG.warning("Ring overflow dropped %d samples", self.ring.dropped_samples)
             # Trailing speech: stopping mid-utterance (before 0.8 s of
@@ -830,45 +949,58 @@ class RecordingSession:
             if active:
                 if pending_interim is not None:
                     self.daemon.worker.cancel(pending_interim)
-                if len(self.ring) >= min_speech:
+                if len(self.ring) >= min_speech or (continued and len(self.ring)):
                     self._offer_final(self.phrase_id, self.ring.read())
 
     def run_file(self, path: Path) -> str:
+        self.is_file = True
         chunk_seconds = float(self.config.get("file_chunk_seconds", 20.0))
         per_request = float(self.config.get("finalize_timeout_seconds", 120.0))
         texts: list[str] = []
-        for i, ch in enumerate(decode_file_to_pcm(path, chunk_seconds)):
-            if self.stop_event.is_set():
-                break
-            if ch.size == 0:
-                continue
-            # Per-chunk retry: one transient worker crash must cost one
-            # retry, never a 20 s hole and never the remaining ~359 chunks.
-            res: JsonObject | None = None
-            for attempt in (1, 2):
+        failures: list[int] = []
+        decode_error: Exception | None = None
+        try:
+            for i, ch in enumerate(decode_file_to_pcm(path, chunk_seconds)):
                 if self.stop_event.is_set():
+                    break
+                if ch.size == 0:
+                    continue
+                # Per-chunk retry: one transient worker crash must cost one
+                # retry, never a 20 s hole and never the remaining ~359 chunks.
+                res: JsonObject | None = None
+                for attempt in (1, 2):
+                    if self.stop_event.is_set():
+                        res = None
+                        break
+                    try:
+                        req = self.daemon.worker.submit(
+                            ch, {"session_id": self.session_id, "phrase_id": i + 1, "final": True},
+                            force=True, stop=self.stop_event)
+                    except OSError as exc:
+                        LOG.warning("Chunk %d submit failed (attempt %d): %s", i + 1, attempt, exc)
+                        req = None
+                    if req:
+                        # Stop-aware: --stop aborts within ~0.2 s instead of
+                        # one uninterruptible 120 s block.
+                        res = self._wait_interruptible(req, per_request)
+                    if res and res.get("ok") is True:
+                        break
+                    if res and not res.get("ok", True):
+                        LOG.warning("Chunk %d failed (attempt %d): %s", i + 1, attempt, res.get("error"))
                     res = None
-                    break
-                try:
-                    req = self.daemon.worker.submit(
-                        ch, {"session_id": self.session_id, "phrase_id": i + 1, "final": True}, force=True)
-                except OSError as exc:
-                    LOG.warning("Chunk %d submit failed (attempt %d): %s", i + 1, attempt, exc)
-                    req = None
-                if req:
-                    # Stop-aware: --stop aborts within ~0.2 s instead of
-                    # one uninterruptible 120 s block.
-                    res = self._wait_interruptible(req, per_request)
                 if res and res.get("text") and res.get("ok", True):
-                    break
-                if res and not res.get("ok", True):
-                    LOG.warning("Chunk %d failed (attempt %d): %s", i + 1, attempt, res.get("error"))
-                res = None
-            if res and res.get("text") and res.get("ok", True):
-                texts.append(res["text"].strip())
-            elif not self.stop_event.is_set():
-                LOG.error("Chunk %d skipped after retries; continuing file.", i + 1)
-        return self._publish(" ".join(texts).strip())
+                    texts.append(res["text"].strip())
+                elif not self.stop_event.is_set() and not (res and res.get("ok") is True):
+                    failures.append(i + 1)
+                    LOG.error("Chunk %d failed after retries; result will be marked partial.", i + 1)
+        except Exception as exc:
+            decode_error = exc
+        result = self._publish(" ".join(texts).strip(), complete=not failures and decode_error is None and not self.stop_event.is_set())
+        if decode_error is not None:
+            raise RuntimeError(f"Transcription incomplete: {decode_error}; partial transcript: {self.transcript_path}") from decode_error
+        if failures:
+            raise RuntimeError(f"Transcription incomplete: failed chunks {failures}; partial transcript: {self.transcript_path}")
+        return result
 
     def _wait_interruptible(self, req_id: str, total: float) -> JsonObject | None:
         # Stop-aware single wait: --stop aborts within ~0.2 s instead of one
@@ -894,7 +1026,16 @@ class DuskyDaemon:
         self.config = json.loads(config_path.read_text(encoding="utf-8"))
         if self.config.get("schema_version") != 2:
             raise RuntimeError("config schema_version must be 2")
-        self.worker = WorkerManager(self.config)
+        if int(self.config.get("max_inflight_requests", 2)) < 1:
+            raise RuntimeError("max_inflight_requests must be positive")
+        for key, default in (("file_chunk_seconds", 20.0), ("max_phrase_seconds", 15.0)):
+            value = float(self.config.get(key, default))
+            if not math.isfinite(value) or not 0 < value <= 30:
+                raise RuntimeError(f"{key} must be finite and within (0, 30]")
+        value = float(self.config.get("finalize_timeout_seconds", 120.0))
+        if not math.isfinite(value) or value <= 0:
+            raise RuntimeError("finalize_timeout_seconds must be finite and positive")
+        self.worker = WorkerManager(self.config, config_path)
         # Chained take: a toggle received mid-drain stores (mode, time)
         # here; _run_session picks it up instead of going idle. `stop` and a
         # fresh `start` clear it. Entries older than 120 s are dropped so a
@@ -1016,6 +1157,9 @@ class DuskyDaemon:
                 if not data:
                     return
                 req = json.loads(data.decode("utf-8"))
+                if not isinstance(req, dict):
+                    conn.sendmsg([b'{"ok":false,"error":"request must be an object"}'])
+                    return
             except (OSError, ValueError):
                 return
             cmd = req.get("command")
@@ -1024,83 +1168,85 @@ class DuskyDaemon:
             # pill already covers the session lifetime (recording/paused
             # states included). Notifications fire only for outcomes
             # (transcription complete / nothing detected / capture failed).
-            with self._lock:
-                if cmd == "status":
-                    resp = self.status()
-                elif cmd in ("start", "toggle"):
-                    if self.state == "idle":
-                        realtime = req.get("mode", "realtime") != "push"
-                        self._pending_restart = None
-                        self._session = RecordingSession(self, realtime)
-                        # Publish state under the lock so --status never
-                        # reports stale idle after start was acked recording.
-                        self.state = "recording"
-                        threading.Thread(target=self._run_session, args=(self._session, False, None), daemon=True).start()
-                        resp = {"ok": True, "state": "recording"}
-                    elif cmd == "toggle" and self._session:
-                        if self._session.stop_event.is_set():
-                            # Already draining: this tap chains a fresh take
-                            # after the drain (every press does something
-                            # visible; the pill shows the drain meanwhile).
-                            # Deliberately NOT set on the stop tap itself, or
-                            # every stop would phantom-restart (pill reopen).
-                            if self.state == "recording":
-                                self._pending_restart = (req.get("mode", "realtime"), time.monotonic())
-                                resp = {"ok": True, "state": "finalizing", "restart": "queued"}
+            try:
+                with self._lock:
+                    if cmd == "status":
+                        resp = self.status()
+                    elif cmd in ("start", "toggle"):
+                        if self.state == "idle":
+                            realtime = req.get("mode", "realtime") != "push"
+                            self._pending_restart = None
+                            self._session = RecordingSession(self, realtime)
+                            # Publish state under the lock so --status never
+                            # reports stale idle after start was acked recording.
+                            self.state = "recording"
+                            threading.Thread(target=self._run_session, args=(self._session, False, None), daemon=True).start()
+                            resp = {"ok": True, "state": "recording"}
+                        elif cmd == "toggle" and self._session:
+                            if self._session.stop_event.is_set():
+                                # Already draining: this tap chains a fresh take
+                                # after the drain (every press does something
+                                # visible; the pill shows the drain meanwhile).
+                                # Deliberately NOT set on the stop tap itself, or
+                                # every stop would phantom-restart (pill reopen).
+                                if self.state == "recording":
+                                    self._pending_restart = (req.get("mode", "realtime"), time.monotonic())
+                                    resp = {"ok": True, "state": "finalizing", "restart": "queued"}
+                                else:
+                                    resp = {"ok": True, "state": "finalizing"}
                             else:
+                                self._session.stop_event.set()
+                                _kill_indicator(self._session)
                                 resp = {"ok": True, "state": "finalizing"}
                         else:
+                            resp = {"ok": False, "error": "already recording", "state": self.state}
+                    elif cmd == "stop":
+                        self._pending_restart = None
+                        if self._session:
                             self._session.stop_event.set()
                             _kill_indicator(self._session)
                             resp = {"ok": True, "state": "finalizing"}
-                    else:
-                        resp = {"ok": False, "error": "already recording", "state": self.state}
-                elif cmd == "stop":
-                    self._pending_restart = None
-                    if self._session:
-                        self._session.stop_event.set()
-                        _kill_indicator(self._session)
-                        resp = {"ok": True, "state": "finalizing"}
-                    else:
-                        resp = {"ok": False, "error": "not recording", "state": self.state}
-                elif cmd == "pause":
-                    sess = self._session
-                    if sess is not None and self.state == "recording":
-                        if sess.paused.is_set():
-                            sess.paused.clear()
-                            resp = {"ok": True, "event": "resumed", "state": self.state}
                         else:
-                            sess.paused.set()
-                            resp = {"ok": True, "event": "paused", "state": self.state}
-                    else:
-                        resp = {"ok": False, "error": "not recording", "state": self.state}
-                elif cmd == "unload":
-                    # Free VRAM/RAM now (worker process exit is the only
-                    # guaranteed CUDA teardown, letting the dGPU reach
-                    # D3cold). Next request respawns on demand. Refused while
-                    # busy so an in-flight transcription is never robbed.
-                    if self.state == "idle":
-                        self.worker.stop()
-                        resp = {"ok": True, "event": "unloaded", "worker_pid": None}
-                    else:
-                        resp = {"ok": False, "error": "busy", "state": self.state}
-                elif cmd == "file":
-                    if self.state == "idle":
-                        try:
-                            p = Path(str(req.get("path", ""))).expanduser()
-                            if not p.is_file():
-                                # PrivateTmp=yes gives the daemon a private /tmp:
-                                # host /tmp files are invisible by design.
-                                resp = {"ok": False, "error": f"file not found (sandbox: place files under $HOME, not /tmp): {p}"}
+                            resp = {"ok": False, "error": "not recording", "state": self.state}
+                    elif cmd == "pause":
+                        sess = self._session
+                        if sess is not None and self.state == "recording":
+                            if sess.paused.is_set():
+                                sess.paused.clear()
+                                resp = {"ok": True, "event": "resumed", "state": self.state}
                             else:
-                                self._session = RecordingSession(self, False)
-                                self.state = "transcribing"
-                                threading.Thread(target=self._run_session, args=(self._session, True, p), daemon=True).start()
-                                resp = {"ok": True, "state": "transcribing"}
-                        except (OSError, ValueError) as exc:
-                            resp = {"ok": False, "error": str(exc)}
-                    else:
-                        resp = {"ok": False, "error": "busy", "state": self.state}
+                                sess.paused.set()
+                                resp = {"ok": True, "event": "paused", "state": self.state}
+                        else:
+                            resp = {"ok": False, "error": "not recording", "state": self.state}
+                    elif cmd == "unload":
+                        # Free VRAM/RAM now (worker process exit is the only
+                        # guaranteed CUDA teardown, letting the dGPU reach
+                        # D3cold). Next request respawns on demand. Refused while
+                        # busy so an in-flight transcription is never robbed.
+                        if self.state == "idle":
+                            self.worker.stop()
+                            resp = {"ok": True, "event": "unloaded", "worker_pid": None}
+                        else:
+                            resp = {"ok": False, "error": "busy", "state": self.state}
+                    elif cmd == "file":
+                        if self.state == "idle":
+                            try:
+                                p = Path(str(req.get("path", ""))).expanduser()
+                                if not p.is_file():
+                                    resp = {"ok": False, "error": f"file not found: {p}"}
+                                else:
+                                    self._session = RecordingSession(self, False)
+                                    self.state = "transcribing"
+                                    threading.Thread(target=self._run_session, args=(self._session, True, p), daemon=True).start()
+                                    resp = {"ok": True, "state": "transcribing", "job": self._session.session_id}
+                            except (OSError, ValueError) as exc:
+                                resp = {"ok": False, "error": str(exc)}
+                        else:
+                            resp = {"ok": False, "error": "busy", "state": self.state}
+            except Exception as exc:
+                LOG.error("Command %s failed: %s", cmd, exc)
+                resp = {"ok": False, "error": str(exc)}
             try:
                 # Single datagram: sendall could split an oversize reply into
                 # N datagrams of which the client reads only the first.
@@ -1131,7 +1277,7 @@ class DuskyDaemon:
             return
         LOG.info("On-demand session complete and unit disabled; stopping service.")
         try:
-            subprocess.run(["systemctl", "--user", "stop", UNIT_NAME],
+            subprocess.run(["systemctl", "--user", "--no-block", "stop", UNIT_NAME],
                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                            stderr=subprocess.DEVNULL, timeout=30, check=False)
         except (OSError, subprocess.SubprocessError) as exc:
@@ -1141,12 +1287,14 @@ class DuskyDaemon:
         self.state = "transcribing" if is_file else "recording"
         systemd_notify(f"STATUS=Dusky STT: {self.state}")
         indicator: subprocess.Popen | None = None
+        error: str | None = None
         if not is_file:
             indicator = self._spawn_indicator(sess)
             sess._indicator = indicator
         try:
             sess.run_file(path) if (is_file and path) else sess.run()
         except Exception as exc:
+            error = str(exc)
             LOG.error("Session failed: %s", exc)
             if self.config.get("notifications", True):
                 try:
@@ -1155,6 +1303,17 @@ class DuskyDaemon:
                 except (OSError, subprocess.SubprocessError):
                     pass
         finally:
+            if is_file:
+                try:
+                    results = Path(str(self.config.get("state_dir", "~/.local/state/dusky-stt"))).expanduser() / "jobs"
+                    results.mkdir(parents=True, exist_ok=True)
+                    atomic_write_text(results / f"{sess.session_id}.json", json.dumps({
+                        "ok": error is None and not sess.stop_event.is_set(), "job": sess.session_id,
+                        "event": "error" if error else "cancelled" if sess.stop_event.is_set() else "transcribed",
+                        "path": sess.transcript_path, "error": error or ("transcription cancelled" if sess.stop_event.is_set() else None),
+                    }) + "\n")
+                except OSError as exc:
+                    LOG.error("Cannot save job result: %s", exc)
             # Pill is usually already gone (killed the instant stop was
             # requested for instant UI feedback); this covers session end
             # without an explicit stop (e.g. file jobs, errors).

@@ -212,4 +212,4 @@ mon_info() {
   printf " ${c_dim}╰─${c_rst} ${c_key}%-15s${c_rst} : %b\n\n" "VFR" "$vfr_status"
 }
 
-alias ms='hyprmoninfo'
+alias ms='mon_info'

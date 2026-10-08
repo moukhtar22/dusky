@@ -1,145 +1,146 @@
 ================================================================================
- UNIVERSAL DRIVE MANAGER & MOUNT ARCHITECTURE CHEAT SHEET (ARCH LINUX 2026)
+ UNIVERSAL DRIVE MANAGER & MOUNT ARCHITECTURE CHEAT SHEET (ARCH LINUX 2026.09)
 ================================================================================
-
-This guide serves as the definitive, bleeding-edge reference for storage,
-cryptography (LUKS2/dm-crypt), filesystem mount configurations, and `drives.toml`
-automation under Linux Kernel 7.1+ and Arch Linux.
+Runtime reference for Linux 7.3+, util-linux 2.42+, cryptsetup 2.8+, systemd 262.
+Planned ISO Python floor: 3.15.rc3; current machine: 3.14.7 (verify final ISO).
 
 --------------------------------------------------------------------------------
- 1. CLI USAGE & RUNTIME BEHAVIORS
+ 1. CLI USAGE & RUNTIME BEHAVIOUR
 --------------------------------------------------------------------------------
-Universal Drive Manager (`drive_manager.py` / aliases: `unlock`, `lock`, `drive_status`):
+  $ unlock <drive1> [drive2 ...]   # open container (if needed) + mount + heal symlinks + TRIM
+  $ lock   <drive1> [drive2 ...]   # unmount everywhere + close container
+  $ drive_status                   # live fleet table (no sudo, no keyring access)
+  $ drive_manager.py set-password <drive...>   # store passphrase in the Secret Service keyring
 
-  $ unlock <drive1> [drive2 ...]   # Decrypt & mount target drive(s)
-  $ lock <drive1> [drive2 ...]     # Unmount & securely close container(s)
-  $ drive_status                   # Display live status table of all drives
-  $ drive_manager.py set-password  # Store/update drive passphrase in Keyring
+  Shell aliases (~/.bashrc / ~/.zshrc):
+    alias unlock='python ~/.local/bin/drive_manager.py unlock'
+    alias lock='python ~/.local/bin/drive_manager.py lock'
+    alias drive_status='python ~/.local/bin/drive_manager.py status'
 
-Key Engine Capabilities:
-  • Parallel Execution: When multiple drives are requested, password entry is
-    collected upfront on the main thread, followed by concurrent decryption
-    and mounting across all available CPU cores via ThreadPoolExecutor.
-  • Dynamic User / Home Migration: Paths starting with `~` or `$HOME` dynamically
-    resolve to the active user. Any legacy hardcoded `/home/<old_user>/...` paths
-    are automatically re-anchored under the active user's `$HOME`.
-  • Dynamic Symlink Reconciliation: Paths specified under `symlinks = [...]` in
-    `drives.toml` are automatically created or healed upon mount, replacing dummy
-    unmounted directories seamlessly.
-  • Stale & Divergent Mount Healing: Auto-discovers any active mounts across the
-    system (`findmnt -S`) matching the device, cleanly unmounting and relocating them.
-  • Interactive Busy Process Resolver: If a filesystem is busy during locking,
-    parses `lsof` with sudo to present locking processes and gracefully terminates them.
-  • Rotational Awareness: Automatically skips `fstrim` on mechanical rotational HDDs,
-    dispatching background TRIM asynchronously only to non-rotational SSD/NVMe.
+  Exit codes: 0 success | 1 any operational/config failure | 130 user cancelled (Ctrl-C / EOF)
+  -> safe chaining:   unlock browser && unlock media && firefox
 
---------------------------------------------------------------------------------
- 2. DRIVES.TOML CONFIGURATION SPECIFICATION
---------------------------------------------------------------------------------
-Configuration File Search Priority:
-  1. `$XDG_CONFIG_HOME/drive_manager/drives.toml` (or `~/.config/drive_manager/drives.toml`)
-  2. `<script_dir>/drives.toml`
-
-Schema & Field Reference:
-  [drives.<drive_name>]
-  type          = "PROTECTED" | "SIMPLE"     # REQUIRED: Encrypted container vs unencrypted
-  mountpoint    = "~/.config/..." | "/mnt/." # REQUIRED: Target mount directory (supports ~, $VARS)
-  outer_uuid    = "<UUID>"                   # REQUIRED: Physical block partition UUID
-  inner_uuid    = "<UUID>"                   # REQUIRED for PROTECTED: Decrypted filesystem UUID
-  hint          = "<string>"                 # OPTIONAL: Passphrase hint for manual prompts
-  fstype        = "ext4"|"btrfs"|"ntfs"|...  # OPTIONAL: Explicit kernel filesystem driver
-  mount_options = ["opt1", "opt2", ...]      # OPTIONAL: List of mount flags
-  symlinks      = ["~/.symlink1", ...]       # OPTIONAL: Declarative symlinks pointing to mountpoint
+  Engine guarantees:
+  * Never runs as root; every privileged step is an individual 'sudo -n <cmd>'. The only
+    interactive sudo call is 'sudo -v' at start; a daemon thread refreshes it every 60 s.
+  * All prompts (passphrase, busy-process resolver) happen on the main thread. Parallel
+    workers report NEEDS_PASSPHRASE and are finished sequentially afterwards.
+  * One mutating instance at a time: flock on $XDG_RUNTIME_DIR/drive_manager/drive_manager.lock.
+  * Mount truth comes from /proc/self/mountinfo (maj:min match, btrfs-aware); crypt truth from
+    /sys/class/block/<part>/holders and /sys/block/dm-N/dm/uuid (CRYPT-LUKS2-..., CRYPT-BITLK-...).
+  * The configured mountpoint is canonical: divergent mounts are unmounted and relocated,
+    empty stale directories under /mnt, /media, /run/media, /home/<olduser> are pruned.
+  * TRIM only on non-rotational media and only when no discard option is present, dispatched as
+    'systemd-run --collect --no-block -p IOSchedulingClass=idle fstrim'  (journalctl -u drive-manager-trim-*).
 
 --------------------------------------------------------------------------------
- 3. READY-TO-USE TOML CONFIGURATION TEMPLATES
+ 2. DRIVES.TOML SPECIFICATION
 --------------------------------------------------------------------------------
+Search order: 1. $XDG_CONFIG_HOME/drive_manager/drives.toml (default ~/.config/...)
+              2. <script_dir>/drives.toml            (-c PATH overrides both)
 
-[drives.browser]
-# Encrypted SSD user-space partition with automatic symlink self-healing
-type          = "PROTECTED"
-mountpoint    = "~/.config/mozilla"
-outer_uuid    = "65541589-e0e0-4cc0-99f4-9b179f05ffb5"
-inner_uuid    = "b982f02e-32f6-40cd-86de-964c90676cc2"
-hint          = "LAP_P"
-fstype        = "ext4"
-mount_options = ["noatime", "delalloc", "commit=20"]
-symlinks      = ["~/.mozilla"]
+  [drives.<name>]
+  type          = "PROTECTED" | "SIMPLE"   REQUIRED
+  mountpoint    = "/mnt/x" | "~/x"         REQUIRED, absolute after ~/$VAR expansion, not / or $HOME
+  outer_uuid    = "<UUID>"                 REQUIRED, blkid UUID of the raw partition (case-sensitive)
+  inner_uuid    = "<UUID>"                 REQUIRED for PROTECTED, forbidden for SIMPLE
+  hint          = "<string>"               OPTIONAL, displayed before manual prompts
+  fstype        = "ext4"|"btrfs"|"ntfs"..  OPTIONAL, in-kernel ntfs driver
+  mount_options = ["a", "b=c"]             OPTIONAL, one option per element, "force" rejected
+  symlinks      = ["~/.link"]              OPTIONAL, must not equal any mountpoint
 
-[drives.media_ssd]
-# Encrypted Ext4 Mass Storage (SSD/NVMe)
-type          = "PROTECTED"
-mountpoint    = "/mnt/media"
-outer_uuid    = "98353f6a-b21b-4966-9f57-948678bde66d"
-inner_uuid    = "a7230e67-34e8-4cd2-981d-ea02d1253539"
-hint          = "media_key"
-fstype        = "ext4"
+Rejected at load time (exit 1, before sudo): unknown keys, malformed/incorrect-case UUIDs,
+duplicate UUIDs / mountpoints / symlinks across drives, inner_uuid on SIMPLE, empty tables.
+
+BitLocker note: libblkid exposes TYPE=BitLocker on the raw partition; the container is opened
+with 'cryptsetup open --type bitlk --key-file -' (passphrase or recovery key on stdin).
+
+--------------------------------------------------------------------------------
+ 3. TEMPLATES (valid against the strict schema)
+--------------------------------------------------------------------------------
+[drives.browser]                         # encrypted ext4 SSD inside $HOME, self-healing symlink
+type = "PROTECTED"
+mountpoint = "~/.config/mozilla"
+outer_uuid = "65541589-e0e0-4cc0-99f4-9b179f05ffb5"
+inner_uuid = "b982f02e-32f6-40cd-86de-964c90676cc2"
+hint = "LAP_P"
+fstype = "ext4"
 mount_options = ["noatime", "lazytime", "delalloc", "commit=20"]
+symlinks = ["~/.mozilla"]
 
-[drives.fast_nvme]
-# High-Throughput Encrypted Btrfs Partition (NVMe)
-type          = "PROTECTED"
-mountpoint    = "/mnt/fast"
-outer_uuid    = "0a52e1bb-4fa0-4138-a150-f59467903e22"
-inner_uuid    = "1adeb61a-0605-4bbc-8178-bb81fe1fca09"
-hint          = "fast_nvme_key"
-fstype        = "btrfs"
+[drives.fast_nvme]                       # encrypted btrfs NVMe: native async discard, no autodefrag
+type = "PROTECTED"
+mountpoint = "/mnt/fast"
+outer_uuid = "0a52e1bb-4fa0-4138-a150-f59467903e22"
+inner_uuid = "1adeb61a-0605-4bbc-8178-bb81fe1fca09"
+fstype = "btrfs"
 mount_options = ["noatime", "compress=zstd:3", "space_cache=v2", "discard=async"]
 
-[drives.rotational_archive]
-# Mechanical Rotational HDD (Btrfs / Auto-Defrag / No TRIM)
-type          = "PROTECTED"
-mountpoint    = "/mnt/archive"
-outer_uuid    = "953a147e-a346-4fea-91f4-a81ec97fa56a"
-inner_uuid    = "46798d3b-cda7-4031-818f-37a06abbeb37"
-hint          = "archive_key"
-fstype        = "btrfs"
+[drives.rotational_archive]              # encrypted btrfs HDD: autodefrag, no TRIM
+type = "PROTECTED"
+mountpoint = "/mnt/archive"
+outer_uuid = "953a147e-a346-4fea-91f4-a81ec97fa56a"
+inner_uuid = "46798d3b-cda7-4031-818f-37a06abbeb37"
+fstype = "btrfs"
 mount_options = ["noatime", "compress=zstd:3", "space_cache=v2", "autodefrag"]
 
-[drives.windows_ntfs]
-# Shared Windows NTFS Partition (Kernel 7.1+ Native Driver)
-type          = "SIMPLE"
-mountpoint    = "/mnt/windows"
-outer_uuid    = "848a215e8a214e4c"
-fstype        = "ntfs"
-mount_options = ["noatime", "uid=1000", "gid=1000", "umask=002", "windows_names", "iocharset=utf8", "prealloc"]
+[drives.windows_ntfs]                    # dual-boot NTFS, in-kernel ntfs (UUID MUST be uppercase)
+type = "SIMPLE"
+mountpoint = "/mnt/windows"
+outer_uuid = "848A215E8A214E4C"
+fstype = "ntfs"
+mount_options = ["noatime", "uid=1000", "gid=1000", "umask=002", "windows_names", "iocharset=utf8"]
 
-[drives.usb_flash]
-# External Flash Drive (exFAT)
-type          = "SIMPLE"
-mountpoint    = "/mnt/usb"
-outer_uuid    = "C4A2B1D3E5"
-fstype        = "exfat"
+[drives.usb_flash]                       # exFAT stick (UUID format XXXX-XXXX, uppercase)
+type = "SIMPLE"
+mountpoint = "/mnt/usb"
+outer_uuid = "C4A2-B1D3"
+fstype = "exfat"
 mount_options = ["uid=1000", "gid=1000", "dmask=022", "fmask=133", "errors=remount-ro", "iocharset=utf8"]
 
 --------------------------------------------------------------------------------
- 4. FILESYSTEM DECISION & OPTIMIZATION MATRIX
+ 4. FILESYSTEM DECISION & OPTIMISATION MATRIX
 --------------------------------------------------------------------------------
-
-FILESYSTEM | TARGET MEDIUM     | RECOMMENDED MOUNT FLAGS                     | CRITICAL NOTES
------------+-------------------+---------------------------------------------+------------------------------------------------
-Ext4       | SSD / NVMe        | noatime, lazytime, delalloc, commit=20      | Avoid 'discard' mount flag; rely on fstrim.
-Ext4       | Rotational HDD    | noatime, lazytime, delalloc, commit=20      | Delayed allocation prevents physical fragmentation.
-Btrfs      | SSD / NVMe        | noatime, compress=zstd:3, discard=async     | discard=async is non-blocking and native.
-Btrfs      | Rotational HDD    | noatime, compress=zstd:3, autodefrag        | autodefrag reduces seek latency (DO NOT use on SSD).
-NTFS       | Dual-Boot / USB   | noatime, uid=1000, gid=1000, windows_names  | Uses native in-kernel 'ntfs' driver with -i.
-           |                   | umask=002, iocharset=utf8, prealloc         | NEVER use 'force' (corrupts Windows dirty bit).
-exFAT      | USB Flash / SD    | uid=1000, gid=1000, dmask=022, fmask=133    | Standard for cross-platform flash drives >32GB.
-           |                   | errors=remount-ro, iocharset=utf8           |
-VFAT/FAT32 | EFI Partition     | fmask=0137, dmask=0027, shortname=mixed     | Strictly for /boot/efi or tiny legacy USBs.
-           |                   | utf8, errors=remount-ro                     | NEVER use 'flush' (destroys flash endurance).
-F2FS       | Flash Native      | atgc, gc_merge, lazytime, compress_chksum   | Requires mkfs -O compression at format time.
-           |                   | compress_algorithm=zstd:6                   | Incompatible with rotational mechanical HDDs.
+FS      | MEDIUM        | MOUNT OPTIONS                                    | NOTES
+--------+---------------+--------------------------------------------------+------------------------------------------
+ext4    | SSD/NVMe      | noatime,lazytime,delalloc,commit=20              | no 'discard' (sync unlink stalls); tool runs fstrim
+ext4    | HDD           | noatime,lazytime,delalloc,commit=20              | delalloc limits fragmentation; TRIM skipped
+btrfs   | SSD/NVMe      | noatime,compress=zstd:3,space_cache=v2,discard=async | tool skips fstrim when discard=async present
+btrfs   | HDD           | noatime,compress=zstd:3,space_cache=v2,autodefrag| autodefrag NEVER on SSD (write amplification)
+ntfs    | dual-boot/USB | noatime,uid,gid,umask=002,windows_names,         | mount -t ntfs (in-kernel); NEVER 'force'
+        |               | iocharset=utf8                                   | (clears Windows dirty bit -> chkdsk data loss)
+exfat   | flash >32 GB  | uid,gid,dmask=022,fmask=133,errors=remount-ro,   | in-kernel exfat; TRIM supported
+        |               | iocharset=utf8                                   |
+vfat    | EFI/tiny USB  | fmask=0137,dmask=0027,shortname=mixed,utf8,      | NEVER 'flush' (kills flash endurance)
+        |               | errors=remount-ro                                |
+f2fs    | flash only    | atgc,gc_merge,lazytime,compress_algorithm=zstd:6 | needs mkfs -O compression; never on HDD
 
 --------------------------------------------------------------------------------
- 5. HARDWARE & KERNEL BEST PRACTICES (LINUX 7.1+)
+ 5. KERNEL / CRYPTSETUP BEST PRACTICES (7.2+ / 2.8+)
 --------------------------------------------------------------------------------
-• Kernel In-Line Decryption: On NVMe drives, configure `/etc/crypttab` with:
-  `no-read-workqueue,no-write-workqueue,discard` to eliminate workqueue context-switch latency.
-• Format Alignment: Always use `--sector-size 4096` during `cryptsetup luksFormat` to match
-  native 4K physical NAND/HDD sector boundaries.
-• Bypassing FUSE Helpers: Always mount NTFS with `mount -i -t ntfs` to force the in-kernel
-  module and bypass deprecated user-space FUSE drivers (`ntfs-3g`, `ntfs3`).
-• Non-Rotational SSD TRIM: Issue TRIM via background `fstrim` or `discard=async`. Mechanical
-  HDDs have no flash cells; TRIM on HDDs is invalid and ignored.
+* The tool activates containers with:
+    SSD/NVMe : cryptsetup open --type luks --tries 1 --key-file - --allow-discards
+               --perf-no_read_workqueue --perf-no_write_workqueue <dev> luks-<outer_uuid>
+    HDD      : cryptsetup open --type luks --tries 1 --key-file - <dev> luks-<outer_uuid>
+  (identical semantics to the crypttab flags discard,no-read-workqueue,no-write-workqueue)
+* Format new containers 4K-aligned:  cryptsetup luksFormat --type luks2 --sector-size 4096 <dev>
+* Make the workqueue/discard flags persistent in the LUKS2 header (then the tool's flags are a no-op):
+    sudo cryptsetup --persistent --allow-discards --perf-no_read_workqueue --perf-no_write_workqueue refresh luks-<outer_uuid>
+* NTFS: always mounted '-i -t ntfs' — the modern 7.1+ in-kernel driver (iomap/folio,
+  full read/write, high performance; docs: https://docs.kernel.org/7.1/filesystems/ntfs.html).
+  Legacy 'ntfs3' and FUSE 'ntfs-3g' are never used. Options: windows_names, iocharset=utf8,
+  preallocated_size= (not 'prealloc').
+* Lifecycle Hooks: drives.toml supports 'post_unlock', 'pre_lock', and 'post_lock' commands
+  (strings or lists of strings, executed unprivileged with $DRIVE_NAME and $DRIVE_MOUNTPOINT).
+  Any hook failure returns failure; failed pre_lock aborts before unmount.
+  Close Firefox before locking browser; --force no longer bypasses its profile lock.
+  The Firefox service uses --disk-fallback: insufficient RAM/disk headroom or an active
+  disk profile keeps Firefox on disk without failing unlock. The resync timer skips
+  these disk profiles. Changed checkpoint files use atomic replacement, requiring
+  temporary space; a failed checkpoint retains RAM data and the previous disk files.
+* Teardown ladder: cancel queued TRIM unit (best-effort) -> pre_lock hooks -> umount -i (5x,
+  busy resolver, foreign mounts refused) -> blockdev --flushbufs -> cryptsetup close
+  -> 5x retry -> cryptsetup close --deferred (reported as FAILURE until gone) -> post_lock hooks
+  -> forensics (lsof, sysfs holders, cryptsetup status).
+* Verify a mapping any time:  sudo cryptsetup status luks-<outer_uuid> ; lsblk --tree /dev/disk/by-uuid/<outer_uuid>
 ================================================================================

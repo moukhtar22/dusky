@@ -12,6 +12,7 @@ SETTINGS_DIR="$HOME/.config/dusky/settings/dusky_glance"
 mkdir -p "$SETTINGS_DIR"
 TIMER_STATE="$SETTINGS_DIR/timer.state"
 POMO_STATE="$SETTINGS_DIR/pomodoro.state"
+ALARM_STATE="$SETTINGS_DIR/alarm.state"
 RECENTS_STATE="$SETTINGS_DIR/recents"
 
 # --- HELPER: SAVE RECENT ---
@@ -80,6 +81,7 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
     printf "\e[1mCOMMANDS:\e[0m\n"
     printf "  \e[32m--pomodoro [work] [break]\e[0m  Start Pomodoro (e.g., 45 10)\n"
     printf "  \e[32m--timer [time]\e[0m             Start Timer (e.g., 90s, 15m)\n"
+    printf "  \e[32m--alarm HH:MM [label]\e[0m      Set alarm for next HH:MM (e.g., 07:30 Wake)\n"
     printf "  \e[32m--stopwatch\e[0m                Start the stopwatch\n"
     printf "  \e[32m--clock\e[0m                    Show the live clock\n"
     printf "  \e[32m--clock-short\e[0m              Show the live clock (no seconds)\n"
@@ -90,7 +92,16 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
     printf "  \e[32m--temp\e[0m                     Show CPU temperature\n"
     printf "  \e[32m--battery\e[0m                  Show battery status/power\n"
     printf "  \e[32m--disk\e[0m                     Show root disk usage\n"
-    printf "  \e[32m--network\e[0m                  Show live network speed\n"
+    printf "  \e[32m--network\e[0m                  Show live network speed (up & down)\n"
+    printf "  \e[32m--network-down\e[0m             Show live network download speed\n"
+    printf "  \e[32m--network-up\e[0m               Show live network upload speed\n"
+    printf "  \e[32m--network-combined\e[0m         Show live combined network speed\n"
+    printf "  \e[32m--network-down-session\e[0m     Show session downloaded data\n"
+    printf "  \e[32m--network-up-session\e[0m       Show session uploaded data\n"
+    printf "  \e[32m--network-session\e[0m          Show session total traffic\n"
+    printf "  \e[32m--network-boot-down\e[0m        Show boot total downloaded data\n"
+    printf "  \e[32m--network-boot-up\e[0m          Show boot total uploaded data\n"
+    printf "  \e[32m--network-boot\e[0m             Show boot total combined traffic\n"
     printf "  \e[32m--uptime\e[0m                   Show system uptime\n"
     printf "  \e[32m--workspace\e[0m                Show active Hyprland workspace\n"
     printf "  \e[32m--hud [card] [vendor]\e[0m      Show live Gaming HUD\n"
@@ -130,6 +141,24 @@ if (( $# > 0 )); then
                 [[ -f "$TIMER_STATE" ]] && last_timer=$(<"$TIMER_STATE")
                 secs=$(parse_timer "$last_timer")
                 "$DAEMON_SCRIPT" --timer "$secs" & disown
+            fi
+            ;;
+        --alarm)
+            if [[ -n "${2:-}" ]]; then
+                [[ "$2" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]] || { echo "Alarm time must be HH:MM (24-hour)" >&2; exit 1; }
+                alarm_lbl="${3:-Alarm}"
+                alarm_lbl="${alarm_lbl// /_}"
+                echo "$2 $alarm_lbl" > "$ALARM_STATE"
+                "$DAEMON_SCRIPT" --alarm "$2" "$alarm_lbl" & disown
+            else
+                last_alarm=""
+                [[ -f "$ALARM_STATE" ]] && last_alarm=$(<"$ALARM_STATE")
+                if [[ -z "$last_alarm" ]]; then
+                    echo "Usage: $0 --alarm HH:MM [label]" >&2
+                    exit 1
+                fi
+                read -r at_ms at_lbl _ <<< "$last_alarm"
+                "$DAEMON_SCRIPT" --alarm "$at_ms" "${at_lbl:-Alarm}" & disown
             fi
             ;;
         *)
@@ -494,190 +523,261 @@ while true; do
         '󰔟  Time & Focus')
             while true; do
                 tf_opts=(
-                    "󰥔  Clock (no seconds)"
-                    "󰥔  Clock (with seconds)"
-                    "󰥔  World Clock"
-                    "󰔟  Timer"
-                    "󰔚  System Uptime"
-                    "󱑎  Stopwatch"
-                    "󱎫  Pomodoro"
+                    "󰔟  Clocks"
+                    "󰔟  Countdowns"
+                    "󱑎  Trackers"
                     "  Back"
                 )
                 tfchoice=$(printf '%s\n' "${tf_opts[@]}" | "${ROFI_SUB[@]}" -p "Time & Focus") || break
                 [[ "$tfchoice" == "  Back" ]] && break
-                
+
                 case "$tfchoice" in
-                    *"Clock (no seconds)"*)
-                        save_recent "Clock (no seconds)" "--clock-short"
-                        "$DAEMON_SCRIPT" --clock-short & disown
-                        exit 0
-                        ;;
-                    *"Clock (with seconds)"*)
-                        save_recent "Clock (with seconds)" "--clock"
-                        "$DAEMON_SCRIPT" --clock & disown
-                        exit 0
-                        ;;
-                    *"World Clock"*)
+                    *"Clocks"*)
                         while true; do
-                            wc_opts=(
-                                "🇯🇵  Japan (Tokyo)"
-                                "🇺🇸  New York (East)"
-                                "🇺🇸  Chicago (Central)"
-                                "🇺🇸  Denver (Mountain)"
-                                "🇺🇸  California (West)"
-                                "🇬🇧  London"
-                                "🇨🇳  Beijing"
-                                "🇦🇺  Australia (Sydney)"
-                                "🇦🇪  Dubai"
-                                "🇷🇺  Moscow"
-                                "🇸🇬  Singapore"
+                            clock_opts=(
+                                "󰥔  Clock (Short)"
+                                "󰥔  Clock (Full)"
+                                "󰥔  World Clock"
                                 "  Back"
                             )
-                            wcchoice=$(printf '%s\n' "${wc_opts[@]}" | "${ROFI_SUB[@]}" -p "World Clock") || break
-                            [[ "$wcchoice" == "  Back" ]] && break
+                            clockchoice=$(printf '%s\n' "${clock_opts[@]}" | "${ROFI_SUB[@]}" -p "Clocks") || break
+                            [[ "$clockchoice" == "  Back" ]] && break
+
+                            case "$clockchoice" in
+                                *"Clock (Short)"*|*"Clock (no seconds)"*)
+                                    save_recent "Clock (Short)" "--clock-short"
+                                    "$DAEMON_SCRIPT" --clock-short & disown
+                                    exit 0
+                                    ;;
+                                *"Clock (Full)"*|*"Clock (with seconds)"*)
+                                    save_recent "Clock (Full)" "--clock"
+                                    "$DAEMON_SCRIPT" --clock & disown
+                                    exit 0
+                                    ;;
+                                *"World Clock"*)
+                                    while true; do
+                                        wc_opts=(
+                                            "󰥔  Tokyo"
+                                            "󰥔  New York"
+                                            "󰥔  Chicago"
+                                            "󰥔  Denver"
+                                            "󰥔  Los Angeles"
+                                            "󰥔  London"
+                                            "󰥔  Beijing"
+                                            "󰥔  Sydney"
+                                            "󰥔  Dubai"
+                                            "󰥔  Moscow"
+                                            "󰥔  Singapore"
+                                            "  Back"
+                                        )
+                                        wcchoice=$(printf '%s\n' "${wc_opts[@]}" | "${ROFI_SUB[@]}" -p "World Clock") || break
+                                        [[ "$wcchoice" == "  Back" ]] && break
                             
-                            case "$wcchoice" in
-                                *"New York"*)
-                                    save_recent "World Clock (New York)" "--world-clock America/New_York NY"
-                                    "$DAEMON_SCRIPT" --world-clock "America/New_York" "NY" & disown
-                                    exit 0
-                                    ;;
-                                *"Chicago"*)
-                                    save_recent "World Clock (Chicago)" "--world-clock America/Chicago Chicago"
-                                    "$DAEMON_SCRIPT" --world-clock "America/Chicago" "Chicago" & disown
-                                    exit 0
-                                    ;;
-                                *"Denver"*)
-                                    save_recent "World Clock (Denver)" "--world-clock America/Denver Denver"
-                                    "$DAEMON_SCRIPT" --world-clock "America/Denver" "Denver" & disown
-                                    exit 0
-                                    ;;
-                                *"California"*)
-                                    save_recent "World Clock (California)" "--world-clock America/Los_Angeles California"
-                                    "$DAEMON_SCRIPT" --world-clock "America/Los_Angeles" "California" & disown
-                                    exit 0
-                                    ;;
-                                *"London"*)
-                                    save_recent "World Clock (London)" "--world-clock Europe/London London"
-                                    "$DAEMON_SCRIPT" --world-clock "Europe/London" "London" & disown
-                                    exit 0
-                                    ;;
-                                *"Beijing"*)
-                                    save_recent "World Clock (Beijing)" "--world-clock Asia/Shanghai Beijing"
-                                    "$DAEMON_SCRIPT" --world-clock "Asia/Shanghai" "Beijing" & disown
-                                    exit 0
-                                    ;;
-                                *"Australia"*)
-                                    save_recent "World Clock (Sydney)" "--world-clock Australia/Sydney Sydney"
-                                    "$DAEMON_SCRIPT" --world-clock "Australia/Sydney" "Sydney" & disown
-                                    exit 0
-                                    ;;
-                                *"Dubai"*)
-                                    save_recent "World Clock (Dubai)" "--world-clock Asia/Dubai Dubai"
-                                    "$DAEMON_SCRIPT" --world-clock "Asia/Dubai" "Dubai" & disown
-                                    exit 0
-                                    ;;
-                                *"Moscow"*)
-                                    save_recent "World Clock (Moscow)" "--world-clock Europe/Moscow Moscow"
-                                    "$DAEMON_SCRIPT" --world-clock "Europe/Moscow" "Moscow" & disown
-                                    exit 0
-                                    ;;
-                                *"Japan"*)
-                                    save_recent "World Clock (Tokyo)" "--world-clock Asia/Tokyo Tokyo"
-                                    "$DAEMON_SCRIPT" --world-clock "Asia/Tokyo" "Tokyo" & disown
-                                    exit 0
-                                    ;;
-                                *"Singapore"*)
-                                    save_recent "World Clock (Singapore)" "--world-clock Asia/Singapore Singapore"
-                                    "$DAEMON_SCRIPT" --world-clock "Asia/Singapore" "Singapore" & disown
-                                    exit 0
+                                        case "$wcchoice" in
+                                            *"New York"*)
+                                                save_recent "World Clock (New York)" "--world-clock America/New_York NY"
+                                                "$DAEMON_SCRIPT" --world-clock "America/New_York" "NY" & disown
+                                                exit 0
+                                                ;;
+                                            *"Chicago"*|*"Chi"*)
+                                                save_recent "World Clock (Chi)" "--world-clock America/Chicago Chi"
+                                                "$DAEMON_SCRIPT" --world-clock "America/Chicago" "Chi" & disown
+                                                exit 0
+                                                ;;
+                                            *"Denver"*|*"Den"*)
+                                                save_recent "World Clock (Den)" "--world-clock America/Denver Den"
+                                                "$DAEMON_SCRIPT" --world-clock "America/Denver" "Den" & disown
+                                                exit 0
+                                                ;;
+                                            *"Los Angeles"*|*"California"*|*"Cali"*)
+                                                save_recent "World Clock (Cali)" "--world-clock America/Los_Angeles Cali"
+                                                "$DAEMON_SCRIPT" --world-clock "America/Los_Angeles" "Cali" & disown
+                                                exit 0
+                                                ;;
+                                            *"London"*|*"Lon"*)
+                                                save_recent "World Clock (Lon)" "--world-clock Europe/London Lon"
+                                                "$DAEMON_SCRIPT" --world-clock "Europe/London" "Lon" & disown
+                                                exit 0
+                                                ;;
+                                            *"Beijing"*|*"BJ"*)
+                                                save_recent "World Clock (BJ)" "--world-clock Asia/Shanghai BJ"
+                                                "$DAEMON_SCRIPT" --world-clock "Asia/Shanghai" "BJ" & disown
+                                                exit 0
+                                                ;;
+                                            *"Sydney"*|*"Australia"*|*"Syd"*)
+                                                save_recent "World Clock (Syd)" "--world-clock Australia/Sydney Syd"
+                                                "$DAEMON_SCRIPT" --world-clock "Australia/Sydney" "Syd" & disown
+                                                exit 0
+                                                ;;
+                                            *"Dubai"*)
+                                                save_recent "World Clock (Dubai)" "--world-clock Asia/Dubai Dubai"
+                                                "$DAEMON_SCRIPT" --world-clock "Asia/Dubai" "Dubai" & disown
+                                                exit 0
+                                                ;;
+                                            *"Moscow"*|*"Mos"*)
+                                                save_recent "World Clock (Mos)" "--world-clock Europe/Moscow Mos"
+                                                "$DAEMON_SCRIPT" --world-clock "Europe/Moscow" "Mos" & disown
+                                                exit 0
+                                                ;;
+                                            *"Tokyo"*|*"Japan"*)
+                                                save_recent "World Clock (Tokyo)" "--world-clock Asia/Tokyo Tokyo"
+                                                "$DAEMON_SCRIPT" --world-clock "Asia/Tokyo" "Tokyo" & disown
+                                                exit 0
+                                                ;;
+                                            *"Singapore"*|*"SG"*)
+                                                save_recent "World Clock (SG)" "--world-clock Asia/Singapore SG"
+                                                "$DAEMON_SCRIPT" --world-clock "Asia/Singapore" "SG" & disown
+                                                exit 0
+                                                ;;
+                                        esac
+                                    done
                                     ;;
                             esac
                         done
                         ;;
-                    *"Timer"*)
+                    *"Countdowns"*)
                         while true; do
-                            last_timer="15m"
-                            [[ -f "$TIMER_STATE" ]] && last_timer=$(<"$TIMER_STATE")
-                            lt_sec=$(parse_timer "$last_timer")
-                            t_opts=(
-                                "󰐊  Start Last ($(fmt_t "$lt_sec"))"
-                                "󰒓  Set in Minutes"
-                                "󰒓  Set in Seconds"
+                            cd_opts=(
+                                "󰔟  Timer"
+                                "󱎫  Pomodoro"
+                                "󰂞  Alarm"
                                 "  Back"
                             )
-                            tchoice=$(printf '%s\n' "${t_opts[@]}" | "${ROFI_SUB[@]}" -p "Timer") || break
-                            [[ "$tchoice" == "  Back" ]] && break
+                            cdchoice=$(printf '%s\n' "${cd_opts[@]}" | "${ROFI_SUB[@]}" -p "Countdowns") || break
+                            [[ "$cdchoice" == "  Back" ]] && break
+
+                            case "$cdchoice" in
+                                *"Timer"*)
+                                    while true; do
+                                        last_timer="15m"
+                                        [[ -f "$TIMER_STATE" ]] && last_timer=$(<"$TIMER_STATE")
+                                        lt_sec=$(parse_timer "$last_timer")
+                                        t_opts=(
+                                            "󰐊  Start Last ($(fmt_t "$lt_sec"))"
+                                            "󰒓  Set in Minutes"
+                                            "󰒓  Set in Seconds"
+                                            "  Back"
+                                        )
+                                        tchoice=$(printf '%s\n' "${t_opts[@]}" | "${ROFI_SUB[@]}" -p "Timer") || break
+                                        [[ "$tchoice" == "  Back" ]] && break
                             
-                            if [[ "$tchoice" == *"Start Last"* ]]; then
-                                save_recent "Timer ($(fmt_t "$lt_sec"))" "--timer $lt_sec"
-                                "$DAEMON_SCRIPT" --timer "$lt_sec" & disown
-                                exit 0
-                            elif [[ "$tchoice" == *"Minutes"* ]]; then
-                                val=$(rofi -dmenu -i -p "Duration (Mins)" -location 3 -theme-str "$PROMPT_STYLE") || continue
-                                val=${val//[!0-9]/}; [[ -z "$val" ]] && continue
-                                echo "${val}m" > "$TIMER_STATE"
-                                save_recent "Timer (${val}m)" "--timer $((val*60))"
-                                "$DAEMON_SCRIPT" --timer "$((val*60))" & disown
-                                exit 0
-                            elif [[ "$tchoice" == *"Seconds"* ]]; then
-                                val=$(rofi -dmenu -i -p "Duration (Secs)" -location 3 -theme-str "$PROMPT_STYLE") || continue
-                                val=${val//[!0-9]/}; [[ -z "$val" ]] && continue
-                                echo "${val}s" > "$TIMER_STATE"
-                                save_recent "Timer (${val}s)" "--timer $val"
-                                "$DAEMON_SCRIPT" --timer "$val" & disown
-                                exit 0
-                            fi
+                                        if [[ "$tchoice" == *"Start Last"* ]]; then
+                                            save_recent "Timer ($(fmt_t "$lt_sec"))" "--timer $lt_sec"
+                                            "$DAEMON_SCRIPT" --timer "$lt_sec" & disown
+                                            exit 0
+                                        elif [[ "$tchoice" == *"Minutes"* ]]; then
+                                            val=$(rofi -dmenu -i -p "Duration (Mins)" -location 3 -theme-str "$PROMPT_STYLE") || continue
+                                            val=${val//[!0-9]/}; [[ -z "$val" ]] && continue
+                                            echo "${val}m" > "$TIMER_STATE"
+                                            save_recent "Timer (${val}m)" "--timer $((val*60))"
+                                            "$DAEMON_SCRIPT" --timer "$((val*60))" & disown
+                                            exit 0
+                                        elif [[ "$tchoice" == *"Seconds"* ]]; then
+                                            val=$(rofi -dmenu -i -p "Duration (Secs)" -location 3 -theme-str "$PROMPT_STYLE") || continue
+                                            val=${val//[!0-9]/}; [[ -z "$val" ]] && continue
+                                            echo "${val}s" > "$TIMER_STATE"
+                                            save_recent "Timer (${val}s)" "--timer $val"
+                                            "$DAEMON_SCRIPT" --timer "$val" & disown
+                                            exit 0
+                                        fi
+                                    done
+                                    ;;
+                                *"Pomodoro"*)
+                                    while true; do
+                                        last_pomo="1500:300"
+                                        [[ -f "$POMO_STATE" ]] && last_pomo=$(<"$POMO_STATE")
+                                        read -r lw_sec lb_sec <<< "$(parse_pomodoro "$last_pomo")"
+                                        p_opts=(
+                                            "󰐊  Start Last ($(fmt_t "$lw_sec") / $(fmt_t "$lb_sec"))"
+                                            "󰒓  Set in Minutes"
+                                            "󰒓  Set in Seconds"
+                                            "  Back"
+                                        )
+                                        pchoice=$(printf '%s\n' "${p_opts[@]}" | "${ROFI_SUB[@]}" -p "Pomodoro") || break
+                                        [[ "$pchoice" == "  Back" ]] && break
+                            
+                                        if [[ "$pchoice" == *"Start Last"* ]]; then
+                                            save_recent "Pomodoro ($(fmt_t "$lw_sec") / $(fmt_t "$lb_sec"))" "--pomodoro $lw_sec $lb_sec"
+                                            "$DAEMON_SCRIPT" --pomodoro "$lw_sec" "$lb_sec" & disown
+                                            exit 0
+                                        elif [[ "$pchoice" == *"Minutes"* ]]; then
+                                            w=$(rofi -dmenu -i -p "Work (Mins)" -location 3 -theme-str "$PROMPT_STYLE") || continue
+                                            w=${w//[!0-9]/}; [[ -z "$w" ]] && continue
+                                            b=$(rofi -dmenu -i -p "Break (Mins)" -location 3 -theme-str "$PROMPT_STYLE") || continue
+                                            b=${b//[!0-9]/}; [[ -z "$b" ]] && b=0
+                                            echo "$((w*60)):$((b*60))" > "$POMO_STATE"
+                                            save_recent "Pomodoro (${w}m / ${b}m)" "--pomodoro $((w*60)) $((b*60))"
+                                            "$DAEMON_SCRIPT" --pomodoro "$((w*60))" "$((b*60))" & disown
+                                            exit 0
+                                        elif [[ "$pchoice" == *"Seconds"* ]]; then
+                                            w=$(rofi -dmenu -i -p "Work (Secs)" -location 3 -theme-str "$PROMPT_STYLE") || continue
+                                            w=${w//[!0-9]/}; [[ -z "$w" ]] && continue
+                                            b=$(rofi -dmenu -i -p "Break (Secs)" -location 3 -theme-str "$PROMPT_STYLE") || continue
+                                            b=${b//[!0-9]/}; [[ -z "$b" ]] && b=0
+                                            echo "$w:$b" > "$POMO_STATE"
+                                            save_recent "Pomodoro (${w}s / ${b}s)" "--pomodoro $w $b"
+                                            "$DAEMON_SCRIPT" --pomodoro "$w" "$b" & disown
+                                            exit 0
+                                        fi
+                                    done
+                                    ;;
+                                *"Alarm"*)
+                                    while true; do
+                                        last_alarm=""
+                                        [[ -f "$ALARM_STATE" ]] && last_alarm=$(<"$ALARM_STATE")
+                                        a_opts=(
+                                            "󰐊  Start Last (${last_alarm:-unset})"
+                                            "󰒓  Set HH:MM + Label"
+                                            "  Back"
+                                        )
+                                        achoice=$(printf '%s\n' "${a_opts[@]}" | "${ROFI_SUB[@]}" -p "Alarm") || break
+                                        [[ "$achoice" == "  Back" ]] && break
+
+                                        if [[ "$achoice" == *"Start Last"* ]]; then
+                                            [[ -z "$last_alarm" ]] && continue
+                                            read -r at_ms at_lbl _ <<< "$last_alarm"
+                                            [[ "$at_ms" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]] || continue
+                                            save_recent "Alarm ($at_ms ${at_lbl:-Alarm})" "--alarm $at_ms ${at_lbl:-Alarm}"
+                                            "$DAEMON_SCRIPT" --alarm "$at_ms" "${at_lbl:-Alarm}" & disown
+                                            exit 0
+                                        elif [[ "$achoice" == *"Set HH:MM"* ]]; then
+                                            at_ms=$(rofi -dmenu -i -p "Alarm HH:MM (24h)" -location 3 -theme-str "$PROMPT_STYLE") || continue
+                                            [[ "$at_ms" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]] || { rofi -e "Use HH:MM, e.g. 07:30"; continue; }
+                                            at_lbl=$(rofi -dmenu -i -p "Label (one word)" -location 3 -theme-str "$PROMPT_STYLE") || continue
+                                            at_lbl="${at_lbl// /_}"; [[ -z "$at_lbl" ]] && at_lbl="Alarm"
+                                            echo "$at_ms $at_lbl" > "$ALARM_STATE"
+                                            save_recent "Alarm ($at_ms $at_lbl)" "--alarm $at_ms $at_lbl"
+                                            "$DAEMON_SCRIPT" --alarm "$at_ms" "$at_lbl" & disown
+                                            exit 0
+                                        fi
+                                    done
+                                    ;;
+                            esac
                         done
                         ;;
-                    *"System Uptime"*)
-                        save_recent "System Uptime" "--uptime"
-                        "$DAEMON_SCRIPT" --uptime & disown
-                        exit 0
-                        ;;
-                    *"Pomodoro"*)
+                    *"Trackers"*)
                         while true; do
-                            last_pomo="1500:300"
-                            [[ -f "$POMO_STATE" ]] && last_pomo=$(<"$POMO_STATE")
-                            read -r lw_sec lb_sec <<< "$(parse_pomodoro "$last_pomo")"
-                            p_opts=(
-                                "󰐊  Start Last ($(fmt_t "$lw_sec") Work / $(fmt_t "$lb_sec") Break)"
-                                "󰒓  Set in Minutes"
-                                "󰒓  Set in Seconds"
+                            tr_opts=(
+                                "󱑎  Stopwatch"
+                                "󰔚  System Uptime"
                                 "  Back"
                             )
-                            pchoice=$(printf '%s\n' "${p_opts[@]}" | "${ROFI_SUB[@]}" -p "Pomodoro") || break
-                            [[ "$pchoice" == "  Back" ]] && break
-                            
-                            if [[ "$pchoice" == *"Start Last"* ]]; then
-                                save_recent "Pomodoro ($(fmt_t "$lw_sec") Work / $(fmt_t "$lb_sec") Break)" "--pomodoro $lw_sec $lb_sec"
-                                "$DAEMON_SCRIPT" --pomodoro "$lw_sec" "$lb_sec" & disown
-                                exit 0
-                            elif [[ "$pchoice" == *"Minutes"* ]]; then
-                                w=$(rofi -dmenu -i -p "Work (Mins)" -location 3 -theme-str "$PROMPT_STYLE") || continue
-                                w=${w//[!0-9]/}; [[ -z "$w" ]] && continue
-                                b=$(rofi -dmenu -i -p "Break (Mins)" -location 3 -theme-str "$PROMPT_STYLE") || continue
-                                b=${b//[!0-9]/}; [[ -z "$b" ]] && b=0
-                                echo "$((w*60)):$((b*60))" > "$POMO_STATE"
-                                save_recent "Pomodoro (${w}m / ${b}m)" "--pomodoro $((w*60)) $((b*60))"
-                                "$DAEMON_SCRIPT" --pomodoro "$((w*60))" "$((b*60))" & disown
-                                exit 0
-                            elif [[ "$pchoice" == *"Seconds"* ]]; then
-                                w=$(rofi -dmenu -i -p "Work (Secs)" -location 3 -theme-str "$PROMPT_STYLE") || continue
-                                w=${w//[!0-9]/}; [[ -z "$w" ]] && continue
-                                b=$(rofi -dmenu -i -p "Break (Secs)" -location 3 -theme-str "$PROMPT_STYLE") || continue
-                                b=${b//[!0-9]/}; [[ -z "$b" ]] && b=0
-                                echo "$w:$b" > "$POMO_STATE"
-                                save_recent "Pomodoro (${w}s / ${b}s)" "--pomodoro $w $b"
-                                "$DAEMON_SCRIPT" --pomodoro "$w" "$b" & disown
-                                exit 0
-                            fi
+                            trchoice=$(printf '%s\n' "${tr_opts[@]}" | "${ROFI_SUB[@]}" -p "Trackers") || break
+                            [[ "$trchoice" == "  Back" ]] && break
+
+                            case "$trchoice" in
+                                *"Stopwatch"*)
+                                    save_recent "Stopwatch" "--stopwatch"
+                                    "$DAEMON_SCRIPT" --stopwatch & disown
+                                    exit 0
+                                    ;;
+                                *"System Uptime"*)
+                                    save_recent "System Uptime" "--uptime"
+                                    "$DAEMON_SCRIPT" --uptime & disown
+                                    exit 0
+                                    ;;
+                            esac
                         done
-                        ;;
-                    *"Stopwatch"*)
-                        save_recent "Stopwatch" "--stopwatch"
-                        "$DAEMON_SCRIPT" --stopwatch & disown
-                        exit 0
                         ;;
                 esac
             done
@@ -688,8 +788,8 @@ while true; do
             while true; do
                 st_opts=(
                     "󰋊  Root Partition (/)"
-                    "󰆼  Solid State Drives (SSD)"
-                    "󰋊  Hard Disk Drives (HDD)"
+                    "󰆼  Solid State (SSD)"
+                    "󰋊  Hard Disk (HDD)"
                     "  Back"
                 )
                 stchoice=$(printf '%s\n' "${st_opts[@]}" | "${ROFI_SUB[@]}" -p "Storage Type") || break
@@ -700,7 +800,7 @@ while true; do
                     "$DAEMON_SCRIPT" --disk & disown
                     exit 0
                     
-                elif [[ "$stchoice" == *"Solid State Drives"* ]]; then
+                elif [[ "$stchoice" == *"Solid State"* || "$stchoice" == *"SSD"* ]]; then
                     while true; do
                         declare -a ssd_opts=()
                         while IFS=$'\t' read -r name model rota; do
@@ -739,7 +839,7 @@ while true; do
                         done
                     done
 
-                elif [[ "$stchoice" == *"Hard Disk Drives"* ]]; then
+                elif [[ "$stchoice" == *"Hard Disk"* || "$stchoice" == *"HDD"* ]]; then
                     while true; do
                         declare -a hdd_opts=()
                         while IFS=$'\t' read -r name model rota; do
@@ -836,10 +936,10 @@ while true; do
         '󰁹  Battery')
             while true; do
                 b_opts=(
-                    "󰁹  Power Draw Only"
-                    "󰁹  Percent Only"
-                    "󰁹  Time Remaining Only"
                     "󰁹  Standard HUD"
+                    "󰁹  Power Draw"
+                    "󰁹  Percentage"
+                    "󰁹  Time Remaining"
                     "  Back"
                 )
                 bchoice=$(printf '%s\n' "${b_opts[@]}" | "${ROFI_SUB[@]}" -p "Battery") || break
@@ -849,15 +949,15 @@ while true; do
                     save_recent "Battery HUD" "--battery"
                     "$DAEMON_SCRIPT" --battery & disown
                     exit 0
-                elif [[ "$bchoice" == *"Percent Only"* ]]; then
+                elif [[ "$bchoice" == *"Percent"* ]]; then
                     save_recent "Battery Percent" "--battery-percent"
                     "$DAEMON_SCRIPT" --battery-percent & disown
                     exit 0
-                elif [[ "$bchoice" == *"Power Draw Only"* ]]; then
+                elif [[ "$bchoice" == *"Power Draw"* ]]; then
                     save_recent "Battery Power Draw" "--battery-watts"
                     "$DAEMON_SCRIPT" --battery-watts & disown
                     exit 0
-                elif [[ "$bchoice" == *"Time Remaining Only"* ]]; then
+                elif [[ "$bchoice" == *"Time Remaining"* ]]; then
                     save_recent "Battery Time" "--battery-time"
                     "$DAEMON_SCRIPT" --battery-time & disown
                     exit 0
@@ -866,10 +966,116 @@ while true; do
             continue
             ;;
 
-        '󰈀  Network Speed')
-            save_recent "Network Speed" "--network"
-            "$DAEMON_SCRIPT" --network & disown
-            exit 0
+        '󰈀  Network Speed'|'󰈀  Network')
+            while true; do
+                net_categories=(
+                    "󱘖  Live Rates"
+                    "󰇚  Session Data"
+                    "󰋊  Boot Totals"
+                    "  Back"
+                )
+                cat_choice=$(printf '%s\n' "${net_categories[@]}" | "${ROFI_SUB[@]}" -p "Network") || break
+                [[ "$cat_choice" == "  Back" ]] && break
+
+                case "$cat_choice" in
+                    *"Live Rates"*)
+                        while true; do
+                            live_opts=(
+                                "󰈀  Both (Up & Down)"
+                                "󰇚  Download Rate"
+                                "󰕒  Upload Rate"
+                                "󱘖  Combined Rate"
+                                "  Back"
+                            )
+                            choice=$(printf '%s\n' "${live_opts[@]}" | "${ROFI_SUB[@]}" -p "Live Rates") || break
+                            [[ "$choice" == "  Back" ]] && break
+                            case "$choice" in
+                                *"Both"*)
+                                    save_recent "Network Speed" "--network"
+                                    "$DAEMON_SCRIPT" --network & disown
+                                    exit 0
+                                    ;;
+                                *"Download"*)
+                                    save_recent "Network Download" "--network-down"
+                                    "$DAEMON_SCRIPT" --network-down & disown
+                                    exit 0
+                                    ;;
+                                *"Upload"*)
+                                    save_recent "Network Upload" "--network-up"
+                                    "$DAEMON_SCRIPT" --network-up & disown
+                                    exit 0
+                                    ;;
+                                *"Combined"*)
+                                    save_recent "Network Combined Speed" "--network-combined"
+                                    "$DAEMON_SCRIPT" --network-combined & disown
+                                    exit 0
+                                    ;;
+                            esac
+                        done
+                        ;;
+
+                    *"Session Data"*)
+                        while true; do
+                            session_opts=(
+                                "󰇚  Downloaded"
+                                "󰕒  Uploaded"
+                                "󱘖  Total Traffic"
+                                "  Back"
+                            )
+                            choice=$(printf '%s\n' "${session_opts[@]}" | "${ROFI_SUB[@]}" -p "Session Data") || break
+                            [[ "$choice" == "  Back" ]] && break
+                            case "$choice" in
+                                *"Downloaded"*)
+                                    save_recent "Session Downloaded" "--network-down-session"
+                                    "$DAEMON_SCRIPT" --network-down-session & disown
+                                    exit 0
+                                    ;;
+                                *"Uploaded"*)
+                                    save_recent "Session Uploaded" "--network-up-session"
+                                    "$DAEMON_SCRIPT" --network-up-session & disown
+                                    exit 0
+                                    ;;
+                                *"Total Traffic"*)
+                                    save_recent "Session Total Traffic" "--network-session"
+                                    "$DAEMON_SCRIPT" --network-session & disown
+                                    exit 0
+                                    ;;
+                            esac
+                        done
+                        ;;
+
+                    *"Boot Totals"*)
+                        while true; do
+                            boot_opts=(
+                                "󰇚  Downloaded"
+                                "󰕒  Uploaded"
+                                "󱘖  Total Traffic"
+                                "  Back"
+                            )
+                            choice=$(printf '%s\n' "${boot_opts[@]}" | "${ROFI_SUB[@]}" -p "Boot Totals") || break
+                            [[ "$choice" == "  Back" ]] && break
+                            case "$choice" in
+                                *"Downloaded"*)
+                                    save_recent "Boot Downloaded" "--network-boot-down"
+                                    "$DAEMON_SCRIPT" --network-boot-down & disown
+                                    exit 0
+                                    ;;
+                                *"Uploaded"*)
+                                    save_recent "Boot Uploaded" "--network-boot-up"
+                                    "$DAEMON_SCRIPT" --network-boot-up & disown
+                                    exit 0
+                                    ;;
+                                *"Total Traffic"*)
+                                    save_recent "Boot Total Traffic" "--network-boot"
+                                    "$DAEMON_SCRIPT" --network-boot & disown
+                                    exit 0
+                                    ;;
+                            esac
+                        done
+                        ;;
+                esac
+            done
+            continue
             ;;
 
         '󰽽  Workspace')

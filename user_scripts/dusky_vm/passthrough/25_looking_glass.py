@@ -243,11 +243,13 @@ def install_packages(pkgs: list[str], operator: pwd.struct_passwd) -> None:
 # ==============================================================================
 def shm_bytes_for(width: int, height: int) -> int:
     """
-    Looking Glass sizing rule: width * height * 4 (BGRA) * 2 (double buffer)
-    + 10 MiB of ring/cursor overhead, rounded UP to a power of two.
+    Looking Glass B7+ IDD sizing rule (triple-buffered):
+    (ceil(width * 4 / 256) * 256) * height * 3 + (4 * 1024 * 1024),
+    rounded UP to the next power of two.
     ivshmem-plain requires a power-of-two region, so the rounding is mandatory.
     """
-    raw = width * height * 4 * 2 + (10 << 20)
+    stride = math.ceil((width * 4) / 256) * 256
+    raw = stride * height * 3 + (4 << 20)
     return 1 << math.ceil(math.log2(raw))
 
 
@@ -260,14 +262,15 @@ def choose_shm(explicit_mib: int | None) -> tuple[int, int]:
 
     presets = [("1", "1920x1080", 1920, 1080), ("2", "2560x1440", 2560, 1440),
                ("3", "3840x2160", 3840, 2160)]
-    table = Table(title="Shared-memory sizing (SDR, double-buffered)", header_style="bold magenta")
+    table = Table(title="Shared-memory sizing (IDD, triple-buffered)", header_style="bold magenta")
     table.add_column("Opt", style="cyan", justify="center")
     table.add_column("Guest resolution", style="green")
-    table.add_column("Frame pair", style="dim")
+    table.add_column("Frame buffer (x3)", style="dim")
     table.add_column("Region (power of two)", style="bold yellow")
     for opt, label, width, height in presets:
         total = shm_bytes_for(width, height)
-        table.add_row(opt, label, f"{width * height * 4 * 2 / (1 << 20):.1f} MiB + 10 MiB",
+        stride = math.ceil((width * 4) / 256) * 256
+        table.add_row(opt, label, f"{stride * height * 3 / (1 << 20):.1f} MiB + 4 MiB",
                       f"{total >> 20} MiB")
     table.add_row("4", "custom", "-", "computed")
     console.print(table)
@@ -466,6 +469,22 @@ def apply_latency_tuning(root: ET.Element) -> list[str]:
     for child in list(balloon):
         balloon.remove(child)
 
+    # Ensure SPICE graphics listener binds to localhost (not none)
+    graphics = devices.find("graphics[@type='spice']")
+    if graphics is not None:
+        listen_elem = graphics.find("listen")
+        if listen_elem is not None and listen_elem.get("type") == "none":
+            listen_elem.set("type", "address")
+            listen_elem.set("address", "127.0.0.1")
+            graphics.set("autoport", "yes")
+            graphics.set("listen", "127.0.0.1")
+            notes.append("graphics spice listen -> 127.0.0.1 (autoport=yes)")
+        elif listen_elem is None and graphics.get("listen") in (None, "none"):
+            graphics.set("autoport", "yes")
+            graphics.set("listen", "127.0.0.1")
+            ET.SubElement(graphics, "listen", type="address", address="127.0.0.1")
+            notes.append("graphics spice listen -> 127.0.0.1 (autoport=yes)")
+
     has_agent = any(
         channel.get("type") == "spicevmc"
         and (channel.find("target") is not None)
@@ -476,6 +495,14 @@ def apply_latency_tuning(root: ET.Element) -> list[str]:
         channel = ET.SubElement(devices, "channel", type="spicevmc")
         ET.SubElement(channel, "target", type="virtio", name="com.redhat.spice.0")
         notes.append("spicevmc agent channel added")
+
+    has_redirdev = any(
+        r.get("bus") == "usb" and r.get("type") == "spicevmc"
+        for r in devices.findall("redirdev")
+    )
+    if not has_redirdev:
+        ET.SubElement(devices, "redirdev", bus="usb", type="spicevmc")
+        notes.append("spicevmc usb redirdev added (Looking Glass USB audio)")
     return notes
 
 
@@ -639,7 +666,7 @@ def main() -> None:
             "  <memballoon model='none'/>\n\n"
             "No xmlns:qemu, no <qemu:commandline>, no kvmfr kernel module.\n"
             f"Client:  looking-glass-client -f /dev/shm/{SHM_NAME}\n"
-            "Guest:   install the Looking Glass host application matching the client build.",
+            "Guest:   install the Looking Glass IDD (or host application) matching the client build.",
             title="libvirt-native configuration",
             border_style="cyan",
         )

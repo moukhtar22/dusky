@@ -1,0 +1,106 @@
+{
+  "recorded_date": "2026-09-28",
+  "reference": "baseline-ufw-8w.json",
+  "reference_sha256": "04683f2646e7d7e70a67ea6350ac6a246b99fa1382e17ef586ee7969777fd0e6",
+  "runs": 5,
+  "conditions": {
+    "schema": "UFW",
+    "uid": 0,
+    "mode": "headless",
+    "viewport": [
+      120,
+      40
+    ],
+    "tabs": [
+      1,
+      2,
+      14
+    ],
+    "idle_observation_seconds": 3.2,
+    "timeout_seconds": 180,
+    "package_constraints_0_and_1_uw": 8000000,
+    "caches": "uncontrolled filesystem/bytecode; fresh processes",
+    "power_note": "configured limits, not a measured 8 W consumption; MMIO limits were 50/60 W"
+  },
+  "median_metrics": {
+    "launcher_enter_ms": 566.469454,
+    "app_run_enter_ms": 1730.179879,
+    "app_mount_enter_ms": 2398.374938,
+    "app_mount_return_ms": 2405.061684,
+    "first_compositor_callback_ms": 3302.649929,
+    "first_after_refresh_ms": 3579.866039,
+    "active_data_refresh_ms": 7166.115924,
+    "boot_refresh_ms": 7167.237925,
+    "viewport_width": 120,
+    "viewport_height": 40,
+    "widgets_at_boot": 106,
+    "custom_widgets_at_boot": 1,
+    "observation_end_ms": 14850.621429,
+    "launcher_return_ms": 14919.12562,
+    "startup_factory_count": 1,
+    "startup_factory_inclusive_ms": 1.371119,
+    "startup_collector_count": 1,
+    "startup_collector_inclusive_ms": 2086.148422,
+    "startup_command_count": 6,
+    "startup_command_inclusive_ms": 3425.534313,
+    "startup_compose_step_count": 32,
+    "startup_compose_step_inclusive_ms": 25.598453,
+    "max_rss_kib": 57012,
+    "process_cpu_ms": 7349.983394
+  },
+  "tab_median_ms": {
+    "1_first_visit": 280.483503,
+    "1_revisit": 211.113754,
+    "2_first_visit": 1854.877276,
+    "2_revisit": 118.113061,
+    "14_first_visit": 894.220905,
+    "14_revisit": 191.875471
+  },
+  "per_run_checks": [
+    {
+      "errors": [],
+      "nonzero_commands": 0,
+      "startup_numbered_rule_reads": 2,
+      "hidden_idle_rich_callbacks": 0
+    },
+    {
+      "errors": [],
+      "nonzero_commands": 0,
+      "startup_numbered_rule_reads": 2,
+      "hidden_idle_rich_callbacks": 0
+    },
+    {
+      "errors": [],
+      "nonzero_commands": 0,
+      "startup_numbered_rule_reads": 2,
+      "hidden_idle_rich_callbacks": 0
+    },
+    {
+      "errors": [],
+      "nonzero_commands": 0,
+      "startup_numbered_rule_reads": 2,
+      "hidden_idle_rich_callbacks": 0
+    },
+    {
+      "errors": [],
+      "nonzero_commands": 0,
+      "startup_numbered_rule_reads": 2,
+      "hidden_idle_rich_callbacks": 0
+    }
+  ],
+  "source_sha256": {
+    "user_scripts/dusky_tui/python/frontend/ui.py": "01eec4cdc4a29c4082807ad023056e0f7b0f534943ee88a0a8a9095bbe2c959b",
+    "user_scripts/dusky_tui/python/engines/ufw.py": "f7d1f9d3143fd1f0eb5335b781e890bb293778c3be7fe3695f3a157d4e8f4918",
+    "user_scripts/network_manager/tui_ufw.py": "0a4829bdec76fc9343f99dafeef5ad02698a53c7b5d112b27e0218a4fbfda622",
+    "user_scripts/dusky_tui/python/tests/test_startup_lifecycle.py": "f49859984385162ac0f5784f40de56a171f28851cada46c432c41d2bc2272030",
+    "user_scripts/dusky_tui/python/main/main.py": "1c10ba654a40465c521bc6dba699da9df3b70fcd838a4b20bbdcb93448f8a764"
+  },
+  "limits": [
+    "Headless callbacks are not optical frames or proven input-to-pixel TTI.",
+    "Clean revisits reuse retained snapshots.",
+    "CPU/RSS cover the whole workload.",
+    "Reference profiler did not fingerprint engine modules; engine identity below verified from the matching saved source manifest.",
+    "Current handoff profiler adds loaded-source fingerprints after the measured workload; use the same revision for new comparisons.",
+    "Idle collector ownership inferred from startup-visible factory IDs; initial tab remains active throughout idle observation."
+  ]
+}

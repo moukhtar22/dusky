@@ -94,6 +94,10 @@ def update_state_file(state: bool) -> None:
 def notify_user(title: str, message: str, urgency: str = "low", icon: str = ICON_WAIT) -> None:
     if not shutil.which("notify-send"):
         return
+    # Keep payloads inside the 200px dusky-warp pill: collapse whitespace,
+    # drop newlines, and hard-cap lengths so mako never wraps/clips.
+    title = " ".join(str(title).split())[:24]
+    message = " ".join(str(message).split())[:28]
     cmd = [
         "notify-send", "-u", urgency, "-a", APP_NAME, "-i", icon,
         "-h", "string:x-canonical-private-synchronous:dusky-warp",
@@ -173,12 +177,12 @@ def ensure_warp_svc_running() -> bool:
         return True
 
     log_info("WARP service is inactive or unresponsive. Prompting to enable/start...")
-    notify_user("Starting Service", "Authentication required to start WARP.", "normal", ICON_WAIT)
+    notify_user("Starting", "Auth required", "normal", ICON_WAIT)
 
     # Enable --now ensures it starts immediately and enables for future boots
     if not _run_privileged_systemctl(["enable", "--now", WARP_SERVICE]):
         log_error("Polkit authorization failed or was dismissed.")
-        notify_user("Authentication Failed", "Could not start WARP service.", "critical", ICON_ERR)
+        notify_user("Auth failed", "Could not start", "critical", ICON_ERR)
         return False
 
     log_info("Service started. Waiting for daemon socket to bind...")
@@ -187,7 +191,7 @@ def ensure_warp_svc_running() -> bool:
         return True
 
     log_error("Daemon failed to bind or respond in time.")
-    notify_user("Daemon Error", "Service started but daemon is unresponsive.", "critical", ICON_ERR)
+    notify_user("Daemon error", "No response", "critical", ICON_ERR)
     return False
 
 # ─── WARP Status ─────────────────────────────────────────────────────────
@@ -307,7 +311,7 @@ def connect_warp() -> bool:
         update_state_file(False)
         return False
 
-    notify_user("Connecting...", "Establishing secure tunnel.", "normal", ICON_WAIT)
+    notify_user("Connecting", "Opening tunnel", "normal", ICON_WAIT)
 
     try:
         res = subprocess.run(
@@ -321,20 +325,20 @@ def connect_warp() -> bool:
 
     if res.returncode != 0:
         log_error("Failed to send connect command.")
-        notify_user("Error", "Failed to send connect command.", "critical", ICON_ERR)
+        notify_user("Error", "Connect failed", "critical", ICON_ERR)
         update_state_file(False)
         return False
 
     for _ in range(POLL_TIMEOUT_SEC):
         if get_warp_status() == "Connected":
             log_success("WARP is now Connected.")
-            notify_user("Connected", "Secure tunnel active.", "normal", ICON_CONN)
+            notify_user("Connected", "Tunnel active", "normal", ICON_CONN)
             update_state_file(True)
             return True
         time.sleep(1)
 
     log_error("Connection timed out.")
-    notify_user("Timeout", f"Failed to connect within {POLL_TIMEOUT_SEC} seconds.", "critical", ICON_ERR)
+    notify_user("Timeout", "No connection", "critical", ICON_ERR)
     update_state_file(False)
     return False
 
@@ -344,7 +348,7 @@ def disconnect_warp() -> bool:
     # If the daemon isn't running, it's already effectively disconnected
     if not _is_service_active() or not _is_daemon_responsive():
         log_success("Daemon not active. Already disconnected.")
-        notify_user("Disconnected", "Secure tunnel closed.", "low", ICON_DISC)
+        notify_user("Disconnected", "Tunnel closed", "low", ICON_DISC)
         update_state_file(False)
         return True
 
@@ -355,17 +359,17 @@ def disconnect_warp() -> bool:
         )
     except (subprocess.SubprocessError, OSError) as e:
         log_error(f"Failed to run warp-cli disconnect: {e}")
-        notify_user("Error", "Failed to disconnect WARP.", "critical", ICON_ERR)
+        notify_user("Error", "Disconnect failed", "critical", ICON_ERR)
         return False
 
     if res.returncode == 0:
         log_success("Disconnected successfully.")
-        notify_user("Disconnected", "Secure tunnel closed.", "low", ICON_DISC)
+        notify_user("Disconnected", "Tunnel closed", "low", ICON_DISC)
         update_state_file(False)
         return True
 
     log_error("Failed to disconnect.")
-    notify_user("Error", "Failed to disconnect WARP.", "critical", ICON_ERR)
+    notify_user("Error", "Disconnect failed", "critical", ICON_ERR)
     return False
 
 # ─── CLI & Entry ─────────────────────────────────────────────────────────

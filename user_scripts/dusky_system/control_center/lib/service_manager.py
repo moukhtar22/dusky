@@ -20,7 +20,6 @@ import logging
 import re
 import shlex
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Callable, Final, Literal
 
 import gi
@@ -72,7 +71,7 @@ def _sanitize_unit(raw: object) -> str | None:
     if not isinstance(raw, str):
         return None
     name = raw.strip()
-    if not name:
+    if not name or name.startswith("-"):
         return None
     # Reject path traversal / shell injection vectors
     if "/" in name or "\\" in name or "\0" in name:
@@ -91,10 +90,6 @@ def _sanitize_unit(raw: object) -> str | None:
             return name
         return None
     return None
-    # Reject overly long names (systemd limit ~256)
-    if len(name) > 256:
-        return None
-    return name
 
 
 def _sanitize_scope(raw: object) -> Scope:
@@ -182,7 +177,7 @@ def _run_argv_async(
         proc = launcher.spawnv(argv)
     except GLib.Error as e:
         log.debug("Failed to spawn %.80s: %s", shlex.join(argv), e.message)
-        GLib.idle_add(lambda: (on_complete(None, e.message, False, None), GLib.SOURCE_REMOVE)[1])
+        GLib.idle_add(lambda message=e.message: (on_complete(None, message, False, None), GLib.SOURCE_REMOVE)[1])
         return None
 
     handle = _ServiceCommandHandle(proc, cancellable)
@@ -234,6 +229,43 @@ class ServiceSpec:
     scope: Scope
 
 
+@dataclass(slots=True, frozen=True)
+class UnitStatus:
+    load_state: str
+    active_state: str
+    sub_state: str
+    unit_file_state: str
+
+
+def check_unit_status_async(
+    scope: Scope,
+    unit: str,
+    timeout: int = TIMEOUT_IS_ACTIVE,
+    on_result: Callable[[UnitStatus | None], None] | None = None,
+) -> _ServiceCommandHandle | None:
+    """Read runtime and startup states in one current-systemd show query."""
+    sanitized = _sanitize_unit(unit)
+    if sanitized is None or scope not in VALID_SCOPES:
+        if on_result:
+            GLib.idle_add(lambda: (on_result(None), GLib.SOURCE_REMOVE)[1])
+        return None
+    argv = [SYSTEMCTL_PATH]
+    if scope == "user":
+        argv.append("--user")
+    argv += ["show", "--no-pager", "--property=LoadState,ActiveState,SubState,UnitFileState", "--", sanitized]
+
+    def complete(stdout: str | None, _stderr: str | None, success: bool, _status: int | None) -> None:
+        result: UnitStatus | None = None
+        if success and stdout:
+            fields = dict(line.split("=", 1) for line in stdout.splitlines() if "=" in line)
+            if all(key in fields for key in ("LoadState", "ActiveState", "SubState", "UnitFileState")):
+                result = UnitStatus(fields["LoadState"], fields["ActiveState"], fields["SubState"], fields["UnitFileState"])
+        if on_result:
+            on_result(result)
+
+    return _run_argv_async(argv, timeout, complete)
+
+
 def normalize_service_spec(raw_unit: object, raw_scope: object = "system") -> ServiceSpec | None:
     """Validate inputs and return normalized spec or None."""
     unit = _sanitize_unit(raw_unit)
@@ -274,7 +306,7 @@ def check_single_service_async(
         # For single unit, exit_code 0 => active, 3 => inactive
         # We treat only "active" as True, everything else False (including activating)
         normalized = stdout.strip().lower()
-        is_active = normalized == "active"
+        is_active = (normalized == "active") if normalized else None
         GLib.idle_add(lambda: (on_result(is_active), GLib.SOURCE_REMOVE)[1])
 
     return _run_argv_async(argv, timeout, _on_complete)
@@ -353,13 +385,13 @@ def check_multiple_services_async(
                                 results[(s, u)] = val
                         else:
                             with lock:
-                                results[(s, u)] = False
+                                results[(s, u)] = None
                     # If expiry: if stdout parsing mismatched, fill remainder
                     if len(lines) < len(us):
                         for u in us[len(lines) :]:
                             with lock:
                                 if (s, u) not in results:
-                                    results[(s, u)] = False
+                                    results[(s, u)] = None
                 _maybe_emit()
 
             return _cb
@@ -367,10 +399,6 @@ def check_multiple_services_async(
         h = _run_argv_async(argv, timeout, _make_cb(scope, units))
         if h:
             handles.append(h)
-        else:
-            for u in units:
-                results[(scope, u)] = None
-            _maybe_emit()
 
     return handles
 

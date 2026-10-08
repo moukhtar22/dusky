@@ -33,9 +33,8 @@ def bootstrap_environment():
     # 2. Check dependencies (we are guaranteed root now)
     try:
         import rich
-        import textual
     except ImportError:
-        print("[\033[1;36m*\033[0m] Missing critical Python libraries (rich, textual).", flush=True)
+        print("Missing python-rich; installing it via pacman.", flush=True)
         print("[\033[1;36m*\033[0m] Autonomous mode: Auto-installing via pacman...", flush=True)
         
         if Path("/var/lib/pacman/db.lck").exists():
@@ -44,7 +43,7 @@ def bootstrap_environment():
             
         try:
             subprocess.run(
-                ["pacman", "-S", "python-rich", "python-textual", "qrencode", "--noconfirm", "--needed"],
+                ["pacman", "-S", "python-rich", "qrencode", "--noconfirm", "--needed"],
                 check=True
             )
             print("[\033[1;32m✔\033[0m] Dependencies installed. Reloading environment...", flush=True)
@@ -130,16 +129,18 @@ def check_pacman_lock():
         die("Pacman database is locked (/var/lib/pacman/db.lck). Is it running elsewhere?")
 
 def install_openssh():
-    """Install OpenSSH using pacman if not present."""
-    if run_cmd("pacman -Qi openssh", check=False).returncode == 0:
-        log_success("OpenSSH is already installed.")
+    """Install the SSH daemon and QR encoder if missing."""
+    missing = [pkg for pkg in ("openssh", "qrencode")
+               if run_cmd(["pacman", "-Qq", pkg], check=False).returncode != 0]
+    if not missing:
+        log_success("OpenSSH and qrencode are already installed.")
         return
 
     check_pacman_lock()
-    with console.status("[bold cyan]Installing OpenSSH via pacman..."):
+    with console.status(f"[bold cyan]Installing {', '.join(missing)} via pacman..."):
         try:
-            run_cmd("pacman -S --noconfirm --needed openssh", check=True, capture=False)
-            log_success("OpenSSH installed successfully.")
+            run_cmd(["pacman", "-S", "--noconfirm", "--needed", *missing], check=True, capture=False)
+            log_success("SSH packages installed successfully.")
         except subprocess.CalledProcessError as e:
             die("Installation failed. Run 'sudo pacman -Syu' first to sync repos.", e)
 
@@ -154,12 +155,12 @@ def generate_host_keys():
 def validate_sshd_config() -> str:
     """Run built-in syntax check for sshd."""
     try:
-        run_cmd("sshd -t", check=True)
+        config = run_cmd("sshd -T", check=True).stdout
         log_success("sshd configuration is valid.")
     except subprocess.CalledProcessError as e:
         die("sshd configuration is invalid. Fix /etc/ssh/sshd_config and re-run.", e)
         
-    return run_cmd("sshd -T").stdout
+    return config
 
 def detect_unit_and_port(config_text: str) -> tuple[str, str, int]:
     """Detect if sshd is using socket or service activation, and determine port."""
@@ -271,20 +272,13 @@ def configure_firewalls(port: int):
         if run_cmd("systemctl is-active firewalld", check=False).returncode == 0:
             active_firewalls += 1
             zone = run_cmd("firewall-cmd --get-default-zone", check=False).stdout.strip() or "public"
-            if port == 22:
-                if run_cmd(f"firewall-cmd --zone={zone} --query-service=ssh", check=False).returncode != 0:
-                    run_cmd(f"firewall-cmd --permanent --zone={zone} --add-service=ssh", check=False)
-                    run_cmd("firewall-cmd --reload", check=False)
-                    log_success(f"Firewalld: Added 'ssh' service to '{zone}' zone.")
-                else:
-                    log_success("Firewalld: SSH service already allowed.")
+            rule = "--add-service=ssh" if port == 22 else f"--add-port={port}/tcp"
+            runtime = run_cmd(["firewall-cmd", f"--zone={zone}", rule], check=False)
+            permanent = run_cmd(["firewall-cmd", "--permanent", f"--zone={zone}", rule], check=False)
+            if runtime.returncode == 0 and permanent.returncode == 0:
+                log_success(f"Firewalld: SSH port {port}/tcp allowed in '{zone}' (runtime and permanent).")
             else:
-                if run_cmd(f"firewall-cmd --zone={zone} --query-port={port}/tcp", check=False).returncode != 0:
-                    run_cmd(f"firewall-cmd --permanent --zone={zone} --add-port={port}/tcp", check=False)
-                    run_cmd("firewall-cmd --reload", check=False)
-                    log_success(f"Firewalld: Added {port}/tcp to '{zone}' zone.")
-                else:
-                    log_success(f"Firewalld: Port {port} already allowed.")
+                log_warn(f"Firewalld: could not fully open {port}/tcp in '{zone}'.")
 
     # --- Raw Iptables ---
     if active_firewalls == 0 and shutil.which("iptables"):
@@ -316,6 +310,8 @@ def manage_services(unit: str, unit_type: str):
         run_cmd(f"systemctl disable {opposing_unit}", check=False)
 
     if run_cmd(f"systemctl is-active {unit}", check=False).returncode == 0:
+        if run_cmd(f"systemctl is-enabled {unit}", check=False).returncode != 0:
+            run_cmd(f"systemctl enable {unit}", check=True)
         log_success(f"{unit} is already active.")
     else:
         with console.status(f"[bold cyan]Starting {unit}..."):
@@ -341,7 +337,7 @@ def configure_tailscale_autonomous() -> str | None:
     console.print(f"\n[magenta bold]✦ Tailscale Network Detected[/] : {ip_out}")
     log_success("Autonomous Mode: Tailscale automatically trusted for SSH ingress.")
     
-    # Trust tailscale interface in firewalld if active (UFW is handled natively by 068_ufw_firewall.sh)
+    # Trust tailscale interface in firewalld if active (UFW is handled natively by 068_ufw_firewall.py)
     if shutil.which("firewall-cmd") and run_cmd("systemctl is-active firewalld", check=False).returncode == 0:
         if shutil.which("ip"):
             ts_iface_raw = run_cmd("ip -o link show", check=False).stdout

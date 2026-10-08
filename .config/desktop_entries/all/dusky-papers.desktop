@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=Dusky Papers
+GenericName=Wallpaper Browser
+Comment=Browse wallpapers and apply Dusky themes
+Exec=/home/dusk/.local/bin/dusky-papers
+TryExec=/home/dusk/.local/bin/dusky-papers
+Icon=preferences-desktop-wallpaper
+Terminal=false
+Categories=Settings;DesktopSettings;
+Keywords=dusky;papers;wallpaper;background;theme;
+StartupNotify=true
+StartupWMClass=dusky-papers

@@ -1,77 +1,147 @@
 # =============================================================================
 # Dusky zoxide module — smarter directory navigation (`z` / `zi`)
 #
-# Dependencies: zsh 5.9+, zoxide 0.9+ (optional — see fallback below)
+# Dependencies: zsh 5.9+, zoxide 0.9+ (optional — see the fallback below)
 # Sourced from ~/.zshrc [6] (must be SOURCED, never executed).
-#   Location: ~/.config/zshrc/zoxide  (no hardcoded usernames; all $HOME-based)
+#   Location: ~/.config/zshrc/zoxide   (no usernames; everything $HOME-based)
 #
 # Contract:
-#   z <keywords>  → jump to best-scored directory (echoes destination)
-#   zi <keywords> → interactive jump via fzf
-#   cd            → left as the builtin, so `cd -P`, `cd old new`,
-#                   AUTO_PUSHD and full `_cd` completion keep working.
-#   fallback      → if zoxide is missing, broken, or its cache is unusable,
-#                   `z`/`zi` are still defined with honest cd-like semantics
-#                   (never "command not found"), and `cd` is unaffected.
+#   z KEYWORDS    jump to the best-scored directory (echoes the destination)
+#   zi KEYWORDS   interactive jump via fzf
+#   cd            untouched, so `cd -P`, `cd old new`, AUTO_PUSHD and the full
+#                 `_cd` completion keep working exactly as before
+#   fallback      if zoxide is missing, broken, or its cache is untrusted,
+#                 `z`/`zi` still exist with honest cd-like semantics
 #
-# Ordering constraints (all satisfied by the [6] module slot):
-#   - after compinit  (~/.zshrc [3], provides `compdef`)
-#   - before syntax-highlighting (~/.zshrc [8], must stay last)
-#   - `_ZO_*` exports are read at zoxide RUNTIME, so fzf/matugen theme
-#     init order does not matter here.
+# Startup cost: ZERO forks.  command -v, grep, mktemp and mv are all gone:
+#   $commands[zoxide]         command hash lookup        (zsh/parameter)
+#   read -r first < $cache    signature pinned to line 1 (1 open + 1 read)
+#   $cache(N.U^WI)            trust gate as a glob qualifier
+#   zf_mv / zf_rm             builtins                   (zsh/files)
+#   $$ + $RANDOM + NOCLOBBER  unique tmp instead of mktemp(1)
 #
-# Self-healing cache: regenerates only when the binary is newer than the
-# cache or the init signature changes; writes atomically via tmp+mv so a
-# failed init can never leave a truncated cache behind.
+# Trust gate: `.` regular file · `U` owned by the effective UID · then a
+# single `^` which negates EVERYTHING after it, so `WI` reads as "not
+# world-writable and not group-writable".  (`^W^I` would be wrong: the second
+# `^` toggles the sense back on.)  Sourcing a file anyone else can write is
+# arbitrary code execution in every future login shell.
+#
+# Self-healing: regenerated only when the cache is missing, empty, untrusted,
+# signature-stale, or older than the RESOLVED binary (${bin:A}, so a shim in
+# ~/.local/bin whose mtime never changes cannot mask an upgrade).  The write
+# is tmp+rename, so a failed init can never leave a truncated cache behind.
 # =============================================================================
 
-# --- Zoxide runtime environment (exported; must persist for the session) ---
+zmodload zsh/parameter 2>/dev/null
+zmodload -F zsh/files b:zf_mv b:zf_rm 2>/dev/null   # -F: do NOT define mv/rm
+
+# --- Runtime environment (exported; zoxide reads these at RUNTIME) -----------
+# _ZO_EXCLUDE_DIRS is a colon-separated list of GLOBS and upstream's default is
+# already "$HOME"; it excludes $HOME itself, never its children.  To exclude a
+# subtree you need a glob, e.g. "$HOME:$HOME/private/**".  Kept explicit so the
+# intent is documented rather than silently inherited.
 export _ZO_ECHO=1
 export _ZO_EXCLUDE_DIRS="$HOME"
-export _ZO_FZF_OPTS="--height 40% --reverse --border"
 
-_zoxide_cache="$HOME/.zoxide-init.zsh"
-_zoxide_bin="$(command -v zoxide)"
-_zoxide_sig="# dusky-zoxide-sig: init zsh (default z/zi)"
-if [[ -n "$_zoxide_bin" ]]; then
-  if [[ ! -s "$_zoxide_cache" || "$_zoxide_bin" -nt "$_zoxide_cache" ]] || ! grep -qF -- "$_zoxide_sig" "$_zoxide_cache" 2>/dev/null; then
-    _zoxide_tmp="$(command mktemp -- "${_zoxide_cache}.tmp.XXXXXX" 2>/dev/null)" || _zoxide_tmp="${_zoxide_cache}.tmp.$$"
-    if "$_zoxide_bin" init zsh >"$_zoxide_tmp" 2>/dev/null && [[ -s "$_zoxide_tmp" ]]; then
-      printf '%s\n' "$_zoxide_sig" >>"$_zoxide_tmp"
-      command mv -f -- "$_zoxide_tmp" "$_zoxide_cache" >/dev/null 2>&1
-    else
-      command rm -f -- "$_zoxide_tmp" >/dev/null 2>&1
+# _ZO_FZF_OPTS replaces zoxide's own fzf options, which is why the matugen
+# theme has to be composed in here.  `core` is loaded immediately before this
+# module in the ~/.zshrc [6] array, so $DUSKY_FZF_COLORS is already set; if it
+# is ever empty this degrades cleanly to no --color at all.
+export _ZO_FZF_OPTS="--height=40% --layout=reverse --border=rounded --info=inline-right --scheme=path${DUSKY_FZF_COLORS:+ --color=$DUSKY_FZF_COLORS}"
+
+# --- Init: an anonymous function gives real scope + real LOCAL_OPTIONS -------
+() {
+    emulate -L zsh
+    setopt localoptions extendedglob no_nomatch noclobber
+    local cache=${ZOXIDE_INIT_CACHE:-$HOME/.zoxide-init.zsh}
+    local bin real sig first tmp='' init
+    local -a trusted
+    local -i ok=0 i=0
+
+    (( $+commands[zoxide] )) || return 0
+    bin=$commands[zoxide]
+    real=${bin:A}
+    sig="# dusky-zoxide-sig: v2 zsh default-z-zi :: $real"
+
+    trusted=( $cache(N.U^WI) )
+    if (( $#trusted )); then
+        first=''
+        read -r first 2>/dev/null < $cache
+        [[ $first == "$sig" ]] && [[ ! $real -nt $cache ]] && ok=1
     fi
-    unset _zoxide_tmp
-  fi
-  [[ -s "$_zoxide_cache" ]] && source "$_zoxide_cache"
-fi
-unset _zoxide_cache _zoxide_bin _zoxide_sig
 
-# --- Fallback: `z`/`zi` must exist even without a usable zoxide ---
-# The guards below mean the real init always wins when it loads; these only
-# fill the gap (missing/broken binary, unwritable HOME, corrupt cache) with
-# cd-like semantics and clear guidance. `cd` itself is never touched.
+    if (( ! ok )); then
+        while (( i++ < 16 )); do
+            tmp=$cache.tmp.$$.$RANDOM
+            [[ -e $tmp ]] || break
+            tmp=''
+        done
+        if [[ -n $tmp ]] &&
+           print -r -- $sig > $tmp 2>/dev/null &&
+           "$bin" init zsh >> $tmp 2>/dev/null &&
+           [[ -s $tmp ]]; then
+            if zf_mv -f -- $tmp $cache 2>/dev/null; then
+                ok=1
+            else
+                zf_rm -f -- $tmp 2>/dev/null
+            fi
+        elif [[ -n $tmp && -e $tmp ]]; then
+            zf_rm -f -- $tmp 2>/dev/null
+        fi
+    fi
+
+    if (( ok )); then
+        source $cache
+    else
+        # Read-only / untrusted $HOME: eval the init directly so the REAL z/zi
+        # still win.  One fork, and only on this degraded path.
+        init=$("$bin" init zsh 2>/dev/null)
+        [[ -n $init ]] && eval "$init"
+    fi
+}
+
+# --- Fallback: `z`/`zi` must exist even without a usable zoxide --------------
+# Guarded by $+functions so the real init always wins when it loaded.
 if (( ! $+functions[z] )); then
   z() {
     emulate -L zsh
+    case ${1-} in
+        -h|--help)
+            print -rl -- \
+                'z KEYWORDS   jump to the best-scored directory' \
+                'z            cd ~' \
+                'z -          cd -' \
+                '' \
+                'zoxide is not installed: this is the cd-compatible fallback.' \
+                'Install it with:  pacman -S zoxide'
+            return 0 ;;
+    esac
     if (( $# == 0 )); then
-      builtin cd ~; return
+        builtin cd ~
+        return $?
     fi
-    if [[ "$1" == "-" && $# -eq 1 ]]; then
-      builtin cd -; return
+    if [[ $1 == - && $# -eq 1 ]]; then
+        builtin cd -
+        return $?
     fi
-    if builtin cd -- "$@" 2>/dev/null; then
-      return 0
+    if (( $# > 1 )); then
+        print -ru2 -- "z: multi-keyword jumps need zoxide (not installed); refusing to fall back to 'cd old new' semantics."
+        return 1
     fi
-    print -u2 "z: no such directory: '${*}' (zoxide unavailable; fell back to cd)"
+    builtin cd -- "$1" 2>/dev/null && return 0
+    print -ru2 -- "z: no such directory: $1 (zoxide unavailable; fell back to cd)"
     return 1
   }
 fi
+
 if (( ! $+functions[zi] )); then
   zi() {
     emulate -L zsh
-    print -u2 "zi: zoxide is not installed (interactive jump unavailable; fzf Alt-C also works if fzf is present)"
+    if [[ ${1-} == (-h|--help) ]]; then
+        print -rl -- 'zi KEYWORDS  interactive zoxide jump (requires zoxide)'
+        return 0
+    fi
+    print -ru2 -- 'zi: zoxide is not installed (interactive jump unavailable; fzf ALT-C also works if fzf is present)'
     return 1
   }
 fi

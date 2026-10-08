@@ -3,17 +3,19 @@
 ===============================================================================
 DUSKY SCREENTIME: DESKTOP ENTRY RESOLVER (Python 3.14 Bleeding-Edge)
 ===============================================================================
-Scans and parses system and user `.desktop` entries line-by-line without any
-subprocesses or regex bottlenecks, matching the exact behavior of Rofi
-(`rofi/dusky_launcher.sh`) to provide clean application names, icons, and
-categories from raw Hyprland window classes.
+Resolve Hyprland application classes from XDG desktop entries. User entries
+take precedence, including Hidden overrides. Application names stay stable;
+window titles are shown separately by the dashboard. Resolved classes are cached.
 """
 
 import os
+import shlex
 import sys
+from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+
+from screentime_common import xdg_path
 
 KNOWN_TERMINALS: set[str] = {
     "kitty",
@@ -29,6 +31,20 @@ KNOWN_TERMINALS: set[str] = {
     "termite",
     "xterm",
 }
+
+
+def _unescape(value: str) -> str:
+    escapes = {"s": " ", "n": "\n", "t": "\t", "r": "\r", "\\": "\\"}
+    result = []
+    index = 0
+    while index < len(value):
+        if value[index] == "\\" and index + 1 < len(value) and value[index + 1] in escapes:
+            index += 1
+            result.append(escapes[value[index]])
+        else:
+            result.append(value[index])
+        index += 1
+    return "".join(result)
 
 
 @dataclass(slots=True, frozen=True)
@@ -48,11 +64,12 @@ class DesktopResolver:
         # Lookup tables mapped by lowercase key to AppInfo
         self._by_wmclass: dict[str, AppInfo] = {}
         self._by_stem: dict[str, AppInfo] = {}
+        self._by_alias: dict[str, AppInfo] = {}
         self._by_name: dict[str, AppInfo] = {}
         self._by_exec: dict[str, AppInfo] = {}
 
         # Cache for previously resolved window_classes during runtime
-        self._resolved_cache: dict[str, AppInfo] = {}
+        self._resolved_cache: OrderedDict[tuple[str, str], AppInfo] = OrderedDict()
         self.reload()
 
     def reload(self) -> None:
@@ -61,45 +78,36 @@ class DesktopResolver:
         """
         self._by_wmclass.clear()
         self._by_stem.clear()
+        self._by_alias.clear()
         self._by_name.clear()
         self._by_exec.clear()
         self._resolved_cache.clear()
 
-        search_dirs: list[Path] = [
-            Path("~/.local/share/applications").expanduser(),
-        ]
-
-        xdg_dirs = os.environ.get(
-            "XDG_DATA_DIRS", "/usr/local/share/:/usr/share/"
-        )
-        for d in xdg_dirs.split(":"):
-            if d.strip():
-                p = Path(d.strip()) / "applications"
-                if p not in search_dirs:
-                    search_dirs.append(p)
-
-        extra_dirs = [
+        search_dirs = [xdg_path("XDG_DATA_HOME", ".local/share") / "applications"]
+        for directory in (os.environ.get("XDG_DATA_DIRS") or "/usr/local/share:/usr/share").split(":"):
+            if directory.startswith("/"):
+                search_dirs.append(Path(directory) / "applications")
+        search_dirs.extend([
+            xdg_path("XDG_DATA_HOME", ".local/share") / "flatpak/exports/share/applications",
             Path("/var/lib/flatpak/exports/share/applications"),
-            Path("~/.local/share/flatpak/exports/share/applications").expanduser(),
-        ]
-        for p in extra_dirs:
-            if p not in search_dirs:
-                search_dirs.append(p)
+        ])
+        seen_ids: set[str] = set()
+        for directory in dict.fromkeys(search_dirs):
+            for filepath in sorted(directory.rglob("*.desktop")):
+                desktop_id = str(filepath.relative_to(directory)).replace("/", "-")
+                if desktop_id not in seen_ids:
+                    seen_ids.add(desktop_id)
+                    self._parse_file(filepath, desktop_id.removesuffix(".desktop"))
 
-        for d in search_dirs:
-            if not d.exists() or not d.is_dir():
-                continue
-            for filepath in d.glob("*.desktop"):
-                self._parse_file(filepath)
-
-    def _parse_file(self, filepath: Path) -> None:
+    def _parse_file(self, filepath: Path, desktop_stem: str | None = None) -> None:
         name = ""
         generic_name = ""
         icon = ""
         wm_class = ""
         exec_cmd = ""
         categories = ""
-        no_display = False
+        hidden = False
+        entry_type = "Application"
         in_desktop_entry = False
 
         try:
@@ -128,13 +136,18 @@ class DesktopResolver:
                         exec_cmd = line[5:].strip()
                     elif line.startswith("Categories=") and not categories:
                         categories = line[11:].strip()
-                    elif line.lower().startswith("nodisplay=true") or line.lower().startswith("hidden=true"):
-                        no_display = True
-        except Exception:
+                    elif line.startswith("Hidden="):
+                        hidden = line[7:].strip() == "true"
+                    elif line.startswith("Type="):
+                        entry_type = line[5:].strip()
+        except OSError:
             return
 
-        if not name or no_display:
+        # NoDisplay hides launcher items, but running applications still need names.
+        if not name or hidden or entry_type != "Application":
             return
+
+        name, generic_name, icon, wm_class = map(_unescape, (name, generic_name, icon, wm_class))
 
         # Clean up XML/Pango entities if present
         name = name.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
@@ -177,7 +190,7 @@ class DesktopResolver:
         if not category_desc:
             category_desc = "Application"
 
-        stem = filepath.stem
+        stem = desktop_stem or filepath.stem
         info = AppInfo(
             name=name,
             category=category_desc,
@@ -187,26 +200,38 @@ class DesktopResolver:
 
         # Index by StartupWMClass
         if wm_class:
-            self._by_wmclass[wm_class.lower()] = info
+            self._by_wmclass.setdefault(wm_class.lower(), info)
 
         # Index by stem (e.g. firefox from firefox.desktop)
-        self._by_stem[stem.lower()] = info
+        self._by_stem.setdefault(stem.lower(), info)
 
         # If stem has dots (e.g. org.kde.kdenlive), also index the last segment
         if "." in stem:
             last_seg = stem.split(".")[-1].lower()
-            if last_seg not in self._by_stem:
-                self._by_stem[last_seg] = info
+            self._by_alias.setdefault(last_seg, info)
 
         # Index by exact Name
-        self._by_name[name.lower()] = info
+        self._by_name.setdefault(name.lower(), info)
 
         # Index by Exec command (handle quotes and path basenames cleanly)
         if exec_cmd:
-            raw_exec = exec_cmd.strip('"\'').split()[0].strip('"\'')
-            clean_exec = raw_exec.split("/")[-1].lower()
-            if clean_exec and clean_exec not in self._by_exec:
-                self._by_exec[clean_exec] = info
+            try:
+                words = shlex.split(exec_cmd)
+            except ValueError:
+                words = []
+            if words and Path(words[0]).name == "env":
+                words = words[1:]
+                while words and ("=" in words[0] or words[0] == "--"):
+                    words.pop(0)
+            if words and not words[0].startswith("-"):
+                self._by_exec.setdefault(Path(words[0]).name.lower(), info)
+
+    def _cache(self, key: tuple[str, str], info: AppInfo) -> AppInfo:
+        self._resolved_cache[key] = info
+        self._resolved_cache.move_to_end(key)
+        if len(self._resolved_cache) > 512:
+            self._resolved_cache.popitem(last=False)
+        return info
 
     def resolve(self, window_class: str, window_title: str = "") -> AppInfo:
         """
@@ -221,75 +246,51 @@ class DesktopResolver:
                 window_class="desktop",
             )
 
-        cache_key = f"{window_class.lower()}::{window_title.lower()}"
+        cache_key = (window_class.lower(), "")
         if cache_key in self._resolved_cache:
+            self._resolved_cache.move_to_end(cache_key)
             return self._resolved_cache[cache_key]
 
         wc_lower = window_class.lower()
 
         # Terminal heuristic prioritization
         if wc_lower in KNOWN_TERMINALS:
-            title_clean = (
-                window_title.split(" - ")[-1] if " - " in window_title else window_title
-            ).strip()
+            entry = self._by_wmclass.get(wc_lower) or self._by_stem.get(wc_lower)
             term_name = window_class.replace("-", " ").replace("_", " ").title()
             res = AppInfo(
-                name=f"{term_name} ({title_clean})"
-                if title_clean and title_clean.lower() != wc_lower
-                else f"{term_name} Terminal",
+                name=entry.name if entry else f"{term_name} Terminal",
                 category="Terminal & Shell",
-                icon="utilities-terminal",
+                icon=entry.icon if entry else "utilities-terminal",
                 window_class=window_class,
             )
-            self._resolved_cache[cache_key] = res
-            return res
+            return self._cache(cache_key, res)
 
-        # 1. Check StartupWMClass exact match
-        if wc_lower in self._by_wmclass:
-            res = self._by_wmclass[wc_lower]
-            self._resolved_cache[cache_key] = res
-            return res
+        # Exact identifiers always beat guessed aliases and class prefixes.
+        for index in (self._by_wmclass, self._by_stem, self._by_name, self._by_exec):
+            if wc_lower in index:
+                return self._cache(cache_key, index[wc_lower])
 
-        # 2. Check filename stem exact match
-        if wc_lower in self._by_stem:
-            res = self._by_stem[wc_lower]
-            self._resolved_cache[cache_key] = res
-            return res
+        if wc_lower in self._by_alias:
+            return self._cache(cache_key, self._by_alias[wc_lower])
 
         # 3. Check if window_class has dots or hyphens (e.g. codium-url-handler -> codium / vscodium)
         if "." in wc_lower:
             last_seg = wc_lower.split(".")[-1]
             if last_seg in self._by_stem:
                 res = self._by_stem[last_seg]
-                self._resolved_cache[cache_key] = res
-                return res
+                return self._cache(cache_key, res)
             if last_seg in self._by_wmclass:
                 res = self._by_wmclass[last_seg]
-                self._resolved_cache[cache_key] = res
-                return res
+                return self._cache(cache_key, res)
 
         if "-" in wc_lower:
             first_seg = wc_lower.split("-")[0]
             if first_seg in self._by_stem:
                 res = self._by_stem[first_seg]
-                self._resolved_cache[cache_key] = res
-                return res
+                return self._cache(cache_key, res)
             if first_seg in self._by_wmclass:
                 res = self._by_wmclass[first_seg]
-                self._resolved_cache[cache_key] = res
-                return res
-
-        # 4. Check Name exact match
-        if wc_lower in self._by_name:
-            res = self._by_name[wc_lower]
-            self._resolved_cache[cache_key] = res
-            return res
-
-        # 5. Check Exec command exact match
-        if wc_lower in self._by_exec:
-            res = self._by_exec[wc_lower]
-            self._resolved_cache[cache_key] = res
-            return res
+                return self._cache(cache_key, res)
 
         # 6. Fallback heuristics for un-indexed window classes (including reverse-DNS)
         clean_name = window_class
@@ -313,8 +314,7 @@ class DesktopResolver:
             icon="application-x-executable",
             window_class=window_class,
         )
-        self._resolved_cache[cache_key] = res
-        return res
+        return self._cache(cache_key, res)
 
 
 if __name__ == "__main__":

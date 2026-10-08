@@ -1,7 +1,7 @@
-# Balanced — default JC l7, 64M, zstd22, nilsimsa (recommended)
+# Balanced — default JC l7, 16MiB, zstd22, nilsimsa (recommended)
 level = 7
 block_size_bits = 24
-max_lookback = 26
+max_lookback = 1
 order = "nilsimsa"
 compression = "zstd:level=22"
 note = "Default, best speed/ratio for games"

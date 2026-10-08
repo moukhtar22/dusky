@@ -14,7 +14,6 @@
 .config/foot/
 .config/gtk-3.0/settings.ini
 .config/gtk-4.0/settings.ini
-.config/dusky_recorder/config.conf
 .config/hypr/hyprlock_themes/
 .config/hypr/shaders/
 .config/hypr/source/
@@ -32,7 +31,6 @@
 .config/matugen/generated_fresh/
 .config/mpv/mpv.conf
 .config/opencode/opencode.json
-.config/opencode/plugins/notification.js
 .config/obs-studio/user.ini
 .config/pacman/makepkg.conf
 .config/pacseek/
@@ -56,6 +54,7 @@
 .config/waybar/17_boxy_h
 .config/waybar/18_notch_2/
 .config/waybar/19_omarchy_h/
+.config/waybar/20_capsule_h/
 .config/wlogout/
 .config/qt5ct/
 .config/qt6ct/

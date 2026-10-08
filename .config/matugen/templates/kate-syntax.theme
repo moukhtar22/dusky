@@ -131,12 +131,12 @@
         },
         "Comment": {
             "text-color": "{{colors.outline.default.hex}}",
-            "selected-text-color": "{{colors.outline_variant.default.hex}}",
+            "selected-text-color": "{{colors.on_primary_container.default.hex}}",
             "italic": true
         },
         "CommentVar": {
             "text-color": "{{colors.outline.default.hex}}",
-            "selected-text-color": "{{colors.outline_variant.default.hex}}"
+            "selected-text-color": "{{colors.on_primary_container.default.hex}}"
         },
         "RegionMarker": {
             "text-color": "{{colors.primary.default.hex}}",
@@ -148,17 +148,17 @@
             "selected-text-color": "{{colors.on_primary_container.default.hex}}"
         },
         "Warning": {
-            "text-color": "{{colors.error_container.default.hex}}",
-            "selected-text-color": "{{colors.on_error_container.default.hex}}"
+            "text-color": "{{colors.secondary.default.hex}}",
+            "selected-text-color": "{{colors.on_primary_container.default.hex}}"
         },
         "Alert": {
             "text-color": "{{colors.error.default.hex}}",
-            "selected-text-color": "{{colors.on_error.default.hex}}",
+            "selected-text-color": "{{colors.on_primary_container.default.hex}}",
             "bold": true
         },
         "Error": {
             "text-color": "{{colors.error.default.hex}}",
-            "selected-text-color": "{{colors.on_error.default.hex}}",
+            "selected-text-color": "{{colors.on_primary_container.default.hex}}",
             "underline": true
         },
         "Others": {

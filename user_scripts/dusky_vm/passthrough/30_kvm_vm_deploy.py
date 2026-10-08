@@ -373,13 +373,13 @@ def build_command(spec: Spec) -> list[str]:
 
     match spec.graphics:
         case "spice":
-            cmd += ["--graphics", "spice,listen=none", "--video", "virtio"]
+            cmd += ["--graphics", "spice,listen=127.0.0.1", "--video", "virtio"]
         case "spice-gl":
-            cmd += ["--graphics", "spice,listen=none,gl.enable=yes",
+            cmd += ["--graphics", "spice,listen=127.0.0.1,gl.enable=yes",
                     "--video", "virtio,accel3d=yes"]
         case _:
             # Looking Glass: SPICE stays for keyboard/mouse + agent, no emulated GPU.
-            cmd += ["--graphics", "spice,listen=none,gl.enable=no", "--video", "none"]
+            cmd += ["--graphics", "spice,listen=127.0.0.1,gl.enable=no", "--video", "model=none"]
 
     for nodedev in spec.hostdevs:
         cmd += ["--hostdev", nodedev]

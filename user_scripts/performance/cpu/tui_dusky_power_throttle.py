@@ -6,7 +6,6 @@ import time
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Any
 
 # Dynamically resolve Dusky TUI root
 _tui_root = Path(__file__).resolve().parents[2] / "dusky_tui"
@@ -26,33 +25,33 @@ _boot_data = _engine.get_boot_limits()
 
 def _get_boot_val(file_name: str) -> int | None:
     val = _boot_data.get(file_name)
-    if val is not None and val > 0:
+    if val is not None and val >= 0:
         return val
     if _domain:
         val = safe_read_int(_domain / file_name)
-        if val is not None and val > 0:
+        if val is not None and val >= 0:
             return val
     return None
 
 # Probe which constraints are physically supported by the CPU hardware
-has_pl1 = bool(_domain and (_domain / "constraint_0_power_limit_uw").exists())
-has_pl2 = bool(_domain and (_domain / "constraint_1_power_limit_uw").exists())
-has_pl4 = bool(_domain and (_domain / "constraint_2_power_limit_uw").exists())
-has_pl1_time = bool(_domain and (_domain / "constraint_0_time_window_us").exists() and safe_read_int(_domain / "constraint_0_time_window_us") is not None)
-has_pl2_time = bool(_domain and (_domain / "constraint_1_time_window_us").exists() and safe_read_int(_domain / "constraint_1_time_window_us") is not None)
+has_pl1 = bool(_domain and (_domain / _engine.constraint_file("pl1")).exists())
+has_pl2 = bool(_domain and (_domain / _engine.constraint_file("pl2")).exists())
+has_pl4 = bool(_domain and (_domain / _engine.constraint_file("pl4")).exists())
+has_pl1_time = bool(_domain and (_domain / _engine.constraint_file("pl1_time")).exists() and safe_read_int(_domain / _engine.constraint_file("pl1_time")) is not None)
+has_pl2_time = bool(_domain and (_domain / _engine.constraint_file("pl2_time")).exists() and safe_read_int(_domain / _engine.constraint_file("pl2_time")) is not None)
 
 # Dynamically resolve values directly from active hardware sysfs / baseline
-pl1_raw = _get_boot_val("constraint_0_power_limit_uw") if has_pl1 else None
-pl2_raw = _get_boot_val("constraint_1_power_limit_uw") if has_pl2 else None
-pl4_raw = _get_boot_val("constraint_2_power_limit_uw") if has_pl4 else None
-pl1_time_raw = _get_boot_val("constraint_0_time_window_us") if has_pl1_time else None
-pl2_time_raw = _get_boot_val("constraint_1_time_window_us") if has_pl2_time else None
+pl1_raw = _get_boot_val(_engine.constraint_file("pl1")) if has_pl1 else None
+pl2_raw = _get_boot_val(_engine.constraint_file("pl2")) if has_pl2 else None
+pl4_raw = _get_boot_val(_engine.constraint_file("pl4")) if has_pl4 else None
+pl1_time_raw = _get_boot_val(_engine.constraint_file("pl1_time")) if has_pl1_time else None
+pl2_time_raw = _get_boot_val(_engine.constraint_file("pl2_time")) if has_pl2_time else None
 
-pl1_def = (pl1_raw // 1_000_000) if pl1_raw else 65
-pl2_def = (pl2_raw // 1_000_000) if pl2_raw else pl1_def
-pl4_def = (pl4_raw // 1_000_000) if pl4_raw else (pl2_def * 2)
-pl1_time_def = round(pl1_time_raw / 1_000_000, 2) if pl1_time_raw else 28.0
-pl2_time_def = round(pl2_time_raw / 1_000_000, 4) if pl2_time_raw else 0.0024
+pl1_def = pl1_raw / 1_000_000 if pl1_raw is not None else 0.0
+pl2_def = pl2_raw / 1_000_000 if pl2_raw is not None else 0.0
+pl4_def = pl4_raw / 1_000_000 if pl4_raw is not None else 0.0
+pl1_time_def = pl1_time_raw / 1_000_000 if pl1_time_raw is not None else 0.0
+pl2_time_def = pl2_time_raw / 1_000_000 if pl2_time_raw is not None else 0.0
 
 ENGINE_TYPE = "pkg_throttle"
 TARGET_FILE = "/sys/class/powercap"
@@ -68,9 +67,9 @@ if has_pl1:
         ConfigItem(
             label="PL1 (Long-Term Limit)",
             key="pl1",
-            type_="int",
+            type_="float",
             default=pl1_def,
-            min_val=1,
+            min_val=0,
             max_val=max(1000, pl1_def * 4),
             step=1,
             extended_help="Sustained long-term CPU package power limit envelope (in Watts). Applies under continuous high workloads."
@@ -82,12 +81,12 @@ if has_pl2:
         ConfigItem(
             label="PL2 (Short-Term Boost)",
             key="pl2",
-            type_="int",
+            type_="float",
             default=pl2_def,
-            min_val=1,
+            min_val=0,
             max_val=max(1000, pl2_def * 4),
             step=1,
-            extended_help="Maximum transient boost power envelope (in Watts). Sustained for the duration of the PL2 time window."
+            extended_help="Short-term CPU package power limit (in Watts), enforced over its averaging window. Actual boost duration depends on workload, temperatures, and other limits."
         )
     )
 
@@ -96,9 +95,9 @@ if has_pl4:
         ConfigItem(
             label="PL4 (Peak Limit)",
             key="pl4",
-            type_="int",
+            type_="float",
             default=pl4_def,
-            min_val=1,
+            min_val=0,
             max_val=max(1000, pl4_def * 4),
             step=5,
             extended_help="Absolute physical hardware power spike clamp (in Watts). Prevents PSU protection triggers on rapid power transitions."
@@ -111,8 +110,9 @@ if not power_items:
             label="RAPL Unavailable",
             key="unsupported",
             type_="action",
-            default="N/A",
-            extended_help="No supported RAPL / Powercap energy domains were discovered in /sys/class/powercap. Ensure the 'intel_rapl_msr' or 'amd_energy' driver is loaded."
+            default=":",
+            read_only=True,
+            extended_help="No supported RAPL / Powercap energy domains were discovered in /sys/class/powercap. Check whether the platform exposes writable package power constraints through powercap."
         )
     )
 
@@ -124,7 +124,7 @@ if has_pl1_time:
             key="pl1_time",
             type_="float",
             default=pl1_time_def,
-            min_val=0.001,
+            min_val=0,
             max_val=max(150.0, pl1_time_def * 2),
             step=0.5,
             extended_help="Rolling averaging window (in seconds) for long-term PL1 enforcement."
@@ -138,10 +138,10 @@ if has_pl2_time:
             key="pl2_time",
             type_="float",
             default=pl2_time_def,
-            min_val=0.0001,
+            min_val=0,
             max_val=max(10.0, pl2_time_def * 4),
             step=0.0005,
-            extended_help="Maximum duration envelope (in seconds) that the CPU package is permitted to boost up to PL2 power limits before scaling down."
+            extended_help="Averaging window (in seconds) for the short-term PL2 constraint; this is not a guaranteed boost duration."
         )
     )
 
@@ -184,22 +184,37 @@ def ensure_root(argv: list[str]) -> None:
 def parse_set_args(args_list: list[str]) -> list[tuple[str, str]]:
     """
     Parses key=value or key value pairs from CLI.
-    Supports: ['pl1=65', 'pl2=90'], ['pl1', '65', 'pl2', '90'], ['pl1_time=28.0']
+    Supports:
+      - ['35'] or ['35w'] -> sets both pl1=35, pl2=35
+      - ['pl1=65', 'pl2=90']
+      - ['pl1', '65', 'pl2', '90']
+      - ['pl1_time=28.0']
     """
+    if len(args_list) == 1 and not args_list[0].startswith("-") and "=" not in args_list[0]:
+        val = args_list[0].strip().rstrip("wW")
+        try:
+            float(val)
+            return [("pl1", val), ("pl2", val)]
+        except ValueError:
+            pass
+
     pairs: list[tuple[str, str]] = []
     i = 0
     while i < len(args_list):
         item = args_list[i]
         if "=" in item:
             k, v = item.split("=", 1)
-            pairs.append((k.strip().lower(), v.strip()))
+            pairs.append((k.strip().lower(), v.strip().rstrip("wW")))
             i += 1
         elif i + 1 < len(args_list) and not args_list[i + 1].startswith("-"):
-            pairs.append((item.strip().lower(), args_list[i + 1].strip()))
+            pairs.append((item.strip().lower(), args_list[i + 1].strip().rstrip("wW")))
             i += 2
         else:
-            i += 1
+            raise ValueError(f"Missing value for {item}")
+        if not pairs[-1][0] or not pairs[-1][1]:
+            raise ValueError("Expected a nonempty key and value")
     return pairs
+
 
 def display_status_table() -> None:
     """Renders a rich, comprehensive status table of CPU power limits and telemetry."""
@@ -235,13 +250,18 @@ def display_status_table() -> None:
         print("-" * 65)
         for k, v in limits.items():
             if v["supported"]:
-                st = "CUSTOM" if is_modified and v["current"] != v["boot"] else "STOCK"
+                st = "CUSTOM" if v["current"] != v["boot"] else "STOCK"
                 print(f"{k.upper():<12} | {str(v['current']) + ' ' + v['unit']:<12} | {str(v['boot']) + ' ' + v['unit']:<14} | {st:<10}")
         for k, v in windows.items():
             if v["supported"]:
-                st = "CUSTOM" if is_modified and abs(v["current"] - v["boot"]) > 0.01 else "STOCK"
+                st = "CUSTOM" if abs(v["current"] - v["boot"]) > 0.0000005 else "STOCK"
                 print(f"{k:<12} | {str(v['current']) + ' ' + v['unit']:<12} | {str(v['boot']) + ' ' + v['unit']:<14} | {st:<10}")
         print("-" * 65)
+        plat_info = info.get("platform_extension") or info.get("asus_wmi", {})
+        if plat_info.get("supported"):
+            vendor = plat_info.get("vendor", "Platform Hardware Limit")
+            print(f"{vendor}: Sustained (PL1) = {plat_info.get('pl1')} W | Burst (PL2) = {plat_info.get('pl2')} W")
+            print("-" * 65)
         print(telemetry)
         return
 
@@ -257,14 +277,14 @@ def display_status_table() -> None:
     p_table.add_column("Constraint", style="bold cyan", justify="left")
     p_table.add_column("Key", justify="center")
     p_table.add_column("Active Limit", justify="center")
-    p_table.add_column("BIOS Baseline", justify="center")
+    p_table.add_column("Captured Baseline", justify="center")
     p_table.add_column("State", justify="center")
 
     for k, v in limits.items():
         if v["supported"]:
             curr = v["current"]
             boot = v["boot"]
-            if is_modified and curr != boot:
+            if curr != boot:
                 st_badge = "[bold yellow]CUSTOM[/bold yellow]"
                 curr_style = f"[bold yellow]{curr} {v['unit']}[/bold yellow]"
             else:
@@ -280,30 +300,35 @@ def display_status_table() -> None:
         t_table.add_column("Window", style="bold cyan", justify="left")
         t_table.add_column("Key", justify="center")
         t_table.add_column("Active Duration", justify="center")
-        t_table.add_column("BIOS Baseline", justify="center")
+        t_table.add_column("Captured Baseline", justify="center")
         t_table.add_column("State", justify="center")
 
         for k, v in windows.items():
             if v["supported"]:
                 curr = v["current"]
                 boot = v["boot"]
-                if is_modified and abs(curr - boot) > 0.01:
+                if abs(curr - boot) > 0.0000005:
                     st_badge = "[bold yellow]CUSTOM[/bold yellow]"
-                    curr_style = f"[bold yellow]{curr:.4f} {v['unit']}[/bold yellow]"
+                    curr_style = f"[bold yellow]{curr:.6f} {v['unit']}[/bold yellow]"
                 else:
                     st_badge = "[bold green]STOCK[/bold green]"
-                    curr_style = f"[bold green]{curr:.4f} {v['unit']}[/bold green]"
-                t_table.add_row(v["label"], f"`{k}`", curr_style, f"{boot:.4f} {v['unit']}", st_badge)
+                    curr_style = f"[bold green]{curr:.6f} {v['unit']}[/bold green]"
+                t_table.add_row(v["label"], f"`{k}`", curr_style, f"{boot:.6f} {v['unit']}", st_badge)
 
         console.print(t_table)
 
-    # Telemetry and Persistence Banner
+    # Telemetry, Hardware Platform, and Persistence Banner
+    plat_info = info.get("platform_extension") or info.get("asus_wmi", {})
+    summary_lines = []
+    if plat_info.get("supported"):
+        vendor = plat_info.get("vendor", "Platform Hardware Limit")
+        p1 = plat_info.get("pl1", "N/A")
+        p2 = plat_info.get("pl2", "N/A")
+        summary_lines.append(f"[bold cyan]{vendor}:[/bold cyan] Sustained (PL1) = [bold green]{p1} W[/bold green]  •  Burst (PL2) = [bold green]{p2} W[/bold green]")
+    summary_lines.append(f"[dim]Telemetry:[/dim] {telemetry}")
     persisted_str = ", ".join(f"{k}: {v}" for k, v in persisted_data.items()) if persisted_data else "None"
-    status_summary = (
-        f"[dim]Telemetry:[/dim] {telemetry}\n"
-        f"[dim]Persistence ({persisted_file}):[/dim] [cyan]{persisted_str}[/cyan]"
-    )
-    console.print(Panel(status_summary, border_style="dim cyan", expand=True))
+    summary_lines.append(f"[dim]Persistence ({persisted_file}):[/dim] [cyan]{persisted_str}[/cyan]")
+    console.print(Panel("\n".join(summary_lines), border_style="dim cyan", expand=True))
 
 def monitor_telemetry() -> None:
     """Continuously prints live power consumption until interrupted."""
@@ -367,13 +392,13 @@ if __name__ == "__main__":
             ensure_root(sys.argv)
             engine = PkgThrottleEngine()
             if engine.restore_state():
-                print("[OK] Successfully restored persistent CPU power limits.")
+                print("[OK] Power restore completed (or no saved state).")
                 sys.exit(0)
             else:
-                print("[*] No persistent power limits state found to restore (or failed to restore).")
-                sys.exit(0)
+                print("[-] Failed to restore persistent CPU power limits.")
+                sys.exit(1)
 
-        # Revert to BIOS factory baseline
+        # Revert to captured baseline
         elif cmd in ("default", "reset", "--default") and len(args_raw) == 1:
             ensure_root(sys.argv)
             engine = PkgThrottleEngine()
@@ -387,25 +412,19 @@ if __name__ == "__main__":
                 sys.exit(1)
 
         # Headless key=value modification
-        elif cmd == "set" or cmd.startswith("--set="):
+        elif cmd in ("set", "--set") or cmd.startswith("--set="):
             ensure_root(sys.argv)
             engine = PkgThrottleEngine()
-            if cmd.startswith("--set="):
-                pairs = parse_set_args([cmd[6:]])
-            else:
-                pairs = parse_set_args(args_raw[1:])
-
-            if not pairs:
-                print("[-] Error: Specify parameters to set, e.g. 'set pl1=65 pl2=90'")
+            try:
+                pairs = parse_set_args([args_raw[0][6:]] + args_raw[1:] if cmd.startswith("--set=") else args_raw[1:])
+            except ValueError as exc:
+                print(f"[-] {exc}")
                 sys.exit(1)
-
-            all_ok = True
-            for key, val in pairs:
-                ok, msg, _ = engine.write_value(key, "DEFAULT", val)
-                tag = "[OK]" if ok else "[-]"
-                print(f"{tag} {msg}")
-                if not ok:
-                    all_ok = False
+            if not pairs:
+                print("[-] Specify parameters, e.g. set pl1=65 pl2=90")
+                sys.exit(1)
+            all_ok, msg, _ = engine.write_batch([(k, "DEFAULT", v, "float") for k, v in pairs])
+            print(f"{'[OK]' if all_ok else '[-]'} {msg}")
 
             display_status_table()
             sys.exit(0 if all_ok else 1)
@@ -418,7 +437,7 @@ if __name__ == "__main__":
             print("Commands:")
             print("  status                  Display comprehensive power limits, baseline, and telemetry")
             print("  set <k=v ...>           Apply power limits (e.g. set pl1=65 pl2=90 pl1_time=28.0)")
-            print("  default                 Restore original boot/BIOS baseline limits")
+            print("  default                 Restore the captured baseline limits")
             print("  restore                 Restore saved persistent configuration (dusky_pkg_power)")
             print("  monitor                 Continuously monitor live CPU package power draw")
             print("\nDusky Router Options:")
@@ -435,6 +454,8 @@ if __name__ == "__main__":
     # Interactive TUI mode requires root privileges
     if not args_raw or (len(args_raw) == 1 and args_raw[0] in ("--tui", "-t")):
         ensure_root(sys.argv)
+    if args_raw in (["--tui"], ["-t"]):
+        args_raw = []
 
     cmd = [sys.executable, str(main_py), str(Path(__file__).resolve()), *args_raw]
     try:

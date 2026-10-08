@@ -1186,7 +1186,7 @@ SCHEMA = {
 # =============================================================================
 # 5. DEFERRED BACKGROUND LOAD HANDLER
 # =============================================================================
-def DEFERRED_LOAD() -> list[int]:
+def DEFERRED_LOAD() -> tuple[list[int], dict[int, list[ConfigItem]]]:
     """
     Background loader invoked by the TUI after first paint.
     Refreshes kernel discovery dynamically to catch newly installed kernels
@@ -1217,9 +1217,9 @@ def DEFERRED_LOAD() -> list[int]:
         target_entry_item = current_items[0]
         tail_items = [it for it in current_items if it.scope != "ENTRY_OVERRIDE" and it.key != "target_entry"]
         new_override_items = build_entry_override_items()
-        SCHEMA[5] = [target_entry_item] + new_override_items + tail_items
+        return [4, 5], {5: [target_entry_item] + new_override_items + tail_items}
 
-    return [4, 5]
+    return [4, 5], {}
 
 
 # =============================================================================

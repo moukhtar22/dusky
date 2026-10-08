@@ -106,7 +106,7 @@ SCHEMA = {
     # -------------------------------------------------------------------------
     1: [
         ConfigItem(
-            label="Apply 'Maximum Battery Saver' Profile",
+            label="Maximum Battery Saver",
             key="preset_battery",
             scope="DEFAULT",
             type_="preset",
@@ -122,7 +122,7 @@ SCHEMA = {
             extended_help="**Maximum Battery Saver**\n\nHighly aggressive power saving. Dims screens and suspends the system very quickly when idle."
         ),
         ConfigItem(
-            label="Apply 'Presentation / Media' Profile",
+            label="Presentation / Media",
             key="preset_presentation",
             scope="DEFAULT",
             type_="preset",

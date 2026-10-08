@@ -3,7 +3,7 @@ Type=Application
 Name=Dusky Monitor Wizard
 GenericName=Display Configuration
 Comment=Configure Hyprland monitors, resolution, and scaling
-Exec=foot --app-id=dusky_tui python3 /home/dusk/user_scripts/hypr/monitor/monitor_wizard.py
+Exec=foot --app-id=dusky_tui python3 /home/dusk/user_scripts/hypr/monitor/tui_monitor_wizard.py
 Icon=preferences-desktop-display
 Terminal=false
 Categories=Settings;Hardware;System;

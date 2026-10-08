@@ -12,13 +12,6 @@ _DUSKY_TUI_ROOT = Path(__file__).resolve().parent.parent.parent / "dusky_tui"
 if str(_DUSKY_TUI_ROOT) not in sys.path:
     sys.path.insert(0, str(_DUSKY_TUI_ROOT))
 
-import sys
-from pathlib import Path
-
-_dusky_root = Path.home() / "user_scripts" / "dusky_tui"
-if str(_dusky_root) not in sys.path:
-    sys.path.insert(0, str(_dusky_root))
-
 from python.frontend.core_types import ConfigItem
 
 # =============================================================================
@@ -86,7 +79,7 @@ SCHEMA = {
             min_val=2, max_val=20, step=1,
             default=10,
             group="Thresholds",
-            extended_help="**Critical Shutdown Level**\n\nPercentage threshold at which the critical shutdown is triggered. The service will prompt a warning before auto-suspending the system."
+            extended_help="**Critical Suspend Level**\n\nPercentage threshold at which the critical warning and suspend countdown begin. The service will prompt a warning before auto-suspending the system."
         ),
         ConfigItem(
             label="Unplug Alert Level (%)",
@@ -96,7 +89,7 @@ SCHEMA = {
             min_val=50, max_val=100, step=1,
             default=100,
             group="Thresholds",
-            extended_help="**Unplug Warning Level**\n\nOnly triggers an unplug alert if the charger is disconnected while the battery is at or above this percentage."
+            extended_help="**Unplug Warning Level**\n\nOnly triggers an unplug alert if the charger is disconnected while the battery is at or below this percentage."
         ),
     ],
 
@@ -111,17 +104,17 @@ SCHEMA = {
             type_="bool",
             default=True,
             group="Power Management",
-            extended_help="**Auto Suspend Enable**\n\nIf enabled, the system will suspend to RAM when the battery level drops below the critical threshold."
+            extended_help="**Auto Suspend Enable**\n\nIf enabled, the system will suspend to RAM when the battery level reaches or falls below the critical threshold, after the grace period."
         ),
         ConfigItem(
             label="Suspend Grace Period (s)",
             key="SUSPEND_GRACE_SEC",
             scope="DEFAULT",
             type_="int",
-            min_val=5, max_val=600, step=5,
+            min_val=0, max_val=3600, step=5,
             default=60,
             group="Power Management",
-            extended_help="**Grace Countdown Period**\n\nSeconds to wait and show warning prompts before initiating auto-suspend upon reaching critical battery capacity."
+            extended_help="**Grace Countdown Period**\n\nAwake seconds to wait before auto-suspend upon reaching critical capacity, and before another attempt after resume. Zero requests immediate suspend; retries have a minimum five-second delay."
         ),
         ConfigItem(
             label="Safety Backup Poll (s)",
@@ -141,7 +134,7 @@ SCHEMA = {
             min_val=1, max_val=1440, step=1,
             default=999,
             group="Timings",
-            extended_help="**Full Alert Loop**\n\nTime in minutes to wait before repeating the full battery notification. 999 means effectively once."
+            extended_help="**Full Alert Loop**\n\nTime in minutes to wait before repeating the full battery notification. 999 is a 999-minute repeat interval while external power remains connected."
         ),
         ConfigItem(
             label="Low Alert Repeat (min)",
@@ -176,7 +169,7 @@ SCHEMA = {
             type_="string",
             default="Suspending system!",
             group="Texts",
-            extended_help="**Shutdown Warning Body**\n\nText message printed on screen inside the critical warning notification."
+            extended_help="**Suspend Warning Body**\n\nText message printed on screen inside the critical warning notification."
         ),
         ConfigItem(
             label="Low Battery Sound",
@@ -194,7 +187,7 @@ SCHEMA = {
             type_="string",
             default="/usr/share/sounds/freedesktop/stereo/suspend-error.oga",
             group="Sounds",
-            extended_help="**Critical Shutdown Sound Path**\n\nAbsolute file path to the audio file played when the critical shutdown warning fires."
+            extended_help="**Critical Suspend Sound Path**\n\nAbsolute file path to the audio file played when the critical suspend warning fires."
         ),
         ConfigItem(
             label="Plug Sound",
@@ -262,6 +255,7 @@ if __name__ == "__main__":
     import subprocess
     main_script = _DUSKY_TUI_ROOT / "python" / "main" / "main.py"
     if main_script.exists():
-        subprocess.run([sys.executable, str(main_script), str(Path(__file__).resolve())])
+        raise SystemExit(subprocess.run([sys.executable, str(main_script), str(Path(__file__).resolve())]).returncode)
     else:
-        print(f"[-] Error: Could not find router at {main_script}")
+        print(f"[-] Error: Could not find router at {main_script}", file=sys.stderr)
+        raise SystemExit(1)

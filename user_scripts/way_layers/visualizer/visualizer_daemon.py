@@ -32,7 +32,6 @@ import os
 import shutil
 import signal
 import socket
-import stat
 import subprocess
 import sys
 import tempfile
@@ -84,12 +83,15 @@ def notify_user(title: str, body: str, urgency: str = "critical") -> None:
             subprocess.run(
                 [notify_bin, "-u", urgency, "-a", "Dusky Visualizer", title, body],
                 check=False,
+                timeout=2,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
         except Exception:
             pass
 
+
+os.environ["GDK_BACKEND"] = "wayland"
 
 try:
     import gi
@@ -229,7 +231,7 @@ def coerce_bool(value: Any, default: bool) -> bool:
     if isinstance(value, bool):
         return value
     if isinstance(value, (int, float)):
-        return value != 0
+        return value != 0 if math.isfinite(value) else default
     if isinstance(value, str):
         s = value.strip().lower()
         if s in {"1", "true", "yes", "on"}:
@@ -439,7 +441,7 @@ class Config:
         self.version = clamp_int(self.version, 1, 1000, 1)
 
         self.bars = clamp_int(self.bars, 16, MAX_BARS, 64)
-        if self.mirror and self.bars % 2 != 0:
+        if self.bars % 2 != 0:
             self.bars = max(16, self.bars - 1)
 
         self.fps = clamp_int(self.fps, 1, 240, 60)
@@ -449,6 +451,9 @@ class Config:
         self.gain = clamp_float(self.gain, 0.0, 10.0, 1.5)
         self.thickness = clamp_float(self.thickness, 0.05, 1.0, 0.50)
         self.bloom = clamp_float(self.bloom, 0.0, 1.0, 0.20)
+        self.inner_glow = clamp_float(self.inner_glow, 0.0, 1.0, 0.70)
+        self.specular_shine = clamp_float(self.specular_shine, 0.0, 1.0, 0.30)
+        self.stardust = clamp_float(self.stardust, 0.0, 1.0, 0.10)
         self.fade_amount = clamp_float(self.fade_amount, 0.0, 1.0, 1.0)
 
         self.segments_count = clamp_int(self.segments_count, 1, 128, 16)
@@ -464,6 +469,8 @@ class Config:
         )
 
         self.cava_source = coerce_str(self.cava_source, "")
+        if any(ch in self.cava_source for ch in "\r\n\x00"):
+            self.cava_source = ""
 
         if not isinstance(self.position, Position):
             self.position = Position.TOP
@@ -544,15 +551,15 @@ def atomic_write_json(path: Path, data: dict[str, Any]) -> None:
     atomic_write_text(path, json.dumps(data, indent=4, ensure_ascii=False) + "\n")
 
 
-def load_json_dict(path: Path) -> dict[str, Any]:
+def load_json_dict(path: Path) -> dict[str, Any] | None:
     try:
         if not path.exists():
-            return {}
+            return None
 
         data = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(data, dict):
-            logging.error("JSON file %s is not an object; ignoring.", path)
-            return {}
+            logging.error("JSON file %s is not an object; retaining current settings.", path)
+            return None
 
         normalized: dict[str, Any] = {}
         for k, v in data.items():
@@ -561,9 +568,9 @@ def load_json_dict(path: Path) -> dict[str, Any]:
 
         return normalized
 
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, ValueError, UnicodeError) as exc:
         logging.error("Failed loading %s: %s", path, exc)
-        return {}
+        return None
 
 
 # -----------------------------------------------------------------------------
@@ -744,7 +751,7 @@ void main() {
             norm_y = clamp(pos.y / max(1.0, curve_y), 0.0, 1.0);
         } else if (u_position == 2) {
             curve_y = u_resolution_y - val * u_content_height;
-            norm_y = clamp((u_resolution_y - pos.y) / max(1.0, curve_y), 0.0, 1.0);
+            norm_y = clamp((u_resolution_y - pos.y) / max(1.0, val * u_content_height), 0.0, 1.0);
         } else {
             curve_y = u_resolution_y * 0.5 - val * u_content_height * 0.5;
             norm_y = clamp(abs(pos.y - u_resolution_y * 0.5) / max(1.0, val * u_content_height * 0.5), 0.0, 1.0);
@@ -1358,6 +1365,10 @@ class Visualizer:
         self.content_height = 0.0
         self.gl_failed = False
         self.fallback_pending = False
+        self.fallback_source: int | None = None
+        self.monitor: Gdk.Monitor | None = None
+        self.display_handlers: list[int] = []
+        self.monitor_handler: int | None = None
 
         self.has_rendered_idle_clear = False
         self.idle_time = 0.0
@@ -1372,6 +1383,8 @@ class Visualizer:
 
         self.fifo_fd: int | None = None
         self.fifo_watch: int | None = None
+        self.fifo_buffer = b""
+        self.fifo_identity: tuple[int, int] | None = None
 
         self.lock_fd: int | None = None
 
@@ -1381,7 +1394,6 @@ class Visualizer:
         self.colors_monitor: Gio.FileMonitor | None = None
         self.colors_retry_source: int | None = None
         self.reload_debounce: int | None = None
-        self.monitor_suppress_until = 0
 
         self.css_added = False
 
@@ -1425,8 +1437,8 @@ class Visualizer:
         try:
             self.lock_fd = os.open(LOCK_FILE, os.O_CREAT | os.O_RDWR, 0o600)
         except OSError as exc:
-            self.log.warning("Could not open lock file %s: %s", LOCK_FILE, exc)
-            return
+            self.log.error("Could not open lock file %s: %s", LOCK_FILE, exc)
+            raise SystemExit(1) from exc
 
         try:
             fcntl.flock(self.lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -1436,7 +1448,8 @@ class Visualizer:
             self.log.error("Another instance is already running.")
             raise SystemExit(1)
         except OSError as exc:
-            self.log.warning("Could not lock %s: %s", LOCK_FILE, exc)
+            self.log.error("Could not lock %s: %s", LOCK_FILE, exc)
+            raise SystemExit(1) from exc
 
     def release_lock(self) -> None:
         if self.lock_fd is None:
@@ -1452,11 +1465,7 @@ class Visualizer:
         except OSError:
             pass
 
-        try:
-            LOCK_FILE.unlink(missing_ok=True)
-        except OSError:
-            pass
-
+        # Keep the inode: unlinking after unlock can create two independent locks.
         self.lock_fd = None
 
     def check_display(self) -> bool:
@@ -1478,7 +1487,20 @@ class Visualizer:
             self.log.error("Gdk.Display.get_default() returned None.")
             return False
 
+        if not GtkLayerShell.is_supported():
+            self.log.error("The display does not support Wayland layer shell.")
+            return False
+
+        self.display_handlers = [
+            display.connect("monitor-added", self.on_monitors_changed),
+            display.connect("monitor-removed", self.on_monitors_changed),
+        ]
         return True
+
+    def on_monitors_changed(self, *args: Any) -> None:
+        self.has_rendered_idle_clear = False
+        self.setup_window()
+        self.ensure_tick()
 
     def dependency_report(self) -> None:
         if not self.cava_available:
@@ -1501,15 +1523,14 @@ class Visualizer:
         raw_config = load_json_dict(CONFIG_FILE)
         raw_colors = load_json_dict(COLORS_FILE)
 
-        self.config = Config.from_dict(raw_config)
-        self.colors = Colors.from_dict(raw_colors)
+        self.config = Config.from_dict(raw_config or {})
+        self.colors = Colors.from_dict(raw_colors or {})
 
         self.ramp_dirty = True
         self.ensure_data_arrays()
 
     def save_config(self) -> None:
         try:
-            self.monitor_suppress_until = GLib.get_monotonic_time() + 750_000
             atomic_write_json(CONFIG_FILE, self.config.to_dict())
         except OSError as exc:
             self.log.error("Failed saving config: %s", exc)
@@ -1537,8 +1558,10 @@ class Visualizer:
             raw_config = load_json_dict(CONFIG_FILE)
             raw_colors = load_json_dict(COLORS_FILE)
 
-            self.config = Config.from_dict(raw_config)
-            self.colors = Colors.from_dict(raw_colors)
+            if raw_config is not None:
+                self.config = Config.from_dict(raw_config)
+            if raw_colors is not None:
+                self.colors = Colors.from_dict(raw_colors)
 
             self.ramp_dirty = True
             self.has_rendered_idle_clear = False
@@ -1568,6 +1591,10 @@ class Visualizer:
                 self.remove_tick()
             return
 
+        # If the user explicitly toggled GPU acceleration, give GL another chance.
+        if old_config.gpu_acceleration != new_config.gpu_acceleration:
+            self.gl_failed = False
+
         # Enabled state changes dominate everything else.
         if old_config.enabled != new_config.enabled:
             if new_config.enabled:
@@ -1583,10 +1610,6 @@ class Visualizer:
 
         if not new_config.enabled:
             return
-
-        # If the user explicitly toggled GPU acceleration, give GL another chance.
-        if old_config.gpu_acceleration != new_config.gpu_acceleration:
-            self.gl_failed = False
 
         # FPS affects both tick and Cava.
         if old_config.fps != new_config.fps:
@@ -1610,6 +1633,7 @@ class Visualizer:
         # Window geometry / renderer / blur-affecting settings.
         window_changed = any(
             (
+                old_config.bars != new_config.bars,
                 old_config.position != new_config.position,
                 old_config.height_pct != new_config.height_pct,
                 old_config.style != new_config.style,
@@ -1665,6 +1689,7 @@ class Visualizer:
             )
             self.colors_monitor.connect("changed", self.on_dir_changed)
             self.colors_retry_source = None
+            self.queue_reload()
             return False
 
         except Exception as exc:
@@ -1679,10 +1704,6 @@ class Visualizer:
         event_type: Gio.FileMonitorEvent,
     ) -> None:
         try:
-            now = GLib.get_monotonic_time()
-            if now < self.monitor_suppress_until:
-                return
-
             if event_type not in self.reload_events:
                 return
 
@@ -1709,13 +1730,14 @@ class Visualizer:
         try:
             CTL_FILE.parent.mkdir(parents=True, exist_ok=True)
 
-            if CTL_FILE.exists() and not stat.S_ISFIFO(CTL_FILE.stat().st_mode):
-                CTL_FILE.unlink()
+            # Only the daemon holding the instance lock replaces a stale FIFO.
+            CTL_FILE.unlink(missing_ok=True)
+            os.mkfifo(CTL_FILE, 0o600)
 
-            if not CTL_FILE.exists():
-                os.mkfifo(CTL_FILE, 0o600)
-
+            self.fifo_buffer = b""
             self.fifo_fd = os.open(CTL_FILE, os.O_RDWR | os.O_NONBLOCK)
+            info = os.fstat(self.fifo_fd)
+            self.fifo_identity = (info.st_dev, info.st_ino)
             self.fifo_watch = GLib.io_add_watch(
                 self.fifo_fd,
                 GLib.PRIORITY_DEFAULT,
@@ -1724,7 +1746,7 @@ class Visualizer:
             )
 
         except Exception as exc:
-            self.log.error("Failed to initialize FIFO IPC: %s", exc)
+            raise RuntimeError("Failed to initialize FIFO IPC") from exc
 
     def on_fifo_read(self, fd: int, condition: GLib.IOCondition) -> bool:
         try:
@@ -1732,17 +1754,19 @@ class Visualizer:
             if not raw:
                 return True
 
-            text = raw.decode("utf-8", "ignore").strip()
-            if not text:
-                return True
-
-            for line in text.splitlines():
+            self.fifo_buffer += raw
+            while b"\n" in self.fifo_buffer:
+                line, self.fifo_buffer = self.fifo_buffer.split(b"\n", 1)
                 cmd = line.strip().lower()
-
-                if cmd == "toggle":
+                if cmd == b"toggle":
                     self.toggle_enabled()
-                elif cmd == "overlay":
+                elif cmd == b"enable" and not self.config.enabled:
+                    self.toggle_enabled()
+                elif cmd == b"overlay":
                     self.toggle_overlay()
+            if len(self.fifo_buffer) > 4096:
+                self.log.warning("Discarding oversized incomplete FIFO command.")
+                self.fifo_buffer = b""
 
         except BlockingIOError:
             pass
@@ -1773,54 +1797,12 @@ class Visualizer:
     # -------------------------------------------------------------------------
 
     def find_hyprland_socket(self) -> Path | None:
-        roots: list[Path] = [Path("/tmp/hypr")]
-
-        xdg_runtime = os.environ.get("XDG_RUNTIME_DIR")
-        if xdg_runtime:
-            roots.append(Path(xdg_runtime) / "hypr")
-
-        sig = os.environ.get("HYPRLAND_INSTANCE_SIGNATURE")
-        if sig:
-            for root in roots:
-                sock = root / sig / ".socket.sock"
-                if sock.exists():
-                    return sock
-
-        uid = os.getuid()
-        candidates: list[Path] = []
-
-        for root in roots:
-            if not root.is_dir():
-                continue
-
-            try:
-                for child in root.iterdir():
-                    if not child.is_dir():
-                        continue
-
-                    sock = child / ".socket.sock"
-
-                    try:
-                        if (
-                            sock.exists()
-                            and child.stat().st_uid == uid
-                            and os.access(sock, os.W_OK)
-                        ):
-                            candidates.append(sock)
-                    except OSError:
-                        pass
-            except OSError:
-                pass
-
-        if not candidates:
+        runtime = os.environ.get("XDG_RUNTIME_DIR")
+        signature = os.environ.get("HYPRLAND_INSTANCE_SIGNATURE")
+        if not runtime or not signature:
             return None
-
-        try:
-            candidates.sort(key=lambda p: p.parent.stat().st_mtime, reverse=True)
-        except OSError:
-            pass
-
-        return candidates[0]
+        path = Path(runtime) / "hypr" / signature / ".socket.sock"
+        return path if path.is_socket() else None
 
     def send_hyprland_command(self, cmd: str) -> bool:
         sock_path = self.find_hyprland_socket()
@@ -1834,11 +1816,10 @@ class Visualizer:
                 sock.sendall(cmd.encode())
 
                 try:
-                    sock.recv(1024)
-                except Exception:
-                    pass
-
-            return True
+                    response = sock.recv(4096)
+                    return response.strip() == b"ok"
+                except OSError:
+                    return False
 
         except Exception as exc:
             self.log.debug("Hyprland IPC failed: %s", exc)
@@ -1883,10 +1864,7 @@ data_format = ascii
 ascii_max_range = 1000
 
 [smoothing]
-integral = {noise}
 monstercat = 1
-gravity = 100
-ignore = 0
 noise_reduction = {noise}
 """
 
@@ -1916,6 +1894,7 @@ noise_reduction = {noise}
             conf_path = self.generate_cava_config()
         except Exception as exc:
             self.log.error("Failed generating Cava config: %s", exc)
+            self.cava_fail_count += 1
             self.schedule_cava_restart()
             return False
 
@@ -1923,7 +1902,7 @@ noise_reduction = {noise}
             self.cava_proc = subprocess.Popen(
                 [cava_path, "-p", str(conf_path)],
                 stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
+                stderr=None,
                 stdin=subprocess.DEVNULL,
                 text=False,
                 bufsize=0,
@@ -1953,6 +1932,8 @@ noise_reduction = {noise}
 
         except Exception as exc:
             self.log.error("Failed starting Cava: %s", exc)
+            self.stop_cava()
+            self.cava_fail_count += 1
             self.schedule_cava_restart()
             return False
 
@@ -1972,6 +1953,7 @@ noise_reduction = {noise}
             except subprocess.TimeoutExpired:
                 try:
                     self.cava_proc.kill()
+                    self.cava_proc.wait(timeout=1)
                 except Exception:
                     pass
             except Exception:
@@ -1986,6 +1968,8 @@ noise_reduction = {noise}
             self.cava_proc = None
 
         self.cava_buffer = b""
+        self.cava_shared_data = [0.0] * self.config.bars
+        self.has_rendered_idle_clear = False
 
     def schedule_cava_restart(self) -> None:
         if not self.config.enabled:
@@ -1997,7 +1981,10 @@ noise_reduction = {noise}
         if self.cava_restart_source is not None:
             self.remove_glib_source(self.cava_restart_source)
 
-        delay = min(30.0, 0.25 * (2 ** min(6, self.cava_fail_count)))
+        self.cava_shared_data = [0.0] * self.config.bars
+        self.has_rendered_idle_clear = False
+        self.ensure_tick()
+        delay = min(30.0, 0.25 * (2 ** min(7, self.cava_fail_count)))
         self.cava_restart_source = GLib.timeout_add(
             int(delay * 1000),
             self.on_cava_restart_timeout,
@@ -2016,6 +2003,7 @@ noise_reduction = {noise}
             if condition & (GLib.IOCondition.HUP | GLib.IOCondition.ERR):
                 self.cava_watch = None
                 self.cava_fail_count += 1
+                self.stop_cava()
                 self.schedule_cava_restart()
                 return False
 
@@ -2023,6 +2011,7 @@ noise_reduction = {noise}
             if not data:
                 self.cava_watch = None
                 self.cava_fail_count += 1
+                self.stop_cava()
                 self.schedule_cava_restart()
                 return False
 
@@ -2034,14 +2023,9 @@ noise_reduction = {noise}
             if b"\n" not in self.cava_buffer:
                 return True
 
-            *lines, remainder = self.cava_buffer.split(b"\n")
-            self.cava_buffer = remainder
-
-            if not lines:
-                return True
-
-            # Use only the newest complete frame.
-            line = lines[-1].strip()
+            # Extract only the newest complete frame without allocating old frames.
+            complete, self.cava_buffer = self.cava_buffer.rsplit(b"\n", 1)
+            line = complete.rsplit(b"\n", 1)[-1].strip()
             if not line:
                 return True
 
@@ -2071,7 +2055,7 @@ noise_reduction = {noise}
                     except ValueError:
                         value = 0.0
 
-                if value < 0.0:
+                if value <= 0.001:
                     value = 0.0
 
                 out[i] = value
@@ -2091,6 +2075,7 @@ noise_reduction = {noise}
             self.log.exception("Cava stdout handler failed.")
             self.cava_watch = None
             self.cava_fail_count += 1
+            self.stop_cava()
             self.schedule_cava_restart()
             return False
 
@@ -2135,7 +2120,7 @@ noise_reduction = {noise}
         self.update_smoothing()
 
         dt = self.update_frame_dt()
-        idle = not any(v > 0.01 for v in self.cava_shared_data)
+        idle = not any(v > 0.001 for v in self.cava_shared_data)
 
         self.idle_time += dt
         if self.idle_time > 86400.0:
@@ -2199,7 +2184,8 @@ noise_reduction = {noise}
         if self.tick_source is not None:
             return
 
-        interval = max(1, int(1000 / self.config.fps))
+        self.last_frame_time = GLib.get_monotonic_time()
+        interval = max(1, round(1000 / self.config.fps))
         self.tick_source = GLib.timeout_add(interval, self.tick)
 
     def remove_tick(self) -> None:
@@ -2340,7 +2326,11 @@ noise_reduction = {noise}
             if data is None:
                 return False
 
-            self.draw_cairo(cr, w, h, data)
+            cr.save()
+            try:
+                self.draw_cairo(cr, w, h, data)
+            finally:
+                cr.restore()
 
         except Exception:
             self.log.exception("Cairo draw failed.")
@@ -2359,7 +2349,20 @@ noise_reduction = {noise}
         gap = bar_full_w * (1.0 - self.config.thickness)
         bar_w = max(0.0, bar_full_w - gap)
 
-        match self.config.style:
+        # Shader-only effects use a visible, simpler software approximation.
+        style = self.config.style
+        if style in (Style.SPECTRUM, Style.AURORA, Style.LIGHTNING):
+            style = Style.LINE
+        elif style in (Style.PSYCHEDELIC, Style.KALEIDOSCOPE):
+            style = Style.CIRCLE
+
+        content_h = min(h, self.content_height) if self.content_height > 0 else h
+        if style not in (Style.RADIAL, Style.CIRCLE, Style.PERIMETER):
+            offset = 0.0 if pos == Position.TOP else h - content_h if pos == Position.BOTTOM else (h - content_h) / 2.0
+            cr.translate(0.0, offset)
+            h = content_h
+
+        match style:
             case Style.BARS:
                 for i in range(n):
                     val = max(0.0, data[i]) * h
@@ -2540,10 +2543,10 @@ noise_reduction = {noise}
                 cy = h / 2.0
                 min_dim = min(w, h)
 
-                ring_r = min_dim * 0.15
-                max_len = min_dim * 0.3
+                max_len = content_h * 0.45
+                ring_r = min(min_dim * 0.12, max_len * 0.6)
 
-                if self.config.style == Style.RADIAL:
+                if style == Style.RADIAL:
                     quarter = max(1, n // 4)
                     avg = sum(data[:quarter]) / quarter
                     ring_r *= 1.0 + 0.25 * max(0.0, avg)
@@ -2617,6 +2620,35 @@ noise_reduction = {noise}
                         cr.set_source_rgba(ramp[-1][0], ramp[-1][1], ramp[-1][2], 0.8)
                         cr.stroke()
 
+            case Style.PERIMETER:
+                # Four inward facing strips, with the same spectrum order as GL.
+                for edge in range(4):
+                    cr.save()
+                    if edge == 0:
+                        length = w
+                    elif edge == 1:
+                        cr.translate(w, 0.0)
+                        cr.rotate(math.pi / 2.0)
+                        length = h
+                    elif edge == 2:
+                        cr.translate(w, h)
+                        cr.rotate(math.pi)
+                        length = w
+                    else:
+                        cr.translate(0.0, h)
+                        cr.rotate(-math.pi / 2.0)
+                        length = h
+                    count = max(1, n // 4)
+                    pitch = length / count
+                    for i in range(count):
+                        idx = min(n - 1, edge * count + i)
+                        depth = content_h * 0.45 * max(0.0, data[idx]) + 4.0
+                        x = i * pitch
+                        cr.rectangle(x, 0.0, pitch + 0.5, depth)
+                        self.apply_gradient(cr, self.color_at(idx, n, ramp), x, 0.0, x, depth)
+                        cr.fill()
+                    cr.restore()
+
     # -------------------------------------------------------------------------
     # OpenGL renderer
     # -------------------------------------------------------------------------
@@ -2674,28 +2706,33 @@ noise_reduction = {noise}
             self.delete_gl_resources()
 
             vs = self.compile_shader(VERTEX_SHADER, GL.GL_VERTEX_SHADER)
-            fs = self.compile_shader(FRAGMENT_SHADER, GL.GL_FRAGMENT_SHADER)
-
-            program = GL.glCreateProgram()
-            GL.glAttachShader(program, vs)
-            GL.glAttachShader(program, fs)
-            GL.glLinkProgram(program)
+            fs = None
+            try:
+                fs = self.compile_shader(FRAGMENT_SHADER, GL.GL_FRAGMENT_SHADER)
+                program = GL.glCreateProgram()
+                self.gl_program = program
+                GL.glAttachShader(program, vs)
+                GL.glAttachShader(program, fs)
+                GL.glLinkProgram(program)
+            finally:
+                GL.glDeleteShader(vs)
+                if fs is not None:
+                    GL.glDeleteShader(fs)
 
             if not GL.glGetProgramiv(program, GL.GL_LINK_STATUS):
                 log = GL.glGetProgramInfoLog(program)
                 if isinstance(log, bytes):
                     log = log.decode("utf-8", "replace")
 
-                GL.glDeleteProgram(program)
+                self.delete_gl_resources()
                 raise RuntimeError(f"Shader link failed: {log}")
 
-            GL.glDeleteShader(vs)
-            GL.glDeleteShader(fs)
-
             vao = GL.glGenVertexArrays(1)
+            self.gl_vao = vao
             GL.glBindVertexArray(vao)
 
             vbo = GL.glGenBuffers(1)
+            self.gl_vbo = vbo
             GL.glBindBuffer(GL.GL_ARRAY_BUFFER, vbo)
 
             vertices = [
@@ -2764,15 +2801,20 @@ noise_reduction = {noise}
             self.gl_failed = True
             self.schedule_cairo_fallback()
 
+    def on_gl_unrealize(self, widget: Gtk.GLArea) -> None:
+        widget.make_current()
+        self.delete_gl_resources()
+
     def schedule_cairo_fallback(self) -> None:
         if self.fallback_pending:
             return
 
         self.fallback_pending = True
-        GLib.idle_add(self.fallback_to_cairo)
+        self.fallback_source = GLib.idle_add(self.fallback_to_cairo)
 
     def fallback_to_cairo(self) -> bool:
         self.fallback_pending = False
+        self.fallback_source = None
         self.setup_window(force_cairo=True)
         self.ensure_tick()
         return False
@@ -2943,6 +2985,15 @@ noise_reduction = {noise}
             self.log.warning("Could not apply CSS: %s", exc)
 
     def destroy_window(self) -> None:
+        # Deferred fallback belongs to the window that failed, not its successor.
+        if self.fallback_source is not None:
+            self.remove_glib_source(self.fallback_source)
+            self.fallback_source = None
+        self.fallback_pending = False
+        if self.monitor is not None and self.monitor_handler is not None:
+            self.monitor.disconnect(self.monitor_handler)
+        self.monitor = None
+        self.monitor_handler = None
         if self.window is not None:
             try:
                 self.window.destroy()
@@ -2972,6 +3023,8 @@ noise_reduction = {noise}
                 self.log.error("No monitor available.")
                 return None
 
+            self.monitor = monitor
+            self.monitor_handler = monitor.connect("notify::geometry", self.on_monitors_changed)
             geom = monitor.get_geometry()
 
             window = Gtk.Window()
@@ -2991,6 +3044,7 @@ noise_reduction = {noise}
 
             GtkLayerShell.init_for_window(window)
             GtkLayerShell.set_namespace(window, LAYER_NAMESPACE)
+            GtkLayerShell.set_monitor(window, monitor)
 
             self.apply_hyprland_rules()
 
@@ -3011,6 +3065,10 @@ noise_reduction = {noise}
             win_w = geom.width
             win_h = geom.height
             is_fullscreen_style = style in (Style.RADIAL, Style.CIRCLE, Style.PSYCHEDELIC, Style.KALEIDOSCOPE, Style.PERIMETER)
+            if not is_fullscreen_style:
+                # Leave room for glow and dots without allocating a full-screen buffer.
+                margin = math.ceil(max(64.0, win_w / self.config.bars / 2.0))
+                win_h = min(geom.height, int(self.content_height) + margin)
 
             if is_fullscreen_style:
                 GtkLayerShell.set_anchor(window, GtkLayerShell.Edge.TOP, True)
@@ -3058,8 +3116,10 @@ noise_reduction = {noise}
                     area = Gtk.GLArea()
                     area.set_required_version(3, 3)
                     area.set_has_alpha(True)
+                    area.set_auto_render(False)
 
                     area.connect("realize", self.on_gl_realize)
+                    area.connect("unrealize", self.on_gl_unrealize)
                     area.connect("render", self.on_gl_render)
 
                     window.add(area)
@@ -3179,7 +3239,20 @@ noise_reduction = {noise}
                 pass
             self.fifo_fd = None
 
-        self.delete_gl_resources()
+        if self.fifo_identity is not None:
+            try:
+                info = CTL_FILE.stat()
+                if (info.st_dev, info.st_ino) == self.fifo_identity:
+                    CTL_FILE.unlink()
+            except OSError:
+                pass
+            self.fifo_identity = None
+
+        display = Gdk.Display.get_default()
+        if display is not None:
+            for handler in self.display_handlers:
+                display.disconnect(handler)
+        self.display_handlers.clear()
         self.destroy_window()
         self.release_lock()
 
@@ -3198,7 +3271,9 @@ def deploy_config(force: bool = False) -> None:
         print(f"[SUCCESS] Dusky Visualizer configuration deployed to {CONFIG_FILE}")
     else:
         existing = load_json_dict(CONFIG_FILE)
-        merged = {**default_config, **existing}
+        if existing is None:
+            raise ValueError(f"Refusing to overwrite invalid configuration: {CONFIG_FILE}")
+        merged = {**existing, **Config.from_dict(existing).to_dict()}
         atomic_write_json(CONFIG_FILE, merged)
         print(f"[SUCCESS] Dusky Visualizer configuration merged & verified at {CONFIG_FILE}")
 
@@ -3211,7 +3286,7 @@ def main() -> int:
     parser.add_argument("--reset", action="store_true", help="Reset configuration file to factory defaults and exit.")
     parser.add_argument("--config", action="store_true", help="Print path to configuration file.")
 
-    args, _ = parser.parse_known_args()
+    args = parser.parse_args()
 
     if args.setup:
         deploy_config(force=False)
@@ -3233,21 +3308,17 @@ def main() -> int:
 
     app = Visualizer()
 
-    app.acquire_lock()
-    app.dependency_report()
-
-    if not app.check_display():
-        app.shutdown()
-        return 1
-
-    app.load_initial()
-    app.init_fifo_ipc()
-    app.init_file_monitors()
-    app.apply_config_changes(None)
-    app.install_signal_handlers()
-    app.ensure_tick()
-
     try:
+        app.acquire_lock()
+        app.dependency_report()
+        if not app.check_display():
+            return 1
+        app.load_initial()
+        app.init_fifo_ipc()
+        app.init_file_monitors()
+        app.apply_config_changes(None)
+        app.install_signal_handlers()
+        app.ensure_tick()
         Gtk.main()
     except KeyboardInterrupt:
         pass

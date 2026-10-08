@@ -1,347 +1,147 @@
 #!/usr/bin/env python3
-#d: Refresh the font cache and align default font aliases
+#d: Install prerequisites, deploy and verify the Dusky font configuration
+"""Deploy schema defaults through the same engine used by the font TUI.
 
+Run as the desktop user; missing required packages are installed with pacman.
+--font-family (or DUSKY_DEFAULT_SANS) overrides the sans-serif default. Missing fonts,
+cache errors, toolkit sync errors, and incorrect aliases exit nonzero.
 """
-Font cache refresh + default-font alignment for clean installs.
-
-Aligns the setup-time font state with the Dusky Font Manager TUI:
-  * builds conf.d/99-dusky-fonts.conf using the actual engine (same writer,
-    same DTD header, binding="strong" aliases) from the schema defaults,
-  * adds metric-compat Arial/Helvetica/Verdana -> default sans-family
-    rewrites (qual="first" form, verified NOT to hijack generic requests),
-  * runs `fc-cache -f`, then verifies sans-serif/serif/monospace/emoji and
-    Arial/Helvetica/Verdana/Times New Roman resolution.
-
-Default family is configurable without editing code:
-    DUSKY_DEFAULT_SANS="JetBrainsMono Nerd Font" python3 140_dusky_font_configurator.py
-  or --font-family "..." (schema Tab-0 default is Atkinson Hyperlegible).
-"""
-
 from __future__ import annotations
 
 import argparse
-import fcntl
 import importlib.util
 import os
+from pathlib import Path
 import subprocess
 import sys
-import time
-from pathlib import Path
 
-GREEN = "\033[0;32m"
-YELLOW = "\033[1;33m"
-RED = "\033[0;31m"
-NC = "\033[0m"
-
-USER_SCRIPTS = Path(os.environ.get("USER_SCRIPTS", "~/user_scripts")).expanduser().resolve()
+USER_SCRIPTS = Path(os.environ.get("USER_SCRIPTS", str(Path(__file__).resolve().parents[2]))).expanduser().resolve()
 DUSKY_TUI_ROOT = USER_SCRIPTS / "dusky_tui"
-SCHEMA_PATH = USER_SCRIPTS / "fonts" / "tui_fonts.py"
-ENGINE_OUTPUT = "~/.config/fontconfig/conf.d/99-dusky-fonts.conf"
+SCHEMA_PATH = USER_SCRIPTS / "fonts/tui_fonts.py"
 
-_METRIC_COMPAT_SANS = ("Arial", "Helvetica", "Verdana")
-_METRIC_COMPAT_EMOJI = ("Segoe UI Emoji", "Apple Color Emoji", "Twemoji Mozilla")
+
+# Official Arch packages required by the default font deployment. Install before
+# schema discovery or D-Bus startup so a fresh system can bootstrap both.
+FONT_PACKAGES = {
+    "Atkinson Hyperlegible": "ttf-atkinson-hyperlegible",
+    "JetBrainsMono Nerd Font Mono": "ttf-jetbrains-mono-nerd",
+    "Noto Color Emoji": "noto-fonts-emoji",
+    "Liberation Serif": "ttf-liberation",
+}
+REQUIRED_PACKAGES = (
+    "fontconfig", "glib2", "dconf", "gsettings-desktop-schemas", "dbus",
+    *FONT_PACKAGES.values(),
+)
+
+
+def ensure_packages() -> None:
+    query = subprocess.run(
+        ["pacman", "--query", "--quiet", "--", *REQUIRED_PACKAGES],
+        capture_output=True, text=True,
+    )
+    if query.returncode not in (0, 1):
+        raise RuntimeError(f"Cannot query installed packages: {query.stderr.strip()}")
+    installed = set(query.stdout.splitlines())
+    missing = [package for package in REQUIRED_PACKAGES if package not in installed]
+    if not missing:
+        if query.returncode:
+            raise RuntimeError(f"Cannot query installed packages: {query.stderr.strip()}")
+        return
+    print(f"[INSTALL] Required packages: {', '.join(missing)}", flush=True)
+    command = ["pacman", "--sync", "--needed", "--noconfirm", "--", *missing]
+    if os.geteuid() != 0:
+        # The orchestrator supplies a PTY in a new session without a
+        # controlling terminal. Read authentication from its input stream.
+        command = ["sudo", "--stdin", "--", *command]
+    # Use the installer's existing repository databases and cached packages;
+    # no isolated database refresh or unrelated system upgrade here.
+    subprocess.run(command, check=True)
+    subprocess.run(["pacman", "--query", "--quiet", "--", *REQUIRED_PACKAGES],
+                   check=True, stdout=subprocess.DEVNULL)
+
+
+def ensure_font_cache() -> None:
+    # An installed package can still be invisible through a stale ISO cache.
+    # Repair before schema discovery and the engine's pre-write validation;
+    # the engine's post-write rebuild happens too late for missing families.
+    proc = subprocess.run(
+        ["fc-list", "--format=%{[]family{%{family}\n}}", ":"],
+        check=True, capture_output=True, text=True, timeout=30,
+    )
+    if proc.stderr.strip():
+        raise RuntimeError(proc.stderr.strip())
+    installed = {family.strip().casefold() for family in proc.stdout.splitlines()}
+    missing = [family for family in FONT_PACKAGES if family.casefold() not in installed]
+    if missing:
+        print(f"[CACHE] Rebuilding for missing families: {', '.join(missing)}", flush=True)
+        subprocess.run(["fc-cache", "--force"], check=True, timeout=120)
 
 
 def _load_schema():
-    """Import tui_fonts schema from the fonts repo via importlib."""
-    if not SCHEMA_PATH.is_file():
-        return None
-    sys.path.insert(0, str(SCHEMA_PATH.parent))
-    if str(DUSKY_TUI_ROOT) not in sys.path:
-        sys.path.insert(0, str(DUSKY_TUI_ROOT))
-    spec = importlib.util.spec_from_file_location("_tui_fonts_140", SCHEMA_PATH)
+    sys.path.insert(0, str(DUSKY_TUI_ROOT))
+    spec = importlib.util.spec_from_file_location("_dusky_font_schema", SCHEMA_PATH)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Cannot load schema: {SCHEMA_PATH}")
     mod = importlib.util.module_from_spec(spec)
-    sys.modules["_tui_fonts_140"] = mod
     spec.loader.exec_module(mod)
     return mod
 
 
-def _default_sans_family() -> str:
-    """DUSKY_DEFAULT_SANS env var, then --font arg (in os.environ), then the
-    schema's Tab 0 sans-serif default, then Atkinson Hyperlegible."""
-    env = os.environ.get("DUSKY_DEFAULT_SANS")
-    if env:
-        return env
-    mod = _load_schema()
-    if mod:
-        for items in mod.SCHEMA.values():
-            for item in items:
-                if item.key == "sans-serif" and item.default:
-                    return str(item.default)
-    return "Atkinson Hyperlegible"
-
-
-def _metric_rewrite_block(name: str, target: str) -> str:
-    return (
-        f'  <match target="pattern">\n'
-        f'    <test qual="first" name="family">\n'
-        f'      <string>{name}</string>\n'
-        f'    </test>\n'
-        f'    <edit name="family" mode="assign" binding="strong">\n'
-        f'      <string>{target}</string>\n'
-        f'    </edit>\n'
-        f'  </match>\n'
+def resolve_match(family: str) -> set[str]:
+    proc = subprocess.run(
+        ["fc-match", "--format=%{[]family{%{family}\n}}", family],
+        check=True, capture_output=True, text=True, timeout=15,
     )
-
-
-def build_config(target: str) -> tuple[bool, str]:
-    """Write canonical config via the real engine (same path the TUI uses),
-    overriding Tab 0 sans-serif to the requested default."""
-    if not DUSKY_TUI_ROOT.is_dir():
-        return False, f"missing engine root: {DUSKY_TUI_ROOT}"
-    sys.path.insert(0, str(DUSKY_TUI_ROOT))
-    mod = _load_schema()
-    if mod is None:
-        return False, f"missing schema: {SCHEMA_PATH}"
-    try:
-        from python.engines.fontconfig import FontconfigEngine
-
-        changes = []
-        for items in mod.SCHEMA.values():
-            for item in items:
-                if item.type_ in ("action", "preset"):
-                    continue
-                val = target if item.key == "sans-serif" else item.default
-                changes.append((item.key, item.scope, val, item.type_))
-
-        engine = FontconfigEngine(ENGINE_OUTPUT)
-        ok, msg, err = engine.write_batch(changes)
-
-        conf = Path(ENGINE_OUTPUT).expanduser()
-        if ok and conf.is_file():
-            text = conf.read_text()
-            missing_sans = [name for name in _METRIC_COMPAT_SANS
-                            if f">{name}</string>" not in text]
-            missing_emoji = [name for name in _METRIC_COMPAT_EMOJI
-                             if f">{name}</string>" not in text]
-            # Determine the configured emoji family from schema defaults
-            emoji_target = "Noto Color Emoji"
-            if mod:
-                for items in mod.SCHEMA.values():
-                    for item in items:
-                        if item.key == "emoji" and item.default:
-                            emoji_target = str(item.default)
-            blocks = "".join(
-                _metric_rewrite_block(n, target) for n in missing_sans
-            ) + "".join(
-                _metric_rewrite_block(n, emoji_target) for n in missing_emoji
-            )
-            if blocks:
-                new_text = text.replace("</fontconfig>", blocks + "</fontconfig>")
-                # Atomic replace: fontconfig re-parses this file on every
-                # fc-match/fc-cache call, so a truncate-then-write would let
-                # a concurrent reader see a half-written (unparseable) conf
-                # and silently drop every alias for that call.
-                tmp = conf.with_name(f".{conf.name}.tmp-{os.getpid()}-{time.monotonic_ns()}")
-                try:
-                    tmp.write_text(new_text)
-                    tmp.replace(conf)
-                finally:
-                    if tmp.exists():
-                        try:
-                            tmp.unlink()
-                        except OSError:
-                            pass
-            _drop_legacy_conf()
-        return (ok, msg) if ok else (False, err or msg)
-    except Exception as exc:
-        return False, str(exc)
-
-
-def _drop_legacy_conf() -> None:
-    """The engine absorbs the legacy ~/.config/fontconfig/fonts.conf into its
-    own emit state, so the legacy file must not keep applying raw
-    qual="any" + binding="strong" rewrites alongside the canonical config
-    (that is how 'Times New Roman' rewrites kept hijacking generic serif
-    requests). Delete it outright; no backup is kept."""
-    legacy = Path.home() / ".config" / "fontconfig" / "fonts.conf"
-    if not legacy.is_file():
-        return
-    legacy.unlink()
-    print("  [i] Removed legacy fonts.conf (superseded by generated config)")
-
-
-def _wait_fc_cache_idle(timeout: float = 30.0) -> None:
-    """Wait until no background fc-cache process is still writing the cache.
-
-    write_batch launches an async fc-cache (fire-and-forget); if the script
-    rebuilds the cache concurrently, whichever process finishes last wins
-    and the other's output may reflect a stale config, making the alias
-    verification fail intermittently. Drain before rebuilding.
-    """
-    time.sleep(0.1)
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        try:
-            proc = subprocess.run(["pgrep", "-x", "fc-cache"],
-                                  capture_output=True, text=True, timeout=5)
-        except Exception:
-            return
-        if proc.returncode != 0:
-            return
-        time.sleep(0.2)
-
-
-def resolve_match(family: str) -> str:
-    try:
-        out = subprocess.run(
-            ["fc-match", "--format=%{family}\n", family],
-            capture_output=True, text=True, timeout=15,
-        ).stdout
-    except Exception:
-        return ""
-    return out.strip()
-
-
-def _schema_defaults(mod) -> dict[str, str]:
-    """Generic-family defaults straight from the schema (same source the
-    engine's write_batch uses), so verification can never drift from what
-    was actually configured."""
-    out = {}
-    if mod:
-        for items in mod.SCHEMA.values():
-            for item in items:
-                if item.key in ("sans-serif", "serif", "monospace", "emoji") and item.default:
-                    out[item.key] = str(item.default)
-    return out
-
-
-def _family_installed(family: str) -> bool:
-    """True if the family is installed (fc-list is authoritative)."""
-    try:
-        proc = subprocess.run(
-            ["fc-list", "--format=%{family}\n", ":"],
-            capture_output=True, text=True, timeout=15,
-        )
-        known = {
-            item.strip().lower()
-            for line in proc.stdout.splitlines()
-            if line.strip()
-            for item in line.split(",")
-            if item.strip()
-        }
-        return family.lower() in known
-    except Exception:
-        return True  # fc-list unavailable: fall back to strict resolution
-
-
-def verify(target_sans: str, schema: dict[str, str]) -> tuple[int, list[tuple[str, bool, str]]]:
-    """Resolve each alias and separate genuine misconfigurations from
-    missing prerequisites.
-
-    * expectation for every generic comes from the schema defaults (the
-      same families write_batch just wrote into the config), so the check
-      can never drift from the configuration;
-    * if the configured family is not installed, that is a font-package
-      prerequisite, not an alias failure: report it loudly as a warning
-      instead of a FAIL (the alias config itself is correct);
-    * if the family IS installed but resolution goes elsewhere, that is a
-      real failure and still exits non-zero after retries.
-    """
-    serif_expect = schema.get("serif", "Liberation Serif")
-    generic_checks = [
-        ("sans-serif", target_sans),
-        ("serif", serif_expect),
-        ("monospace", schema.get("monospace", "JetBrainsMono Nerd Font Mono")),
-        ("emoji", schema.get("emoji", "Noto Color Emoji")),
-    ]
-    results = []
-    for generic, expect in generic_checks:
-        results.append(_check_alias(f"{generic} -> {expect}", generic, expect))
-
-    for name in (*_METRIC_COMPAT_SANS, "Times New Roman"):
-        expect = target_sans if name in _METRIC_COMPAT_SANS else serif_expect
-        results.append(_check_alias(f"{name} -> {expect}", name, expect))
-
-    failures = sum(1 for _label, ok, _note in results if not ok)
-    return failures, results
-
-
-def _check_alias(label: str, family: str, expect: str) -> tuple[str, bool, str]:
-    """One alias check: warn (pass) when the expected family is missing,
-    strict-fail when it is installed but resolves incorrectly."""
-    if not _family_installed(expect):
-        return (label, True,
-                f"family '{expect}' is not installed on this system; "
-                "alias config is correct, install the font package to activate it")
-    return (label, _retried(family, expect), "")
-
-
-def _retried(family: str, expect: str, attempts: int = 3) -> bool:
-    """Try up to `attempts` times, then decide with the last non-empty
-    result. A consistent mismatch still fails (loudly)."""
-    last = ""
-    for _ in range(attempts):
-        out = resolve_match(family)
-        if _matched(out, expect):
-            return True
-        if not out:
-            time.sleep(0.4)
-            continue
-        last = out
-    return _matched(last, expect)
-
-
-def _matched(matcher_out: str, expect: str) -> bool:
-    if not matcher_out or not expect:
-        return False
-    matched_families = [f.strip().lower() for f in matcher_out.split(",") if f.strip()]
-    exp_lower = expect.strip().lower()
-    return any(exp_lower == fam or exp_lower in fam for fam in matched_families)
+    if proc.stderr.strip():
+        raise RuntimeError(proc.stderr.strip())
+    return {value.strip().casefold() for value in proc.stdout.splitlines() if value.strip()}
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Font cache refresh + alias verify")
-    parser.add_argument("--font-family", default=None,
-                        help="Override the default sans-serif family "
-                             "(also: DUSKY_DEFAULT_SANS)")
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--font-family", default=os.environ.get("DUSKY_DEFAULT_SANS"),
+                        help="Override the schema's sans-serif default")
     args = parser.parse_args()
-    if args.font_family:
-        os.environ["DUSKY_DEFAULT_SANS"] = args.font_family
+    try:
+        ensure_packages()
+        # dconf writes require a session bus, including during a TTY install.
+        if (not os.environ.get("DBUS_SESSION_BUS_ADDRESS")
+                and os.environ.get("GSETTINGS_BACKEND", "dconf") == "dconf"):
+            os.execvp("dbus-run-session", ["dbus-run-session", "--", sys.executable,
+                       str(Path(__file__).resolve()), *sys.argv[1:]])
+        ensure_font_cache()
+        mod = _load_schema()
+        from python.engines.fontconfig import FontconfigEngine
 
-    target = _default_sans_family()
-    print(f"{YELLOW}:: Refreshing System Font Cache (target sans: "
-          f"{GREEN}{target}{NC}{YELLOW})...{NC}")
-
-    ok, msg = build_config(target)
-    if not ok:
-        print(f"{RED}[FAIL] writing fontconfig config: {msg}{NC}")
-        sys.exit(1)
-    print(f"  [i] {msg}")
-
-    _wait_fc_cache_idle()
-    subprocess.run(["fc-cache", "-f"], check=False)
-    _wait_fc_cache_idle()
-
-    print(f"\n{YELLOW}:: Verifying Font Aliases...{NC}")
-    schema = _schema_defaults(_load_schema())
-    failures, results = verify(target, schema)
-    warned = 0
-    for label, ok, note in results:
-        if ok and not note:
-            print(f"{GREEN}[+] {label}{NC}")
-        elif ok and note:
-            warned += 1
-            print(f"{YELLOW}[!] {label}{NC}  ({note})")
-        else:
-            print(f"{RED}[-] {label}{NC}")
-
-    if failures:
-        print(f"\n{RED}[FAIL] {failures} aliases resolved incorrectly.{NC}")
-        sys.exit(1)
-    if warned:
-        print(f"\n{YELLOW}[OK] Alias config verified ({warned} family/"
-              f"families not installed on this system yet - install the "
-              f"corresponding font package to activate them).{NC}")
-    print(f"\n{GREEN}[SUCCESS] System fonts aligned to '{target}'.{NC}")
+        changes = [(item.key, item.scope,
+                    args.font_family if item.key == "sans-serif" and args.font_family else item.default,
+                    item.type_)
+                   for items in mod.SCHEMA.values() for item in items
+                   if item.type_ not in ("action", "preset")]
+        defaults = {key: value for key, _scope, value, _type in changes}
+        engine = FontconfigEngine(mod.TARGET_FILE)
+        ok, message, error = engine.write_batch(changes, force_cache=True)
+        if not ok:
+            raise RuntimeError(error or message)
+        print(message)
+        with engine._file_lock():
+            checks = {key: str(defaults[key]) for key in ("sans-serif", "serif", "monospace", "emoji")}
+            checks.update({name: str(defaults[generic]) for name, generic in engine.FAMILY_REWRITES.items()})
+            failures = []
+            for family, expected in checks.items():
+                resolved = resolve_match(family)
+                ok = expected.casefold() in resolved
+                print(f"[{'OK' if ok else 'FAIL'}] {family} -> {', '.join(sorted(resolved))}")
+                if not ok:
+                    failures.append(family)
+            if failures:
+                raise RuntimeError(f"Incorrect font resolution: {', '.join(failures)}")
+        print("[SUCCESS] Font configuration, toolkit sync, cache, and aliases verified.")
+        return 0
+    except (ImportError, OSError, SyntaxError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
+        print(f"[FAIL] {exc}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":
-    lock_path = Path("/tmp/.dusky-fontconfig-140.lock")
-    with lock_path.open("w") as lock_fd:
-        fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX)
-        try:
-            code = main()
-        finally:
-            fcntl.flock(lock_fd.fileno(), fcntl.LOCK_UN)
-        sys.exit(code)
+    sys.exit(main())

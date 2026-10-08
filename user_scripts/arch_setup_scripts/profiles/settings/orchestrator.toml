@@ -119,9 +119,6 @@ write_reports = true
 # EXECUTION & DATABASE TUNING
 # ------------------------------------------------------------------------------
 [execution]
-# Maximum deferral passes allowed for tasks waiting on unfulfilled dependencies
-max_defer_passes = 3
-
 # Minimum required free disk space buffer (in bytes) before attempting backups/updates (64MB)
 disk_space_reserve_bytes = 67108864
 
@@ -193,16 +190,7 @@ complete = "/usr/share/sounds/freedesktop/stereo/complete.oga"
 # Interval in seconds for maintaining background sudo credential heartbeat (keep-alive)
 heartbeat_interval = 45
 
-# Sudoers timestamp timeout in minutes written to temporary /etc/sudoers.d/ drop-ins
-timestamp_timeout = 15
-
-# System directory where temporary sudoers drop-in files are written
-sudoers_dir = "/etc/sudoers.d"
-
-# Filename prefix used for temporary /etc/sudoers.d/ drop-in files
-dropin_prefix = "99_dusky_"
-
-# List of environment variables preserved during sudo escalation
+# List of environment variables passed explicitly to privileged tasks
 env_keep = [
     "HOME",
     "USER",
@@ -223,9 +211,7 @@ env_keep = [
     "XDG_SESSION_TYPE",
     "XDG_CURRENT_DESKTOP",
     "DBUS_SESSION_BUS_ADDRESS",
-    "DISPLAY",
     "WAYLAND_DISPLAY",
-    "XAUTHORITY",
     "SSH_AUTH_SOCK",
     "SSH_AGENT_PID",
     "SUDO_ASKPASS",
@@ -304,7 +290,7 @@ cooldown = 0.35
 # Regex rules for detecting interactive prompts (e.g. Sudo, Pacman, PGP key imports)
 [[prompts.rules]]
 name = "sudo_password"
-pattern = "(?i)(\\[sudo\\] password for [^:]+:|^\\s*Password:\\s*$|sudo: a password is required|Password:\\s*$)"
+pattern = "(?i)(\\[sudo\\] password for [^:]+:|^\\s*Password:\\s*$|Password:\\s*$)"
 kind = "password"
 
 [[prompts.rules]]

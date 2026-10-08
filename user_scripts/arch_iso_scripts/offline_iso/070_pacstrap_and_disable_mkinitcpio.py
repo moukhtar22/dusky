@@ -37,25 +37,35 @@ MOUNT_POINT = Path("/mnt")
 
 # Base packages every system needs
 FINAL_PACKAGES = [
-    "base", "base-devel", "linux", "linux-headers", "mkinitcpio",
+    "base", "base-devel", "linux", "linux-headers", "mkinitcpio", "terminus-font",
     "neovim", "btrfs-progs", "dosfstools", "efibootmgr", "openssh", "git", "zsh",
     "networkmanager", "yazi", "linux-firmware-other", "otf-atkinsonhyperlegiblemono-nerd",
     "python", "python-textual", "python-rich"
 ]
 
 def wait_for_pacman_lock():
-    lock_file = Path("/var/lib/pacman/db.lck")
-    while lock_file.exists():
-        res = subprocess.run(["pgrep", "-x", "pacman"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        if res.returncode != 0:
-            try:
-                lock_file.unlink()
-                Log.warn("Removed stale pacman lock file: /var/lib/pacman/db.lck")
-                break
-            except Exception:
-                pass
-        Log.warn("Waiting for pacman lock...")
-        time.sleep(2)
+    """
+    Guarantees no pacman lock files ever block or halt the installer.
+    Terminates any lingering background pacman/pacstrap instances and forcefully
+    unlinks db.lck in both host and target environments immediately.
+    """
+    try:
+        subprocess.run(["pkill", "-9", "-x", "pacman"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        subprocess.run(["pkill", "-9", "-x", "pacstrap"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+    except Exception:
+        pass
+
+    lock_files = [
+        Path("/var/lib/pacman/db.lck"),
+        MOUNT_POINT / "var/lib/pacman/db.lck",
+    ]
+    for lock_file in lock_files:
+        try:
+            if lock_file.exists():
+                lock_file.unlink(missing_ok=True)
+                Log.warn(f"Purged pacman lock file: {lock_file}")
+        except Exception as e:
+            Log.warn(f"Could not remove lock file {lock_file}: {e}")
 
 class HardwareScanner:
     def __init__(self):
@@ -306,20 +316,25 @@ def main():
     
     try:
         if auto_mode:
-            # Ironclad scope management to ensure pipe stream destruction 
-            yes_proc = subprocess.Popen(['yes', ''], stdout=subprocess.PIPE)
-            try:
-                subprocess.run(pacstrap_cmd, stdin=yes_proc.stdout, check=True)
-            finally:
-                yes_proc.terminate()
-                yes_proc.wait()
+            # pacstrap already adds --noconfirm for non-interactive execution
+            subprocess.run(pacstrap_cmd, stdin=subprocess.DEVNULL, check=True)
         else:
             subprocess.run(pacstrap_cmd, check=True)
             
         print(f"\n{Log.GREEN}Pacstrap Complete.{Log.RESET}")
     except subprocess.CalledProcessError as e:
-        Log.err(f"Pacstrap failed with exit code {e.returncode}")
-        sys.exit(1)
+        Log.warn(f"Pacstrap interrupted (exit code {e.returncode}), purging all pacman locks and retrying...")
+        wait_for_pacman_lock()
+        time.sleep(1)
+        try:
+            if auto_mode:
+                subprocess.run(pacstrap_cmd, stdin=subprocess.DEVNULL, check=True)
+            else:
+                subprocess.run(pacstrap_cmd, check=True)
+            print(f"\n{Log.GREEN}Pacstrap Complete.{Log.RESET}")
+        except subprocess.CalledProcessError as e2:
+            Log.err(f"Pacstrap failed with exit code {e2.returncode}")
+            sys.exit(1)
 
 if __name__ == "__main__":
     main()

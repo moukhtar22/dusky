@@ -15,9 +15,11 @@ Inherits from TomlEngine, adding:
 ===============================================================================
 """
 
+import math
 import os
 import re
 import socket
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -58,7 +60,7 @@ window_geometry = "420x96"
 window_title = "Kokoro TTS"
 audio_device = ""
 cache_max_mb = 512
-use_user_mpv_config = false
+use_user_mpv_config = true
 extra_args = []
 prefetch_segments = 4
 write_stall_timeout_s = 0.0
@@ -70,12 +72,13 @@ max_files = 32
 bit_depth = 16                        # 16 | 24
 
 [engine]
-provider = "cuda"                     # auto | cuda | tensorrt | rocm | openvino | cpu
+provider = "auto"                     # auto | cuda | tensorrt | migraphx | openvino | cpu
 precision = "auto"                    # auto | f32 | fp16 | fp16-gpu | int8
 models_dir = ""
 voices_file = ""
 device_id = 0
-gpu_mem_limit_mb = 2048               # VRAM cap for CUDA/ROCm (0 = unlimited)
+gpu_mem_limit_mb = 2048               # CUDA arena budget, not total VRAM (0 = unlimited)
+cudnn_conv_use_max_workspace = false
 arena_extend_strategy = "kSameAsRequested"
 cudnn_conv_algo_search = "HEURISTIC"
 cuda_lib_dirs = []
@@ -178,26 +181,17 @@ class KokoroEngine(TomlEngine):
         v2 = voice_2.strip().strip('"\'') or "af_bella"
         v3 = voice_3.strip().strip('"\'') or "none"
 
-        if not blend or v2 in ("", "none") or weight_2 <= 0:
+        if not blend:
             return v1
-
-        if v3 not in ("", "none") and weight_3 > 0:
-            total = weight_1 + weight_2 + weight_3
-            if total <= 0:
-                total = 1.0
-            w1 = round(weight_1 / total, 2)
-            w2 = round(weight_2 / total, 2)
-            w3 = round(1.0 - w1 - w2, 2)
-            if w3 < 0:
-                w3 = 0.0
-            return f"{v1}:{w1:.2f},{v2}:{w2:.2f},{v3}:{w3:.2f}"
-        else:
-            total = weight_1 + weight_2
-            if total <= 0:
-                total = 1.0
-            w1 = round(weight_1 / total, 2)
-            w2 = round(1.0 - w1, 2)
-            return f"{v1}:{w1:.2f},{v2}:{w2:.2f}"
+        entries = [(v, w) for v, w in ((v1, weight_1), (v2, weight_2), (v3, weight_3))
+                   if v != "none" and math.isfinite(w) and w > 0]
+        if not entries:
+            return v1
+        if len(entries) == 1:
+            return entries[0][0]
+        scale = max(w for _, w in entries)
+        total = sum(w / scale for _, w in entries)
+        return ",".join(f"{v}:{w / scale / total:.8g}" for v, w in entries)
 
     @staticmethod
     def parse_voice_spec(spec: str) -> dict[str, Any]:
@@ -274,10 +268,17 @@ class KokoroEngine(TomlEngine):
             "weight_3": 0.00,
         }
 
+    def _socket_path(self) -> Path:
+        configured = self.cache.get("daemon.socket_path") or self.cache.get("daemon/socket_path")
+        value = os.environ.get("DUSKY_SOCKET") or configured
+        if value:
+            return Path(os.path.expandvars(str(value))).expanduser()
+        runtime = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+        return Path(runtime) / "dusky-kokoro/control.sock"
+
     def _trigger_reload(self) -> None:
         """Attempts live socket IPC reload, then falls back to trigger.sh --reload."""
-        runtime_dir = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
-        sock_path = Path(runtime_dir) / "dusky-kokoro" / "control.sock"
+        sock_path = self._socket_path()
         if sock_path.exists():
             try:
                 with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
@@ -289,7 +290,8 @@ class KokoroEngine(TomlEngine):
             except Exception:
                 pass
 
-        trigger_sh = Path.home() / "user_scripts" / "tts_stt" / "dusky_kokoro" / "trigger.sh"
+        trigger_sh = Path(shutil.which("dusky-kokoro") or
+                          Path.home() / "user_scripts" / "tts_stt" / "dusky_kokoro" / "trigger.sh")
         if trigger_sh.exists() and os.access(trigger_sh, os.X_OK):
             try:
                 subprocess.Popen(
@@ -320,7 +322,7 @@ class KokoroEngine(TomlEngine):
                     self.cache[k] = val
 
         # Status telemetry injection
-        pid_file = Path("/tmp/dusky_kokoro.pid")
+        pid_file = self._socket_path().with_name("daemon.pid")
         is_running = False
         status_str = "STOPPED"
         if pid_file.exists():
@@ -335,7 +337,7 @@ class KokoroEngine(TomlEngine):
         if not is_running:
             try:
                 res = subprocess.run(
-                    ["systemctl", "--user", "is-active", "dusky-kokoro.service"],
+                    ["systemctl", "--user", "is-active", "dusky_kokoro.service"],
                     capture_output=True,
                     text=True,
                     timeout=1.0,
@@ -345,7 +347,7 @@ class KokoroEngine(TomlEngine):
                     status_str = "RUNNING (systemd)"
                 else:
                     res_sock = subprocess.run(
-                        ["systemctl", "--user", "is-active", "dusky-kokoro.socket"],
+                        ["systemctl", "--user", "is-active", "dusky_kokoro.socket"],
                         capture_output=True,
                         text=True,
                         timeout=1.0,
@@ -355,14 +357,21 @@ class KokoroEngine(TomlEngine):
             except Exception:
                 pass
 
-        gpu_state = "Unknown"
-        for card_path in [Path("/sys/class/drm/card0/device/power_state"), Path("/sys/class/drm/card1/device/power_state")]:
-            if card_path.exists():
+        provider = str(self.cache.get("engine.provider", "auto"))
+        vendor = {"cuda": "0x10de", "tensorrt": "0x10de", "migraphx": "0x1002", "openvino": "0x8086"}.get(provider)
+        states = []
+        if provider != "cpu":
+            for device in sorted(Path("/sys/class/drm").glob("card[0-9]*/device")):
+                if not re.fullmatch(r"card\d+", device.parent.name):
+                    continue
                 try:
-                    gpu_state = card_path.read_text().strip()
-                    break
+                    if vendor and (device / "vendor").read_text().strip() != vendor:
+                        continue
+                    state = (device / "power_state").read_text().strip()
+                    states.append(f"{device.parent.name}: {state}")
                 except OSError:
                     pass
+        gpu_state = "; ".join(states) or ("Not used (CPU)" if provider == "cpu" else "Unknown")
 
         self.cache["daemon.status"] = status_str
         self.cache["daemon/status"] = status_str

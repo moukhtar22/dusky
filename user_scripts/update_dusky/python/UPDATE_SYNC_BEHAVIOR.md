@@ -1,151 +1,165 @@
-# Dusky Sync & Update Architecture
+# Dusky Updater: Sync Behavior
 
-Reference guide for `update_dusky.py` synchronization mechanics, backup strategies, file restoration algorithms, and `once` execution markers.
+This guide describes [update_dusky.py](update_dusky.py). **Developer** means the
+version published on the selected upstream branch; **user** means local changes
+on the user's machine. Rules below were checked against the code on 2026-10-03;
+this is a behavior reference, not a claim that every case has been run in a VM.
 
----
+## 1. The Main Rule
 
-## 1. Core Mechanics & Repo Layout
+**Developer changes win at the same path. User changes survive when the
+developer's version at that path is unchanged. Conflicting local files are
+backed up, not combined automatically.**
 
-- **Work Tree (`WORK_TREE`)**: `~` ([user_home()](file:///home/dusk/user_scripts/update_dusky/python/update_dusky.py#L89))
-- **Git Directory (`GIT_DIR`)**: `~/dusky` ([L2314](file:///home/dusk/user_scripts/update_dusky/python/update_dusky.py#L2314)) — Bare repository
-- **Upstream Tracking Ref**: `refs/dusky-updater/upstream/<branch>` ([L3368](file:///home/dusk/user_scripts/update_dusky/python/update_dusky.py#L3368))
-
-### The 5 Sync Tasks ([GitEngine.execute_phase: L3367](file:///home/dusk/user_scripts/update_dusky/python/update_dusky.py#L3367))
-
-| Task | Name | Primary Function | Core Action |
-| :---: | :--- | :--- | :--- |
-| **0** | **Bare Repo Validation** | [_get_repo_state](file:///home/dusk/user_scripts/update_dusky/python/update_dusky.py#L2778) | Validates permissions & ownership. Clears stale locks (>60s). Auto-clones if absent. |
-| **1** | **Fetch & Diff** | [_fetch_with_retry](file:///home/dusk/user_scripts/update_dusky/python/update_dusky.py#L2885) | Fetches upstream ref. Evaluates `merge-base` for fast-forward, diverged, or unrelated history. |
-| **2** | **Collision Backup** | [_backup_worktree_collisions](file:///home/dusk/user_scripts/update_dusky/python/update_dusky.py#L2975) | Moves untracked work-tree files colliding with incoming tracked paths to `moved_aside_<ts>`. |
-| **3** | **Atomic Snapshot** | [_capture_tracked_changes](file:///home/dusk/user_scripts/update_dusky/python/update_dusky.py#L3079) | Backs up local tracked edits/deletions (`diff-index HEAD`) to `your_changes_<ts>` with a `MANIFEST.txt`. |
-| **4** | **Reset & Restore** | [_restore_user_modifications](file:///home/dusk/user_scripts/update_dusky/python/update_dusky.py#L3253) | Runs `git reset --hard`, then restores local changes or stages conflicts in `manual_merge_<ts>`. |
-
----
-
-## 2. Sync Pipeline Flow
+“Unchanged” compares the old and new commit's file contents **and Git mode**.
+An executable-bit or file-type change counts as a developer change too.
 
 ```mermaid
 flowchart TD
-    Start(["Start Sync"]) --> T0["Task 0: Validate Repo"]
-    T0 --> T1["Task 1: Fetch Upstream Ref"]
-    
-    T1 --> Compare{"HEAD vs Upstream"}
-    Compare -- "Equal" --> Success(["Sync Complete"])
-    Compare -- "Different" --> MB{"Merge-Base Analysis"}
-    
-    MB -- "Fast-Forward" --> T2["Task 2: Collision Backup"]
-    MB -- "Diverged / Unrelated" --> Flag{"--allow-diverged-reset?"}
-    Flag -- "No" --> Abort(["Abort (Error)"])
-    Flag -- "Yes" --> HistoryBackup["Backup Git Dir (repo_history_*)"] --> T2
-    
-    T2 --> T3["Task 3: Atomic Snapshot"]
-    T3 --> Reset["Task 4: git reset --hard"]
-    Reset --> Restore["_restore_user_modifications"] --> Success
+    Start["Compare old and new developer versions at each path"] --> Changed{"Developer changed this path?"}
+    Changed -- No --> Keep["Keep the user's edit, deletion, or local addition"]
+    Changed -- Yes --> Local{"User also changed this path?"}
+    Local -- No --> Apply["Apply the developer's version or deletion"]
+    Local -- Yes --> Save["Save local contents or deletion intent"]
+    Save --> Apply
 ```
 
----
+## 2. File Conflict Chart
 
-## 3. History Reconciliation & Safety
+These rules apply to local working files during an ordinary update. Locally
+committed changes follow the history rules in section 5.
 
-```mermaid
-graph TD
-    HEAD["Compare HEAD vs Upstream"] --> Match{"Status?"}
-    Match -- "Equal" --> P1["Perfect Match (Skip Sync)"]
-    Match -- "Unborn" --> P2["Bootstrap Init (Hard Reset)"]
-    Match -- "Diverged" --> P3{"Merge-Base Result"}
-    
-    P3 -- "base == local_head" --> FF["Fast-Forward Update"]
-    P3 -- "base != local_head" --> Div["Diverged History (Requires --allow-diverged-reset)"]
-    P3 -- "No common ancestor" --> Unrel["Unrelated History (Requires --allow-diverged-reset)"]
-```
-
-> [!IMPORTANT]
-> **Safety Overrides for Diverged / Unrelated Histories**:
-> - Aborts unless `--allow-diverged-reset` is passed ([L3513](file:///home/dusk/user_scripts/update_dusky/python/update_dusky.py#L3513)).
-> - Preserves bare repo metadata in `repo_history_<timestamp>` ([L3208](file:///home/dusk/user_scripts/update_dusky/python/update_dusky.py#L3208)).
-> - Creates full work-tree snapshot `full_snapshot_<timestamp>` for unrelated histories ([L3157](file:///home/dusk/user_scripts/update_dusky/python/update_dusky.py#L3157)).
-
----
-
-## 4. File Restoration Decision Matrix
-
-Post-reset, [_restore_user_modifications](file:///home/dusk/user_scripts/update_dusky/python/update_dusky.py#L3253) compares pre-reset state `(old_oid, old_mode)` with new upstream state `(new_oid, new_mode)`:
-
-```mermaid
-flowchart TD
-    File["Backed-Up Local File"] --> Status{"Local Status?"}
-    
-    Status -- "Deleted (D)" --> NewOidD{"Upstream Changed?<br/>(new_oid != old_oid)"}
-    NewOidD -- "No (Unchanged)" --> SafeDel["delete-safe: Re-apply Deletion"]
-    NewOidD -- "Yes (Modified)" --> RestUp["delete-restored: Restore Upstream File"]
-    NewOidD -- "Deleted Upstream" --> PresDel["delete-preserved: Stay Deleted"]
-    
-    Status -- "Modified (M)" --> SafeMod{"Upstream Changed?<br/>(new_oid != old_oid)"}
-    SafeMod -- "No (Unchanged / Deleted)" --> RestUser["restore: Re-apply User Edit"]
-    SafeMod -- "Yes (Modified)" --> Merge["merge: Save User Copy to manual_merge_*"]
-```
-
-| Local Status | Upstream State | Action Code | Behavior | Work-Tree Result | Line |
-| :---: | :---: | :---: | :--- | :--- | :---: |
-| **Deleted** | Unchanged | `delete-safe` | Re-applies local deletion | Deleted | [L3293](file:///home/dusk/user_scripts/update_dusky/python/update_dusky.py#L3293) |
-| **Deleted** | Also Deleted | `delete-preserved` | No-op (deleted on both sides) | Deleted | [L3290](file:///home/dusk/user_scripts/update_dusky/python/update_dusky.py#L3290) |
-| **Deleted** | Modified | `delete-restored` | **Upstream wins** (overrides deletion) | Upstream file restored | [L3306](file:///home/dusk/user_scripts/update_dusky/python/update_dusky.py#L3306) |
-| **Modified** | Unchanged | `restore` | Restores local modification | Local edited file | [L3333](file:///home/dusk/user_scripts/update_dusky/python/update_dusky.py#L3333) |
-| **Modified** | Deleted | `restore` | Restores local edit (survives upstream drop) | Local untracked file | [L3285](file:///home/dusk/user_scripts/update_dusky/python/update_dusky.py#L3285) |
-| **Modified** | Modified | `merge` | Upstream in work tree; user copy in `manual_merge_*` | Upstream version | [L3310](file:///home/dusk/user_scripts/update_dusky/python/update_dusky.py#L3310) |
-
----
-
-## 5. Key Edge Cases & Takeaways
-
-> [!WARNING]
-> - **Deletion Resurrection**: If you delete a tracked file locally and upstream modifies it, upstream's version is restored (`delete-restored`).
-> - **Survival Against Upstream Deletion**: If upstream deletes a file you edited locally, your version survives as an untracked file (`restore`).
-
-- **Untracked Local Files**: Ignored by `reset --hard`. If upstream adds a file at the same path, Task 2 moves untracked path to `moved_aside_<timestamp>`.
-- **Local-Only Tracked Files**: Removed by `reset --hard`. Preserved in `full_snapshot_<timestamp>` during unrelated history resets.
-
----
-
-## 6. Backup Storage Strategy
-
-Backups are saved under `~/.local/share/dusky/backups/` ([backups_dir(): L117](file:///home/dusk/user_scripts/update_dusky/python/update_dusky.py#L117)):
-
-| Directory | Created By | Purpose | Retention |
-| :--- | :--- | :--- | :--- |
-| `moved_aside_<ts>` | Task 2 ([L3040](file:///home/dusk/user_scripts/update_dusky/python/update_dusky.py#L3040)) | Untracked work-tree collisions | Permanent |
-| `your_changes_<ts>` | Task 3 ([L3126](file:///home/dusk/user_scripts/update_dusky/python/update_dusky.py#L3126)) | Pre-reset local tracked edits | Removed after restore |
-| `full_snapshot_<ts>` | Task 3 ([L3171](file:///home/dusk/user_scripts/update_dusky/python/update_dusky.py#L3171)) | Full tracked tree snapshot (unrelated history) | Permanent |
-| `repo_history_<ts>` | Task 1 ([L3216](file:///home/dusk/user_scripts/update_dusky/python/update_dusky.py#L3216)) | Copy of `~/dusky` bare repo before diverged reset | Permanent |
-| `manual_merge_<ts>` | Task 4 ([L3313](file:///home/dusk/user_scripts/update_dusky/python/update_dusky.py#L3313)) | User versions conflicting with upstream updates | Permanent |
-
----
-
-## 7. Script Execution Markers (`once` System)
-
-The `OnceStore` class ([L797](file:///home/dusk/user_scripts/update_dusky/python/update_dusky.py#L797)) manages execution state using SQLite at `state_dir() / "once.db"` ([L799](file:///home/dusk/user_scripts/update_dusky/python/update_dusky.py#L799)). Unique marker keys are generated via [OnceStore.make_key](file:///home/dusk/user_scripts/update_dusky/python/update_dusky.py#L896) using a 16-byte `BLAKE2b` digest ([L916](file:///home/dusk/user_scripts/update_dusky/python/update_dusky.py#L916)) over key material (`once`, scope, profile, mode, task name, relative path, args).
-
-```mermaid
-stateDiagram-v2
-    [*] --> Lookup
-    Lookup --> Mode{"once_mode?"}
-    
-    Mode -- "forever" --> Skip["Action: skip (Never re-runs)"]
-    Mode -- "sealed" --> SealedCheck{"Checksum modified?"}
-    SealedCheck -- "No" --> Skip
-    SealedCheck -- "Yes" --> Notify["Action: notify_sealed (Warn & Skip)"]
-    
-    Mode -- "content (default)" --> ContentCheck{"Checksum matches?"}
-    ContentCheck -- "Match" --> Skip
-    ContentCheck -- "Changed" --> Run["Action: run (Re-executes)"]
-```
-
----
-
-## 8. CLI Flags Summary
-
-| Flag / Setting | Scope | Effect |
+| Developer action | User action | After updating |
 | :--- | :--- | :--- |
-| `--allow-diverged-reset` | Sync Phase | Allows hard reset on diverged or unrelated history ([L3513](file:///home/dusk/user_scripts/update_dusky/python/update_dusky.py#L3513)). |
-| `--skip-sync` | Entrypoint | Bypasses `GitEngine.execute_phase` completely. |
-| `status.showUntrackedFiles` | Git Config | Set to `no` automatically by `_ensure_repo_defaults()` ([L2860](file:///home/dusk/user_scripts/update_dusky/python/update_dusky.py#L2860)). |
+| Edit a file | Leave it unchanged | Developer's whole file replaces it |
+| Delete a file | Leave it unchanged | File is deleted |
+| Edit a file | Edit the same file | Developer's whole file wins; user's copy is backed up |
+| Delete a file | Edit the same file | File stays deleted; user's copy is backed up |
+| Edit a file | Delete the same file | Developer's file returns; prior deletion is recorded |
+| Delete a file | Delete the same file | File remains deleted |
+| Add a file | Already have a local file at that path | Local file is backed up; developer's file wins |
+| Leave a file unchanged | Edit it | User's edit survives |
+| Leave a file unchanged | Delete it | User's deletion survives |
+| Do not add a path | Add a local file there | User's file survives |
+| Rename `A` to `B` | Edit `A` | User's `A` is backed up; developer's `B` is installed |
+| Add a file or directory tree | Have an obstructing local file, directory, or symlink | Obstructing local paths are moved to backup before checkout |
+
+A developer file reintroduced after a previous deletion is a new incoming file;
+a past user deletion is not a permanent “never restore this filename” setting.
+Unrelated local files are left alone unless they obstruct incoming paths.
+
+## 3. Renames: Paths, Not File Identity
+
+The updater captures local changes with rename detection disabled. It treats a
+rename as **delete the old path + add the new path**, rather than following a
+file's identity across names. This can leave two files after an update.
+
+| Developer action | User action | After updating |
+| :--- | :--- | :--- |
+| Leave `A` unchanged | Rename `A` to `B` | `A` stays deleted; user's `B` remains |
+| Edit `A` | Rename `A` to `B` | Developer's `A` returns; user's `B` remains |
+| Delete `A` | Rename `A` to `B` | `A` stays deleted; user's `B` remains |
+| Rename `A` to `C` | Rename `A` to `B` | Developer's `C` and user's `B` can both remain |
+| Rename `A` to `B` | Already have a local `B` | Local `B` is backed up; developer's `B` wins |
+
+Examples assume `B` and `C` are otherwise unrelated, unobstructed paths.
+Staged renames also follow the staging rule below.
+
+```mermaid
+flowchart LR
+    Before["User renames A to B"] --> Update["Developer edits A"]
+    Update --> After["After update: developer's A + user's B"]
+```
+
+**Limitation:** developer-wins is a rule for matching paths. It does not remove
+or replace a user's renamed copy at a different, untouched path.
+
+## 4. Backups and Staging
+
+Default location: `~/Documents/dusky_backups/` for the target user. Configure it
+with `paths.documents_dir` and `paths.backups_subdir`. `<ts>` means a timestamp.
+
+| Backup directory | What it contains |
+| :--- | :--- |
+| `your_changes_<ts>` | Local working files in `payload/`; deletion records, staged contents and recovery status in `.meta/` |
+| `manual_merge_<ts>` | User versions displaced by developer edits or deletions; restore manually if wanted |
+| `moved_aside_<ts>` | Local paths that obstructed incoming files, stored in `payload/` |
+| `repo_history_<ts>` | Bare Git repository before an explicitly allowed history reset |
+| `full_snapshot_<ts>` | Full tracked-tree backup before replacing unrelated history |
+
+**Staged changes are saved, but staging is not automatically reapplied after a
+reset.** The working file and staged version can differ; staged contents and
+mode/deletion records are retained for manual recovery in `.meta/`.
+If no reset is needed because the commits already match, staging stays intact.
+
+Completed `your_changes_*` backups are kept until retention cleanup, normally
+**14 days**. `paths.backup_retention_days = 0` disables that cleanup. Conflicts,
+staged recovery, collisions, history backups and full snapshots are not
+expired automatically.
+
+Successful sync can still leave local conflicts requiring attention. Check the
+warnings and `.meta/RESTORE_RESULT.txt` / `.meta/STATUS` in the local-change backup.
+“Manual merge” is a backup name, not an automatic content merge.
+
+## 5. Update Flow and History
+
+The work tree defaults to the target user's home; the bare Git repository defaults
+to `~/dusky`. Override them with `DUSKY_WORK_TREE` and `DUSKY_GIT_DIR`.
+
+```mermaid
+flowchart TD
+    Start["Recover interrupted sync; validate repository"] --> Fetch["Fetch selected branch and fix target commit"]
+    Fetch --> History{"History allows update?"}
+    History -- No --> Stop["Stop; explicit history override required"]
+    History -- Yes --> Equal{"Already at target commit?"}
+    Equal -- Yes --> Keep["Keep local files and index; no reset"]
+    Equal -- No --> Backup["Back up collisions, local files, and staged changes"]
+    Backup --> Check["Recheck captured state; abort if it changed"]
+    Check --> Reset["Reset to target commit"]
+    Reset --> Restore["Restore safe local changes; retain conflict backups"]
+```
+
+| Repository history | Behavior |
+| :--- | :--- |
+| Same commit | No reset; local files and staging remain in place |
+| Fast-forward update | Back up, apply developer version, then restore safe local changes |
+| Local commits ahead, diverged, or unrelated | Stop unless `--allow-diverged-reset` is supplied; preserve repository history first |
+| Unrelated history with override | Also take a full tracked-tree snapshot |
+| Missing repository or no initial commit | Back up collisions and initialize; ordinary tracked-edit restoration does not apply |
+
+Existing Git locks and in-progress Git operations stop sync. Git listing failures
+abort instead of being treated as “nothing to back up.” A transaction journal
+tracks interrupted work for recovery before another fetch. Filesystem recovery
+is not a blanket guarantee that every task or entire update will be rolled back.
+
+## 6. Options and Recovery
+
+| Option | Effect |
+| :--- | :--- |
+| `--sync-only` | Sync files without running the profile's ordinary tasks |
+| `--skip-sync` | Skip ordinary Git sync; invalid restart handoff can still require recovery sync |
+| `--allow-diverged-reset` | Permit the history replacement described above |
+| `execution.validate_subscript_syntax` | Optional task-script syntax checks; **off by default** |
+
+`--sync-only` and `--skip-sync` cannot be combined. When syntax checking is enabled,
+invalid task scripts remain on disk but their tasks are blocked with warnings.
+The checker does not replace them with older scripts. Updater/profile/settings
+activation checks are separate and still apply when task-script checks are off.
+
+When updater, profile, or settings changes require a restart, a validated handoff
+passes update state and the operation lock to the replacement process.
+When launched through [update_dusky_supervisor.py](update_dusky_supervisor.py), a
+candidate that fails before its startup-health checkpoint can be replaced with
+a previously recorded known-good bundle. Ordinary task failures after that
+checkpoint do not trigger this rollback. Direct Python launches do not provide
+that external supervisor recovery.
+
+Tasks with `once` markers follow their configured mode:
+
+| Mode | When the task runs again |
+| :--- | :--- |
+| `content` (default) | Its checksum changes, or no successful marker exists |
+| `forever` | Only when no successful marker exists |
+| `sealed` | Only when no successful marker exists; content changes produce a notification instead |
+
+A marker read error is reported as an error, not treated as a missing marker.

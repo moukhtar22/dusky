@@ -444,37 +444,10 @@ hl.window_rule({
     center = true
 })
 
---- file_manager_switcher ---
+--- Default Applications ---
 hl.window_rule({
-    name = "file_manager_switcher",
-    match = { class = "^(235_file_manager_switch.sh)$" },
-    float = true,
-    size = {634, 445},
-    center = true
-})
-
---- 236_browser_switcher.sh ---
-hl.window_rule({
-    name = "236_browser_switcher.sh",
-    match = { class = "^(236_browser_switcher.sh)$" },
-    float = true,
-    size = {634, 445},
-    center = true
-})
-
---- 237_text_editer_switcher.sh ---
-hl.window_rule({
-    name = "237_text_editer_switcher.sh",
-    match = { class = "^(237_text_editer_switcher.sh)$" },
-    float = true,
-    size = {634, 445},
-    center = true
-})
-
---- 238_terminal_switcher.sh ---
-hl.window_rule({
-    name = "238_terminal_switcher.sh",
-    match = { class = "^(238_terminal_switcher.sh)$" },
+    name = "default_apps_switcher",
+    match = { class = "^235_default_apps[.]py$" },
     float = true,
     size = {634, 445},
     center = true
@@ -933,14 +906,6 @@ hl.window_rule({
     size = {979, 642}
 })
 
---- dusky_power.sh script ---
-hl.window_rule({
-    name = "dusky_power.sh",
-    match = { class = "^(dusky_power.sh)$" },
-    float = true,
-    size = {790, 530},
-    center = true
-})
 
 --- dusky_battery_tui.sh ---
 hl.window_rule({
@@ -1479,7 +1444,7 @@ hl.window_rule({
     name = "music_recognition.py",
     match = { class = "^(music_recognition.py)$" },
     float = true,
-    size = {614, 253}, -- set absolute window size in pixels
+    size = {614, 353}, -- set absolute window size in pixels
     center = true
 })
 
@@ -1513,7 +1478,7 @@ hl.window_rule({
 })
 
 
---- Dusky Wallpaper Selector---
+--- Dusky Wallpaper Selector (Legacy Python GTK) ---
 hl.window_rule({
     name = "wallpaper_selectorpy",
     match = {
@@ -1524,6 +1489,15 @@ hl.window_rule({
     -- size = {"monitor_w * 0.49", "monitor_h * 0.6144"},
 
     animation = "popin 60%",      -- scale in starting from 60% size
+})
+
+--- Dusky Papers ---
+hl.layer_rule({
+    name = "dusky_papers",
+    match = { namespace = "dusky-papers" },
+    blur = true,
+    xray = false, -- Blur the windows underneath, rather than only the wallpaper.
+    ignore_alpha = 0.0
 })
 
 

@@ -10,14 +10,16 @@ ConditionEnvironment=XDG_RUNTIME_DIR
 Type=notify
 NotifyAccess=main
 WorkingDirectory=%h/.local/lib/dusky-stt
-ExecStartPre=%h/.local/lib/dusky-stt/.venv-main/bin/python %h/.local/lib/dusky-stt/dusky_main.py --config %h/.local/lib/dusky-stt/config.json --check-cpu-isolation
-ExecStart=%h/.local/lib/dusky-stt/.venv-main/bin/python %h/.local/lib/dusky-stt/dusky_main.py --config %h/.local/lib/dusky-stt/config.json
+ExecStartPre="%h/.local/lib/dusky-stt/.venv-main/bin/python" "%h/.local/lib/dusky-stt/dusky_main.py" --config "%h/.local/lib/dusky-stt/config.json" --check-cpu-isolation
+ExecStart="%h/.local/lib/dusky-stt/.venv-main/bin/python" "%h/.local/lib/dusky-stt/dusky_main.py" --config "%h/.local/lib/dusky-stt/config.json"
 Environment=CUDA_VISIBLE_DEVICES=-1
 Environment=PYTHONUNBUFFERED=1
 Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=PYTHONNOUSERSITE=1
 Environment=HF_HOME=%h/.cache/huggingface
 Environment=HF_HUB_OFFLINE=1
+Environment=TMPDIR=%t/dusky-stt
+Environment=ORT_DISABLE_TELEMETRY=1
 RuntimeDirectory=dusky-stt
 RuntimeDirectoryMode=0700
 StateDirectory=dusky-stt
@@ -39,9 +41,8 @@ LimitNOFILE=8192
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=%h/.local/state/dusky-stt %h/.cache/huggingface %h/.local/share/dusky-stt
-ReadOnlyPaths=%h/.local/lib/dusky-stt
-PrivateTmp=yes
+ReadWritePaths="%h/.local/state/dusky-stt"
+ReadOnlyPaths="%h/.local/lib/dusky-stt"
 ProtectProc=invisible
 ProtectClock=yes
 ProtectKernelTunables=yes
@@ -57,7 +58,7 @@ RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_INET AF_INET6
 # NOTE: no IPAddressAllow/Deny here on purpose: user units run without the
 # privilege to program the IP firewall (log shows "unit configures an IP
 # firewall, but not running as root"). AF_UNIX+NETLINK+INET via
-# RestrictAddressFamilies plus localhost-only Ollama use is the enforceable part.
+# RestrictAddressFamilies is enforced without that privilege.
 # NVRTC JIT needs WX pages; PipeWire needs RTKit priority.
 MemoryDenyWriteExecute=no
 RestrictRealtime=no

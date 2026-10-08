@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import signal
 import sys
 from pathlib import Path
 
@@ -66,20 +67,11 @@ def read_text(path: Path) -> str:
 
 
 def present_cpus() -> set[int]:
-    try:
-        return set(parse_cpu_list(read_text(SYS_CPU / "present")))
-    except HelperError:
-        return set()
+    return set(parse_cpu_list(read_text(SYS_CPU / "present")))
 
 
 def online_cpus() -> set[int]:
-    raw = read_text(SYS_CPU / "online")
-    if not raw:
-        return present_cpus()
-    try:
-        return set(parse_cpu_list(raw))
-    except HelperError:
-        return present_cpus()
+    return set(parse_cpu_list(read_text(SYS_CPU / "online")))
 
 
 def is_hotpluggable(cpu: int) -> bool:
@@ -108,27 +100,38 @@ def apply(cpus: list[int], want_online: bool) -> None:
     if want_online:
         pending = [c for c in cpus if c not in current]
     else:
-        targeted = {c for c in cpus if c in current and is_hotpluggable(c)}
+        locked = [c for c in cpus if c == 0 or not is_hotpluggable(c)]
+        if locked:
+            raise HelperError(f"CPUs cannot be offlined: {locked}")
+        targeted = set(cpus) & current
         remaining = current - targeted
         if not remaining:
             raise HelperError("refusing to offline the last remaining online CPU")
-        if len(targeted) * 2 > len(current):
-            raise HelperError(
-                f"refusing mass-offline: request would take {len(targeted)} of "
-                f"{len(current)} online CPUs down; this helper only restores "
-                "small launch subsets"
-            )
+        for unit in ("user.slice", "system.slice"):
+            path = Path("/sys/fs/cgroup") / unit / "cpuset.cpus"
+            if path.exists() and (raw := read_text(path)):
+                allowed = set(parse_cpu_list(raw)) & current
+                if allowed and not allowed - targeted:
+                    raise HelperError(f"request removes every online CPU allowed by {unit}")
         pending = sorted(targeted)
 
-    for cpu in pending:
-        if not want_online and not is_hotpluggable(cpu):
-            raise HelperError(f"CPU{cpu} is not hotpluggable")
-        write_online_state(cpu, "1" if want_online else "0")
-
-    final = online_cpus()
-    failed = [c for c in cpus if (c in final) != want_online]
-    if failed:
-        raise HelperError(f"kernel did not honour hotplug for CPUs {failed}")
+    try:
+        for cpu in pending:
+            write_online_state(cpu, "1" if want_online else "0")
+        final = online_cpus()
+        failed = [c for c in cpus if (c in final) != want_online]
+        if failed:
+            raise HelperError(f"kernel did not honour hotplug for CPUs {failed}")
+    except (HelperError, KeyboardInterrupt) as exc:
+        rollback_errors = []
+        for cpu in reversed(pending):
+            try:
+                write_online_state(cpu, "1" if cpu in current else "0")
+            except HelperError as rollback_exc:
+                rollback_errors.append(str(rollback_exc))
+        if rollback_errors:
+            raise HelperError(f"{exc}; rollback failed: {'; '.join(rollback_errors)}") from exc
+        raise
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -145,11 +148,38 @@ def main(argv: list[str] | None = None) -> int:
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--online", metavar="CPULIST", help="bring CPUs online")
     group.add_argument("--offline", metavar="CPULIST", help="take CPUs offline")
+    group.add_argument("--hold-online", metavar="CPULIST",
+                       help="online CPUs until stdin closes, then restore their original state")
     args = parser.parse_args(argv)
 
     try:
-        selection = parse_cpu_list(args.online if args.online is not None else args.offline)
-        apply(selection, want_online=args.online is not None)
+        if args.hold_online is not None:
+            selection = parse_cpu_list(args.hold_online)
+            # Finish sudo's foreground command before holding CPUs. Its monitor
+            # otherwise forwards terminal hangup as SIGTERM to this helper.
+            try:
+                if os.fork() > 0:
+                    return 0
+                os.setsid()
+            except OSError as exc:
+                raise HelperError(f"cannot detach hotplug holder: {exc}") from exc
+            restore = sorted(set(selection) - online_cpus())
+            def interrupted(_signum: int, _frame: object) -> None:
+                raise KeyboardInterrupt
+            signal.signal(signal.SIGTERM, interrupted)
+            signal.signal(signal.SIGHUP, signal.SIG_IGN)
+            signal.signal(signal.SIGINT, signal.SIG_IGN)
+            apply(selection, want_online=True)
+            try:
+                print("READY", flush=True)
+                while sys.stdin.buffer.read(1):
+                    pass
+            finally:
+                apply(restore, want_online=False)
+                print("RESTORED", flush=True)
+        else:
+            selection = parse_cpu_list(args.online if args.online is not None else args.offline)
+            apply(selection, want_online=args.online is not None)
     except HelperError as exc:
         print(f"core_helper: {exc}", file=sys.stderr)
         return 1

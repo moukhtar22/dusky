@@ -1,0 +1,13 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Dusky Firewall
+GenericName=Firewall & Security Manager
+Comment=Manage UFW firewall rules, open/closed ports, connections, NAT and domain whitelists (TUI)
+Exec=foot --app-id=dusky_tui python3 /home/dusk/user_scripts/network_manager/tui_firewall.py
+Icon=security-high
+Terminal=false
+Categories=Network;Security;Settings;System;Utility;
+Keywords=dusky;firewall;ufw;ports;security;iptables;nftables;network;rule;nat;block;allow;tui;
+StartupNotify=true
+StartupWMClass=dusky_tui

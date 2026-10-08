@@ -105,18 +105,14 @@ def main() -> None:
             print(f"Warning: Failed to set directory ownership: {e}")
 
     default_config = f"""; Looking Glass Client Configuration
-; Tailored for Hyprland / Wayland / Kernel 7.1.8 / Aug 2026
+; Tailored for Hyprland / Wayland / Looking Glass B7+
 
-[app]
-shmFile={shm_file}
+[lgmp]
+shmDevice={shm_file}
 allowDMA=yes
-renderer=opengl
 
-[opengl]
+[egl]
 vsync=no
-preventBuffer=yes
-mipmap=yes
-amdPinnedMem=yes
 
 [wayland]
 fractionScale=no
@@ -130,13 +126,14 @@ noScreensaver=yes
 borderless=yes
 
 [input]
-escapeKey=64
+escapeKey=KEY_F6
 rawMouse=yes
 hideCursor=yes
 
 [spice]
 enable=yes
 clipboard=yes
+audio=yes
 """
 
     if not config_file.exists():
@@ -150,7 +147,7 @@ clipboard=yes
 
     # Parse and ensure required keys
     lines = content.splitlines()
-    has_app = False
+    has_lgmp = False
     has_shm = False
     has_spice_section = False
     has_enable = False
@@ -160,18 +157,16 @@ clipboard=yes
         stripped = line.strip()
         if stripped.startswith("[") and stripped.endswith("]"):
             current_section = stripped[1:-1].lower()
-            if current_section == "app":
-                has_app = True
+            if current_section in ("lgmp", "app"):
+                has_lgmp = True
             if current_section == "spice":
                 has_spice_section = True
-        elif current_section == "app" and "=" in stripped:
+        elif current_section in ("lgmp", "app") and "=" in stripped:
             key = stripped.split("=", 1)[0].strip().lower()
-            if key == "shmfile":
-                has_shm = True
-                # Validate value; if wrong, we'll fix below
+            if key in ("shmdevice", "shmfile"):
                 val = stripped.split("=", 1)[1].strip()
-                if val != shm_file:
-                    has_shm = False
+                if val == shm_file:
+                    has_shm = True
         elif current_section == "spice" and "=" in stripped:
             key = stripped.split("=", 1)[0].strip().lower()
             val = stripped.split("=", 1)[1].strip().lower() if "=" in stripped else ""
@@ -182,25 +177,24 @@ clipboard=yes
 
     # If all correct, nothing to do
     if has_shm and has_spice_section and has_enable and has_clipboard:
-        print("SPICE clipboard and shmFile settings are already correctly configured in client.ini.")
+        print("SPICE clipboard and shmDevice settings are already correctly configured in client.ini.")
         return
 
-    # Rebuild with fixes: ensure shmFile correct, ensure spice section correct
-    # Use simple line-based patch to preserve comments/formatting where possible
+    # Rebuild with fixes: ensure shmDevice correct, ensure spice section correct
     new_lines: list[str] = []
-    in_app = False
+    in_lgmp = False
     in_spice = False
     injected_shm = has_shm
     injected_enable = has_enable
     injected_clipboard = has_clipboard
-    found_app = False
+    found_lgmp = False
 
     for line in lines:
         stripped = line.strip()
         if stripped.startswith("[") and stripped.endswith("]"):
             # Close previous sections: inject missing keys before leaving section
-            if in_app and not injected_shm:
-                new_lines.append(f"shmFile={shm_file}")
+            if in_lgmp and not injected_shm:
+                new_lines.append(f"shmDevice={shm_file}")
                 injected_shm = True
             if in_spice:
                 if not injected_enable:
@@ -209,18 +203,18 @@ clipboard=yes
                 if not injected_clipboard:
                     new_lines.append("clipboard=yes")
                     injected_clipboard = True
-            in_app = stripped[1:-1].lower() == "app"
+            in_lgmp = stripped[1:-1].lower() in ("lgmp", "app")
             in_spice = stripped[1:-1].lower() == "spice"
-            if in_app:
-                found_app = True
+            if in_lgmp:
+                found_lgmp = True
             new_lines.append(line)
             continue
 
-        if in_app and "=" in stripped:
+        if in_lgmp and "=" in stripped:
             key = stripped.split("=", 1)[0].strip().lower()
-            if key == "shmfile":
-                if stripped.split("=", 1)[1].strip() != shm_file:
-                    new_lines.append(f"shmFile={shm_file}")
+            if key in ("shmdevice", "shmfile"):
+                if stripped.split("=", 1)[1].strip() != shm_file or key == "shmfile":
+                    new_lines.append(f"shmDevice={shm_file}")
                     injected_shm = True
                 else:
                     new_lines.append(line)
@@ -239,24 +233,23 @@ clipboard=yes
         new_lines.append(line)
 
     # Handle files that ended inside a section without closing
-    if in_app and not injected_shm:
-        new_lines.append(f"shmFile={shm_file}")
+    if in_lgmp and not injected_shm:
+        new_lines.append(f"shmDevice={shm_file}")
     if in_spice:
         if not injected_enable:
             new_lines.append("enable=yes")
         if not injected_clipboard:
             new_lines.append("clipboard=yes")
 
-    # Ensure [app] exists at all (legacy file without app section)
-    if not found_app:
-        # Prepend app section at top (after initial comments)
+    # Ensure [lgmp] exists at all
+    if not found_lgmp:
         insert_at = 0
         for i, l in enumerate(new_lines):
             if l.strip().startswith("["):
                 insert_at = i
                 break
-        new_lines.insert(insert_at, f"shmFile={shm_file}")
-        new_lines.insert(insert_at, "[app]")
+        new_lines.insert(insert_at, f"shmDevice={shm_file}")
+        new_lines.insert(insert_at, "[lgmp]")
 
     # Ensure [spice] exists
     if not has_spice_section:
@@ -265,12 +258,13 @@ clipboard=yes
         new_lines.append("[spice]")
         new_lines.append("enable=yes")
         new_lines.append("clipboard=yes")
+        new_lines.append("audio=yes")
     elif not has_enable or not has_clipboard:
         print("Updating parameters in [spice] section...")
 
-    # Also ensure shmFile fix is reported
+    # Also ensure shmDevice fix is reported
     if not has_shm:
-        print(f"Updating shmFile to {shm_file}...")
+        print(f"Updating shmDevice to {shm_file}...")
 
     new_content = "\n".join(new_lines) + "\n"
     # Normalize consecutive blank lines

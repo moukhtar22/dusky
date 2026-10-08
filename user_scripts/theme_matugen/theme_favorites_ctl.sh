@@ -1,258 +1,172 @@
 #!/usr/bin/env bash
 set -euo pipefail
-# ---------------- CONFIG ----------------
 
-WALL_DIR="$HOME/Pictures/wallpapers/active_theme"
-STATE_DIR="$HOME/.config/dusky/settings/dusky_theme"
-FAV_FILE="$STATE_DIR/favorites.list"
-CACHE_FILE="$STATE_DIR/current_wallpaper.cache"
-INDEX_FILE="$STATE_DIR/favorites.index"
+readonly WALL_DIR="$HOME/Pictures/wallpapers/active_theme"
+readonly STATE_DIR="$HOME/.config/dusky/settings/dusky_theme"
+readonly FAV_FILE="$STATE_DIR/favorites.list"
+readonly CACHE_FILE="$STATE_DIR/current_wallpaper.cache"
+readonly INDEX_FILE="$STATE_DIR/favorites.index"
+readonly CURRENT_IMAGE_FILE="$STATE_DIR/current_image"
+readonly THEME_CTL="$HOME/user_scripts/theme_matugen/theme_ctl.sh"
 
-THEME_CTL="$HOME/user_scripts/theme_matugen/theme_ctl.sh"
+_TEMP_FILE=""
+trap '[[ -z "$_TEMP_FILE" ]] || rm -f -- "$_TEMP_FILE"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
 
-mkdir -p "$STATE_DIR"
-touch "$FAV_FILE" "$CACHE_FILE" "$INDEX_FILE"
+notify() {
+  if command -v notify-send >/dev/null 2>&1; then
+    notify-send "Favorites" "$1" || :
+  else
+    printf '%s\n' "$1" >&2
+  fi
+}
 
-# ---------------- DEPENDENCY CHECK ----------------
-
-if ! command -v awww >/dev/null 2>&1; then
-  notify-send "Favorites" "awww not installed"
-  exit 1
-fi
-
-if ! command -v notify-send >/dev/null 2>&1; then
-  echo "notify-send missing"
-  exit 1
-fi
-
-# ---------------- UTIL ----------------
-
-normalize() {
-  echo "$1" | tr -d '\r' | xargs
+save_file() {
+  local destination="$1"
+  shift
+  _TEMP_FILE=$(mktemp "$STATE_DIR/favorites.tmp.XXXXXX")
+  if (( $# )); then
+    printf '%s\n' "$@" >"$_TEMP_FILE"
+  fi
+  mv -fT -- "$_TEMP_FILE" "$destination"
+  _TEMP_FILE=""
 }
 
 get_current_wallpaper() {
-
-  local img=""
-
-  img=$(awww query 2>/dev/null | sed -n 's/.*image: //p')
-
-  if [[ -n "$img" && -f "$img" ]]; then
-    echo "$img" >"$CACHE_FILE"
-    echo "$img"
-    return
-  fi
-
-  if [[ -s "$CACHE_FILE" ]]; then
-    cat "$CACHE_FILE"
-    return
-  fi
-
-  echo ""
-}
-
-# silent flag supported
-apply_wallpaper() {
-
-  local img="$1"
-  local silent="${2:-0}"
-
-  [[ -f "$img" ]] || {
-    notify-send "Favorites" "Wallpaper missing: $(basename "$img")"
-    exit 1
-  }
-
-  echo "$img" >"$CACHE_FILE"
-
-  if [[ -x "$THEME_CTL" ]]; then
-    "$THEME_CTL" set "$img" 2>/dev/null || awww img "$img"
-  else
-    awww img "$img"
-  fi
-
-  if [[ "$silent" != "1" ]]; then
-    notify-send "Favorites" "Applied: $(basename "$img")"
-  fi
-}
-
-# ---------------- FAVORITE STATUS ----------------
-
-find_position() {
-
-  local target="$1"
-  mapfile -t favs <"$FAV_FILE"
-
-  for i in "${!favs[@]}"; do
-    if [[ "${favs[$i]}" == "$target" ]]; then
-      echo "$((i + 1)) ${#favs[@]}"
-      return
+  local output line current=""
+  local -a record=()
+  # Match the controller's first-image policy on multiple monitors.
+  if output=$(timeout -k 1s 2s awww query 2>/dev/null); then
+    while IFS= read -r line; do
+      if [[ "$line" == *"currently displaying: image: "* ]]; then
+        current="${line#*"currently displaying: image: "}"
+        break
+      fi
+    done <<<"$output"
+    if [[ -z "$current" ]]; then
+      notify "No wallpaper image detected"
+      return 1
     fi
-  done
-
-  echo "0 ${#favs[@]}"
+    # A mode-directory swap can move the source while awww keeps its old path.
+    if [[ -f "$CURRENT_IMAGE_FILE" ]]; then
+      mapfile -d '' -t record <"$CURRENT_IMAGE_FILE"
+      if (( ${#record[@]} == 2 )) && [[ "${record[0]}" == "$current" ]]; then
+        current="${record[1]}"
+      fi
+    fi
+  elif [[ -s "$CACHE_FILE" ]]; then
+    current=$(<"$CACHE_FILE")
+  fi
+  if [[ "$current" != /* || ! -f "$current" || "$current" == *$'\n'* ]]; then
+    notify "No valid wallpaper detected"
+    return 1
+  fi
+  save_file "$CACHE_FILE" "$current"
+  printf '%s\n' "$current"
 }
 
-# ---------------- ADD ----------------
+wallpaper_id() {
+  # Preserve whitespace and nested paths; external images keep absolute paths.
+  if [[ "$1" == "$WALL_DIR/"* ]]; then
+    printf '%s\n' "${1#"$WALL_DIR"/}"
+  else
+    printf '%s\n' "$1"
+  fi
+}
+
+load_favorites() {
+  favs=()
+  [[ ! -f "$FAV_FILE" ]] || mapfile -t favs <"$FAV_FILE"
+}
 
 add_favorite() {
-
-  local name="$1"
-
-  read -r pos total <<<"$(find_position "$name")"
-
-  if ((pos > 0)); then
-
-    notify-send "Favorites" \
-      "Already favorite: $name\nPosition: $pos / $total"
-
-    return
-  fi
-
-  echo "$name" >>"$FAV_FILE"
-  sort -u "$FAV_FILE" -o "$FAV_FILE"
-
-  read -r pos total <<<"$(find_position "$name")"
-
-  notify-send "Favorites" \
-    "Added favorite: $name\nPosition: $pos / $total"
+  local name="$1" item
+  local -a favs=()
+  load_favorites
+  for item in "${favs[@]}"; do
+    if [[ "$item" == "$name" ]]; then
+      notify "Already favorite: $name"
+      return 0
+    fi
+  done
+  favs+=("$name")
+  save_file "$FAV_FILE" "${favs[@]}"
+  notify "Added favorite: $name"
 }
-
-# ---------------- REMOVE ----------------
 
 remove_favorite() {
-
-  local name="$1"
-
-  read -r pos total <<<"$(find_position "$name")"
-
-  if ((pos == 0)); then
-
-    notify-send "Favorites" \
-      "Not in favorites: $name"
-
-    return
+  local name="$1" item
+  local -a favs=() kept=()
+  load_favorites
+  for item in "${favs[@]}"; do
+    [[ "$item" == "$name" ]] || kept+=("$item")
+  done
+  if (( ${#kept[@]} == ${#favs[@]} )); then
+    notify "Not in favorites: $name"
+    return 0
   fi
-
-  grep -Fxv "$name" "$FAV_FILE" >"$FAV_FILE.tmp"
-  mv "$FAV_FILE.tmp" "$FAV_FILE"
-
-  notify-send "Favorites" \
-    "Removed favorite: $name"
+  save_file "$FAV_FILE" "${kept[@]}"
+  notify "Removed favorite: $name"
 }
-
-# ---------------- TOGGLE ----------------
-
-toggle_favorite() {
-
-  local current
-  current=$(get_current_wallpaper)
-
-  [[ -z "$current" ]] && {
-    notify-send "Favorites" "No wallpaper detected"
-    exit 1
-  }
-
-  local name
-  name=$(normalize "$(basename "$current")")
-
-  add_favorite "$name"
-}
-
-# ---------------- DELETE CURRENT ----------------
-
-delete_current() {
-
-  local current
-  current=$(get_current_wallpaper)
-
-  [[ -z "$current" ]] && {
-    notify-send "Favorites" "No wallpaper detected"
-    exit 1
-  }
-
-  local name
-  name=$(normalize "$(basename "$current")")
-
-  remove_favorite "$name"
-}
-
-# ---------------- CYCLE ----------------
 
 cycle_favorite() {
-
-  mapfile -t favs <"$FAV_FILE"
-  local total=${#favs[@]}
-
-  if ((total == 0)); then
-    notify-send "Favorites" "No favorites saved"
-    exit 0
+  local index="" next full
+  local -i start=0 offset selected total
+  local -a favs=()
+  load_favorites
+  total=${#favs[@]}
+  if (( total == 0 )); then
+    notify "No favorites saved"
+    return 0
   fi
-
-  local index=0
-
   if [[ -s "$INDEX_FILE" ]]; then
-    index=$(cat "$INDEX_FILE" 2>/dev/null || echo 0)
-    [[ "$index" =~ ^[0-9]+$ ]] || index=0
+    index=$(<"$INDEX_FILE")
+    index="${index#"${index%%[!0]*}"}"
+    index="${index:-0}"
+    if [[ "$index" =~ ^[0-9]{1,9}$ ]]; then
+      start=$(( (10#$index + 1) % total ))
+    fi
   fi
-
-  index=$(((index + 1) % total))
-  echo "$index" >"$INDEX_FILE"
-
-  local next="${favs[$index]}"
-  local full="$WALL_DIR/$next"
-
-  [[ -f "$full" ]] || {
-    notify-send "Favorites" "Missing file: $next"
-    exit 1
-  }
-
-  apply_wallpaper "$full" 1
-
-  notify-send "Favorites" \
-    "Favorite: $next\nPosition: $((index + 1)) / $total"
+  for (( offset=0; offset<total; offset++ )); do
+    selected=$(( (start + offset) % total ))
+    next="${favs[selected]}"
+    [[ -n "$next" ]] || continue
+    if [[ "$next" == /* ]]; then full="$next"; else full="$WALL_DIR/$next"; fi
+    [[ -f "$full" ]] || continue
+    # Never mask a palette/controller failure with a wallpaper-only success.
+    if [[ -x "$THEME_CTL" ]]; then
+      "$THEME_CTL" set "$full"
+    else
+      awww img "$full"
+    fi
+    save_file "$CACHE_FILE" "$full"
+    save_file "$INDEX_FILE" "$selected"
+    notify "Favorite: $next"$'\n'"Position: $((selected + 1)) / $total"
+    return 0
+  done
+  notify "No saved favorite files are available"
+  return 1
 }
-
-# ---------------- LIST ----------------
-
-list_favorites() {
-
-  notify-send "Favorites location" "$FAV_FILE"
-  cat "$FAV_FILE"
-}
-
-# ---------------- ENTRY ----------------
 
 case "${1:-}" in
-
-toggle)
-  toggle_favorite
-  ;;
-
-remove)
-  delete_current
-  ;;
-
-cycle)
-  cycle_favorite
-  ;;
-
-list)
-  list_favorites
-  ;;
-
-*)
-  echo "Usage:"
-  echo "  toggle  - add current wallpaper"
-  echo "  remove  - remove current wallpaper"
-  echo "  cycle   - cycle favorites"
-  echo "  list    - show favorites"
-  ;;
+  toggle|remove|cycle|list) ;;
+  *)
+    printf 'Usage: %s {toggle|remove|cycle|list}\n' "${0##*/}"
+    printf '  toggle adds the current image; remove deletes its favorite entry.\n'
+    exit 1
+    ;;
 esac
+(( $# == 1 )) || { printf 'Unexpected arguments\n' >&2; exit 1; }
+mkdir -p -- "$STATE_DIR"
 
-# bindd = $mainMod, H, Add Favorite, exec, dusky-run -- $user_scripts/theme_matugen/theme_favorites_ctl.sh toggle
-#
-# bindd = $mainMod SHIFT, apostrophe, Cycle Favorite, exec, dusky-run -- $user_scripts/theme_matugen/theme_favorites_ctl.sh cycle
-#
-# bindd = $mainMod SHIFT, D, Remove Favorite, exec, dusky-run -- $user_scripts/theme_matugen/theme_favorites_ctl.sh remove
-#
-# bind = SUPER SHIFT, W, exec, $user_scripts/rofi/rofi_wallpaper_selctor.sh fav
+case "$1" in
+  toggle|remove)
+    current=$(get_current_wallpaper)
+    name=$(wallpaper_id "$current")
+    if [[ "$1" == toggle ]]; then add_favorite "$name"; else remove_favorite "$name"; fi
+    ;;
+  cycle) cycle_favorite ;;
+  list) [[ ! -f "$FAV_FILE" ]] || cat -- "$FAV_FILE" ;;
+esac

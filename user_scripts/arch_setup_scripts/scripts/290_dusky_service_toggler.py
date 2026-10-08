@@ -64,14 +64,19 @@ SYSTEM_SERVICES: Final[list[ServiceConfig]] = [
     ServiceConfig("bluetooth.service", True, "Bluetooth protocol stack daemon"),
     ServiceConfig("ufw.service", True, "Uncomplicated Firewall daemon"),
     ServiceConfig("fstrim.timer", True, "Weekly SSD TRIM maintenance timer"),
+    ServiceConfig("systemd-tmpfiles-clean.timer", True, "Daily cleanup of temporary directories (/tmp, /var/tmp) timer"),
     ServiceConfig("systemd-timesyncd.service", True, "Network time synchronization daemon"),
     ServiceConfig("acpid.service", True, "Advanced Configuration and Power Interface daemon"),
     ServiceConfig("systemd-resolved.service", True, "Network Name Resolution manager"),
     ServiceConfig("snapper-cleanup.timer", True, "Btrfs Snapper snapshot cleanup timer"),
     ServiceConfig("snapper-cleanup.service", True, "Btrfs Snapper snapshot cleanup service"),
+    ServiceConfig("dusky_boot_zram_flush.timer", True, "Dusky one-time boot memory flush into ZRAM timer"),
+    ServiceConfig("dusky_pro_active_zram_swap.timer", True, "Proactive ZRAM idle memory reclaimer timer"),
     # Optional / Disabled by Default:
     ServiceConfig("tlp.service", False, "Power management daemon (disabled by default)"),
+    ServiceConfig("dusky_powertop_autotune.timer", False, "Powertop auto-tune 2min after boot (disabled by default, conflicts with TLP)"),
     ServiceConfig("vsftpd.service", False, "FTP server daemon (disabled by default)"),
+    ServiceConfig("sshd.service", False, "OpenSSH server daemon (disabled by default)"),
     ServiceConfig("reflector.timer", False, "Pacman mirrorlist reflector timer (disabled by default)"),
 ]
 

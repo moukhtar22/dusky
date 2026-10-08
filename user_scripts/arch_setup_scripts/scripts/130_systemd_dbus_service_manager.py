@@ -104,6 +104,9 @@ SYSTEM_SERVICES: list[ServiceConfig] = [
     ServiceConfig("/usr/lib/systemd/system/linux-modules-cleanup.service", "enable"),
     # Dusky Keylogger Keystroke Statistics Daemon (Default: Disable)
     ServiceConfig("$HOME/user_scripts/keylogger/systemd/dusky_keylogger.service", "disable"),
+    # Dusky Powertop Auto-Tune one-shot + boot timer (Default: Disable)
+    ServiceConfig("$HOME/user_scripts/battery/powertop/dusky_powertop_autotune.service", "disable"),
+    ServiceConfig("$HOME/user_scripts/battery/powertop/dusky_powertop_autotune.timer", "disable"),
 ]
 
 SYSTEMD_SYSTEM_DIR = Path("/etc/systemd/system")

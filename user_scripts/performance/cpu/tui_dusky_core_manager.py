@@ -1,15 +1,11 @@
 #!/usr/bin/env python3
 """
 Dusky CPU Core Manager
-High-Performance Core Hotplug and Systemd CPU Affinity Manager for Arch Linux (Kernel 7.2+)
+High-Performance Core Hotplug and Systemd CPU Affinity Manager for Arch Linux (Kernel 7.3+)
 """
 import os
 import sys
 from pathlib import Path
-
-# Enable bytecode caching for maximum startup performance
-sys.dont_write_bytecode = False
-os.environ.pop("PYTHONDONTWRITEBYTECODE", None)
 
 _tui_root = Path(__file__).resolve().parents[2] / "dusky_tui"
 if str(_tui_root) not in sys.path:
@@ -45,12 +41,11 @@ def generate_affinity_presets(p_cores: list[int], e_cores: list[int]) -> list[st
     if not all_cores:
         return ["unset"]
 
-    max_idx = max(all_cores)
     total = len(all_cores)
     presets = ["unset"]
 
     if total > 1:
-        presets.append(f"1-{max_idx}" if max_idx > 1 else "1")
+        presets.append(format_cpu_list([c for c in all_cores if c != 0]))
 
     if p_cores and e_cores:
         p_str = format_cpu_list(p_cores)
@@ -65,17 +60,17 @@ def generate_affinity_presets(p_cores: list[int], e_cores: list[int]) -> list[st
     else:
         if total >= 4:
             mid = total // 2
-            presets.append(f"0-{mid - 1}")
-            presets.append(f"{mid}-{max_idx}")
+            presets.append(format_cpu_list(all_cores[:mid]))
+            presets.append(format_cpu_list(all_cores[mid:]))
             if mid > 1:
-                presets.append(f"1-{mid - 1}")
+                presets.append(format_cpu_list([c for c in all_cores[:mid] if c != 0]))
 
-    presets.append("0")
+    if 0 in all_cores:
+        presets.append("0")
     return list(dict.fromkeys(presets))
 
 
 affinity_presets = generate_affinity_presets(p_cores, e_cores)
-max_core_id = max(p_cores + e_cores) if (p_cores or e_cores) else 0
 
 TABS: list[str] = []
 if p_cores:
@@ -94,16 +89,17 @@ if p_cores:
     SCHEMA[tab_idx] = []
     for c in p_cores:
         is_locked = c in locked_cores
-        lbl = f"CPU {c:02d} (BSP Locked)" if is_locked else f"CPU {c:02d}"
+        lbl = f"CPU {c:02d} (Kernel Locked)" if is_locked else f"CPU {c:02d}"
         help_text = f"Toggle Performance Core {c} online/offline state."
         if is_locked:
-            help_text += " (Bootstrap Processor locked by Linux kernel hotplug protection)."
+            help_text += " (This CPU cannot be offlined through the supported kernel interface)."
         SCHEMA[tab_idx].append(
             ConfigItem(
                 label=lbl,
                 key=f"cpu{c}",
                 type_="bool",
                 default=True,
+                read_only=is_locked,
                 extended_help=help_text,
             )
         )
@@ -113,13 +109,14 @@ if e_cores:
     SCHEMA[tab_idx] = []
     for c in e_cores:
         is_locked = c in locked_cores
-        lbl = f"CPU {c:02d} (BSP Locked)" if is_locked else f"CPU {c:02d}"
+        lbl = f"CPU {c:02d} (Kernel Locked)" if is_locked else f"CPU {c:02d}"
         SCHEMA[tab_idx].append(
             ConfigItem(
                 label=lbl,
                 key=f"cpu{c}",
                 type_="bool",
                 default=True,
+                read_only=is_locked,
                 extended_help=f"Toggle Efficient Core {c} online/offline state.",
             )
         )
@@ -135,22 +132,25 @@ SCHEMA[tab_idx] = [
         default="unset",
         group="systemd Process Scheduling",
         extended_help=(
-            "**Systemd Process CPU Affinity (`CPUAffinity=`)**\n\n"
-            "Configures which CPU cores systemd (PID 1) and all descendant user sessions, "
-            "desktop applications, and background services are allowed to execute on.\n\n"
-            "**Why this is essential for Core 0:**\n"
-            f"Because Linux kernel 6.6+ permanently forbids hotplug-offlining Core 0 (BSP), "
-            f"setting CPU Affinity to `1-{max_core_id}` is the official runtime mechanism to ensure user applications "
-            "and system daemons NEVER run on Core 0, leaving Core 0 dedicated exclusively to kernel interrupts.\n\n"
-            "**Common Configurations & Presets:**\n"
-            "- `unset`: Normal scheduling across all CPU cores.\n"
-            f"- `1-{max_core_id}`: Exclude Core 0 (frees bootstrap core for kernel IRQs and timing).\n"
-            "- P-Cores / E-Cores: Restrict all systemd workloads to high-power or high-efficiency cores.\n\n"
-            "*Note:* Fully configurable. Presets adapt to your hardware topology, and you can type any custom range (e.g. `2-7`, `0,2,4`, `1-15`). Applied live via `systemctl daemon-reexec`."
+            "Sets systemd's default process affinity and AllowedCPUs on user.slice and system.slice. "
+            "Slice limits apply to existing workloads immediately; process affinity also applies to "
+            "new services. Existing per-process masks may remain narrower until processes restart. "
+            "CPU 0 stays online. Excluding it does not configure interrupts or isolate kernel work. "
+            "Other slices, including machine.slice, are outside these slice limits. "
+            "Use unset to clear Dusky's manager setting and these two slice CPU limits. "
+            "Custom CPU lists such as 2-7 or 0,2,4 are supported."
         )
     )
 ]
 tab_idx += 1
+
+TAB_NOTICES = {
+    TABS.index("System Affinity"): {
+        "level": "warning",
+        "position": "top",
+        "message": "Slice limits apply live; existing process affinity masks may require a process restart to widen.",
+    }
+}
 
 
 def ensure_root(argv: list[str]) -> None:
@@ -175,33 +175,10 @@ def parse_core_args(args_list: list[str], valid_cores: list[int]) -> list[int]:
     e.g. ['1', '2', '3'], ['1-3'], ['1,2,3'], ['1-3,5,7-9'], ['1 - 3, 5']
     Returns a sorted list of unique validated core IDs.
     """
-    valid_set = set(valid_cores)
-    parsed: set[int] = set()
-
-    for arg in args_list:
-        tokens = [t.strip() for t in arg.split(",") if t.strip()]
-        for token in tokens:
-            if "-" in token:
-                parts = [p.strip() for p in token.split("-")]
-                if len(parts) != 2 or not parts[0].isdigit() or not parts[1].isdigit():
-                    print(f"[-] Syntax Error: Invalid core range '{token}'. Expected format like '1-3'.")
-                    sys.exit(1)
-                start, end = int(parts[0]), int(parts[1])
-                if start > end:
-                    start, end = end, start
-                parsed.update(range(start, end + 1))
-            else:
-                if not token.isdigit():
-                    print(f"[-] Syntax Error: Invalid CPU identifier '{token}'. Expected integer ID.")
-                    sys.exit(1)
-                parsed.add(int(token))
-
-    invalid = sorted([c for c in parsed if c not in valid_set])
-    if invalid:
-        max_valid = max(valid_cores) if valid_cores else 0
-        print(f"[-] Hardware Error: CPUs {invalid} do not exist (valid hardware range: 0-{max_valid}).")
+    ok, msg, parsed = parse_cpu_list(" ".join(args_list), max(valid_cores) if valid_cores else 0)
+    if not ok or not parsed or parsed - set(valid_cores):
+        print(f"[-] Invalid CPU selection: {msg if not ok else 'select existing CPU IDs'}")
         sys.exit(1)
-
     return sorted(parsed)
 
 
@@ -243,7 +220,7 @@ def display_status_table() -> None:
     for core in all_known:
         arch = "[bold cyan]P-Core[/bold cyan]" if core in p_cores else "[bold green]E-Core[/bold green]"
         if core in locked_cores:
-            table.add_row(f"CPU {core:02d}", arch, "[bold yellow] (BSP)[/bold yellow]", get_core_freq(core))
+            table.add_row(f"CPU {core:02d}", arch, "[bold yellow] (Locked)[/bold yellow]", get_core_freq(core))
         else:
             status = get_core_status(core)
             st_icon = "[bold green]●[/bold green]" if status else "[dim red]○[/dim red]"
@@ -257,35 +234,38 @@ def display_status_table() -> None:
     )
 
 
-def batch_process_cores(cores_list: list[int], enable: bool, action_name: str) -> None:
+def batch_process_cores(cores_list: list[int], enable: bool, action_name: str) -> bool:
     """Batch sets online/offline status for a collection of cores with clear progress reporting."""
+    all_ok = True
     print(f"Initiating {action_name} Sequence...")
     for core in cores_list:
         if core in locked_cores:
             if enable:
-                print(f"CPU {core:02d}: Already online (BSP Locked)")
+                print(f"CPU {core:02d}: Already online (Kernel Locked)")
             else:
-                print(f"CPU {core:02d}: Skipped (BSP Locked - Kernel Hotplug Protected)")
+                print(f"CPU {core:02d}: Skipped (Kernel Hotplug Protected)")
             continue
         success, msg = set_core_status(core, enable=enable)
         tag = "[OK]" if success else "[-]"
         print(f"{tag} CPU {core:02d}: {msg}")
+        all_ok = success and all_ok
+    return all_ok
 
 
 if __name__ == "__main__":
     import subprocess
     import argparse
 
-    # 1. Check for persistent state restoration
-    if "--restore" in sys.argv:
+    # The service restores both independent components, even if one fails.
+    if sys.argv[1:] in (["--restore"], ["--restore-all"]):
         ensure_root(sys.argv)
-        engine = CpuCoreEngine()
-        if engine.restore_state():
-            print("[OK] Successfully restored persistent CPU core states.")
-            sys.exit(0)
-        else:
-            print("[*] No persistent CPU core states found to restore (or failed to restore).")
-            sys.exit(0)
+        power_ok = True
+        if sys.argv[1:] == ["--restore-all"]:
+            power_script = Path(__file__).with_name("tui_dusky_power_throttle.py")
+            power_ok = subprocess.run([sys.executable, str(power_script), "--restore"]).returncode == 0
+        ok = CpuCoreEngine().restore_state()
+        print("[OK] CPU core restore completed (or no saved state)." if ok else "[-] CPU core restore failed.")
+        sys.exit(0 if ok and power_ok else 1)
 
     # 2. Check for dusky_tui delegation
     delegate_flags = {
@@ -298,7 +278,7 @@ if __name__ == "__main__":
         "--log",
         "interactive",
     }
-    if len(sys.argv) == 1 or any(arg in delegate_flags for arg in sys.argv):
+    if len(sys.argv) == 1 or any(arg.split("=", 1)[0] in delegate_flags for arg in sys.argv[1:]):
         main_py = Path(__file__).resolve().parents[2] / "dusky_tui" / "python" / "main" / "main.py"
         cmd = [sys.executable, str(main_py), str(Path(__file__).resolve()), *sys.argv[1:]]
         try:
@@ -310,7 +290,7 @@ if __name__ == "__main__":
 
     # 3. Natively handle custom core manager subcommands
     parser = argparse.ArgumentParser(
-        description="Dusky Advanced Hybrid CPU Core & Affinity Manager (Arch Linux Kernel 7.2+)",
+        description="Dusky Advanced Hybrid CPU Core & Affinity Manager (Arch Linux Kernel 7.3+)",
         epilog=(
             "Interactive Mode:\n"
             "  Run without arguments to launch the full graphical Textual TUI.\n\n"
@@ -371,37 +351,38 @@ if __name__ == "__main__":
         # All core modification commands require root
         ensure_root(sys.argv)
 
+        all_ok = True
         if args.command == "ecores-only":
             if not e_cores:
                 print("[-] Error: ecores-only requires a hybrid CPU topology with Efficient Cores.")
                 sys.exit(1)
-            batch_process_cores(e_cores, enable=True, action_name="E-Core Wakeup")
-            batch_process_cores(p_cores, enable=False, action_name="P-Core Shutdown")
+            all_ok = batch_process_cores(e_cores, enable=True, action_name="E-Core Wakeup") and all_ok
+            all_ok = batch_process_cores(p_cores, enable=False, action_name="P-Core Shutdown") and all_ok
 
         elif args.command == "pcores-only":
             if not e_cores:
                 print("[-] Error: pcores-only requires a hybrid CPU topology.")
                 sys.exit(1)
-            batch_process_cores(p_cores, enable=True, action_name="P-Core Wakeup")
-            batch_process_cores(e_cores, enable=False, action_name="E-Core Shutdown")
+            all_ok = batch_process_cores(p_cores, enable=True, action_name="P-Core Wakeup") and all_ok
+            all_ok = batch_process_cores(e_cores, enable=False, action_name="E-Core Shutdown") and all_ok
 
         elif args.command == "all-cores":
-            batch_process_cores(all_known_cores, enable=True, action_name="Global Wakeup")
+            all_ok = batch_process_cores(all_known_cores, enable=True, action_name="Global Wakeup") and all_ok
 
         elif args.command == "enable":
             target_cores = parse_core_args(args.cores, all_known_cores)
-            batch_process_cores(target_cores, enable=True, action_name="Targeted Wakeup")
+            all_ok = batch_process_cores(target_cores, enable=True, action_name="Targeted Wakeup") and all_ok
 
         elif args.command == "disable":
             target_cores = parse_core_args(args.cores, all_known_cores)
-            batch_process_cores(target_cores, enable=False, action_name="Targeted Shutdown")
+            all_ok = batch_process_cores(target_cores, enable=False, action_name="Targeted Shutdown") and all_ok
 
         elif args.command == "toggle":
             target_cores = parse_core_args(args.cores, all_known_cores)
             print("Initiating Targeted Toggle Sequence...")
             for core in target_cores:
                 if core in locked_cores:
-                    print(f"CPU {core:02d}: Skipped (BSP Locked - Kernel Hotplug Protected)")
+                    print(f"CPU {core:02d}: Skipped (Kernel Hotplug Protected)")
                     continue
                 current_state = get_core_status(core)
                 new_state = not current_state
@@ -409,8 +390,14 @@ if __name__ == "__main__":
                 st_label = "ON" if new_state else "OFF"
                 tag = "[OK]" if success else "[-]"
                 print(f"{tag} CPU {core:02d}: Toggled -> {st_label} ({msg})")
+                all_ok = success and all_ok
 
         # Save updated state and display live table
         engine = CpuCoreEngine()
-        engine.save_persistent_state()
+        try:
+            engine.save_persistent_state()
+        except OSError as exc:
+            print(f"[-] Persistence failed: {exc}")
+            all_ok = False
         display_status_table()
+        sys.exit(0 if all_ok else 1)

@@ -41,11 +41,11 @@ declare -ar pkgs_graphics=(
 )
 
 declare -ar pkgs_hyprland=(
-  "hyprland" "xorg-xwayland" "xdg-desktop-portal-hyprland" "xdg-desktop-portal-gtk" "localsearch" "polkit" "xdg-utils" "socat" "inotify-tools" "libnotify" "mako" "file"
+  "hyprland" "xorg-xwayland" "xdg-desktop-portal-hyprland" "xdg-desktop-portal-gtk" "localsearch" "polkit" "dbus" "xdg-utils" "socat" "inotify-tools" "libnotify" "mako" "file"
 )
 
 declare -ar pkgs_appearance=(
-  "qt5-wayland" "qt6-wayland" "gtk3" "gtk4" "nwg-look" "qt5ct" "qt6ct" "qt6-svg" "qt6-multimedia-ffmpeg" "adw-gtk-theme" "upower" "plocate" "matugen" "otf-font-awesome" "ttf-jetbrains-mono-nerd" "otf-atkinsonhyperlegiblemono-nerd" "ttf-atkinson-hyperlegible" "otf-atkinson-hyperlegible" "noto-fonts-emoji" "sassc" "python-packaging" "python" "python-gobject" "python-cairo" "python-opengl" "gtk-layer-shell" "python-evdev" "python-pyudev" "fontconfig" "papirus-icon-theme" "python-pyquery" "python-textual" "python-rich"
+  "qt5-wayland" "qt6-wayland" "gtk3" "gtk4" "glib2" "dconf" "nwg-look" "qt5ct" "qt6ct" "qt6-svg" "qt6-multimedia-ffmpeg" "adw-gtk-theme" "upower" "plocate" "matugen" "otf-font-awesome" "ttf-jetbrains-mono-nerd" "otf-atkinsonhyperlegiblemono-nerd" "ttf-atkinson-hyperlegible" "otf-atkinson-hyperlegible" "noto-fonts-emoji" "sassc" "python-packaging" "python" "python-gobject" "python-cairo" "python-opengl" "gtk-layer-shell" "python-evdev" "python-pyudev" "fontconfig" "papirus-icon-theme" "python-pyquery" "python-textual" "python-rich" "python-regex" "python-pillow"
 )
 
 declare -ar pkgs_desktop=(
@@ -57,7 +57,7 @@ declare -ar pkgs_audio=(
 )
 
 declare -ar pkgs_filesystem=(
-  "btrfs-progs" "compsize" "zram-generator" "udisks2" "udiskie" "dosfstools" "xdg-user-dirs" "usbutils" "gnome-disk-utility" "unzip" "zip" "unrar" "7zip" "cpio" "file-roller" "rsync" "nfs-utils" "nilfs-utils" "smartmontools" "dmraid" "hdparm" "hwdetect" "lsscsi" "sg3_utils" "cpupower" "dust" "dkms"
+  "btrfs-progs" "compsize" "zram-generator" "udisks2" "udiskie" "dosfstools" "xdg-user-dirs" "usbutils" "gnome-disk-utility" "unzip" "zip" "tar" "unrar" "7zip" "cpio" "file-roller" "rsync" "nfs-utils" "nilfs-utils" "smartmontools" "dmraid" "hdparm" "hwdetect" "lsscsi" "sg3_utils" "cpupower" "dust" "dkms"
   "thunar" "thunar-archive-plugin" "file-roller" "thunar-volman" "thunar-media-tags-plugin" "thunar-shares-plugin" "thunar-vcs-plugin" "tumbler" "ffmpegthumbnailer" "webp-pixbuf-loader" "poppler-glib" "libgsf" "libgepub" "libopenraw" "resvg" "gvfs" "gvfs-mtp" "gvfs-nfs" "gvfs-smb" "gvfs-gphoto2" "gvfs-afc" "gvfs-dnssd" "catfish" "gnome-keyring" "meld" "xreader" "imagemagick" "kio-admin"
 )
 

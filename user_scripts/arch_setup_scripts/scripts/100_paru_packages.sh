@@ -73,9 +73,6 @@ trap 'abort_with_signal SIGTERM 143' TERM
 # ------------------------------------------------------------------------------
 # 4. CONFIGURATION
 # ------------------------------------------------------------------------------
-# installing manually with script because this is a massive package that includes every cursor theme
-# "bibata-cursor-theme-bin"
-
 declare -ar PACKAGES=(
   "wlogout"
   "adwsteamgtk"
@@ -84,6 +81,7 @@ declare -ar PACKAGES=(
   "tray-tui"
   "xdg-terminal-exec"
   "papirus-folders"
+  "bibata-cursor-theme-bin"
 )
 
 # Delay before auto-retrying

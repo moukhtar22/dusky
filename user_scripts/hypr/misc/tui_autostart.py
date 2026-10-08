@@ -105,15 +105,6 @@ SCHEMA = {
             extended_help="**Waybar Status Bar**\n\nAutomatically launches the Waybar panel on startup."
         ),
         ConfigItem(
-            label="Waybar Timer",
-            key="waybar_timer",
-            scope="autostart",
-            type_="bool",
-            default=False,
-            group="Interface & Desktop",
-            extended_help="**Waybar Productivity Timer**\n\nAutomatically launches the pomodoro timer module on Waybar startup."
-        ),
-        ConfigItem(
             label="Network Tray Applet",
             key="nm_applet",
             scope="autostart",
@@ -426,6 +417,96 @@ SCHEMA = {
             extended_help="**Network Glance Autostart**\n\nLaunches network bandwidth overlay at startup."
         ),
         ConfigItem(
+            label="Network Download Speed",
+            key="glance_network_down",
+            scope="autostart",
+            type_="bool",
+            default=False,
+            parent_ref="menu_dusky_glance",
+            group="Dashboards",
+            extended_help="**Network Download Glance Autostart**\n\nLaunches live download speed overlay at startup."
+        ),
+        ConfigItem(
+            label="Network Upload Speed",
+            key="glance_network_up",
+            scope="autostart",
+            type_="bool",
+            default=False,
+            parent_ref="menu_dusky_glance",
+            group="Dashboards",
+            extended_help="**Network Upload Glance Autostart**\n\nLaunches live upload speed overlay at startup."
+        ),
+        ConfigItem(
+            label="Network Combined Speed",
+            key="glance_network_combined",
+            scope="autostart",
+            type_="bool",
+            default=False,
+            parent_ref="menu_dusky_glance",
+            group="Dashboards",
+            extended_help="**Network Combined Glance Autostart**\n\nLaunches combined network speed overlay at startup."
+        ),
+        ConfigItem(
+            label="Session Downloaded Data",
+            key="glance_network_down_session",
+            scope="autostart",
+            type_="bool",
+            default=False,
+            parent_ref="menu_dusky_glance",
+            group="Dashboards",
+            extended_help="**Session Download Glance Autostart**\n\nLaunches session downloaded data overlay at startup."
+        ),
+        ConfigItem(
+            label="Session Uploaded Data",
+            key="glance_network_up_session",
+            scope="autostart",
+            type_="bool",
+            default=False,
+            parent_ref="menu_dusky_glance",
+            group="Dashboards",
+            extended_help="**Session Upload Glance Autostart**\n\nLaunches session uploaded data overlay at startup."
+        ),
+        ConfigItem(
+            label="Session Total Traffic",
+            key="glance_network_session",
+            scope="autostart",
+            type_="bool",
+            default=False,
+            parent_ref="menu_dusky_glance",
+            group="Dashboards",
+            extended_help="**Session Total Traffic Glance Autostart**\n\nLaunches session total traffic overlay at startup."
+        ),
+        ConfigItem(
+            label="Boot Total Downloaded",
+            key="glance_network_boot_down",
+            scope="autostart",
+            type_="bool",
+            default=False,
+            parent_ref="menu_dusky_glance",
+            group="Dashboards",
+            extended_help="**Boot Total Download Glance Autostart**\n\nLaunches boot total downloaded data overlay at startup."
+        ),
+        ConfigItem(
+            label="Boot Total Uploaded",
+            key="glance_network_boot_up",
+            scope="autostart",
+            type_="bool",
+            default=False,
+            parent_ref="menu_dusky_glance",
+            group="Dashboards",
+            extended_help="**Boot Total Upload Glance Autostart**\n\nLaunches boot total uploaded data overlay at startup."
+        ),
+        ConfigItem(
+            label="Boot Total Traffic",
+            key="glance_network_boot",
+            scope="autostart",
+            type_="bool",
+            default=False,
+            parent_ref="menu_dusky_glance",
+            group="Dashboards",
+            extended_help="**Boot Total Traffic Glance Autostart**\n\nLaunches boot total traffic overlay at startup."
+        ),
+        ConfigItem(
             label="System Uptime",
             key="glance_uptime",
             scope="autostart",
@@ -674,8 +755,7 @@ SCHEMA = {
             group="Optimization",
             preset_payload={
                 "xwayland.enabled": False,
-                "autostart.audio_visualizer": False,
-                "autostart.waybar_timer": False
+                "autostart.audio_visualizer": False
             },
             extended_help="**Lightweight Preset**\n\nOptimizes RAM usage by aggressively disabling XWayland and non-essential background layers."
         ),

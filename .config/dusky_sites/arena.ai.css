@@ -1,0 +1,14 @@
+@-moz-document domain("arena.ai") {
+    /* >>> dusky:picks - managed by the Visual Picker, one rule per line */
+    pre.shiki.github-dark.shiki-code-block { background-color: var(--surface_container) !important; color: var(--on_surface) !important; border-color: var(--outline_variant) !important; } /* dusky key=sel%1Fpre.shiki.github-dark.shiki-code-block%1Fbg | bg: surface_container */
+    div.flex-1 { background-color: var(--surface) !important; color: var(--on_surface) !important; border-color: var(--outline_variant) !important; } /* dusky key=sel%1Fdiv.flex-1%1Fbg | bg: surface */
+    div.flex-col { background-color: var(--surface) !important; color: var(--on_surface) !important; border-color: var(--outline_variant) !important; } /* dusky key=sel%1Fdiv.flex-col%1Fbg | bg: surface */
+    textarea.flex-none.resize-none.body-base { background-color: var(--surface) !important; color: var(--on_surface) !important; border-color: var(--outline_variant) !important; } /* dusky key=sel%1Ftextarea.flex-none.resize-none.body-base%1Fbg | bg: surface */
+    form.flex-col { background-color: var(--surface) !important; color: var(--on_surface) !important; border-color: var(--outline_variant) !important; } /* dusky key=sel%1Fform.flex-col%1Fbg | bg: surface */
+    div.flex-none { background-color: var(--surface) !important; color: var(--on_surface) !important; border-color: var(--outline_variant) !important; } /* dusky key=sel%1Fdiv.flex-none%1Fbg | bg: surface */
+    div { background-color: var(--surface) !important; color: var(--on_surface) !important; border-color: var(--outline_variant) !important; } /* dusky key=sel%1Fdiv%1Fbg | bg: surface */
+    span[role="tab"] { background-color: var(--surface) !important; color: var(--on_surface) !important; border-color: var(--outline_variant) !important; } /* dusky key=sel%1Fspan%5Brole%3D%22tab%22%5D%1Fbg | bg: surface */
+    button.shrink-0 { background-color: var(--primary_container) !important; color: var(--on_primary_container) !important; border-color: var(--outline_variant) !important; } /* dusky key=sel%1Fbutton.shrink-0%1Fbg | bg: primary_container */
+    button[aria-label="Dusky Template Generator audit"] { background-color: var(--on_secondary) !important; } /* dusky key=sel%1Fbutton%5Baria-label%3D%22Dusky%20Template%20Generator%20audit%22%5D%1Fbg | bg: on_secondary */
+    /* <<< dusky:picks */
+}

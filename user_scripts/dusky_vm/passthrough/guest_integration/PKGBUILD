@@ -1,0 +1,38 @@
+# Build locally inside each guest with its native CPU and makepkg configuration.
+# Upstream is an archived prototype. clipboard-owner.patch is maintained here.
+pkgname=dusky-wayland-vdagent
+pkgver=0.3.4
+pkgrel=1
+pkgdesc='Native Wayland SPICE clipboard bridge with clipboard-owner tracking'
+arch=('x86_64' 'aarch64')
+url='https://github.com/v-dermichev/wayland-vdagent'
+license=('MIT')
+depends=('spice-vdagent' 'wayland')
+makedepends=('rust' 'pkgconf' 'patch')
+options=('!debug')
+_commit=9191ec6a82d9712a81d5c86d6e5cf5daa21af2b9
+source=("wayland-vdagent-${_commit}.tar.gz::${url}/archive/${_commit}.tar.gz"
+        'Cargo.lock' 'clipboard-owner.patch' 'dusky_vdagent.service')
+sha256sums=('7f1c2cf23d86ed814f4e8e8f6b6e4903651ed28df43c1a024456ff31be7f7e77'
+            'SKIP' 'SKIP' 'SKIP')
+
+prepare() {
+    cd "wayland-vdagent-${_commit}"
+    cp "${srcdir}/Cargo.lock" .
+    patch -Np1 -i "${srcdir}/clipboard-owner.patch"
+    cargo fetch --locked
+}
+
+build() {
+    cd "wayland-vdagent-${_commit}"
+    printf 'Native Rust flags: %s\n' "$RUSTFLAGS"
+    cargo build --frozen --release
+}
+
+package() {
+    cd "wayland-vdagent-${_commit}"
+    install -Dm755 target/release/wayland-vdagent "${pkgdir}/usr/bin/wayland-vdagent"
+    install -Dm644 "${srcdir}/dusky_vdagent.service" \
+        "${pkgdir}/usr/lib/systemd/user/dusky_vdagent.service"
+    install -Dm644 README.md "${pkgdir}/usr/share/doc/${pkgname}/README.md"
+}

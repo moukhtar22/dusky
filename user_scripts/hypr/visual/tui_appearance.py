@@ -47,7 +47,8 @@ TABS = [
     "Styling",
     "Effects",
     "Smart",
-    "Special"
+    "Special",
+    "Grouping"
 ]
 
 # =============================================================================
@@ -1687,6 +1688,369 @@ SCHEMA = {
             default=True,
             group="Styling",
             extended_help="**Magic Disable Blur**\n\nDisables the kawase background blur effect strictly for magic scratchpad windows."
+        ),
+    ],
+
+    # -------------------------------------------------------------------------
+    # TAB 8: GROUPING
+    # -------------------------------------------------------------------------
+    8: [
+        # --- Groupbar Controls ---
+        ConfigItem(
+            label="Enable Groupbars",
+            key="enabled",
+            scope="group/groupbar",
+            type_="bool",
+            default=True,
+            group="Groupbar",
+            extended_help="**Enable Groupbars**\n\nEnables or disables groupbar decorations on tabbed window groups."
+        ),
+        ConfigItem(
+            label="Render Titles",
+            key="render_titles",
+            scope="group/groupbar",
+            type_="bool",
+            default=True,
+            group="Groupbar",
+            extended_help="**Render Titles**\n\nWhether to render window title text within the groupbar tab decoration."
+        ),
+        ConfigItem(
+            label="Stacked Tabs",
+            key="stacked",
+            scope="group/groupbar",
+            type_="bool",
+            default=False,
+            group="Groupbar",
+            extended_help="**Stacked Tabs**\n\nRenders the groupbar tabs as a vertical stack instead of a horizontal bar."
+        ),
+        ConfigItem(
+            label="Priority",
+            key="priority",
+            scope="group/groupbar",
+            type_="int",
+            default=3,
+            min_val=0,
+            max_val=6,
+            step=1,
+            group="Groupbar",
+            extended_help="**Decoration Priority**\n\nSets the decoration priority for groupbars relative to other window decorations [0 - 6]."
+        ),
+
+        # --- Typography ---
+        ConfigItem(
+            label="Font Size",
+            key="font_size",
+            scope="group/groupbar",
+            type_="int",
+            default=16,
+            min_val=6,
+            max_val=24,
+            step=1,
+            group="Typography",
+            extended_help="**Font Size**\n\nFont size of titles displayed in the groupbar."
+        ),
+        ConfigItem(
+            label="Active Font Weight",
+            key="font_weight_active",
+            scope="group/groupbar",
+            type_="cycle",
+            default="bold",
+            options=["thin", "light", "normal", "medium", "semibold", "bold", "ultrabold", "heavy"],
+            group="Typography",
+            extended_help="**Active Font Weight**\n\nFont weight used for the active/focused tab title."
+        ),
+        ConfigItem(
+            label="Inactive Font Weight",
+            key="font_weight_inactive",
+            scope="group/groupbar",
+            type_="cycle",
+            default="bold",
+            options=["thin", "light", "normal", "medium", "semibold", "bold", "ultrabold", "heavy"],
+            group="Typography",
+            extended_help="**Inactive Font Weight**\n\nFont weight used for inactive tab titles."
+        ),
+        ConfigItem(
+            label="Font Family",
+            key="font_family",
+            scope="group/groupbar",
+            type_="string",
+            default="",
+            group="Typography",
+            extended_help="**Font Family**\n\nFont used to display groupbar titles. Leave empty to fall back to misc.font_family."
+        ),
+
+        # --- Geometry & Pills ---
+        ConfigItem(
+            label="Height",
+            key="height",
+            scope="group/groupbar",
+            type_="int",
+            default=17,
+            min_val=10,
+            max_val=48,
+            step=1,
+            group="Geometry",
+            extended_help="**Groupbar Height**\n\nHeight of the groupbar in layout pixels (17px provides a compact squircle pill appearance)."
+        ),
+        ConfigItem(
+            label="Gaps In",
+            key="gaps_in",
+            scope="group/groupbar",
+            type_="int",
+            default=2,
+            min_val=0,
+            max_val=20,
+            step=1,
+            group="Geometry",
+            extended_help="**Gaps In**\n\nGap size in pixels between adjacent gradient pills."
+        ),
+        ConfigItem(
+            label="Gaps Out",
+            key="gaps_out",
+            scope="group/groupbar",
+            type_="int",
+            default=0,
+            min_val=0,
+            max_val=20,
+            step=1,
+            group="Geometry",
+            extended_help="**Gaps Out**\n\nGap size in pixels between gradient pills and the window."
+        ),
+        ConfigItem(
+            label="Text Padding",
+            key="text_padding",
+            scope="group/groupbar",
+            type_="int",
+            default=4,
+            min_val=0,
+            max_val=22,
+            step=1,
+            group="Geometry",
+            extended_help="**Text Padding**\n\nHorizontal padding inside each tab pill for titles."
+        ),
+        ConfigItem(
+            label="Text Offset",
+            key="text_offset",
+            scope="group/groupbar",
+            type_="int",
+            default=0,
+            min_val=-20,
+            max_val=20,
+            step=1,
+            group="Geometry",
+            extended_help="**Text Offset**\n\nVertical offset in pixels to adjust title text alignment within the pill."
+        ),
+        ConfigItem(
+            label="Indicator Height",
+            key="indicator_height",
+            scope="group/groupbar",
+            type_="int",
+            default=0,
+            min_val=0,
+            max_val=20,
+            step=1,
+            group="Geometry",
+            extended_help="**Indicator Height**\n\nHeight of the legacy indicator line. Set to 0 to hide the line and rely on pill gradients."
+        ),
+        ConfigItem(
+            label="Indicator Gap",
+            key="indicator_gap",
+            scope="group/groupbar",
+            type_="int",
+            default=2,
+            min_val=0,
+            max_val=20,
+            step=1,
+            group="Geometry",
+            extended_help="**Indicator Gap**\n\nGap between indicator bar and title."
+        ),
+        ConfigItem(
+            label="Keep Upper Gap",
+            key="keep_upper_gap",
+            scope="group/groupbar",
+            type_="bool",
+            default=True,
+            group="Geometry",
+            extended_help="**Keep Upper Gap**\n\nWhether to preserve the upper window gap above the groupbar."
+        ),
+
+        # --- Shapes & Gradients ---
+        ConfigItem(
+            label="Enable Gradients",
+            key="gradients",
+            scope="group/groupbar",
+            type_="bool",
+            default=True,
+            group="Pills",
+            extended_help="**Enable Gradients / Pills**\n\nEnables gradient background pills behind each title."
+        ),
+        ConfigItem(
+            label="Pill Rounding",
+            key="gradient_rounding",
+            scope="group/groupbar",
+            type_="int",
+            default=12,
+            min_val=0,
+            max_val=40,
+            step=1,
+            group="Pills",
+            extended_help="**Pill Rounding Radius**\n\nCorner rounding radius applied to gradient pills."
+        ),
+        ConfigItem(
+            label="Rounding Power",
+            key="gradient_rounding_power",
+            scope="group/groupbar",
+            type_="float",
+            default=4.0,
+            min_val=1.0,
+            max_val=10.0,
+            step=0.5,
+            group="Pills",
+            extended_help="**Rounding Power**\n\nMathematical curve used for pill corners: 1.0 is triangular, 2.0 is circular, 4.0 is squircle."
+        ),
+        ConfigItem(
+            label="Round Only Edges",
+            key="gradient_round_only_edges",
+            scope="group/groupbar",
+            type_="bool",
+            default=False,
+            group="Pills",
+            extended_help="**Round Only Outer Edges**\n\nWhen false, rounds all 4 corners of every pill. When true, rounds only the extreme ends of the entire groupbar."
+        ),
+        ConfigItem(
+            label="Blur Pills",
+            key="blur",
+            scope="group/groupbar",
+            type_="bool",
+            default=False,
+            group="Pills",
+            extended_help="**Blur Pills**\n\nApplies kawase background blur behind groupbar indicators and gradient pills."
+        ),
+
+        # --- Pill Colors ---
+        ConfigItem(
+            label="Active Pill Color",
+            key="col.active",
+            scope="group/groupbar",
+            type_="color",
+            default="primary",
+            options=COLOR_ALIASES,
+            group="Pill Colors",
+            extended_help="**Active Pill Background Color**\n\nBackground fill color for the focused/active tab pill."
+        ),
+        ConfigItem(
+            label="Inactive Pill Color",
+            key="col.inactive",
+            scope="group/groupbar",
+            type_="color",
+            default="inverse_on_surface",
+            options=COLOR_ALIASES,
+            group="Pill Colors",
+            extended_help="**Inactive Pill Background Color**\n\nBackground fill color for unfocused tab pills."
+        ),
+        ConfigItem(
+            label="Locked Active Pill",
+            key="col.locked_active",
+            scope="group/groupbar",
+            type_="color",
+            default="tertiary",
+            options=COLOR_ALIASES,
+            group="Pill Colors",
+            extended_help="**Locked Active Pill Color**\n\nBackground fill color for the active tab when the group is locked."
+        ),
+        ConfigItem(
+            label="Locked Inactive Pill",
+            key="col.locked_inactive",
+            scope="group/groupbar",
+            type_="color",
+            default="tertiary_container",
+            options=COLOR_ALIASES,
+            group="Pill Colors",
+            extended_help="**Locked Inactive Pill Color**\n\nBackground fill color for inactive tabs when the group is locked."
+        ),
+
+        # --- Text Colors ---
+        ConfigItem(
+            label="Active Text Color",
+            key="text_color",
+            scope="group/groupbar",
+            type_="color",
+            default="surface",
+            options=COLOR_ALIASES,
+            group="Text Colors",
+            extended_help="**Active Title Text Color**\n\nColor of the active tab's title text (dark on light primary pill)."
+        ),
+        ConfigItem(
+            label="Inactive Text Color",
+            key="text_color_inactive",
+            scope="group/groupbar",
+            type_="color",
+            default="on_surface",
+            options=COLOR_ALIASES,
+            group="Text Colors",
+            extended_help="**Inactive Title Text Color**\n\nColor of inactive tabs' title text (light on dark pill)."
+        ),
+        ConfigItem(
+            label="Locked Active Text",
+            key="text_color_locked_active",
+            scope="group/groupbar",
+            type_="color",
+            default="on_tertiary",
+            options=COLOR_ALIASES,
+            group="Text Colors",
+            extended_help="**Locked Active Title Text Color**\n\nColor of the active tab title when the group is locked."
+        ),
+        ConfigItem(
+            label="Locked Inactive Text",
+            key="text_color_locked_inactive",
+            scope="group/groupbar",
+            type_="color",
+            default="on_tertiary_container",
+            options=COLOR_ALIASES,
+            group="Text Colors",
+            extended_help="**Locked Inactive Title Text Color**\n\nColor of inactive tab titles when the group is locked."
+        ),
+
+        # --- Window Group Borders ---
+        ConfigItem(
+            label="Active Group Border",
+            key="col.border_active",
+            scope="group",
+            type_="color",
+            default="primary",
+            options=COLOR_ALIASES,
+            group="Group Borders",
+            extended_help="**Active Group Border Color**\n\nBorder color around the window when part of an active unlocked group."
+        ),
+        ConfigItem(
+            label="Inactive Group Border",
+            key="col.border_inactive",
+            scope="group",
+            type_="color",
+            default="inverse_on_surface",
+            options=COLOR_ALIASES,
+            group="Group Borders",
+            extended_help="**Inactive Group Border Color**\n\nBorder color around inactive grouped windows."
+        ),
+        ConfigItem(
+            label="Locked Active Border",
+            key="col.border_locked_active",
+            scope="group",
+            type_="color",
+            default="tertiary",
+            options=COLOR_ALIASES,
+            group="Group Borders",
+            extended_help="**Locked Active Group Border Color**\n\nBorder color around the active window when the group is locked."
+        ),
+        ConfigItem(
+            label="Locked Inactive Border",
+            key="col.border_locked_inactive",
+            scope="group",
+            type_="color",
+            default="tertiary_container",
+            options=COLOR_ALIASES,
+            group="Group Borders",
+            extended_help="**Locked Inactive Group Border Color**\n\nBorder color around inactive windows when the group is locked."
         ),
     ]
 }

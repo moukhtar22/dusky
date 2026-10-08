@@ -56,7 +56,9 @@ LOCK_HELD=false
 
 notify_user() {
     if command -v notify-send >/dev/null 2>&1; then
-        notify-send -u critical -t 5000 --app-name="dusky-keys" "Dusky Keys" "$1" || true
+        # 2>/dev/null: without a notification daemon (e.g. running from a TTY)
+        # notify-send spews a GDBus NameHasNoOwner error into the console.
+        notify-send -u critical -t 5000 --app-name="dusky-keys" "Dusky Keys" "$1" 2>/dev/null || true
     fi
 }
 
@@ -209,14 +211,28 @@ fi
 
 # --- INPUT ACCESS CHECK ---
 if ! current_session_has_input_access; then
-    if ! $INTERACTIVE; then
+    if [[ "$RUN_MODE" == "setup" ]]; then
+        # Setup itself never reads /dev/input (only the daemon does), so a
+        # missing group must not fail the whole orchestra run. Fix it instead:
+        # best-effort add the user to the group, say when it takes effect,
+        # and keep going.
+        if ! id -nG | grep -qw -- input; then
+            printf "%b[NOTE]%b User '%s' is not in the 'input' group yet.\n" "${C_YELLOW}" "${C_RESET}" "$USER"
+            if sudo usermod -aG input "$USER" 2>/dev/null; then
+                printf "%b[SUCCESS]%b Added '%s' to the 'input' group. Log out and back in once and the OSD will go live.\n" "${C_GREEN}" "${C_RESET}" "$USER"
+            else
+                printf "%b[NOTE]%b Could not add automatically. Run: %bsudo usermod -aG input %s%b\n" "${C_YELLOW}" "${C_RESET}" "${C_CYAN}" "$USER" "${C_RESET}"
+            fi
+        fi
+    elif ! $INTERACTIVE; then
         notify_user "$NOT_SETUP_MSG"
         exit 1
+    else
+        printf "%b[CRITICAL]%b You are not in the 'input' group.\n" "${C_RED}" "${C_RESET}"
+        printf "Run: %bsudo usermod -aG input %s%b\n" "${C_CYAN}" "$USER" "${C_RESET}"
+        notify_user "Permission Denied. Run: sudo usermod -aG input $USER\nThen log out and log back in."
+        exit 1
     fi
-    printf "%b[CRITICAL]%b You are not in the 'input' group.\n" "${C_RED}" "${C_RESET}"
-    printf "Run: %bsudo usermod -aG input %s%b\n" "${C_CYAN}" "$USER" "${C_RESET}"
-    notify_user "Permission Denied. Run: sudo usermod -aG input $USER\nThen log out and log back in."
-    exit 1
 fi
 
 acquire_lock
@@ -226,7 +242,9 @@ deploy_config
 mkdir -p "$BASE_DIR" 2>/dev/null || true
 
 if [[ ! -x "$PYTHON_BIN" ]]; then
-    if ! $INTERACTIVE; then
+    # Non-interactive runs are only rejected when they try to USE the
+    # daemon; an explicit --setup is exactly the place to build.
+    if [[ "$RUN_MODE" != "setup" ]] && ! $INTERACTIVE; then
         notify_user "$NOT_SETUP_MSG"
         exit 1
     fi
@@ -239,7 +257,7 @@ if [[ ! -x "$PYTHON_BIN" ]]; then
 fi
 
 if [[ ! -f "$MARKER_FILE" ]]; then
-    if ! $INTERACTIVE; then
+    if [[ "$RUN_MODE" != "setup" ]] && ! $INTERACTIVE; then
         notify_user "$NOT_SETUP_MSG"
         exit 1
     fi

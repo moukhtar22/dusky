@@ -605,8 +605,13 @@ def main():
             sys.exit(1)
 
     # Run checks
-    if not shutil.which("xfreerdp3"):
-        print_err("xfreerdp3 binary not found. Please install it via: sudo pacman -S freerdp")
+    freerdp_bin = (
+        shutil.which("sdl-freerdp3")
+        or shutil.which("wlfreerdp3")
+        or shutil.which("xfreerdp3")
+    )
+    if not freerdp_bin:
+        print_err("FreeRDP v3 binary not found (checked sdl-freerdp3, wlfreerdp3, xfreerdp3). Please install via: sudo pacman -S freerdp")
         sys.exit(1)
 
     vm_name = resolve_vm(specified_vm)
@@ -651,16 +656,19 @@ def main():
 
     # Build command
     cmd = [
-        "xfreerdp3",
+        freerdp_bin,
         f"/v:{ip_addr}",
         f"/u:{username}",
         "/cert:ignore",
-        "/dynamic-resolution"
+        "/dynamic-resolution",
+        "/network:lan",
+        "/clipboard",
+        "/sound",
     ]
     if password:
         cmd.append(f"/p:{password}")
 
-    print_info(f"Connecting to [bold cyan]{username}@{ip_addr}[/bold cyan] via FreeRDP v3...")
+    print_info(f"Connecting to [bold cyan]{username}@{ip_addr}[/bold cyan] via FreeRDP v3 ({Path(freerdp_bin).name})...")
     try:
         res = subprocess.run(cmd)
         if res.returncode != 0:

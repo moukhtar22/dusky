@@ -1,0 +1,61 @@
+@-moz-document domain("google.com") {
+    :root, .jKhXsc, .YzCcne {
+      --xhUGwc: var(--surface) !important;
+      --YLNNHc: var(--primary_fixed) !important;
+      --aYn2S: var(--surface_container_highest) !important;
+      --KIZPne: var(--on_surface_variant) !important;
+      --XKMDxc: var(--surface_container_low) !important;
+      --xPpiM: var(--surface) !important;
+      --XKMDxc: var(--surface) !important;
+      --Lm570b: var(--surface_bright) !important;
+      --JKqx2: var(--primary) !important;
+      --gS5jXb: var(--outline_variant) !important;
+      --m3c6: var(--surface_bright) !important;
+      --cIehld: var(--surface) !important;
+    }
+    
+    .RNNXgb, .aajZCb, .kzKS5c {
+      background: var(--surface_container_high) !important;
+    }
+    
+    .sbhl, .NrdQVe, .NzSfif {
+      background: var(--surface_container) !important;
+    }
+    
+    .ho072b, .qEn1od, .Vt1EGb, .f6F9Be, .c93Gbe {
+      background: var(--surface) !important;
+    }
+    
+    .T14B5e input[type="submit"] {
+      background-color: var(--surface_container) !important;
+      border: 1px solid var(--outline_variant) !important;
+    }
+    .T14B5e input[type="submit"]:hover {
+      background-color: var(--surface_container) !important;
+      border: 1px solid var(--outline) !important;
+    }
+    
+    .RDmXvc {
+      background-image: linear-gradient(transparent 0px,var(--surface) 52px,var(--xhUGwc) 80px) !important;
+    }
+    
+    .vIifob {
+      background: var(--surface_bright) !important;
+    }
+    
+    .DV7the {
+      color: var(--primary) !important;
+    }
+    /* >>> dusky:picks - managed by the Visual Picker, one rule per line */
+    div[role="contentinfo"] { background-color: var(--background) !important; color: var(--on_background) !important; border-color: var(--outline_variant) !important; } /* dusky key=sel%1Fdiv%5Brole%3D%22contentinfo%22%5D%1Fbg | bg: background */
+    div.esoFne { background-color: var(--surface_container_lowest) !important; color: var(--on_surface) !important; border-color: var(--outline_variant) !important; } /* dusky key=sel%1Fdiv.esoFne%1Fbg | bg: surface_container_lowest */
+    div.Zze5V { background: transparent !important; box-shadow: none !important; } /* dusky key=sel%1Fdiv.Zze5V%1Fbg | bg: transparent */
+    path { fill: var(--primary) !important; color: var(--primary) !important; } /* dusky key=sel%1Fpath%1Ffill | fill: primary */
+    button.HxxZfc.mY3e9c.u9H4O { background-color: var(--primary_container) !important; color: var(--on_primary_container) !important; border-color: var(--outline_variant) !important; } /* dusky key=sel%1Fbutton.HxxZfc.mY3e9c.u9H4O%1Fbg | bg: primary_container */
+    #rw0ISc { background-color: var(--surface_container_lowest) !important; color: var(--on_surface) !important; border-color: var(--outline_variant) !important; } /* dusky key=sel%1F%23rw0ISc%1Fbg | bg: surface_container_lowest */
+    div.wv9iH.MjJqGe.cd29Sd > svg.FJ6RFd > path:nth-of-type(1) { fill: var(--surface_container_lowest) !important; color: var(--surface_container_lowest) !important; } /* dusky key=sel%1Fdiv.wv9iH.MjJqGe.cd29Sd%20%3E%20svg.FJ6RFd%20%3E%20path%3Anth-of-type(1)%1Ffill | fill: surface_container_lowest */
+    div.niO4u.VDgVie.SlP8xc { background-color: var(--primary_container) !important; color: var(--on_primary_container) !important; border-color: var(--outline_variant) !important; } /* dusky key=sel%1Fdiv.niO4u.VDgVie.SlP8xc%1Fbg | bg: primary_container */
+    div.bvUkz { background-color: var(--on_tertiary) !important; } /* dusky key=sel%1Fdiv.bvUkz%1Fbg | bg: on_tertiary */
+    button.uMMzHc { background-color: var(--inverse_on_surface) !important; } /* dusky key=sel%1Fbutton.uMMzHc%1Fbg | bg: inverse_on_surface */
+    /* <<< dusky:picks */
+}

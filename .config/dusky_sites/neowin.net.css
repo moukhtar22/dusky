@@ -1,0 +1,8 @@
+@-moz-document domain("neowin.net") {
+    /* >>> dusky:picks - managed by the Visual Picker, one rule per line */
+    div { background-color: var(--background) !important; color: var(--on_background) !important; border-color: var(--outline_variant) !important; } /* dusky key=sel%1Fdiv%1Fbg | bg: background */
+    a { color: var(--on_background) !important; } /* dusky key=sel%1Fa%1Ftext | text: on_background */
+    p { color: var(--on_secondary_container) !important; } /* dusky key=sel%1Fp%1Ftext | text: on_secondary_container */
+    h3 { color: var(--on_surface_variant) !important; } /* dusky key=sel%1Fh3%1Ftext | text: on_surface_variant */
+    /* <<< dusky:picks */
+}

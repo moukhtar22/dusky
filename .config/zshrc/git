@@ -1,210 +1,911 @@
-# 1. Base Bare Repo Function & Alias
-# Functions are globally accessible in subshells, functions, and scripts without relying on interactive alias expansion.
+# =============================================================================
+# ~/.config/zshrc/git — Dusky bare-repo dotfiles manager
+#
+#   git_dusky ARGS...      raw git pinned to the bare repo + $HOME work tree
+#   git_dusky_add_list     stage the .git_dusky_list manifest (+ add -u)
+#   git_dusky_restore      DANGER: hard reset $HOME to HEAD (now confirmed)
+#   git_dusky_push FILE    add -> prompt -> scoped commit -> push
+#   gitdelta               uncommitted changes vs HEAD (stages manifest first)
+#   gitdelta N             Nth most recent commit (1 = HEAD)
+#   gitdelta list          fzf commit browser with live delta preview
+#   lazygit_dusky · dusky  lazygit / dashboard entry points
+#
+#   Path resolution and cached colour lookup use zsh builtins.
+#
+#   Spec anchors:
+#     git-add(1)        --pathspec-from-file / --pathspec-file-nul / -u
+#     gitglossary(7)    pathspec magic, :(literal,top)
+#     git-branch(1)     --show-current is empty on detached HEAD
+#     git-rev-parse(1)  --verify --quiet, REV^{commit}, BR@{upstream}
+#     delta             --paging=never --width
+#     fzf(1)            previews run through $SHELL; $FZF_PREVIEW_COLUMNS
+#     zshbuiltins(1)    cd -q (no chpwd hooks, no print)
+#     zshmisc(1)        { try } always { cleanup }
+#     zshexpn(1)        (#b) backreferences, (b) pattern-quote, (q), (0), (f)
+# =============================================================================
+
+zmodload zsh/parameter 2>/dev/null
+zmodload -F zsh/stat b:zstat 2>/dev/null   # -F: do NOT define `stat`, which
+                                           # would shadow /usr/bin/stat
+
+typeset -g  DUSKY_GIT_DIR=${DUSKY_GIT_DIR:-$HOME/dusky}
+typeset -g  DUSKY_GIT_LIST=${DUSKY_GIT_LIST:-$HOME/.git_dusky_list}
+typeset -gA _DUSKY_MG_CACHE
+
+# Ctrl-T has its own fzf defaults (40% height), separate from the Dusky TUI.
+# Preserve existing picker options and make repeated sourcing idempotent.
+if [[ " ${FZF_CTRL_T_OPTS-} " != *" --no-height "* ]]; then
+    export FZF_CTRL_T_OPTS="${FZF_CTRL_T_OPTS:+$FZF_CTRL_T_OPTS }--no-height"
+fi
+
+# -----------------------------------------------------------------------------
+# 1. Base primitive — a function, so subshells, scripts and hooks can use it
+# -----------------------------------------------------------------------------
 function git_dusky() {
-    /usr/bin/git --git-dir="$HOME/dusky/" --work-tree="$HOME" "$@"
+    emulate -L zsh
+    /usr/bin/git --git-dir="$DUSKY_GIT_DIR" --work-tree="$HOME" "$@"
 }
 
-# 2. Add List Function (Filters missing files gracefully with warning fallback)
-function git_dusky_add_list() {
-    (
-        cd "$HOME" || return 0
-        if [[ ! -f .git_dusky_list ]]; then
-            printf '\033[33m⚠ Warning: .git_dusky_list not found in %s — skipping manifest staging.\033[0m\n' "$HOME"
-            git_dusky diff HEAD
-            return 0
-        fi
+function _git_dusky_have_head() {
+    emulate -L zsh
+    git_dusky rev-parse --verify --quiet HEAD >/dev/null 2>&1
+}
 
-        local missing=()
-        local valid=()
-        local line clean
-
-        while IFS= read -r line || [[ -n "$line" ]]; do
-            clean="${line#"${line%%[![:space:]]*}"}"
-            clean="${clean%"${clean##*[![:space:]]}"}"
-            [[ -z "$clean" || "$clean" == \#* ]] && continue
-
-            if [[ "$clean" == *[\*\?\[]* ]]; then
-                local matches=( $~clean(N) )
-                if (( ${#matches[@]} > 0 )); then
-                    valid+=( "${matches[@]}" )
-                else
-                    missing+=( "$clean" )
-                fi
-            else
-                if [[ -e "$clean" || -L "$clean" ]]; then
-                    valid+=( "$clean" )
-                else
-                    missing+=( "$clean" )
-                fi
-            fi
-        done < .git_dusky_list
-
-        if (( ${#missing[@]} > 0 )); then
-            printf '\033[33m⚠ Warning: %d file(s) in .git_dusky_list missing on disk:\033[0m\n' "${#missing[@]}"
-            for m in "${missing[@]}"; do
-                printf '  \033[90m➔ %s\033[0m\n' "$m"
-            done
-        fi
-
-        if (( ${#valid[@]} > 0 )); then
-            if ! printf '%s\0' "${valid[@]}" | git_dusky add --pathspec-from-file=- --pathspec-file-nul; then
-                printf '\033[31m✖ git add failed for manifest paths\033[0m\n'
-            fi
-        fi
-
-        if ! git_dusky add -u; then
-            printf '\033[31m✖ git add -u failed\033[0m\n'
-        fi
-    )
+# -----------------------------------------------------------------------------
+# 2. $HOME-relative path resolver -> REPLY.  rc 1 if the path is outside $HOME.
+#    Expands a leading ~/ or $HOME/, absolutises with :a (which does NOT
+#    resolve symlinks, so a symlinked dotfile keeps its logical path), then
+#    tests containment with a pattern-quoted prefix and slices by index.
+# -----------------------------------------------------------------------------
+function _git_dusky_relpath() {
+    emulate -L zsh
+    setopt localoptions extendedglob
+    local p=$1 hp=${(b)HOME}
+    [[ $p == '~/'*     ]] && p=$HOME/${p#\~/}
+    [[ $p == '$HOME/'* ]] && p=$HOME/${p#\$HOME/}
+    [[ $p == /*        ]] || p=$HOME/$p
+    p=${p:a}
+    [[ $p == $hp/* ]] || return 1
+    REPLY=${p[$(( ${#HOME} + 2 )),-1]}
+    [[ -n $REPLY ]] || return 1
     return 0
 }
 
-# 3. Alias for discarding all local changes (both staged and unstaged) and revert the state of tracked files to exactly match the last commit (HEAD), this is a destructive operation. (DANGER ZONE)
-alias git_dusky_restore='echo "git --git-dir=$HOME/dusky/ --work-tree=$HOME reset --hard HEAD" && git_dusky reset --hard HEAD'
+# -----------------------------------------------------------------------------
+# 3. Manifest staging
+# -----------------------------------------------------------------------------
+function git_dusky_add_list() {
+    emulate -L zsh
+    setopt localoptions extendedglob no_nomatch no_auto_pushd
+    local cwd=$PWD
+    local CY=$'\e[33m' CR=$'\e[31m' CD=$'\e[38;5;242m' C0=$'\e[0m'
+    local -i rc=0
 
-# 4. Delta/Diff
-#    gitdelta        -> uncommitted working-tree changes vs HEAD (unchanged habit)
-#    gitdelta <N>    -> Nth-most-recent commit: header, stat, patch (1 = HEAD)
-#    gitdelta list   -> fzf commit browser with live delta preview pane,
-#                       Time-Machine style. [ENTER] full diff · [q/ESC] quit.
-function _gitdelta_show() {
-    git_dusky show \
-        --color=always \
-        --decorate=short \
-        --date=format-local:'%Y-%m-%d %H:%M' \
-        --format='%C(bold blue)󰏖 %h%C(reset) %C(bold green)%an%C(reset) %C(dim)%ad%C(reset)%d%n%C(bold yellow)%s%C(reset)' \
-        --stat \
-        --patch \
-        "$1" \
-        | delta
+    if [[ ! -r $DUSKY_GIT_LIST ]]; then
+        print -ru2 -- "${CY}⚠ ${DUSKY_GIT_LIST} not found — skipping manifest staging.${C0}"
+        _git_dusky_have_head && git_dusky diff HEAD
+        return 0
+    fi
+
+    builtin cd -q -- $HOME || {
+        print -ru2 -- "${CR}✖ git_dusky_add_list: cannot cd into \$HOME${C0}"
+        return 1
+    }
+    {
+        () {
+            local line clean m REPLY
+            local -a valid missing outside matches gone
+
+            # $(<file) is read by the shell itself — no fork, no `cat`.
+            for line in ${(f)"$(<$DUSKY_GIT_LIST)"}; do
+                clean=${${line##[[:space:]]##}%%[[:space:]]##}
+                [[ -z $clean || $clean == '#'* ]] && continue
+
+                # Expand supported home prefixes before filesystem matching.
+                [[ $clean == '~/'* ]] && clean=$HOME/${clean#\~/}
+                [[ $clean == '$HOME/'* ]] && clean=$HOME/${clean#\$HOME/}
+                # Match zsh filename patterns, then allow literal paths and
+                # broken symlinks. Brace expansion is not performed here.
+                matches=( ${~clean}(N) )
+                if (( ! $#matches )); then
+                    if [[ -e $clean || -L $clean ]]; then
+                        matches=( "$clean" )        # includes broken symlinks
+                    else
+                        missing+=( "$clean" )
+                        continue
+                    fi
+                fi
+                for m in "${matches[@]}"; do
+                    if _git_dusky_relpath "$m"; then
+                        valid+=( "$REPLY" )
+                    else
+                        outside+=( "$m" )
+                    fi
+                done
+            done
+
+            if (( $#missing )); then
+                print -ru2 -- "${CY}⚠ ${#missing} manifest path(s) not present on disk:${C0}"
+                for m in "${missing[@]}"; do print -ru2 -- "  ${CD}➔ $m${C0}"; done
+            fi
+            if (( $#outside )); then
+                print -ru2 -- "${CY}⚠ ${#outside} manifest path(s) resolve outside \$HOME and were skipped:${C0}"
+                for m in "${outside[@]}"; do print -ru2 -- "  ${CD}➔ $m${C0}"; done
+            fi
+
+            if (( $#valid )); then
+                # :(literal,top) — no pathspec magic, anchored at the work tree.
+                if ! printf ':(literal,top)%s\0' "${valid[@]}" |
+                     git_dusky add --pathspec-from-file=- --pathspec-file-nul; then
+                    print -ru2 -- "${CR}✖ git add failed for manifest paths${C0}"
+                    return 1
+                fi
+            fi
+
+            if ! git_dusky add -u; then
+                print -ru2 -- "${CR}✖ git add -u failed${C0}"
+                return 1
+            fi
+
+            # `add -u` walks the ENTIRE work tree ($HOME): never hide deletions.
+            gone=( ${(0)"$(git_dusky diff --cached --name-only --diff-filter=D -z)"} )
+            if (( $#gone )); then
+                print -ru2 -- "${CY}⚠ 'git add -u' staged ${#gone} deletion(s):${C0}"
+                for m in "${gone[@]}"; do print -ru2 -- "  ${CR}- $m${C0}"; done
+            fi
+            return 0
+        }
+        rc=$?
+    } always {
+        builtin cd -q -- $cwd
+    }
+    return $rc
 }
 
+# -----------------------------------------------------------------------------
+# 4. Destructive restore — same alias name, now with a safety interlock
+# -----------------------------------------------------------------------------
+function _git_dusky_restore() {
+    emulate -L zsh
+    local ans
+    local -i force=0
+    [[ ${1-} == (-y|--force) ]] && force=1
+
+    print -ru2 -- "/usr/bin/git --git-dir=$DUSKY_GIT_DIR --work-tree=$HOME reset --hard HEAD"
+    print -ru2 -- 'DANGER: discards ALL staged and unstaged changes to tracked dotfiles in $HOME.'
+    if (( ! force )); then
+        if [[ ! -t 0 ]]; then
+            print -ru2 -- 'Refusing to hard-reset non-interactively. Pass -y to force.'
+            return 1
+        fi
+        if ! vared -p "Proceed? [Y/n] " ans; then
+            print
+            print -ru2 -- 'Aborted.'
+            return 1
+        fi
+        if [[ -n $ans && $ans != [Yy]* ]]; then
+            print -ru2 -- 'Aborted.'
+            return 1
+        fi
+    fi
+    git_dusky reset --hard HEAD
+}
+alias git_dusky_restore='_git_dusky_restore'
+
+# -----------------------------------------------------------------------------
+# 5. Matugen colour lookup -> REPLY.  Pure zsh, mtime-memoised, zero forks.
+# -----------------------------------------------------------------------------
 function _gitdelta_matugen() {
-    # $1 = color key, $2 = fallback hex
-    local mg="$HOME/.config/matugen/generated/dusky_tui.json" v=""
-    if [[ -f "$mg" ]]; then
-        v=$(sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$mg" | head -n1)
+    emulate -L zsh
+    setopt localoptions extendedglob
+    local key=$1 fallback=$2 mg=$HOME/.config/matugen/generated/dusky_tui.json
+    local line stamp=''
+    local -a st match mbegin mend        # declared so (#b) cannot leak globals
+
+    REPLY=$fallback
+    [[ -r $mg ]] || return 0
+
+    # NOTE: no `--` here — zstat's `+element` argument stops zsh's generic
+    # option parser, so a following `--` would be taken as a FILE name.
+    (( $+builtins[zstat] )) && zstat -A st +mtime $mg 2>/dev/null && stamp=$st[1]
+
+    if [[ -z $stamp || ${_DUSKY_MG_CACHE[__stamp]-} != "$stamp" ]]; then
+        _DUSKY_MG_CACHE=( __stamp "$stamp" )
+        for line in ${(f)"$(<$mg)"}; do
+            if [[ $line == (#b)[[:space:]]#\"([^\"]##)\"[[:space:]]#:[[:space:]]#\"([^\"]##)\"* ]]; then
+                [[ -n ${_DUSKY_MG_CACHE[$match[1]]-} ]] || _DUSKY_MG_CACHE[$match[1]]=$match[2]
+            fi
+        done
     fi
-    [[ "$v" =~ ^#[0-9A-Fa-f]{6}$ ]] && printf '%s' "$v" || printf '%s' "$2"
+
+    line=${_DUSKY_MG_CACHE[$key]-}
+    [[ $line == '#'[0-9A-Fa-f](#c6) ]] && REPLY=$line
+    return 0
 }
 
+# -----------------------------------------------------------------------------
+# 6. Diff/commit stream generator & renderer
+# -----------------------------------------------------------------------------
+function _gitdelta_render_stream() {
+    emulate -L zsh
+    setopt localoptions extendedglob no_auto_pushd
+    local cwd=$PWD
+    local -i rc=0
+
+    builtin cd -q -- $HOME || return 1
+    {
+        () {
+            local target=${1-} mode=${2-}
+            shift 2 2>/dev/null || shift $#
+            local -a file_filters=( "$@" )
+            local -a filter_arg=()
+            (( $#file_filters )) && filter_arg=( -- "${(@)file_filters/#/:(literal,top)}" )
+
+            # Selector identities come from machine-readable output, never
+            # from Git's quoted, abbreviated or rename-formatted stat labels.
+            if [[ $mode == fzf_items ]]; then
+                local -a records
+                local raw_records record add del item_path old display
+                local TAB=$'\t'
+                local -i i
+                if [[ -n $target ]]; then
+                    raw_records=$(git_dusky show --numstat -z --format='' "$target" "${filter_arg[@]}") || return $?
+                else
+                    raw_records=$(git_dusky diff --numstat -z HEAD "${filter_arg[@]}") || return $?
+                fi
+                records=( ${(0)raw_records} )
+                for (( i=1; i <= $#records; ++i )); do
+                    record=$records[i]
+                    add=${record%%$TAB*}
+                    record=${record#*$TAB}
+                    del=${record%%$TAB*}
+                    item_path=${record#*$TAB}
+                    old=''
+                    if [[ -z $item_path ]]; then
+                        (( ++i )); old=$records[i]
+                        (( ++i )); item_path=$records[i]
+                    fi
+                    display=${(V)item_path}
+                    [[ -n $old ]] && display+=" (from ${(V)old})"
+                    if [[ $add == - ]]; then
+                        display+=' (binary)'
+                    else
+                        display+=" (+$add, -$del)"
+                    fi
+                    # The path occupies all remaining fields, so tabs inside
+                    # filenames remain intact in {s2..} and in selected output.
+                    printf '%s\t%s\0' "$display" "$item_path"
+                done
+                return 0
+            fi
+
+            local -a stat_lines numstat_lines
+            local raw_stat raw_numstat
+            local C_DIM=$'\e[38;5;242m' C_GREEN=$'\e[32m' C_RED=$'\e[31m' C_RESET=$'\e[0m'
+            local TAB=$'\t'
+
+            if [[ -n $target ]]; then
+                local header
+                header="$(git_dusky show --color=always --decorate=short \
+                        --date=format-local:'%Y-%m-%d %H:%M' \
+                        --format='%C(bold blue)󰏖 %h%C(reset) %C(bold green)%an%C(reset) %C(dim)%ad%C(reset)%d%n%C(bold yellow)%s%C(reset)' \
+                        --no-patch "$target")" || return $?
+                raw_stat=$(git_dusky show --color=always --stat-width=1000 --stat-name-width=1000 --stat-graph-width=20 --format='' "$target" "${filter_arg[@]}") || return $?
+                raw_numstat=$(git_dusky show --numstat --format='' "$target" "${filter_arg[@]}") || return $?
+                stat_lines=( ${(f)raw_stat} )
+                numstat_lines=( ${(f)raw_numstat} )
+                if [[ $#stat_lines -eq 0 ]]; then
+                    [[ -n $header ]] && print -r -- "$header"
+                    return 0
+                fi
+                [[ -n $header ]] && print -r -- "$header"$'\n'
+            else
+                raw_stat=$(git_dusky diff --color=always --stat-width=1000 --stat-name-width=1000 --stat-graph-width=20 HEAD "${filter_arg[@]}") || return $?
+                raw_numstat=$(git_dusky diff --numstat HEAD "${filter_arg[@]}") || return $?
+                stat_lines=( ${(f)raw_stat} )
+                numstat_lines=( ${(f)raw_numstat} )
+                if [[ $#stat_lines -eq 0 ]]; then
+                    return 0
+                fi
+            fi
+
+            typeset -A det_map det_len dir_color
+            local line a d p rest det det_pad formatted
+            integer max_det_w=0 w pad_det next_color_idx=0
+            local base_dir sub_dir file_p lead trail c_base C_DIM_CODE=$'\e[2m'
+            local -a parts
+            local -a dir_colors=(
+                $'\e[38;5;111m' # sky blue
+                $'\e[38;5;176m' # lavender
+                $'\e[38;5;215m' # peach / orange
+                $'\e[38;5;114m' # sage green
+                $'\e[38;5;221m' # warm yellow
+                $'\e[38;5;116m' # mint teal
+                $'\e[38;5;211m' # soft rose
+                $'\e[38;5;147m' # periwinkle
+                $'\e[38;5;180m' # sand
+                $'\e[38;5;152m' # ice blue
+                $'\e[38;5;182m' # mauve
+                $'\e[38;5;186m' # light olive
+            )
+
+            for line in "${numstat_lines[@]}"; do
+                [[ -z $line ]] && continue
+                a=${line%%$TAB*}
+                rest=${line#*$TAB}
+                d=${rest%%$TAB*}
+                p=${rest#*$TAB}
+                if [[ $a == "-" && $d == "-" ]]; then
+                    det="${C_DIM}(binary)${C_RESET}"
+                    w=8
+                else
+                    det="${C_DIM}(${C_GREEN}+${a}${C_DIM}, ${C_RED}-${d}${C_DIM})${C_RESET}"
+                    w=$(( 6 + ${#a} + ${#d} ))
+                fi
+                det_map[$p]=$det
+                det_len[$p]=$w
+                (( w > max_det_w )) && max_det_w=$w
+            done
+
+            local raw_p clean_p after_pipe clean_after clean_after_trim cnt cnt_part gr
+            for line in "${stat_lines[@]}"; do
+                if [[ $line == *"|"* ]]; then
+                    raw_p=${line%%|*}
+                    clean_p=${${raw_p## #}%% #}
+                    clean_p=${clean_p//(#b)$'\e'\[[0-9;]#m/}
+                    after_pipe=${line#*|}
+                    clean_after=${after_pipe//(#b)$'\e'\[[0-9;]#m/}
+                    clean_after_trim=${clean_after## #}
+                    cnt=${clean_after_trim%% *}
+                    if [[ -n ${det_map[$clean_p]-} ]]; then
+                        if [[ $clean_p == */* ]]; then
+                            parts=( ${(s:/:)clean_p} )
+                            if (( $#parts <= 2 )); then
+                                base_dir="${clean_p%/*}/"
+                                sub_dir=""
+                                file_p="${clean_p##*/}"
+                            else
+                                base_dir="${parts[1]}/${parts[2]}/"
+                                file_p="${parts[-1]}"
+                                sub_dir="${clean_p#$base_dir}"
+                                sub_dir="${sub_dir%$file_p}"
+                            fi
+
+                            if [[ -z ${dir_color[$base_dir]-} ]]; then
+                                next_color_idx=$(( next_color_idx + 1 ))
+                                dir_color[$base_dir]=${dir_colors[ (( (next_color_idx - 1) % #dir_colors ) + 1) ]}
+                            fi
+                            c_base=${dir_color[$base_dir]}
+                            lead=${raw_p%%${clean_p}*}
+                            trail=${raw_p#*${clean_p}}
+                            if [[ -n $sub_dir ]]; then
+                                raw_p="${lead}${c_base}${base_dir}${C_DIM_CODE}${sub_dir}${C_RESET}${file_p}${trail}"
+                            else
+                                raw_p="${lead}${c_base}${base_dir}${C_RESET}${file_p}${trail}"
+                            fi
+                        fi
+
+                        det=${det_map[$clean_p]}
+                        w=${det_len[$clean_p]}
+                        pad_det=$(( max_det_w - w ))
+                        det_pad=${(l:pad_det:: :)}
+                        if [[ $cnt == <-> ]]; then
+                            cnt_part=${after_pipe%%${cnt}*}${cnt}
+                            gr=${after_pipe#*${cnt}}
+                            gr=${gr## #}
+                            if [[ -n $gr ]]; then
+                                formatted="${raw_p}|${cnt_part}  ${det}${det_pad}  ${gr}"
+                            else
+                                formatted="${raw_p}|${cnt_part}  ${det}"
+                            fi
+                        else
+                            formatted="${raw_p}|${after_pipe}  ${det}"
+                        fi
+
+                        print -r -- "${formatted}" 2>/dev/null || break
+                        continue
+                    fi
+                fi
+                print -r -- "$line" 2>/dev/null || break
+            done
+
+            print -r -- "" 2>/dev/null || true
+
+            if [[ -n $target ]]; then
+                git_dusky show --patch --format="" "$target" "${filter_arg[@]}"
+            else
+                git_dusky diff --patch HEAD "${filter_arg[@]}"
+            fi
+        } "$@"
+        rc=$?
+    } always {
+        builtin cd -q -- $cwd
+    }
+    return $rc
+}
+
+function _gitdelta_show() {
+    emulate -L zsh
+    setopt localoptions pipefail
+    local target=${1-} mode=${2-}
+    local -a stream_status
+    shift 2 2>/dev/null || shift $#
+    if (( ! $+commands[delta] )); then
+        _gitdelta_render_stream "$target" "$mode" "$@"
+        return $?
+    elif [[ -t 1 ]]; then
+        _gitdelta_render_stream "$target" "$mode" "$@" | delta
+        stream_status=( "${pipestatus[@]}" )
+    else
+        _gitdelta_render_stream "$target" "$mode" "$@" | delta --paging=never
+        stream_status=( "${pipestatus[@]}" )
+    fi
+    (( stream_status[2] == 0 && stream_status[1] == 141 )) && return 0
+    (( stream_status[2] )) && return $stream_status[2]
+    return $stream_status[1]
+}
+
+# -----------------------------------------------------------------------------
+# 7. fzf commit browser (Time Machine)
+# -----------------------------------------------------------------------------
+function _gitdelta_browse() {
+    emulate -L zsh
+    setopt localoptions extendedglob
+    local c_bg c_fg c_acc c_mut c_ok sel hash preview REPLY raw_hash TAB=$'\t'
+    local -a fields
+    local -i rc=0
+
+    if (( ! $+commands[fzf] )); then
+        print -ru2 -- "gitdelta: fzf is required for 'gitdelta list'."
+        return 1
+    fi
+    if ! _git_dusky_have_head; then
+        print -ru2 -- 'gitdelta: no commits yet — nothing to list.'
+        return 1
+    fi
+
+    _gitdelta_matugen bg      '#1d100a'; c_bg=$REPLY
+    _gitdelta_matugen fg      '#f8ddd2'; c_fg=$REPLY
+    _gitdelta_matugen accent  '#ffb694'; c_acc=$REPLY
+    _gitdelta_matugen muted   '#55433b'; c_mut=$REPLY
+    _gitdelta_matugen success '#f0be79'; c_ok=$REPLY
+
+    # fzf runs previews through $SHELL, where zsh functions do not exist, so
+    # git is inlined with both paths baked in at build time via (q) quoting.
+    preview="/usr/bin/git -C ${(q)HOME} --git-dir=${(q)DUSKY_GIT_DIR} --work-tree=${(q)HOME}"
+    preview+=" show --color=always --decorate=short --date=format-local:'%Y-%m-%d %H:%M'"
+    preview+=" --format='%C(bold blue)󰏖 %h%C(reset) %C(bold green)%an%C(reset) %C(dim)%ad%C(reset)%d%n%C(bold yellow)%s%C(reset)'"
+    preview+=' --stat --patch {5}'
+    (( $+commands[delta] )) && preview+=' | delta --paging=never ${FZF_PREVIEW_COLUMNS:+--width=$FZF_PREVIEW_COLUMNS}'
+
+    local helper=${(q)HOME}/user_scripts/git/git_dusky.py
+    local layout_helper=${(q)HOME}/user_scripts/git/git_fzf_layout.sh
+    local cur_layout="right,70%,border-left,wrap"
+    [[ -f "$HOME/.config/dusky/settings/git_preview_layout" ]] && cur_layout=$(< "$HOME/.config/dusky/settings/git_preview_layout")
+    [[ $cur_layout == "hidden" ]] && cur_layout="hidden"
+
+    sel=$(git_dusky log --color=always \
+            --date=format-local:'%Y-%m-%d %H:%M' \
+            --format="%C(yellow)%<(48,trunc)%s%C(reset)${TAB}%C(green)%<(14,trunc)%cr%C(reset)${TAB}%C(dim)%ad%C(reset)${TAB}%C(bold green)%<(8,trunc)%an%C(reset)${TAB}%C(bold cyan)%h%C(reset)${TAB}%C(auto)%d%C(reset)" \
+        | FZF_DEFAULT_OPTS= FZF_DEFAULT_OPTS_FILE= fzf --ansi --with-shell='/bin/sh -c' \
+            --delimiter="$TAB" \
+            --tabstop=4 \
+            --ellipsis='' \
+            --no-sort \
+            --tiebreak=index \
+            --highlight-line \
+            --scrollbar='│' \
+            --separator='─' \
+            --info=right \
+            --prompt='󰏖 commits ❯ ' \
+            --pointer='▶' \
+            --marker='▶' \
+            --no-height \
+            --layout=reverse \
+            --border=rounded \
+            --border-label=' 󰏖 dusky commit browser ' \
+            --border-label-pos=2 \
+            --preview-window="$cur_layout" \
+            --preview-label=' commit diff ' \
+            --preview-label-pos=center \
+            --preview="$preview" \
+            --header='[ENTER] diff   [Alt-M] vim   [Alt-←/→] resize   [Alt-H/J/K/L] move   [Alt-V] view   [Shift-↑/↓] scroll   [q/ESC] quit' \
+            --bind="alt-left:transform:bash ${layout_helper} --resize-preview left" \
+            --bind="alt-right:transform:bash ${layout_helper} --resize-preview right" \
+            --bind="alt-up:transform:bash ${layout_helper} --resize-preview up" \
+            --bind="alt-down:transform:bash ${layout_helper} --resize-preview down" \
+            --bind="alt-h:transform:bash ${layout_helper} --move-preview left" \
+            --bind="alt-j:transform:bash ${layout_helper} --move-preview down" \
+            --bind="alt-k:transform:bash ${layout_helper} --move-preview up" \
+            --bind="alt-l:transform:bash ${layout_helper} --move-preview right" \
+            --bind="alt-v:transform:bash ${layout_helper} --move-preview hidden" \
+            --bind="alt-m:transform:${helper} --toggle-vim '󰏖 commits ❯ '" \
+            --bind="esc:transform:${helper} --key-escape" \
+            --bind="start:transform:${helper} --vim-init '󰏖 commits ❯ '" \
+            --bind='j:down,k:up,g:first,G:last,ctrl-d:half-page-down,ctrl-u:half-page-up,q:abort' \
+            --bind='/:change-prompt( 󰍉 search ❯ )+enable-search+unbind(j,k,g,G,J,K,v,V,q,ctrl-a,ctrl-d,ctrl-u,/)' \
+            --bind='shift-up:preview-up,shift-down:preview-down,shift-scroll-up:preview-up,shift-scroll-down:preview-down,scroll-up:up,scroll-down:down,preview-scroll-up:preview-up,preview-scroll-down:preview-down,ctrl-/:toggle-preview,alt-p:change-preview-window(down,50%,border-top|right,70%,border-left)' \
+            --color="bg:$c_bg,bg+:$c_mut,fg:$c_fg,fg+:$c_fg" \
+            --color="hl:$c_acc,hl+:$c_acc,pointer:$c_ok,marker:$c_ok" \
+            --color="prompt:$c_acc,info:$c_acc,border:$c_mut,label:$c_acc,scrollbar:$c_acc,separator:$c_mut")
+    rc=$?
+    (( rc == 1 || rc == 130 )) && return 0
+    (( rc == 0 )) || return $rc
+    [[ -n $sel ]] || return 0
+
+    fields=("${(@ps:\t:)sel}")
+    raw_hash=${fields[5]}
+    hash=${${raw_hash//(#b)$'\e'\[[0-9;]#m/}//[[:space:]]/}
+    if ! git_dusky rev-parse --verify --quiet "${hash}^{commit}" >/dev/null 2>&1; then
+        print -ru2 -- "gitdelta: could not resolve commit '$hash'"
+        return 1
+    fi
+    _gitdelta_show "$hash"
+}
+
+# -----------------------------------------------------------------------------
+# 8. fzf file diff browser
+# -----------------------------------------------------------------------------
+function _gitdelta_select() {
+    emulate -L zsh
+    setopt localoptions extendedglob
+    local c_bg c_fg c_acc c_mut c_ok sel key file target line_num REPLY TAB=$'\t'
+    local -a sel_lines lines
+    local -i rc=0
+
+    if (( ! $+commands[fzf] )); then
+        print -ru2 -- "gitdelta: fzf is required for 'gitdelta select'."
+        return 1
+    fi
+
+    # Support optional commit number: gitdelta select [N]
+    if [[ -n ${1-} ]]; then
+        local n=$1
+        if [[ $n != <1-> ]]; then
+            print -ru2 -- 'Usage: gitdelta select [N]  —  N = Nth-last commit (default: uncommitted changes)'
+            return 1
+        fi
+        if ! git_dusky rev-parse --verify --quiet "HEAD~$(( n - 1 ))" >/dev/null 2>&1; then
+            print -ru2 -- "No commit that far back — history is shorter than ${n}."
+            return 1
+        fi
+        target="HEAD~$(( n - 1 ))"
+    else
+        git_dusky_add_list || return $?
+        if ! _git_dusky_have_head; then
+            print -ru2 -- 'gitdelta: no commits yet — nothing to diff against HEAD.'
+            return 1
+        fi
+        target=""
+    fi
+
+    _gitdelta_matugen bg      '#1d100a'; c_bg=$REPLY
+    _gitdelta_matugen fg      '#f8ddd2'; c_fg=$REPLY
+    _gitdelta_matugen accent  '#ffb694'; c_acc=$REPLY
+    _gitdelta_matugen muted   '#55433b'; c_mut=$REPLY
+    _gitdelta_matugen success '#f0be79'; c_ok=$REPLY
+
+    local helper=${(q)HOME}/user_scripts/git/git_dusky.py
+    local layout_helper=${(q)HOME}/user_scripts/git/git_fzf_layout.sh
+    local preview="DUSKY_GIT_DIR=${(q)DUSKY_GIT_DIR} ${helper} --diff-preview ${(q)target} {s2..} {+s2..}"
+
+    local raw_items
+    raw_items=$(_gitdelta_render_stream "$target" "fzf_items") || return $?
+    lines=( ${(0)raw_items} )
+    if (( $#lines == 0 )); then
+        print -ru2 -- 'gitdelta: no changed files to select.'
+        return 0
+    fi
+
+    local cur_layout="right,70%,border-left,wrap"
+    [[ -f "$HOME/.config/dusky/settings/git_preview_layout" ]] && cur_layout=$(< "$HOME/.config/dusky/settings/git_preview_layout")
+    [[ $cur_layout == "hidden" ]] && cur_layout="hidden"
+
+    sel=$(printf '%s\0' "${lines[@]}" \
+        | FZF_DEFAULT_OPTS= FZF_DEFAULT_OPTS_FILE= fzf --read0 --print0 --with-shell='/bin/sh -c' \
+            --multi \
+            --delimiter="$TAB" \
+            --with-nth=1 \
+            --expect='ctrl-e,enter' \
+            --ellipsis='' \
+            --highlight-line \
+            --scrollbar='│' \
+            --separator='─' \
+            --info=right \
+            --prompt='󰏖 files ❯ ' \
+            --pointer='▶' \
+            --marker='✔ ' \
+            --no-height \
+            --layout=reverse \
+            --border=rounded \
+            --border-label=' 󰏖 dusky file diff browser ' \
+            --border-label-pos=2 \
+            --preview-window="$cur_layout" \
+            --preview-label=' file diff ' \
+            --preview-label-pos=center \
+            --preview="$preview" \
+            --header='[TAB] mark   [Alt-M] vim   [Alt-←/→] resize   [Alt-H/J/K/L] move   [Alt-V] view   [Shift-↑/↓] scroll   [ctrl-e] edit   [ENTER] diff   [q] quit' \
+            --bind="alt-left:transform:bash ${layout_helper} --resize-preview left" \
+            --bind="alt-right:transform:bash ${layout_helper} --resize-preview right" \
+            --bind="alt-up:transform:bash ${layout_helper} --resize-preview up" \
+            --bind="alt-down:transform:bash ${layout_helper} --resize-preview down" \
+            --bind="alt-h:transform:bash ${layout_helper} --move-preview left" \
+            --bind="alt-j:transform:bash ${layout_helper} --move-preview down" \
+            --bind="alt-k:transform:bash ${layout_helper} --move-preview up" \
+            --bind="alt-l:transform:bash ${layout_helper} --move-preview right" \
+            --bind="alt-v:transform:bash ${layout_helper} --move-preview hidden" \
+            --bind="alt-m:transform:${helper} --toggle-vim '󰏖 files ❯ '" \
+            --bind="esc:transform:${helper} --key-escape" \
+            --bind="start:transform:${helper} --vim-init '󰏖 files ❯ '" \
+            --bind='j:down,k:up,g:first,G:last,J:toggle+down,K:toggle+up,v:toggle,V:toggle,ctrl-d:half-page-down,ctrl-u:half-page-up,q:abort' \
+            --bind='ctrl-a:select-all,ctrl-d:deselect-all' \
+            --bind='/:change-prompt( 󰍉 search ❯ )+enable-search+unbind(j,k,g,G,J,K,v,V,q,ctrl-a,ctrl-d,ctrl-u,/)' \
+            --bind='shift-up:preview-up,shift-down:preview-down,shift-scroll-up:preview-up,shift-scroll-down:preview-down,scroll-up:up,scroll-down:down,preview-scroll-up:preview-up,preview-scroll-down:preview-down,ctrl-/:toggle-preview,alt-p:change-preview-window(down,50%,border-top|right,70%,border-left)' \
+            --color="bg:$c_bg,bg+:$c_mut,fg:$c_fg,fg+:$c_fg" \
+            --color="hl:$c_acc,hl+:$c_acc,pointer:$c_ok,marker:$c_ok" \
+            --color="prompt:$c_acc,info:$c_acc,border:$c_mut,label:$c_acc,scrollbar:$c_acc,separator:$c_mut")
+    rc=$?
+    (( rc == 1 || rc == 130 )) && return 0
+    (( rc == 0 )) || return $rc
+    [[ -n $sel ]] || return 0
+
+    sel_lines=( "${(@0)sel}" )
+    (( $#sel_lines )) || return 0
+
+    key=${sel_lines[1]}
+    local -a files
+    local l item_f
+    for l in "${sel_lines[@]:1}"; do
+        [[ -z $l ]] && continue
+        item_f=${l#*$TAB}
+        [[ -n $item_f ]] && files+=( "$item_f" )
+    done
+    (( $#files )) || return 0
+
+    if [[ $key == 'ctrl-e' ]]; then
+        local -a editor=( ${(z)${EDITOR:-nvim}} )
+        editor=( "${(@Q)editor}" )
+        local -a existing_paths
+        local f fp
+        for f in "${files[@]}"; do
+            fp="$HOME/$f"
+            if [[ -f $fp ]]; then
+                existing_paths+=( "$fp" )
+            else
+                print -ru2 -- "gitdelta: cannot edit '$fp' (file not found on disk)."
+            fi
+        done
+        (( $#existing_paths )) || return 1
+
+        if (( $#existing_paths == 1 )); then
+            line_num=0
+            local h
+            local -a match mbegin mend
+            _git_dusky_relpath "${existing_paths[1]}" || return 1
+            local selected_path=$REPLY
+            if [[ -n $target ]]; then
+                for h in ${(f)"$(git_dusky show -U0 --format='' "$target" -- ":(literal,top)${selected_path}" 2>/dev/null)"}; do
+                    if [[ $h == (#b)@@\ -[0-9]#(,[0-9]#)#\ \+([0-9]##)* ]]; then
+                        line_num=$match[2]
+                        break
+                    fi
+                done
+            else
+                for h in ${(f)"$(git_dusky diff -U0 HEAD -- ":(literal,top)${selected_path}" 2>/dev/null)"}; do
+                    if [[ $h == (#b)@@\ -[0-9]#(,[0-9]#)#\ \+([0-9]##)* ]]; then
+                        line_num=$match[2]
+                        break
+                    fi
+                done
+            fi
+            if (( line_num > 0 )); then
+                "${editor[@]}" "+$line_num" "${existing_paths[1]}"
+            else
+                "${editor[@]}" "${existing_paths[1]}"
+            fi
+        else
+            "${editor[@]}" "${existing_paths[@]}"
+        fi
+        return $?
+    fi
+
+    _gitdelta_show "$target" "" "${files[@]}"
+}
+
+# -----------------------------------------------------------------------------
+# 9. gitdelta router
+# -----------------------------------------------------------------------------
 function gitdelta() {
+    emulate -L zsh
+    setopt localoptions extendedglob pipefail
+    local n target
+
     if (( $# == 0 )); then
-        git_dusky_add_list && git_dusky diff --stat --patch HEAD
+        git_dusky_add_list || return $?
+        if ! _git_dusky_have_head; then
+            print -ru2 -- 'gitdelta: no commits yet — nothing to diff against HEAD.'
+            return 1
+        fi
+        _gitdelta_show
         return $?
     fi
 
-    if [[ "$1" == "list" ]]; then
-        if ! command -v fzf >/dev/null 2>&1; then
-            echo "fzf is required for 'gitdelta list'."
+    case $1 in
+        -h|--help)
+            print -rl -- \
+                'gitdelta            uncommitted work-tree changes vs HEAD (stages the manifest first)' \
+                'gitdelta select [N] interactive multi-file fzf diff browser (N = optional commit number)' \
+                'gitdelta FILE...    show diff for specific file(s) (full path or partial name)' \
+                'gitdelta N          Nth most recent commit, 1 = HEAD' \
+                'gitdelta N FILE...  show diff for FILE(s) in Nth commit' \
+                'gitdelta list       fzf commit browser with live delta preview'
+            return 0 ;;
+        list)
+            _gitdelta_browse
+            return $? ;;
+        select|pick)
+            shift
+            _gitdelta_select "$@"
+            return $? ;;
+    esac
+
+    n=$1
+    if [[ $n == <1-> ]]; then
+        if ! git_dusky rev-parse --verify --quiet "HEAD~$(( n - 1 ))" >/dev/null 2>&1; then
+            print -ru2 -- "No commit that far back — history is shorter than ${n}."
             return 1
         fi
-        if ! git_dusky rev-parse --verify --quiet HEAD >/dev/null; then
-            echo "No commits yet — nothing to list."
-            return 1
+        target="HEAD~$(( n - 1 ))"
+        shift
+        if (( $# == 0 )); then
+            _gitdelta_show "$target"
+            return $?
+        fi
+    else
+        target=""
+    fi
+
+    # Handle file path or pattern arguments
+    local -a changed_files matched_files matches
+    local raw_files
+    if [[ -n $target ]]; then
+        raw_files=$(git_dusky show --name-only -z --format='' "$target") || return $?
+    else
+        raw_files=$(git_dusky diff --name-only -z HEAD) || return $?
+    fi
+    changed_files=( ${(0)raw_files} )
+    if (( $#changed_files == 0 )); then
+        print -ru2 -- 'gitdelta: no changed files.'
+        return 0
+    fi
+
+    local query abs REPLY
+    for query in "$@"; do
+        # 1. Exact match
+        if (( ${changed_files[(Ie)$query]} )); then
+            matched_files+=( "$query" )
+            continue
         fi
 
-        local c_bg c_fg c_acc c_mut c_ok preview_cmd sel hash
-        c_bg=$(_gitdelta_matugen bg "#1d100a")
-        c_fg=$(_gitdelta_matugen fg "#f8ddd2")
-        c_acc=$(_gitdelta_matugen accent "#ffb694")
-        c_mut=$(_gitdelta_matugen muted "#55433b")
-        c_ok=$(_gitdelta_matugen success "#f0be79")
+        # 2. Path relative to $HOME
+        abs=${query:a}
+        if _git_dusky_relpath "$abs"; then
+            if (( ${changed_files[(Ie)$REPLY]} )); then
+                matched_files+=( "$REPLY" )
+                continue
+            fi
+        fi
 
-        # Runs inside fzf's child shell: no zsh functions there — inline git.
-        preview_cmd='/usr/bin/git --git-dir="$HOME/dusky/" --work-tree="$HOME" show --color=always --decorate=short --date=format-local:"%Y-%m-%d %H:%M" --format="%C(bold blue)󰏖 %h%C(reset) %C(bold green)%an%C(reset) %C(dim)%ad%C(reset)%d%n%C(bold yellow)%s%C(reset)" --stat --patch {1} | delta --paging=never --width=$FZF_PREVIEW_COLUMNS'
+        # 3. Substring / pattern match against changed files
+        matches=( ${(M)changed_files:#*$query*} )
+        if (( $#matches >= 1 )); then
+            matched_files+=( "${matches[@]}" )
+            continue
+        fi
 
-        sel=$(git_dusky log --color=always \
-                --date=format-local:'%Y-%m-%d %H:%M' \
-                --format='%h %C(dim)%ad%C(reset) %C(bold green)%an%C(reset) %C(yellow)%s%C(reset)%d' \
-            | fzf --ansi \
-                --no-sort \
-                --tiebreak=index \
-                --prompt='󰏖 commits ❯ ' \
-                --pointer='▶' \
-                --height=100% \
-                --layout=reverse \
-                --border=rounded \
-                --border-label=' 󰏖 dusky commit browser ' \
-                --border-label-pos=2 \
-                --preview-window='right,70%,border-left,wrap' \
-                --preview-label=' commit diff ' \
-                --preview-label-pos=center \
-                --preview="$preview_cmd" \
-                --header='[ENTER] full diff   [q/ESC] quit   filter by hash / author / subject' \
-                --bind='q:abort' \
-                --color="bg:$c_bg,bg+:$c_mut,fg:$c_fg,fg+:$c_fg" \
-                --color="hl:$c_acc,hl+:$c_acc,pointer:$c_ok,marker:$c_ok" \
-                --color="prompt:$c_acc,info:$c_acc,border:$c_mut,label:$c_acc") || return 0
+        print -ru2 -- "gitdelta: no changed file matching '$query'."
+    done
 
-        hash="${${=sel}[1]}"
-        _gitdelta_show "$hash"
+    matched_files=( ${(u)matched_files} )
+    if (( $#matched_files >= 1 )); then
+        _gitdelta_show "$target" "" "${matched_files[@]}"
         return $?
     fi
 
-    local n="${1}"
-    if [[ ! "$n" =~ ^[0-9]+$ ]] || (( n < 1 )); then
-        echo "Usage: gitdelta [N|list]  —  no arg: uncommitted changes · N = Nth-last commit · list = fzf browser"
-        return 1
-    fi
-
-    if ! git_dusky rev-parse --verify --quiet "HEAD~$((n - 1))" >/dev/null; then
-        echo "No commit that far back — history is shorter than ${n}."
-        return 1
-    fi
-
-    _gitdelta_show "HEAD~$((n - 1))"
+    return 1
 }
 
-# 5. Lazygit Bare Repo Alias
-alias lazygit_dusky='lazygit --git-dir=$HOME/dusky/ --work-tree=$HOME'
-
-# 6. Push a single file to dotfiles bare repo
+# -----------------------------------------------------------------------------
+# 9. Single-file push
+# -----------------------------------------------------------------------------
 function git_dusky_push() {
-    local filepath="${1:-}"
-    if [[ -z "$filepath" ]]; then
-        echo "Usage: git_dusky_push <file_path>"
+    emulate -L zsh
+    setopt localoptions extendedglob no_auto_pushd
+    local target=${1-} abs rel cwd=$PWD REPLY
+    local -i rc=0
+
+    if [[ -z $target ]]; then
+        print -ru2 -- 'Usage: git_dusky_push FILE'
+        return 1
+    fi
+    abs=${target:a}
+    if ! _git_dusky_relpath "$abs"; then
+        print -ru2 -- "Error: the file must live inside \$HOME (got: $abs)"
+        return 1
+    fi
+    rel=$REPLY
+    if [[ ! -e $abs && ! -L $abs ]]; then
+        print -ru2 -- "Error: no such file: $abs"
         return 1
     fi
 
-    # Resolve relative path to HOME
-    local rel_path
-    rel_path=$(realpath --relative-to="$HOME" "$filepath" 2>/dev/null)
-    if [[ $? -ne 0 || "$rel_path" == ../* ]]; then
-        echo "Error: File must be within $HOME"
-        return 1
-    fi
+    builtin cd -q -- $HOME || return 1
+    {
+        () {
+            local msg br
+            local -a others
 
-    (
-        cd "$HOME" || return 1
+            if ! git_dusky add -- ":(literal,top)$rel"; then
+                print -ru2 -- 'Error: git add failed — nothing committed or pushed.'
+                return 1
+            fi
+            git_dusky diff --cached --quiet -- ":(literal,top)$rel"
+            local -i diff_rc=$?
+            if (( diff_rc == 0 )); then
+                print -ru2 -- "Nothing to commit for '$rel' (identical to HEAD)."
+                return 0
+            elif (( diff_rc != 1 )); then
+                print -ru2 -- 'Error: git diff failed — nothing committed or pushed.'
+                return $diff_rc
+            fi
 
-        if ! git_dusky add "$rel_path"; then
-            echo "Error: git add failed — nothing committed or pushed."
-            return 1
-        fi
+            local raw_others
+            raw_others=$(git_dusky diff --cached --name-only -z) || return $?
+            others=( ${(0)raw_others} )
+            others=( ${others:#${(b)rel}} )
+            (( $#others )) && print -ru2 -- \
+                "Note: ${#others} other path(s) are staged; this commit is scoped to '$rel' only."
 
-        echo -n "Commit message for '$rel_path': "
-        local msg
-        read -r msg
-        if [[ -z "$msg" ]]; then
-            echo "Aborted: Commit message is required."
-            return 1
-        fi
+            # vared uses ZLE, so cursor keys edit the line instead of printing
+            # escape sequences. Keep read for callers supplying stdin via a pipe.
+            if [[ -t 0 ]]; then
+                vared -p "Commit message for '$rel': " msg || return 1
+            else
+                print -nu2 -- "Commit message for '$rel': "
+                read -r msg || return 1
+            fi
+            if [[ -z ${msg//[[:space:]]/} ]]; then
+                print -ru2 -- 'Aborted: a commit message is required.'
+                return 1
+            fi
 
-        if ! git_dusky commit -m "$msg ($rel_path)"; then
-            echo "Commit failed — nothing pushed (working tree state untouched)."
-            return 1
-        fi
+            # Scoped commit: never sweep up whatever gitdelta staged earlier.
+            if ! git_dusky commit -m "$msg ($rel)" -- ":(literal,top)$rel"; then
+                print -ru2 -- 'Commit failed — nothing pushed (working tree untouched).'
+                return 1
+            fi
 
-        if ! git_dusky push; then
-            local br
             br=$(git_dusky branch --show-current)
-            echo "Plain push failed — retrying with upstream setup (-u origin ${br:-main})..."
-            git_dusky push -u origin "${br:-main}"
-        fi
-    )
+            if [[ -z $br ]]; then
+                print -ru2 -- 'Detached HEAD — refusing to guess a branch. The commit is local.'
+                return 1
+            fi
+            if git_dusky rev-parse --verify --quiet "${br}@{upstream}" >/dev/null 2>&1; then
+                git_dusky push
+            else
+                print -ru2 -- "No upstream for '$br' — pushing with -u origin $br"
+                git_dusky push -u origin "$br"
+            fi
+        }
+        rc=$?
+    } always {
+        builtin cd -q -- $cwd
+    }
+    return $rc
 }
 
-# 7. Dusky Dotfiles Manager Dashboard Alias
-alias dusky='~/user_scripts/git/git_dusky.py'
-
+# -----------------------------------------------------------------------------
+# 10. Entry points  (inner quotes survive a $HOME that contains spaces)
+# -----------------------------------------------------------------------------
+alias lazygit_dusky='lazygit --git-dir="$DUSKY_GIT_DIR" --work-tree="$HOME"'
+alias dusky='"$HOME/user_scripts/git/git_dusky.py"'

@@ -408,7 +408,7 @@
             "critical": 15
         },
         "tooltip-format": "{timeTo}\nHealth: {health}%\nPower Draw: {power:.2f} W\nCycles: {cycles}\n\nLMB: Toggle Format\nRMB: Timeout Settings",
-        "on-click-right": "dusky-run kitty --class dusky_hypridle.sh -e $HOME/user_scripts/hypridle/dusky_hypridle.sh"
+        "on-click-right": "dusky-run kitty --class dusky_tui -e python3 $HOME/user_scripts/hypridle/tui_dusky_hypridle.py"
     },
 
 "custom/notification": {

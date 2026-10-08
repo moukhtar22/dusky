@@ -67,11 +67,11 @@ INSTALL_SEQUENCE=(
     "S | 050_pacman_config.sh --auto"
     "S | 051_pacman_hooks.sh --auto"
     "S | 055_pacman_reflector.sh"
+    "S | 058_aur_paru_fallback_yay.sh --paru"
     "S | 060_package_installation.sh"
-    "S | 068_ufw_firewall.sh"
+    "S | 068_ufw_firewall.py"
     "S | 070_openssh_setup.sh --auto"
     "U | 075_changing_shell_zsh.sh"
-    "S | 080_aur_paru_fallback_yay.sh --paru"
 #    "S | 085_warp.py"
 #    "U | 090_paru_packages_optional.sh"
 #    "S | 095_battery_limiter_again_dusk.sh"
@@ -87,6 +87,7 @@ INSTALL_SEQUENCE=(
 
     "U | 145_matugen_directories.py"
 #    "U | 150_wallpapers_download.sh"
+    "U | 151_dusky_papers_setup.py --update-cache"
     "U | 155_blur_shadow_opacity.sh"
     "U | 160_theme_ctl.py"
     "U | 165_qtct_config.sh"
@@ -96,24 +97,23 @@ INSTALL_SEQUENCE=(
 #    "S | firefox_symlink_partition.py"
 #    "S | 200_tlp_config.py"
     "S | 205_zram_configuration.sh"
-    "S | 206_zram_tmpfs_mounts.py --disable"
+    "S | 206_zram_tmpfs_mounts.py"
     "S | 210_zram_optimize_swappiness.sh"
     "S | 211_systemd_oomd_zram.py"
     "S | 212_thp_sysfs_optimizer.sh"
     "S | 213_systemd_journaling_optimizer.sh"
-    "S | 214_damon_reclaim_optimizer.py"
     "S | 216_systemd_accounting_optimizer.py --yes"
-    "S | 217_boot_memory_reclaimer.py"
+    "S | 217_pro_active_zram_swap.py"
 #    "S | 215_powerkey_lid_close_behaviour.sh"
 
     "S | 220_logrotate_optimization.sh"
     "S | 225_faillock_timeout.py --preset lenient -y"
 #    "U | 230_asus_tuf_tweaks.sh"
-    "U | 235_file_manager_switch.sh --thunar"
-    "U | 236_browser_switcher.sh --firefox"
+    "U | 235_default_apps.py --file-manager --set thunar"
+    "U | 235_default_apps.py --browser --set firefox"
 
-    "U | 237_text_editer_switcher.sh --mousepad"
-    "U | 238_terminal_switcher.sh --kitty"
+    "U | 235_default_apps.py --text-editor --set mousepad"
+    "U | 235_default_apps.py --terminal --set kitty"
     "U | 241_thunar_defaults.py"
     "U | 242_file_manager_bookmarks_sidepane.py"
     "U | 243_mousepad_defaults.py"
@@ -164,7 +164,7 @@ INSTALL_SEQUENCE=(
 
 # ------ CUSTOM PATH SCRIPTS -------
 
-    "U | wallpaper_selector.py --build-cache"
+    "U | ignore-fail | wallpaper_selector.py --build-cache"
 #    "U | dusky_neovim_manager.sh"
 )
 

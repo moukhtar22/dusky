@@ -10,6 +10,7 @@ On-disk format is SQLite STRICT. application_id = 0x44534B59 ('DSKY').
 
 from __future__ import annotations
 
+import fcntl
 import logging
 import os
 import queue
@@ -28,16 +29,7 @@ logger = logging.getLogger(__name__)
 SCHEMA_VERSION = 2
 APPLICATION_ID = 0x44534B59  # 'DSKY'
 
-# Persistent file-level pragmas (set once at init).
-_FILE_PRAGMAs = """
-PRAGMA application_id = 1146309465;
-PRAGMA user_version = 2;
-PRAGMA journal_mode = WAL;
-PRAGMA auto_vacuum = INCREMENTAL;
-"""
-
-# Per-connection pragmas. journal_mode is re-issued so a reader that
-# races a brand-new file still lands in WAL rather than DELETE.
+# WAL is persistent; connection tuning stays separate from schema metadata.
 _WRITER_PRAGMAS = (
     "PRAGMA journal_mode = WAL",
     "PRAGMA synchronous = NORMAL",
@@ -82,7 +74,6 @@ CREATE TABLE IF NOT EXISTS events (
     device        TEXT    NOT NULL DEFAULT ''
 ) STRICT;
 
-CREATE INDEX IF NOT EXISTS idx_events_date      ON events(local_date);
 CREATE INDEX IF NOT EXISTS idx_events_ts        ON events(ts_ms);
 CREATE INDEX IF NOT EXISTS idx_events_kind_ts   ON events(kind, ts_ms);
 CREATE INDEX IF NOT EXISTS idx_events_key_ts    ON events(key_name, ts_ms);
@@ -197,40 +188,31 @@ def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
     return {str(r[1]) for r in rows}
 
 
+def _execute_schema(conn: sqlite3.Connection) -> None:
+    # executescript() commits a pending transaction in sqlite3's default mode.
+    # These static DDL statements must stay inside the caller's transaction.
+    for statement in _SCHEMA.split(";"):
+        if statement.strip():
+            conn.execute(statement)
+
+
 def _migrate_v1_to_v2(conn: sqlite3.Connection) -> None:
-    """Rebuild the v1 events(date, ts_ms, ...) table into schema v2."""
-    cols = _table_columns(conn, "events")
-    if "local_date" in cols and "ts_us" in cols and "minute_of_day" in cols:
-        return
-    conn.executescript(
-        """
-        ALTER TABLE events RENAME TO events_v1;
-        """
-    )
-    conn.executescript(_SCHEMA)
+    """Atomically rebuild v1, preserving row IDs and rebuilding its indexes."""
+    table_sql = _SCHEMA.split("CREATE INDEX", 1)[0]
+    conn.execute(table_sql.replace("events (", "events_v2 (", 1).strip().rstrip(";"))
     conn.execute(
         """
-        INSERT INTO events (
-            ts_us, ts_ms, local_date, hour, minute, minute_of_day,
+        INSERT INTO events_v2 (
+            id, ts_us, ts_ms, local_date, hour, minute, minute_of_day,
             weekday, key_name, keycode, char, kind, device
         )
-        SELECT
-            ts_ms * 1000,
-            ts_ms,
-            date,
-            hour,
-            minute,
-            hour * 60 + minute,
-            weekday,
-            key_name,
-            keycode,
-            char,
-            kind,
-            device
-        FROM events_v1
+        SELECT id, ts_ms * 1000, ts_ms, date, hour, minute, hour * 60 + minute,
+               weekday, key_name, keycode, char, kind, device
+        FROM events
         """
     )
-    conn.execute("DROP TABLE events_v1")
+    conn.execute("DROP TABLE events")
+    conn.execute("ALTER TABLE events_v2 RENAME TO events")
 
 
 class KeyStore:
@@ -248,12 +230,27 @@ class KeyStore:
     def path(self) -> Path:
         return self._db_path
 
-    def init_db(self) -> None:
-        self._db_path.parent.mkdir(parents=True, exist_ok=True)
+    @contextmanager
+    def collector_lock(self) -> Iterator[int]:
+        """One collector per database; purge uses the same ownership lock."""
+        self._db_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        # Keep the lock file in place: unlinking it allows a second inode/owner.
+        fd = os.open(
+            self._db_path.with_name(self._db_path.name + '.lock'),
+            os.O_CREAT | os.O_RDWR | os.O_CLOEXEC,
+            0o600,
+        )
         try:
-            os.chmod(self._db_path.parent, 0o700)
-        except OSError:
-            pass
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise RuntimeError(f"Collector already owns {self._db_path}; stop it first") from exc
+            yield fd
+        finally:
+            os.close(fd)
+
+    def init_db(self) -> None:
+        self._db_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         # If DB already exists, ensure its permissions are tight before opening.
         if self._db_path.exists():
             try:
@@ -262,7 +259,10 @@ class KeyStore:
                 pass
         with self._connect(writable=True) as conn:
             with conn:
-                conn.executescript(_FILE_PRAGMAs)
+                conn.execute("BEGIN IMMEDIATE")
+                version = conn.execute("PRAGMA user_version").fetchone()[0]
+                if version > SCHEMA_VERSION:
+                    raise sqlite3.OperationalError(f"unsupported schema version: {version}")
                 tables = {
                     r[0]
                     for r in conn.execute(
@@ -273,7 +273,11 @@ class KeyStore:
                     cols = _table_columns(conn, "events")
                     if "date" in cols and "local_date" not in cols:
                         _migrate_v1_to_v2(conn)
-                conn.executescript(_SCHEMA)
+                # date_mod already indexes the local_date prefix.
+                conn.execute("DROP INDEX IF EXISTS idx_events_date")
+                _execute_schema(conn)
+                conn.execute(f"PRAGMA application_id = {APPLICATION_ID}")
+                conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
                 conn.execute(
                     "INSERT OR REPLACE INTO meta (key, value) "
                     "VALUES ('schema_version', ?)",
@@ -300,12 +304,8 @@ class KeyStore:
             # that has no schema -- callers should call init_db() first.
             if not self._db_path.exists():
                 raise sqlite3.OperationalError(f"database not initialized: {self._db_path}")
-            uri = f"file:{self._db_path.as_posix()}?mode=ro"
-            try:
-                conn = sqlite3.connect(uri, uri=True, timeout=10.0)
-            except sqlite3.OperationalError:
-                # Older sqlite builds without URI support or bad URI handling
-                conn = sqlite3.connect(self._db_path, timeout=10.0)
+            uri = self._db_path.absolute().as_uri() + "?mode=ro"
+            conn = sqlite3.connect(uri, uri=True, timeout=10.0)
         try:
             _configure(conn, read_only=not writable)
             yield conn
@@ -315,9 +315,13 @@ class KeyStore:
     def open_writer(self) -> sqlite3.Connection:
         """Open a long-lived writer connection. Caller owns the lifetime."""
         # Ensure parent exists so sqlite can create the file; chmod will be done in init_db.
-        self._db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._db_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         conn = sqlite3.connect(self._db_path, timeout=10.0)
-        _configure(conn)
+        try:
+            _configure(conn)
+        except BaseException:
+            conn.close()
+            raise
         return conn
 
     def insert_many(self, rows: list[EventRow], conn: sqlite3.Connection | None = None) -> int:
@@ -342,7 +346,6 @@ class KeyStore:
         """
         with self._connect(writable=True) as conn:
             conn.execute("PRAGMA optimize")
-            conn.execute("PRAGMA incremental_vacuum(64)")
             conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
 
     def total(self) -> int:
@@ -361,18 +364,18 @@ class KeyStore:
         return int(row[0])
 
     def count_ranges(self, ranges: list[tuple[datetime, datetime]]) -> list[int]:
-        """One scan, N range counts. Used by the dashboard cards."""
+        """Independent covering-index range counts for dashboard cards."""
         if not ranges:
             return []
         parts: list[str] = []
         params: list[int] = []
         for start, end in ranges:
             parts.append(
-                "SUM(CASE WHEN ts_ms >= ? AND ts_ms < ? THEN 1 ELSE 0 END)"
+                "(SELECT COUNT(*) FROM events WHERE ts_ms >= ? AND ts_ms < ?)"
             )
             params.append(int(start.timestamp() * 1000))
             params.append(int(end.timestamp() * 1000))
-        sql = f"SELECT {', '.join(parts)} FROM events"
+        sql = f"SELECT {', '.join(parts)}"
         with self._connect() as conn:
             row = conn.execute(sql, params).fetchone()
         return [int(v or 0) for v in row]
@@ -416,7 +419,7 @@ class KeyStore:
                 "SELECT COUNT(*) AS c FROM ("
                 "  SELECT 1 FROM events"
                 "  WHERE ts_ms >= ? AND ts_ms < ?"
-                "  GROUP BY local_date, minute_of_day"
+                "  GROUP BY ts_ms / 60000"
                 ")",
                 (lo, hi),
             ).fetchone()
@@ -504,7 +507,7 @@ class KeyStore:
     def first_last_ts(self) -> tuple[int | None, int | None]:
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT MIN(ts_ms), MAX(ts_ms) FROM events"
+                "SELECT (SELECT MIN(ts_ms) FROM events), (SELECT MAX(ts_ms) FROM events)"
             ).fetchone()
         return (
             int(row[0]) if row[0] is not None else None,
@@ -533,7 +536,7 @@ class KeyStore:
             cur = conn.execute(
                 "SELECT ts_us, ts_ms, local_date, hour, minute, minute_of_day, "
                 "weekday, key_name, keycode, char, kind, device "
-                "FROM events WHERE ts_ms >= ? AND ts_ms < ? ORDER BY ts_us, id",
+                "FROM events WHERE ts_ms >= ? AND ts_ms < ? ORDER BY ts_ms, ts_us, id",
                 (lo, hi),
             )
             for r in cur:
@@ -541,19 +544,17 @@ class KeyStore:
 
 
 class EventWriter:
-    """Dedicated SQLite writer thread.
+    """Bounded, non-blocking producer queue with one SQLite writer.
 
-    The asyncio loop only ever does submit() (a non-blocking
-    queue.Queue.put_nowait). The kernel evdev ring is therefore
-    never stalled by fsync or a WAL checkpoint.
+    Failed batches retry even while idle. During a database outage, the worker
+    keeps its current batch and stops consuming the bounded queue.
     """
 
     def __init__(self, store: KeyStore, queue_size: int = 64) -> None:
         self._store = store
-        self._queue: queue.Queue[list[EventRow] | None] = queue.Queue(
-            maxsize=queue_size
-        )
+        self._queue: queue.Queue[list[EventRow]] = queue.Queue(maxsize=queue_size)
         self._thread: threading.Thread | None = None
+        self._closing = threading.Event()
         self._error: BaseException | None = None
         self._written = 0
         self._lock = threading.Lock()
@@ -568,131 +569,118 @@ class EventWriter:
     def last_error(self) -> BaseException | None:
         return self._error
 
-    def start(self) -> None:
+    @property
+    def is_alive(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
+    def start(self, *, ownership_fd: int | None = None) -> None:
         if self._thread is not None:
             return
-        self._thread = threading.Thread(
-            target=self._run,
-            name="dusky-sqlite-writer",
-            daemon=True,
-        )
-        self._thread.start()
+        # Share the same flock ownership until the worker actually exits,
+        # including when its caller's close deadline expires.
+        worker_fd = os.dup(ownership_fd) if ownership_fd is not None else None
+        try:
+            self._thread = threading.Thread(
+                target=self._run, args=(worker_fd,), name="dusky-sqlite-writer", daemon=True
+            )
+            self._thread.start()
+        except BaseException:
+            self._thread = None
+            if worker_fd is not None:
+                os.close(worker_fd)
+            raise
 
     def submit(self, rows: list[EventRow]) -> bool:
-        """Enqueue a batch. Returns False if the queue is saturated."""
+        if self._closing.is_set() or not self.is_alive:
+            return False
         if not rows:
             return True
-        if not isinstance(rows, list):
-            # Defensive: callers should always pass list[EventRow]; if a single
-            # row is passed by mistake we wrap it to avoid thread crash.
-            logger.warning("EventWriter.submit: expected list, got %s", type(rows).__name__)
-            rows = list(rows) if isinstance(rows, (tuple, set)) else [rows]  # type: ignore[list-item]
         try:
             self._queue.put_nowait(rows)
             return True
         except queue.Full:
             return False
 
-    def close(self, timeout: float = 8.0) -> None:
+    def close(self, timeout: float = 8.0) -> bool:
+        """Stop after draining. False means the worker still owns its rows."""
+        self._closing.set()
         if self._thread is None:
-            return
-        # Keep trying to deliver the sentinel: if the queue is saturated
-        # the writer is still draining and will free a slot shortly.
-        deadline = time.monotonic() + timeout
+            return True
+        # Wake an idle blocking get. A full queue already gives it work to drain.
+        try:
+            self._queue.put_nowait([])
+        except queue.Full:
+            pass
+        self._thread.join(timeout=max(0.0, timeout))
+        if self.is_alive:
+            logger.error("Writer thread did not exit within %.1fs", timeout)
+            return False
+        return True
+
+    def take_pending(self) -> list[EventRow]:
+        """Transfer unwritten rows only after the writer has actually exited."""
+        if self.is_alive:
+            raise RuntimeError("writer still owns pending rows")
+        rows, self._retry = self._retry, []
         while True:
             try:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    break
-                self._queue.put(None, timeout=max(0.05, remaining))
-                break
-            except queue.Full:
-                if time.monotonic() >= deadline:
-                    logger.warning("Writer close timed out waiting for queue space")
-                    break
-        # Give the thread a chance to drain; if it doesn't exit, we leave
-        # it as daemon so process can still exit (data loss is already logged).
-        self._thread.join(timeout=timeout)
-        if self._thread.is_alive():
-            logger.warning("Writer thread did not exit within %.1fs", timeout)
-        self._thread = None
+                rows.extend(self._queue.get_nowait())
+            except queue.Empty:
+                return rows
 
-    def _run(self) -> None:
+    def _run(self, ownership_fd: int | None) -> None:
+        try:
+            self._write_loop()
+        finally:
+            if ownership_fd is not None:
+                os.close(ownership_fd)
+
+    def _write_loop(self) -> None:
         conn = None
         try:
             conn = self._store.open_writer()
-        except BaseException as exc:
-            self._error = exc
-            logger.error("Writer could not open DB: %s", exc)
-            return
-        try:
             while True:
-                item = self._queue.get()
-                if item is None:
-                    # Sentinel arrived as the next top-level item: flush any
-                    # pending retry that accumulated from prior transient failures.
-                    if self._retry:
-                        self._flush(conn, [])
-                    break
-                # Defensive: if someone enqueued a non-list (e.g., single row), handle.
-                if not isinstance(item, list):
-                    logger.warning("Writer received non-list batch %s", type(item).__name__)
-                    item = [item]  # type: ignore[list-item]
-                batch = list(item)
-                # Coalesce any additional batches that arrived while we were
-                # waiting on sqlite, to reduce transaction count.
-                while True:
+                if not self._retry:
                     try:
-                        nxt = self._queue.get_nowait()
+                        batch = self._queue.get(block=not self._closing.is_set())
                     except queue.Empty:
                         break
-                    if nxt is None:
-                        self._flush(conn, batch)
-                        # Draining after sentinel: also flush retry if needed,
-                        # then exit without losing the retry.
-                        if self._retry:
-                            self._flush(conn, [])
-                        return
-                    if not isinstance(nxt, list):
-                        logger.warning("Writer coalesce got non-list %s", type(nxt).__name__)
-                        nxt = [nxt]  # type: ignore[list-item]
-                    batch.extend(nxt)
-                self._flush(conn, batch)
-        except BaseException as exc:
+                    if not batch:
+                        continue
+                    # Bound coalescing to the queue snapshot so continuous
+                    # producers cannot postpone a commit indefinitely.
+                    for _ in range(self._queue.qsize()):
+                        try:
+                            batch.extend(self._queue.get_nowait())
+                        except queue.Empty:
+                            break
+                    self._retry = batch
+                if not self._flush(conn):
+                    if self._closing.wait(0.5):
+                        break
+        except Exception as exc:
             self._error = exc
-            logger.exception("Writer thread crashed")
+            logger.exception("Writer thread failed")
         finally:
-            # Final attempt to persist retry if thread is exiting due to
-            # exception or sentinel. This ensures we don't silently drop
-            # rows that were held in _retry after a transient SQLITE_BUSY.
             if conn is not None:
-                if self._retry:
-                    try:
-                        self._flush(conn, [])
-                    except Exception:
-                        logger.exception("Final retry flush failed")
                 try:
-                    conn.execute("PRAGMA optimize")
-                    conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+                    if self._error is None:
+                        conn.execute("PRAGMA optimize")
+                        conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
                 except sqlite3.Error:
-                    pass
-                try:
+                    logger.debug("Writer maintenance failed", exc_info=True)
+                finally:
                     conn.close()
-                except Exception:
-                    pass
 
-    def _flush(self, conn: sqlite3.Connection, rows: list[EventRow]) -> None:
-        pending = self._retry + rows
-        if not pending:
-            return
+    def _flush(self, conn: sqlite3.Connection) -> bool:
         try:
             with conn:
-                conn.executemany(_INSERT_SQL, [_row_params(r) for r in pending])
-            self._retry = []
+                conn.executemany(_INSERT_SQL, [_row_params(r) for r in self._retry])
             with self._lock:
-                self._written += len(pending)
+                self._written += len(self._retry)
+            self._retry = []
             self._error = None
+            return True
         except sqlite3.Error as exc:
             self._error = exc
-            # Never drop keystrokes: keep them queued for the next attempt.
-            self._retry = pending
+            return False

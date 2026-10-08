@@ -1,0 +1,11 @@
+@-moz-document domain("phoronix.com") {
+    /* >>> dusky:picks - managed by the Visual Picker, one rule per line */
+    div { background-color: var(--background) !important; color: var(--on_background) !important; border-color: var(--outline_variant) !important; } /* dusky key=sel%1Fdiv%1Fbg | bg: background */
+    input { background-color: var(--surface_container_low) !important; color: var(--on_surface) !important; border-color: var(--outline_variant) !important; } /* dusky key=sel%1Finput%1Fbg | bg: surface_container_low */
+    a { background-color: var(--surface) !important; color: var(--on_surface) !important; border-color: var(--outline_variant) !important; } /* dusky key=sel%1Fa%1Fbg | bg: surface */
+    article.full > div.content > blockquote { color: var(--primary_fixed_dim) !important; } /* dusky key=sel%1Farticle.full%20%3E%20div.content%20%3E%20blockquote%1Ftext | text: primary_fixed_dim */
+    p { color: var(--on_secondary_container) !important; } /* dusky key=sel%1Fp%1Ftext | text: on_secondary_container */
+    header { color: var(--on_tertiary_container) !important; } /* dusky key=sel%1Fheader%1Ftext | text: on_tertiary_container */
+    #main > article { color: var(--secondary) !important; } /* dusky key=sel%1F%23main%20%3E%20article%1Ftext | text: secondary */
+    /* <<< dusky:picks */
+}

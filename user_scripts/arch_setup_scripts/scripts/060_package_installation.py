@@ -2453,7 +2453,7 @@ def parse_command_line() -> argparse.Namespace:
     )
     return parser.parse_args()
 
-async def main_async(manifest: InstallationManifest, ctx: RuntimeContext) -> None:
+async def main_async(manifest: InstallationManifest, ctx: RuntimeContext) -> int:
     """Executes pre-flight ALPM queries and launches the TUI inside a single event loop."""
     try:
         await AsyncPackageManager.filter_installed_packages(manifest)
@@ -2461,7 +2461,10 @@ async def main_async(manifest: InstallationManifest, ctx: RuntimeContext) -> Non
         Console(stderr=True).print(f"[yellow]Warning: initial installed check failed: {e}[/]")
 
     app = EliteInstallerApp(manifest, ctx)
-    await app.run_async()
+    result = await app.run_async()
+    # Textual's return value carries self.exit(status); return_code also
+    # captures framework failures that may not produce an application result.
+    return app.return_code or (result if isinstance(result, int) else 0)
 
 def main() -> None:
     args = parse_command_line()
@@ -2508,7 +2511,7 @@ def main() -> None:
             sys.exit(1)
 
     try:
-        asyncio.run(main_async(manifest, ctx))
+        sys.exit(asyncio.run(main_async(manifest, ctx)))
     except KeyboardInterrupt:
         Console(stderr=True).print("\n[bold red]:: Interrupted by user.[/]")
         sys.exit(130)

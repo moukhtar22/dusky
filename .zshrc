@@ -11,6 +11,7 @@
 # 7. Prompt & Tool Initialization
 # 8. Plugins (Syntax Highlighting MUST be last)
 # 9. TTY Auto-Login
+# 10. User Customizations (Immune to Updates)
 # =============================================================================
 
 # Exit early if not interactive (prevents breaking SCP/SFTP/rsync)
@@ -59,11 +60,33 @@ export VISUAL='nvim'
 
 # Compilation Optimization: Moved to ~/.config/pacman/makepkg.conf
 
-# Clipboard DB path: load active mode from settings
-if [[ -f "$HOME/.config/dusky/settings/cliphist_db_env" ]]; then
-  source "$HOME/.config/dusky/settings/cliphist_db_env"
-  export CLIPHIST_DB_PATH
-fi
+# Clipboard DB path: refresh at startup and at each interactive prompt.
+# Read the toggler's file as literal data, using the daemon's path/fallback rules.
+_dusky_clipboard_env() {
+  emulate -L zsh
+  local env_file="${XDG_CONFIG_HOME:-$HOME/.config}/dusky/settings/cliphist_db_env"
+  local line val MATCH MBEGIN MEND
+  local -a match mbegin mend
+  local assignment='^[[:space:]]*(export[[:space:]]+)?CLIPHIST_DB_PATH[[:space:]]*=[[:space:]]*(.*)$'
+  local double_quote='^"([^"]*)"' single_quote="^'([^']*)'"
+  export CLIPHIST_DB_PATH="${XDG_CACHE_HOME:-$HOME/.cache}/cliphist/db"
+  if [[ -f $env_file && ! -L $env_file && -r $env_file ]]; then
+    while IFS= read -r line || [[ -n $line ]]; do
+      [[ $line =~ $assignment ]] || continue
+      val=$match[2]
+      if [[ $val =~ $double_quote || $val =~ $single_quote ]]; then
+        val=$match[1]
+      else
+        val=${val%%[[:space:]]*}
+      fi
+      [[ $val == /?* ]] && CLIPHIST_DB_PATH=$val
+    done < "$env_file"
+  fi
+  return 0
+}
+_dusky_clipboard_env
+autoload -Uz add-zsh-hook
+add-zsh-hook precmd _dusky_clipboard_env
 
 # Configure PATH - enabled for npm global bins (fixes gemini-cli)
 # Deduped PATH - ensures npm global bins without duplication (Hyprland also sets PATH via systemd)
@@ -145,11 +168,17 @@ alias dusky_replace='python3 ~/user_scripts/tools/sed/dusky_replace.py'
 # System & Development Scripts
 alias tui='python ~/user_scripts/dusky_tui/python/main/main.py'
 alias sendlogs="$HOME/user_scripts/arch_setup_scripts/send_logs.sh --auto"
-alias update_dusky="$HOME/user_scripts/update_dusky/python/update_dusky.py"
+alias update_dusky="$HOME/user_scripts/update_dusky/python/update_dusky_supervisor.py"
 alias dusky_force_sync_github="$HOME/user_scripts/update_dusky/dusky_force_sync_github.sh"
 alias darkmode="$HOME/user_scripts/theme_matugen/theme_ctl.sh set --mode dark"
 alias lightmode="$HOME/user_scripts/theme_matugen/theme_ctl.sh set --mode light"
 alias run_sysbench="$HOME/user_scripts/performance/sysbench_benchmark.py"
+
+# mpv + yt-dlp livestream playback (vid URL, vid --help, etc.)
+_vid() {
+    python3 "$HOME/user_scripts/tools/yt_dlp_downloader/live_stream_mpv/mpv_yt_dlp_playback_livestream.py" "$@"
+}
+alias vid='noglob _vid'
 
 # Local AI Web Bridge Shortcut
 _ask_func() {
@@ -167,7 +196,7 @@ _ask_func() {
 alias ask='noglob _ask_func'
 
 # Memory Optimization
-alias mem_optimize='sudo systemctl start dusky_boot_mem_reclaim.service'
+alias mem_optimize='sudo systemctl start dusky_pro_active_zram_swap.service'
 
 # Networking
 alias iphone_vnc="$HOME/user_scripts/networking/iphone_vnc.sh"
@@ -310,6 +339,23 @@ fi
 # Native variable check avoids expensive $(tty) subshells
 if [[ -z "$DISPLAY" && -z "$WAYLAND_DISPLAY" && "$TTY" == "/dev/tty1" ]]; then
   exec start-hyprland
+fi
+
+
+# -----------------------------------------------------------------------------
+# [10] USER CUSTOMIZATIONS
+# -----------------------------------------------------------------------------
+# Put your personal aliases, functions, and exports into ~/.zshrc.local
+# This file is not tracked by Dusky and will not be overwritten on update.
+if [[ -f "$HOME/.zshrc.local" ]]; then
+  source "$HOME/.zshrc.local"
+fi
+
+if [[ -d "$HOME/.config/zshrc/custom" ]]; then
+  for _user_mod in "$HOME/.config/zshrc/custom"/*.zsh(N); do
+    [[ -r "$_user_mod" ]] && source "$_user_mod"
+  done
+  unset _user_mod
 fi
 
 # =============================================================================

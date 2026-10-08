@@ -22,7 +22,7 @@ declare -Ar DEFAULT_CUSTOM_DROPINS=(
 #    Add absolute paths to binaries you want to process automatically.
 declare -ar DEFAULT_BINARIES=(
 
-#    "/usr/bin/powertop"
+    "/usr/bin/powertop"
     "/usr/bin/papirus-folders"
     "/usr/bin/rfkill"
     "/usr/bin/smartctl"

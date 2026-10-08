@@ -1,202 +1,229 @@
 #!/usr/bin/env bash
-# Automates the setup of a secure vsftpd server
-
-# 1. Strict Mode & Environment Setup
+# Configure local-user FTP with passive transfers and subnet-scoped firewall rules.
 set -euo pipefail
+script_path=$(realpath -- "${BASH_SOURCE[0]}")
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=vsftpd_common.sh
+source "${script_path%/*}/vsftpd_common.sh"
+original_args=("$@")
+auto=false
+ftp_root=''
+ftp_user=''
+interface=''
 
-# 2. Output Formatting (Visual Feedback)
-GREEN=$'\033[0;32m'
-BLUE=$'\033[0;34m'
-RED=$'\033[0;31m'
-YELLOW=$'\033[1;33m'
-NC=$'\033[0m' # No Color
+while (( $# )); do
+    case $1 in
+        -h|--help)
+            printf 'Usage: %s [--auto] [--dir PATH] [--user USER] [--interface IFACE]\n' "${0##*/}"
+            printf '  -a, --auto, -y, --yes   Use defaults without prompts\n'
+            printf '  -d, --dir, -p, --path   FTP root (default: /mnt/zram1)\n'
+            printf '  -u, --user              Existing local user (default: invoking user)\n'
+            printf '  -i, --interface         Override automatic LAN interface selection\n'
+            exit 0 ;;
+        -a|--auto|-y|--yes) auto=true; shift ;;
+        -d|--dir|-p|--path|-u|--user|-i|--interface)
+            (( $# >= 2 )) && [[ -n $2 && $2 != -* ]] || die "Option $1 requires a value."
+            case $1 in
+                -d|--dir|-p|--path) ftp_root=$2 ;;
+                -u|--user) ftp_user=$2 ;;
+                -i|--interface) interface=$2 ;;
+            esac
+            shift 2 ;;
+        *) die "Unknown argument: $1" ;;
+    esac
+done
+if (( EUID != 0 )); then
+    exec sudo -- bash -- "$script_path" "${original_args[@]}"
+fi
+if [[ $auto == false ]]; then
+    read -rp 'Set up an FTP server for local file sharing? [Y/n]: ' answer || die 'No confirmation received.'
+    case ${answer,,} in ''|y|yes) ;; *) info 'Cancelled.'; exit 0 ;; esac
+fi
+ftp_user=${ftp_user:-${SUDO_USER:-}}
+if [[ -z $ftp_user || $ftp_user == root ]]; then
+    [[ $auto == false ]] || die 'Specify a regular user with --user when running directly as root.'
+    read -rp 'Username to allow FTP access: ' ftp_user || die 'No username received.'
+fi
+[[ -n $ftp_user && $ftp_user != -* && $ftp_user != *:* && $ftp_user != *$'\n'* ]] || die 'Invalid username.'
+passwd_entry=$(getent passwd "$ftp_user") || die "User '$ftp_user' does not exist."
+IFS=: read -r account_name _ account_uid account_gid _ _ account_shell <<< "$passwd_entry"
+[[ $account_uid != 0 ]] || die 'The FTP account must be a regular user.'
+ftp_user=$account_name
+grep -Fxq -- "$account_shell" /etc/shells || die "User shell '$account_shell' is not listed in /etc/shells (required by vsftpd PAM)."
+if [[ -f /etc/ftpusers ]] && grep -Fxq -- "$ftp_user" /etc/ftpusers; then
+    die "User '$ftp_user' is denied by /etc/ftpusers."
+fi
+if [[ -z $ftp_root ]]; then
+    if [[ $auto == false ]]; then
+        read -rp 'FTP root directory [/mnt/zram1]: ' ftp_root || die 'No directory received.'
+    fi
+    ftp_root=${ftp_root:-/mnt/zram1}
+fi
+validate_root "$ftp_root"
+ftp_root=$(realpath -m -- "$ftp_root")
+validate_root "$ftp_root"
+lock_update
 
-log_info() { printf "${BLUE}[INFO]${NC} %s\n" "$1"; }
-log_success() { printf "${GREEN}[SUCCESS]${NC} %s\n" "$1"; }
-log_warn() { printf "${YELLOW}[WARN]${NC} %s\n" "$1"; }
-log_error() { printf "${RED}[ERROR]${NC} %s\n" "$1"; exit 1; }
+# Derive the subnet from the selected live address, not an unrelated route.
+# Prefer the lowest-metric default route and exclude VPN/container interfaces.
+# Explicit --interface supports bridges and unusual interface names.
+network=$(python3 - "$interface" <<'NETWORK'
+import ipaddress
+import json
+import subprocess
+import sys
 
-# 3. Root Privilege Check & Re-execution
-if [[ $EUID -ne 0 ]]; then
-   # We don't print "escalating" yet, strictly to keep the flow clean
-   exec sudo "$0" "$@"
+def ip(*args):
+    return json.loads(subprocess.check_output(['ip', '-j', '-4', *args], text=True))
+
+requested = sys.argv[1]
+routes = sorted(ip('route', 'show', 'default'), key=lambda r: r.get('metric', 0))
+preferred = [r.get('dev') for r in routes]
+addresses = ip('-d', 'address', 'show')
+addresses.sort(key=lambda a: preferred.index(a['ifname']) if a['ifname'] in preferred else len(preferred))
+excluded_names = ('lo', 'wg', 'tun', 'tap', 'tailscale', 'CloudflareWARP',
+                  'warp', 'docker', 'waydroid', 'virbr', 'br-', 'veth', 'zt')
+excluded_kinds = {'wireguard', 'tun', 'veth', 'vxlan', 'geneve', 'gre', 'gretap', 'ipip', 'sit'}
+for link in addresses:
+    name = link['ifname']
+    if requested:
+        if name != requested:
+            continue
+    elif name.startswith(excluded_names) or link.get('linkinfo', {}).get('info_kind') in excluded_kinds:
+        continue
+    if 'UP' not in link.get('flags', []):
+        continue
+    for addr in link.get('addr_info', []):
+        if addr.get('scope') != 'global' or addr.get('valid_life_time') == 0:
+            continue
+        host = ipaddress.IPv4Interface(f"{addr['local']}/{addr['prefixlen']}")
+        print(name, host.ip, host.network)
+        sys.exit(0)
+raise SystemExit('No active LAN IPv4 address found; connect the LAN or specify --interface.')
+NETWORK
+) || die 'LAN detection failed.'
+read -r interface lan_ip subnet <<< "$network"
+info "User: $ftp_user; root: $ftp_root; LAN: $interface ($lan_ip, $subnet)"
+if ! pacman -Q vsftpd >/dev/null 2>&1; then
+    info 'Installing vsftpd from the configured repositories/cache.'
+    pacman -S --needed --noconfirm vsftpd
 fi
 
-# ==============================================================================
-# NEW: User Intent Confirmation
-# ==============================================================================
-printf "${BLUE}[INPUT]${NC} Do you want to set up an FTP server for local file sharing? [Y/n]: "
-read -r CONFIRM_INSTALL
-# Default to 'Y' if enter is pressed
-CONFIRM_INSTALL=${CONFIRM_INSTALL:-Y}
-
-if [[ ! "$CONFIRM_INSTALL" =~ ^[Yy]$ ]]; then
-    echo ""
-    log_info "Okay, I won't set it up. Exiting."
-    exit 0
+# Preserve existing shared/mounted directory metadata and all descendant modes.
+if [[ ! -d $ftp_root ]]; then
+    mkdir -p -- "$ftp_root"
+    chown -- "$account_uid:$account_gid" "$ftp_root"
+    chmod 0755 -- "$ftp_root"
 fi
-# ==============================================================================
-
-# 4. User & Directory Logic
-# Detect the actual user who invoked sudo (to add to allow list)
-REAL_USER="${SUDO_USER:-$(whoami)}"
-
-# If running as raw root (no sudo), ask for the user manually
-if [[ "$REAL_USER" == "root" ]]; then
-    log_warn "Running as raw root. Cannot auto-detect target user."
-    read -r -p "Enter the username to allow FTP access: " REAL_USER
+if ! sudo -u "$ftp_user" -- bash -c '[[ -r $1 && -w $1 && -x $1 ]]' bash "$ftp_root"; then
+    die "User '$ftp_user' needs read/write/traverse access to '$ftp_root'; adjust its permissions first."
 fi
 
-# Interactive Directory Selection
-DEFAULT_PATH="/mnt/zram1"
-printf "${BLUE}[INPUT]${NC} Enter FTP directory path [Default: ${DEFAULT_PATH}]: "
-read -r USER_PATH_INPUT
-FTP_ROOT="${USER_PATH_INPUT:-$DEFAULT_PATH}"
-
-log_info "Target User: $REAL_USER"
-log_info "FTP Root:    $FTP_ROOT"
-
-# 5. Package Installation & Firewall Detection
-# Determine which firewall to use without breaking existing setups.
-FIREWALL_CMD=""
-
-if systemctl is-active --quiet ufw; then
-    FIREWALL_CMD="ufw"
-elif systemctl is-active --quiet firewalld; then
-    FIREWALL_CMD="firewalld"
-elif command -v ufw >/dev/null 2>&1; then
-    # Neither is active, but UFW is installed
-    FIREWALL_CMD="ufw"
+# Configure only active managers. Do not activate a new firewall or hide failures.
+ufw_status=''
+iptables_policy=''
+firewalld_active=false
+if command -v firewall-cmd >/dev/null && systemctl is-active --quiet firewalld.service; then
+    firewalld_active=true
+elif command -v ufw >/dev/null; then
+    ufw_status=$(LC_ALL=C ufw status) || die 'Could not query UFW status.'
+fi
+if [[ $firewalld_active == true ]]; then
+    # firewalld reports an unassigned interface as "no zone" with exit 2.
+    if zone=$(LC_ALL=C firewall-cmd --get-zone-of-interface="$interface" 2>&1); then
+        :
+    else
+        zone_status=$?
+        [[ $zone_status == 2 && $zone == 'no zone' ]] || die "Could not query firewalld zone: $zone"
+    fi
+    if [[ -z $zone || $zone == 'no zone' ]]; then
+        zone=$(firewall-cmd --get-default-zone)
+    fi
+    for port in 21 40000-40100; do
+        rule="rule family=\"ipv4\" source address=\"$subnet\" port port=\"$port\" protocol=\"tcp\" accept"
+        firewall-cmd --zone="$zone" --add-rich-rule="$rule"
+        firewall-cmd --permanent --zone="$zone" --add-rich-rule="$rule"
+    done
+    info "firewalld rules configured for $subnet in zone $zone."
+elif [[ $ufw_status == 'Status: active'* ]]; then
+    ufw allow in on "$interface" from "$subnet" to any port 21 proto tcp comment 'LAN FTP Control'
+    ufw allow in on "$interface" from "$subnet" to any port 40000:40100 proto tcp comment 'LAN FTP Passive'
+    info "UFW rules configured for $subnet."
 else
-    # Default original behavior: Assume/Install firewalld
-    FIREWALL_CMD="firewalld"
+    if command -v iptables >/dev/null; then
+        iptables_policy=$(iptables -w 5 -S INPUT) || die 'Could not query iptables INPUT rules.'
+    fi
+    if [[ $iptables_policy == *'-P INPUT DROP'* ]]; then
+        for port in 21 40000:40100; do
+            if ! iptables -w 5 -C INPUT -i "$interface" -s "$subnet" -p tcp --dport "$port" -j ACCEPT; then
+                iptables -w 5 -I INPUT 1 -i "$interface" -s "$subnet" -p tcp --dport "$port" -j ACCEPT
+            fi
+        done
+        warn 'iptables rules are runtime-only; persist them using your existing firewall configuration.'
+    else
+        warn 'No supported active firewall detected. FTP listens on all IPv4 interfaces; LAN-only access is not enforced by this script.'
+    fi
 fi
 
-if [[ "$FIREWALL_CMD" == "ufw" ]]; then
-    log_info "UFW detected as primary firewall framework."
-    log_info "Updating system and installing dependencies (vsftpd)..."
-    pacman -Syu --needed --noconfirm vsftpd
+begin_update vsftpd.conf vsftpd.userlist
+if [[ -e /etc/vsftpd.userlist ]]; then
+    cp -- /etc/vsftpd.userlist "$update_dir/vsftpd.userlist"
 else
-    log_info "Firewalld designated as primary firewall framework."
-    log_info "Updating system and installing dependencies (vsftpd, firewalld)..."
-    pacman -Syu --needed --noconfirm vsftpd firewalld
+    : > "$update_dir/vsftpd.userlist"
 fi
-
-# 6. Firewall Configuration
-if [[ "$FIREWALL_CMD" == "ufw" ]]; then
-    log_info "Configuring UFW..."
-    # Ensure UFW systemd service is active before manipulating rules
-    systemctl enable --now ufw.service
-
-    # Add rules idempotently
-    ufw allow 21/tcp > /dev/null
-    ufw allow 40000:40100/tcp > /dev/null
-    
-    # Force enable bypasses the interactive "may disrupt ssh" warning
-    ufw --force enable > /dev/null
-    ufw reload > /dev/null
-    log_success "Firewall rules applied via UFW (Port 21, 40000-40100)."
-
-else
-    log_info "Configuring Firewalld..."
-    # Ensure service is running before using firewall-cmd
-    systemctl enable --now firewalld
-
-    # Add rules idempotently
-    firewall-cmd --permanent --add-service=ftp > /dev/null
-    firewall-cmd --permanent --add-port=40000-40100/tcp > /dev/null
-    firewall-cmd --reload > /dev/null
-    log_success "Firewall rules applied via Firewalld (Port 21, 40000-40100)."
+if ! grep -Fxq -- "$ftp_user" "$update_dir/vsftpd.userlist"; then
+    python3 - "$update_dir/vsftpd.userlist" "$ftp_user" <<'USERLIST'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+data = path.read_bytes()
+path.write_bytes(data + (b'\n' if data and not data.endswith(b'\n') else b'')
+                 + sys.argv[2].encode() + b'\n')
+USERLIST
 fi
-
-# 7. VSFTPD Configuration Generation
-log_info "Generating /etc/vsftpd.conf..."
-
-# Backup is not required per instructions ("Clean"), enforcing overwrite.
-cat > /etc/vsftpd.conf <<EOF
-# --- Access Control ---
-# Allow anonymous FTP? (NO for security)
+cat > "$update_dir/vsftpd.conf" <<EOF
+# Local-user FTP; subnet access rules are managed separately by the firewall.
 anonymous_enable=NO
-# Allow local users to log in? (YES)
 local_enable=YES
-# Enable any form of write commands?
 write_enable=YES
-
-# --- Chroot and Directory Settings ---
-# Restrict local users to their chroot jail after login.
+local_umask=022
+use_localtime=YES
+dirmessage_enable=YES
 chroot_local_user=YES
-# Security Note: allow_writeable_chroot is enabled per user requirements.
 allow_writeable_chroot=YES
-# Specify the directory to which local users will be chrooted.
-local_root=$FTP_ROOT
-
-# --- User Authentication and Listing ---
-# Enable the use of a userlist file.
+local_root=$ftp_root
 userlist_enable=YES
-# Path to the userlist file.
 userlist_file=/etc/vsftpd.userlist
-# When userlist_deny=NO, the userlist_file acts as an allow list.
 userlist_deny=NO
-
-# --- Logging ---
-# Enable transfer logging.
 xferlog_enable=YES
-# Use standard log file format.
-xferlog_std_format=YES
-# Path to the vsftpd log file.
-xferlog_file=/var/log/vsftpd.log
-# Log all FTP protocol commands and responses.
-log_ftp_protocol=YES
-
-# --- Connection Handling ---
-listen=NO
-listen_ipv6=YES
+xferlog_std_format=NO
+vsftpd_log_file=/var/log/vsftpd.log
+listen=YES
+listen_ipv6=NO
+listen_port=21
 pam_service_name=vsftpd
-
-# --- Passive Mode ---
 pasv_enable=YES
 pasv_min_port=40000
 pasv_max_port=40100
-
-# --- Banners and Messages ---
-ftpd_banner=Welcome to this Arch Linux FTP service.
-
-# --- Performance and Security Tweaks ---
 use_sendfile=YES
 connect_from_port_20=YES
+seccomp_sandbox=NO
+ftpd_banner=Welcome to the Arch Linux LAN FTP service.
 EOF
-
-# 8. User Allow List
-log_info "Configuring Allow List..."
-if ! grep -q "^${REAL_USER}$" /etc/vsftpd.userlist 2>/dev/null; then
-    echo "$REAL_USER" | tee -a /etc/vsftpd.userlist > /dev/null
-    log_success "Added '$REAL_USER' to /etc/vsftpd.userlist"
-else
-    log_info "User '$REAL_USER' already in allow list."
+chmod 0600 -- "$update_dir/vsftpd.conf" "$update_dir/vsftpd.userlist"
+chown root:root -- "$update_dir/vsftpd.conf" "$update_dir/vsftpd.userlist"
+update_pending=true
+mv -f -- "$update_dir/vsftpd.userlist" /etc/vsftpd.userlist
+mv -f -- "$update_dir/vsftpd.conf" /etc/vsftpd.conf
+if [[ $(systemctl show --property=LoadState --value vsftpd.socket) == loaded ]]; then
+    systemctl is-active --quiet vsftpd.socket && socket_was_active=true
+    systemctl is-enabled --quiet vsftpd.socket && socket_was_enabled=true
+    socket_changed=true
+    systemctl disable --now vsftpd.socket
 fi
-
-# 9. Directory Permissions
-log_info "Setting up directory permissions..."
-if [[ ! -d "$FTP_ROOT" ]]; then
-    mkdir -p "$FTP_ROOT"
-    log_info "Created directory: $FTP_ROOT"
-fi
-
-# Applying specific instruction: chmod -R 777
-chmod -R 777 "$FTP_ROOT"
-log_success "Permissions set to 777 for $FTP_ROOT"
-
-# 10. Service Activation
-log_info "Starting vsftpd service..."
-systemctl enable --now vsftpd
-
-# 11. Final Status
-IP_ADDR=$(ip route get 1.1.1.1 2>/dev/null | grep -oP 'src \K\S+')
-echo ""
-log_success "FTP Server Setup Complete!"
-echo "----------------------------------------------------"
-printf "Server IP:      %s\n" "${IP_ADDR:-Unknown}"
-printf "FTP User:       %s\n" "$REAL_USER"
-printf "Root Dir:       %s\n" "$FTP_ROOT"
-printf "Logs:           /var/log/vsftpd.log\n"
-echo "----------------------------------------------------"
+restart_attempted=true
+systemctl restart vsftpd.service
+verify_service
+systemctl enable vsftpd.service
+update_pending=false
+printf '\nFTP is ready: ftp://%s@%s/\nRoot: %s\nPassive ports: 40000–40100/TCP\n' "$ftp_user" "$lan_ip" "$ftp_root"

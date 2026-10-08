@@ -1,5 +1,5 @@
-# Max — l9, 64M, lzma9, nilsimsa, slowest but smallest (archival)
+# Max — l9, 64MiB, lzma9, nilsimsa, slowest but smallest (archival)
 level = 9
 block_size_bits = 26
 compression = "lzma:level=9"
-note = "Max ratio, 10x slower decompress — use for cold storage"
+note = "Max ratio, slower decompression — use for cold storage"

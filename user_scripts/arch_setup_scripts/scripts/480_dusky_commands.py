@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 #d: Install and manage dusky commands
 
-from __future__ import annotations
-
 import argparse
 import fcntl
 import hashlib
@@ -21,7 +19,7 @@ from dataclasses import dataclass
 from enum import Enum
 from functools import cache
 from pathlib import Path
-from typing import Any, NamedTuple, Sequence
+from typing import Any, NamedTuple
 
 
 def _json_excepthook(exc_type: type, exc_value: BaseException, exc_traceback: Any) -> None:
@@ -45,8 +43,8 @@ try:
     console = Console()
     error_console = Console(stderr=True)
 except ImportError:
-    Console = Panel = Confirm = Table = Text = type("Mock", (), {})  # type: ignore
-    console = error_console = None  # type: ignore
+    Console = Panel = Confirm = Table = Text = None
+    console = error_console = None
 
 
 def check_ui_deps(is_json: bool) -> None:
@@ -124,13 +122,14 @@ BEFORE_COMMANDS: list[FleetCommand] = [
     FleetCommand(Mode.USER, 'mkdir -p ~/.config/opencode/themes || true', "Create Opencode Themes Directory"),
     FleetCommand(Mode.USER, 'mkdir -p ~/.config/Kvantum/matugen || true', "Create Kvantum Matugen Directory"),
     FleetCommand(Mode.USER, 'systemctl --user disable --now dusky_sliders.service || true', "Disable Legacy Sliders Service"),
-    # --- Remove old dusky_snaapshot timer (typo) before re-deploying dusky_snapshot ---
+    # --- Remove old dusky_snapshot units before re-deployment ---
     FleetCommand(
         Mode.SUDO,
-        'systemctl stop dusky_snaapshot.timer dusky_snaapshot.service 2>/dev/null; systemctl disable dusky_snaapshot.timer 2>/dev/null; true',
-        "Stop & Disable Legacy Typo Snapshot Service"
+        'systemctl stop dusky_snapshot.timer dusky_snapshot.service 2>/dev/null || true; '
+        'systemctl disable dusky_snapshot.timer 2>/dev/null || true',
+        "Stop & Disable Snapshot Service"
     ),
-    FleetCommand(Mode.SUDO, 'rm -f /etc/systemd/system/dusky_snaapshot.service /etc/systemd/system/dusky_snaapshot.timer', "Remove Legacy Typo Snapshot Unit Files"),
+    FleetCommand(Mode.SUDO, 'rm -f /etc/systemd/system/dusky_snapshot.service /etc/systemd/system/dusky_snapshot.timer', "Remove Snapshot Unit Files"),
     FleetCommand(Mode.SUDO, 'systemctl daemon-reload', "Systemd System Daemon Reload"),
     # --- System Services ---
     # FleetCommand(Mode.USER, 'systemctl --user disable dusky.service || true', "Disable Legacy Dusky Service"),
@@ -233,17 +232,13 @@ def get_escalator() -> str:
     """Resolves available privilege escalation tool (sudo or doas)."""
     escalator = shutil.which("sudo") or shutil.which("doas")
     if not escalator:
-        if error_console:
-            error_console.print("[bold red]CRITICAL ERROR: Neither 'sudo' nor 'doas' found on system.[/bold red]")
-        else:
-            print("CRITICAL ERROR: Neither 'sudo' nor 'doas' found on system.", file=sys.stderr)
-        sys.exit(1)
+        raise FileNotFoundError("Neither 'sudo' nor 'doas' found on system.")
     return escalator
 
 
 def get_user_ipc_env(ctx: UserContext) -> dict[str, str]:
-    """Constructs a sterile whitelist IPC environment for subshell command executions."""
-    runtime_dir = Path(f"/run/user/{ctx.uid}")
+    """Build the user environment needed by Wayland and session services."""
+    runtime_dir = Path(os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{ctx.uid}")
     env = {
         "PATH": os.environ.get("PATH", "/usr/local/sbin:/usr/local/bin:/usr/bin"),
         "USER": ctx.username,
@@ -259,7 +254,8 @@ def get_user_ipc_env(ctx: UserContext) -> dict[str, str]:
     # Preserve critical XDG, Wayland, and Hyprland IPC variables
     for xdg_var in (
         "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_SESSION_TYPE",
-        "WAYLAND_DISPLAY", "DISPLAY", "HYPRLAND_INSTANCE_SIGNATURE", "SSH_AUTH_SOCK"
+        "XDG_STATE_HOME", "DBUS_SESSION_BUS_ADDRESS", "LC_ALL", "LC_CTYPE",
+        "WAYLAND_DISPLAY", "HYPRLAND_INSTANCE_SIGNATURE", "SSH_AUTH_SOCK"
     ):
         if xdg_var in os.environ:
             env[xdg_var] = os.environ[xdg_var]
@@ -297,48 +293,18 @@ class Logger:
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
         self._file = open(self.log_path, "a", encoding="utf-8")
 
-        # Native Rich file console for pure plain-text file logging without regex volatility
-        if RICH_AVAILABLE:
-            self.file_console = Console(file=self._file, force_terminal=False, color_system=None)
-        else:
-            self.file_console = None
-
         self.log("INFO", f"--- Dusky Commands Session Started: {time.strftime('%Y-%m-%d %H:%M:%S')} ---")
 
     def log(self, level: str, message: str) -> None:
         timestamp = time.strftime("%H:%M:%S")
-
-        # Console Output (Terminal)
-        if not self.is_json and console:
-            match level.upper():
-                case "INFO":
-                    console.print(f"[bold blue][INFO][/bold blue] {message}")
-                case "SUCCESS" | "OK":
-                    console.print(f"[bold green][OK][/bold green]   {message}")
-                case "WARN":
-                    console.print(f"[bold yellow][WARN][/bold yellow] {message}")
-                case "ERROR":
-                    if error_console:
-                        error_console.print(f"[bold red][ERROR][/bold red] {message}")
-                    else:
-                        print(f"[ERROR] {message}", file=sys.stderr)
-                case "RUN":
-                    console.print(f"[bold cyan][RUN][/bold cyan]  {message}")
-                case _:
-                    console.print(f"[{level}] {message}")
-
-        # File Logging (Plain Text)
         clean_msg = re.sub(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])", "", message)
-        rich_markup = f"[bold][{level}][/bold] {clean_msg}"
-        if self.file_console:
-            self.file_console.print(f"[{timestamp}] {rich_markup}")
-        else:
-            if Text is not Any and hasattr(Text, "from_markup"):
-                plain = Text.from_markup(rich_markup).plain
-            else:
-                plain = re.sub(r"\[/?(?:bold|dim|italic|underline|uppercase|cyan|blue|green|yellow|red|magenta|purple|white)[^\]]*\]", "", rich_markup)
-            self._file.write(f"[{timestamp}] {plain}\n")
-            self._file.flush()
+        if not self.is_json and console:
+            styles = {"INFO": "blue", "SUCCESS": "green", "OK": "green",
+                      "WARN": "yellow", "ERROR": "red", "RUN": "cyan"}
+            target = error_console if level == "ERROR" else console
+            target.print(f"[{level}] {clean_msg}", style=styles.get(level, ""), markup=False)
+        self._file.write(f"[{timestamp}] [{level}] {clean_msg}\n")
+        self._file.flush()
 
     def close(self) -> None:
         if not self._file.closed:
@@ -352,18 +318,20 @@ class SudoKeepAlive(threading.Thread):
         super().__init__(daemon=True)
         self.interval = interval
         self.stop_event = threading.Event()
-        self.escalator = Path(get_escalator()).name
+        self.escalator = get_escalator()
 
     def run(self) -> None:
         while not self.stop_event.is_set():
             if self.stop_event.wait(self.interval):
                 break
             try:
-                if self.escalator == "sudo":
-                    subprocess.run(["sudo", "-v", "-n"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
-                elif self.escalator == "doas":
-                    subprocess.run(["doas", "true"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
-            except OSError:
+                result = subprocess.run(
+                    [self.escalator, "-n", "-v"], stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL, timeout=10, check=False,
+                )
+                if result.returncode:
+                    break
+            except (OSError, subprocess.TimeoutExpired):
                 break
 
     def stop(self) -> None:
@@ -379,15 +347,13 @@ class FleetPatcherEngine:
         self.ctx = ctx
         self.is_json = is_json
         self.state_dir = ctx.home / ".local/state/dusky"
-        self.state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.state_file = self.state_dir / "patch_history.state"
 
         timestamp = time.strftime("%Y%m%d_%H%M%S")
         self.log_file = ctx.home / "Documents" / "logs" / f"dusky_patcher_{timestamp}.log"
 
-        xdg_runtime = os.environ.get("XDG_RUNTIME_DIR")
-        lock_dir = Path(xdg_runtime) if xdg_runtime and Path(xdg_runtime).exists() else self.state_dir
-        self.lock_file = lock_dir / "dusky_fleet_patcher.lock"
+        # One lock location for terminal, sudo, and session invocations.
+        self.lock_file = self.state_dir / "dusky_fleet_patcher.lock"
 
         self.lock_fd: int | None = None
         self.completed_patches: set[str] = set()
@@ -396,71 +362,73 @@ class FleetPatcherEngine:
         self.active_process: subprocess.Popen | None = None
 
     def acquire_lock(self) -> None:
+        self.state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         try:
             self.lock_fd = os.open(self.lock_file, os.O_CREAT | os.O_RDWR, 0o600)
             fcntl.flock(self.lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except (BlockingIOError, OSError):
-            if not self.is_json and error_console:
-                error_console.print("[bold red]CRITICAL ERROR: Another dusky fleet patcher instance is currently running![/bold red]")
-            else:
-                print("CRITICAL ERROR: Another dusky fleet patcher instance is currently running!", file=sys.stderr)
-            sys.exit(1)
+        except BlockingIOError as exc:
+            os.close(self.lock_fd)
+            self.lock_fd = None
+            raise RuntimeError("Another dusky fleet patcher instance is currently running.") from exc
 
     def load_state(self) -> None:
-        self.state_dir.mkdir(parents=True, exist_ok=True)
-        if self.state_file.exists():
-            with open(self.state_file, "r", encoding="utf-8") as f:
-                for line in f:
-                    stripped = line.strip()
-                    if stripped:
-                        self.completed_patches.add(stripped)
+        self.completed_patches.clear()
+        try:
+            state = self.state_file.open("r", encoding="utf-8")
+        except FileNotFoundError:
+            return
+        with state:
+            self.completed_patches.update(line.strip() for line in state if line.strip())
 
     def record_completed(self, cmd_hash: str) -> None:
         """Atomic state write via temporary file replacement preventing corruption on reboot."""
-        self.completed_patches.add(cmd_hash)
-        self.state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-
+        completed = self.completed_patches | {cmd_hash}
         tmp_file = self.state_file.with_suffix(".state.tmp")
-        with open(tmp_file, "w", encoding="utf-8") as f:
-            f.write("\n".join(self.completed_patches) + "\n")
-            f.flush()
-            try:
+        try:
+            with tmp_file.open("w", encoding="utf-8") as f:
+                f.write("\n".join(sorted(completed)) + "\n")
+                f.flush()
                 os.fsync(f.fileno())
-            except OSError:
-                pass
-        os.replace(tmp_file, self.state_file)
+            tmp_file.replace(self.state_file)
+            directory_fd = os.open(self.state_dir, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        finally:
+            tmp_file.unlink(missing_ok=True)
+        self.completed_patches = completed
 
-    def ensure_sudo(self, pending_commands: Sequence[FleetCommand]) -> bool:
-        needs_sudo = any(cmd.mode == Mode.SUDO and cmd.state_hash not in self.completed_patches for cmd in pending_commands)
-        if not needs_sudo:
-            return True
-
+    def ensure_sudo(self) -> bool:
+        """Authenticate only immediately before a root command is executed."""
         if self.sudo_keepalive and self.sudo_keepalive.is_alive():
             return True
 
         if self.logger:
             self.logger.log("INFO", "Root privileges required for upcoming patches. Authenticating...")
 
-        escalator = get_escalator()
         try:
+            escalator = get_escalator()
             res = subprocess.run([escalator, "-n", "true"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             if res.returncode != 0:
-                auth_res = subprocess.run([escalator, "-v"], timeout=60)
+                auth_args = [escalator, "-v"] if Path(escalator).name == "sudo" else [escalator, "true"]
+                auth_res = subprocess.run(auth_args, stdout=subprocess.DEVNULL, timeout=60)
                 if auth_res.returncode != 0:
                     if self.logger:
                         self.logger.log("ERROR", f"{Path(escalator).name.capitalize()} authentication failed. Cannot apply root patches.")
                     return False
-        except FileNotFoundError:
+        except OSError as exc:
             if self.logger:
-                self.logger.log("ERROR", f"Privilege escalator '{escalator}' not found on system.")
+                self.logger.log("ERROR", f"Privilege authentication unavailable: {exc}")
             return False
         except subprocess.TimeoutExpired:
             if self.logger:
                 self.logger.log("ERROR", f"{Path(escalator).name.capitalize()} authentication timed out.")
             return False
 
-        self.sudo_keepalive = SudoKeepAlive()
-        self.sudo_keepalive.start()
+        if Path(escalator).name == "sudo":
+            self.sudo_keepalive = SudoKeepAlive()
+            self.sudo_keepalive.start()
         return True
 
     def run_stage(
@@ -477,7 +445,7 @@ class FleetPatcherEngine:
             return results
 
         if self.logger:
-            self.logger.log("INFO", f"=== Stage: [bold uppercase]{stage_name}[/bold uppercase] ({len(commands)} commands) ===")
+            self.logger.log("INFO", f"=== Stage: {stage_name.upper()} ({len(commands)} commands) ===")
 
         pending = commands if force else [c for c in commands if c.state_hash not in self.completed_patches]
         if not pending:
@@ -487,13 +455,7 @@ class FleetPatcherEngine:
                 results.append(CommandResult(stage_name, c, ExecutionStatus.SKIPPED, "Already applied"))
             return results
 
-        if not dry_run and not self.ensure_sudo(pending):
-            for c in pending:
-                results.append(CommandResult(stage_name, c, ExecutionStatus.FAILED, "Sudo authentication failed"))
-            return results
-
         env = get_user_ipc_env(self.ctx)
-        escalator = get_escalator()
         total = len(commands)
 
         for idx, cmd_obj in enumerate(commands, start=1):
@@ -508,42 +470,45 @@ class FleetPatcherEngine:
 
             if interactive and not use_defaults and not self.is_json and sys.stdin.isatty() and Confirm:
                 prompt_msg = f"Execute [{cmd_obj.mode.value}] patch '{cmd_obj.description or cmd_obj.cmd}'?"
-                if not Confirm.ask(prompt_msg, default=True):
+                if not Confirm.ask(Text(prompt_msg), default=True):
                     if self.logger:
                         self.logger.log("INFO", f"[{idx}/{total}] Skipped by user: {cmd_obj.cmd}")
                     results.append(CommandResult(stage_name, cmd_obj, ExecutionStatus.SKIPPED, "Skipped by user prompt"))
                     continue
 
             if dry_run:
+                message = f"[{idx}/{total}] [DRY-RUN] Would apply [{cmd_obj.mode.value}]: {cmd_obj.cmd}"
                 if self.logger:
-                    self.logger.log("RUN", f"[{idx}/{total}] [DRY-RUN] Would apply [{cmd_obj.mode.value}]: {cmd_obj.cmd}")
+                    self.logger.log("RUN", message)
+                elif not self.is_json and console:
+                    console.print(message, markup=False)
                 results.append(CommandResult(stage_name, cmd_obj, ExecutionStatus.DRY_RUN, "Dry-run simulation"))
                 continue
 
             if self.logger:
                 self.logger.log("RUN", f"[{idx}/{total}] Applying [{cmd_obj.mode.value}]: {cmd_obj.cmd}")
 
-            # Sterile IPC environment array for /usr/bin/env wrapper
-            safe_vars = ["XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "WAYLAND_DISPLAY", "HYPRLAND_INSTANCE_SIGNATURE"]
-            env_assigns = [f"{k}={v}" for k, v in env.items() if k in safe_vars]
+            if cmd_obj.mode == Mode.SUDO and not self.ensure_sudo():
+                results.append(CommandResult(stage_name, cmd_obj, ExecutionStatus.FAILED, "Privilege authentication failed"))
+                continue
 
+            exec_cmd = ["/usr/bin/bash", "-c", f"set -eo pipefail; {cmd_obj.cmd}"]
             if cmd_obj.mode == Mode.SUDO:
-                # Strictly isolate SUDO execution environments. DO NOT pass USER and HOME to root sessions.
-                sudo_args = [escalator, "--non-interactive"] if Path(escalator).name == "sudo" else [escalator]
-                exec_cmd = [*sudo_args, "/usr/bin/env", *env_assigns, "bash", "-c", f"set -eo pipefail; {cmd_obj.cmd}"]
-            else:
-                # Inject User directories strictly for unprivileged executions
-                env_assigns.extend([f"HOME={self.ctx.home}", f"USER={self.ctx.username}"])
-                exec_cmd = ["bash", "-c", f"set -eo pipefail; {cmd_obj.cmd}"]
+                escalator = get_escalator()
+                exec_cmd = [escalator, "-n", *exec_cmd]
 
             try:
-                # start_new_session=True creates a new Process Group so child process trees can be cleanly terminated on exit
+                # A separate process group supports cleanup while retaining the session
+                # required by sudo's terminal-scoped authentication cache.
                 self.active_process = subprocess.Popen(
-                    exec_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env, text=True, errors="replace", start_new_session=True
+                    exec_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env, text=True, errors="replace", process_group=0
                 )
                 stdout_data, _ = self.active_process.communicate()
                 ret_code = self.active_process.returncode
                 output_text = stdout_data.strip() if stdout_data else ""
+
+                if self.logger and output_text:
+                    self.logger.log("OUTPUT", output_text)
 
                 if ret_code == 0:
                     self.record_completed(cmd_hash)
@@ -553,17 +518,19 @@ class FleetPatcherEngine:
                 else:
                     if self.logger:
                         self.logger.log("WARN", f"Patch failed with exit code {ret_code}: {cmd_obj.cmd}")
-                        if output_text and not self.is_json and console:
-                            console.print(f"         └─ [red]{output_text}[/red]")
                         self.logger.log("WARN", "Continuing orchestration sequence despite failure...")
                     results.append(CommandResult(stage_name, cmd_obj, ExecutionStatus.FAILED, f"Failed with exit code {ret_code}", output_text))
 
-            except Exception as e:
+            except (OSError, subprocess.SubprocessError) as e:
                 if self.logger:
                     self.logger.log("ERROR", f"Subprocess execution crashed:\n{traceback.format_exc()}")
                 results.append(CommandResult(stage_name, cmd_obj, ExecutionStatus.FAILED, f"Exception: {e}", ""))
             finally:
-                self.active_process = None
+                # Keep the process reference on signals so cleanup can stop its group.
+                if self.active_process and self.active_process.returncode is not None:
+                    if self.active_process.stdout:
+                        self.active_process.stdout.close()
+                    self.active_process = None
 
         return results
 
@@ -571,34 +538,46 @@ class FleetPatcherEngine:
         if self.sudo_keepalive:
             self.sudo_keepalive.stop()
 
-        # Kill the entire Process Group with strict boundary guards (pgid > 1) to prevent system-wide signal nukes
-        if self.active_process:
-            try:
-                pgid = os.getpgid(self.active_process.pid)
-                if pgid > 1:
+        try:
+            if self.active_process:
+                process = self.active_process
+                # process_group=0 makes the child's PID its process group ID.
+                pgid = process.pid
+
+                def send_group(sig: signal.Signals) -> None:
                     try:
-                        os.killpg(pgid, signal.SIGTERM)
-                        self.active_process.wait(timeout=2.0)
+                        os.killpg(pgid, sig)
+                    except ProcessLookupError:
+                        pass
                     except PermissionError:
-                        subprocess.run([get_escalator(), "-n", "kill", "-TERM", f"-{pgid}"], check=False, stderr=subprocess.DEVNULL)
-                    except (ProcessLookupError, subprocess.TimeoutExpired, OSError):
-                        try:
-                            os.killpg(pgid, signal.SIGKILL)
-                        except PermissionError:
-                            subprocess.run([get_escalator(), "-n", "kill", "-KILL", f"-{pgid}"], check=False, stderr=subprocess.DEVNULL)
-            except OSError:
-                pass
+                        subprocess.run(
+                            [get_escalator(), "-n", "/usr/bin/kill", f"-{sig.name.removeprefix('SIG')}", "--", f"-{pgid}"],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10, check=False,
+                        )
 
-        if self.logger:
-            self.logger.close()
+                try:
+                    send_group(signal.SIGTERM)
+                    try:
+                        process.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        pass
+                    send_group(signal.SIGKILL)
+                    process.wait(timeout=2)
+                finally:
+                    if process.stdout:
+                        process.stdout.close()
+                    self.active_process = None
 
-        if self.lock_fd is not None:
-            try:
-                fcntl.flock(self.lock_fd, fcntl.LOCK_UN)
+        finally:
+            if self.sudo_keepalive:
+                self.sudo_keepalive.join(timeout=11)
+                self.sudo_keepalive = None
+            if self.logger:
+                self.logger.close()
+            if self.lock_fd is not None:
                 os.close(self.lock_fd)
-                # POSIX lockfile safety: Do NOT unlink lock_file to avoid TOCTOU race conditions
-            except OSError:
-                pass
+                self.lock_fd = None
+                # Keep the lock inode so concurrent instances always lock the same file.
 
 
 # ==============================================================================
@@ -637,7 +616,7 @@ def render_status_matrix(engine: FleetPatcherEngine, selected_stages: list[str])
             mode_badge = "[bold red]SUDO[/bold red]" if cmd_obj.mode == Mode.SUDO else "[bold green]USER[/bold green]"
             is_applied = cmd_obj.state_hash in engine.completed_patches
             status_fmt = "[green]✔ YES[/green]" if is_applied else "[yellow]○ PENDING[/yellow]"
-            table.add_row(stage_name.upper(), mode_badge, status_fmt, cmd_obj.cmd, cmd_obj.description or "-")
+            table.add_row(stage_name.upper(), mode_badge, status_fmt, Text(cmd_obj.cmd), Text(cmd_obj.description or "-"))
 
     console.print(table)
 
@@ -655,7 +634,7 @@ def list_commands() -> None:
     for stage_name, cmds in STAGES.items():
         for cmd_obj in cmds:
             mode_badge = "[bold red]SUDO[/bold red]" if cmd_obj.mode == Mode.SUDO else "[bold green]USER[/bold green]"
-            table.add_row(stage_name.upper(), mode_badge, cmd_obj.cmd, cmd_obj.description or "-")
+            table.add_row(stage_name.upper(), mode_badge, Text(cmd_obj.cmd), Text(cmd_obj.description or "-"))
 
     console.print(table)
 
@@ -690,17 +669,18 @@ def parse_args() -> argparse.Namespace:
     stage_group.add_argument("-s", "--setup", action="store_true", help="Run Setup / Post-Install stage commands")
     stage_group.add_argument("-a", "--after", action="store_true", help="Run Post-Update stage commands")
     stage_group.add_argument("-A", "--all", action="store_true", help="Run ALL stages in sequence (before -> setup -> after)")
-    stage_group.add_argument("--stage", choices=["before", "setup", "after", "all"], help="Specify a single target stage or 'all'")
+    stage_group.add_argument("--stage", choices=[*STAGES, "all"], help="Specify a single target stage or 'all'")
 
     control_group = parser.add_argument_group("Execution Control Flags")
     control_group.add_argument("-i", "--interactive", action="store_true", help="Interactively prompt before executing each patch")
     control_group.add_argument("-y", "--default", action="store_true", help="Non-interactive mode (auto-apply default choices)")
     control_group.add_argument("-f", "--force", action="store_true", help="Force re-execution of commands even if previously completed")
-    control_group.add_argument("-n", "--dry-run", action="store_true", help="Preview planned command executions without making changes")
-    control_group.add_argument("-st", "--status", action="store_true", help="Inspect and display patch state matrix without executing")
-    control_group.add_argument("-l", "--list", action="store_true", help="Display all configured stages and commands in a Rich table")
+    inspection_group = control_group.add_mutually_exclusive_group()
+    inspection_group.add_argument("-n", "--dry-run", action="store_true", help="Preview planned command executions without making changes")
+    inspection_group.add_argument("-st", "--status", action="store_true", help="Inspect and display patch state matrix without executing")
+    inspection_group.add_argument("-l", "--list", action="store_true", help="Display all configured stages and commands in a Rich table")
     control_group.add_argument("--json", action="store_true", help="Output status/execution results as formatted JSON")
-    control_group.add_argument("--reset-state", action="store_true", help="Reset and clear state history file")
+    inspection_group.add_argument("--reset-state", action="store_true", help="Reset and clear state history file")
 
     return parser.parse_args()
 
@@ -709,141 +689,119 @@ def parse_args() -> argparse.Namespace:
 # 7. MAIN ENTRYPOINT
 # ==============================================================================
 
-def main() -> None:
+def main() -> int:
     args = parse_args()
-
     if args.json:
         sys.excepthook = _json_excepthook
-
     check_ui_deps(args.json)
 
-    ctx = resolve_user_context(is_json=args.json)
-
-    # Security Check: Prevent running directly as root without an underlying real user
-    if ctx.uid == 0:
-        if not args.json and error_console:
-            error_console.print("[bold red]CRITICAL ERROR: Do NOT run this script directly as root! Run as normal user.[/bold red]")
-        else:
-            print("CRITICAL ERROR: Do NOT run this script directly as root!", file=sys.stderr)
-        sys.exit(1)
-
-    # Handle --list flag
     if args.list:
-        list_commands()
-        sys.exit(0)
+        if args.json:
+            print(json.dumps([
+                {"stage": stage, "mode": cmd.mode.value, "cmd": cmd.cmd,
+                 "description": cmd.description, "hash": cmd.state_hash}
+                for stage, commands in STAGES.items() for cmd in commands
+            ], indent=2))
+        else:
+            list_commands()
+        return 0
 
+    ctx = resolve_user_context(is_json=args.json)
+    if ctx.uid == 0:
+        raise RuntimeError("Run as a normal user, or through sudo with an underlying normal user.")
+    if ctx.is_root:
+        # Run the orchestrator as the resolved user so state, logs, and USER patches
+        # have the same ownership and behavior as a normal invocation.
+        os.initgroups(ctx.username, ctx.gid)
+        os.setgid(ctx.gid)
+        os.setuid(ctx.uid)
+        os.environ.update(HOME=str(ctx.home), USER=ctx.username, LOGNAME=ctx.username,
+                          XDG_RUNTIME_DIR=f"/run/user/{ctx.uid}")
+        os.environ.pop("DBUS_SESSION_BUS_ADDRESS", None)
+
+    selected_stages = [
+        stage for stage in STAGES
+        if args.all or args.stage == "all" or getattr(args, stage, False) or args.stage == stage
+    ] or list(STAGES)
     engine = FleetPatcherEngine(ctx, is_json=args.json)
 
-    # Handle --reset-state flag
-    if args.reset_state:
-        if engine.state_file.exists():
-            engine.state_file.unlink()
-            if not args.json and console:
-                console.print("[bold green]State history cleared successfully.[/bold green]")
-            elif args.json:
-                print(json.dumps({"status": "success", "message": "State history cleared successfully"}))
-        else:
-            if not args.json and console:
-                console.print("[bold yellow]No state file found to clear.[/bold yellow]")
-            elif args.json:
-                print(json.dumps({"status": "warning", "message": "No state file found to clear"}))
-        sys.exit(0)
-
-    # Resolve active stages
-    selected_stages: list[str] = []
-    if args.all or args.stage == "all":
-        selected_stages = ["before", "setup", "after"]
-    else:
-        if args.before or args.stage == "before":
-            selected_stages.append("before")
-        if args.setup or args.stage == "setup":
-            selected_stages.append("setup")
-        if args.after or args.stage == "after":
-            selected_stages.append("after")
-
-    # Default to 'all' if no stage specified
-    if not selected_stages:
-        selected_stages = ["before", "setup", "after"]
-
-    # Acquire lock & load state
-    engine.acquire_lock()
-    engine.load_state()
-
-    # Status Inspection Mode
-    if args.status:
-        if args.json:
-            json_data = []
-            for st in selected_stages:
-                for c in STAGES.get(st, []):
-                    json_data.append({
-                        "stage": st,
-                        "mode": c.mode.value,
-                        "cmd": c.cmd,
-                        "description": c.description,
-                        "hash": c.state_hash,
-                        "applied": c.state_hash in engine.completed_patches,
-                    })
-            print(json.dumps(json_data, indent=2))
-        else:
-            render_status_matrix(engine, selected_stages)
-        sys.exit(0)
-
-    engine.logger = Logger(engine.log_file, is_json=args.json)
-
-    if not args.json:
-        render_header(ctx, selected_stages)
-
-    def handle_exit(signum, frame):
+    def handle_exit(signum: int, frame: Any) -> None:
         raise SystemExit(128 + signum)
 
-    signal.signal(signal.SIGINT, handle_exit)
-    signal.signal(signal.SIGTERM, handle_exit)
-
-    all_results: list[CommandResult] = []
-
+    old_handlers = {sig: signal.signal(sig, handle_exit) for sig in (signal.SIGINT, signal.SIGTERM)}
     try:
-        for stage_name in selected_stages:
-            commands = STAGES.get(stage_name, [])
-            results = engine.run_stage(
-                stage_name,
-                commands,
-                force=args.force,
-                dry_run=args.dry_run,
-                interactive=args.interactive,
-                use_defaults=args.default,
-            )
-            all_results.extend(results)
+        # Inspection and simulation only read the atomically replaced history.
+        if not (args.status or args.dry_run) or args.reset_state:
+            engine.acquire_lock()
+        if args.reset_state:
+            existed = engine.state_file.exists()
+            engine.state_file.unlink(missing_ok=True)
+            message = "State history cleared successfully" if existed else "No state file found to clear"
+            if args.json:
+                print(json.dumps({"status": "success" if existed else "warning", "message": message}))
+            else:
+                console.print(message, markup=False)
+            return 0
 
+        engine.load_state()
+        if args.status:
+            if args.json:
+                print(json.dumps([
+                    {"stage": stage, "mode": cmd.mode.value, "cmd": cmd.cmd,
+                     "description": cmd.description, "hash": cmd.state_hash,
+                     "applied": cmd.state_hash in engine.completed_patches}
+                    for stage in selected_stages for cmd in STAGES[stage]
+                ], indent=2))
+            else:
+                render_status_matrix(engine, selected_stages)
+            return 0
+
+        if not args.dry_run:
+            engine.logger = Logger(engine.log_file, is_json=args.json)
+        if not args.json:
+            render_header(ctx, selected_stages)
+
+        all_results = [
+            result
+            for stage in selected_stages
+            for result in engine.run_stage(
+                stage, STAGES[stage], force=args.force, dry_run=args.dry_run,
+                interactive=args.interactive, use_defaults=args.default,
+            )
+        ]
+        failed = any(result.status == ExecutionStatus.FAILED for result in all_results)
         if args.json:
-            json_res = [
-                {
-                    "stage": r.stage,
-                    "mode": r.command.mode.value,
-                    "cmd": r.command.cmd,
-                    "status": r.status.value,
-                    "message": r.message,
-                    "output": r.output,
-                }
-                for r in all_results
-            ]
-            print(json.dumps(json_res, indent=2))
+            print(json.dumps([
+                {"stage": result.stage, "mode": result.command.mode.value,
+                 "cmd": result.command.cmd, "status": result.status.value,
+                 "message": result.message, "output": result.output}
+                for result in all_results
+            ], indent=2))
         else:
             render_execution_summary(all_results)
-            if engine.logger:
-                engine.logger.log("SUCCESS", "All requested fleet patches completed and verified.")
-    except (SystemExit, KeyboardInterrupt) as e:
-        if not args.json and console:
-            console.print("\n[bold red][ABORTED][/bold red] Interrupted by user/system signal.")
-        elif args.json:
+        if engine.logger:
+            engine.logger.log("WARN" if failed else "INFO", "Execution finished with failures." if failed else "Execution finished.")
+        return int(failed)
+    except (SystemExit, KeyboardInterrupt) as exc:
+        if args.json:
             print(json.dumps({"status": "aborted", "message": "Interrupted by signal"}), file=sys.stderr)
-        sys.exit(e.code if isinstance(e, SystemExit) else 130)
+        else:
+            error_console.print("[ABORTED] Interrupted by user/system signal.", style="red", markup=False)
+        return exc.code if isinstance(exc, SystemExit) else 130
     finally:
-        engine.cleanup()
+        # Ignore repeated termination signals while reaping children and releasing resources.
+        for sig in old_handlers:
+            signal.signal(sig, signal.SIG_IGN)
+        try:
+            engine.cleanup()
+        finally:
+            for sig, handler in old_handlers.items():
+                signal.signal(sig, handler)
 
 
 if __name__ == "__main__":
     try:
-        main()
+        sys.exit(main())
     except KeyboardInterrupt:
         if console:
             console.print("\n[bold red][ABORTED][/bold red] Interrupted by user (SIGINT).")

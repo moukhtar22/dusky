@@ -1,1003 +1,481 @@
 #!/usr/bin/env bash
-# =====================================================================
-# mpris_playback_selection - Rofi Audio Source Controller
-# Architecture: Bash 5.0+ | pactl + playerctl + D-Bus Pipeline
-# Discovery: pactl sink-inputs + client resolution (catches ALL audio sources)
-# Control: MPRIS (playerctl) / CLI Plugins / pactl fallback (with wise suspension)
-# Dependencies: pactl, rofi, notify-send, busctl
-# Optional: playerctl (MPRIS control)
-# =====================================================================
-
+# Bash 5.3+; Wayland Rofi, pactl, jq, notify-send.
+# Optional: playerctl + busctl for MPRIS, or executable CLI controllers.
+# List media sessions and additional streams with measured audio activity.
 set -euo pipefail
 
-# --- Configuration ---
-readonly APP_NAME="mpris_playback"
-readonly NOTIFY_ICON="multimedia-audio-player-symbolic"
-
-readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-readonly CONTROLLERS_DIR="$SCRIPT_DIR/controllers"
-
+readonly APP_NAME=mpris_playback NOTIFY_ICON=multimedia-audio-player-symbolic
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+readonly SCRIPT_DIR CONTROLLERS_DIR="$SCRIPT_DIR/controllers"
 readonly ROFI_CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/rofi/config.rasi"
 readonly ROFI_THEME='window {width: 40%;} listview {lines: 10;}'
+# Metadata protocol: title, artist, position, duration, status separated by US.
+# US is not IFS whitespace, so empty fields survive read. Display data is one line.
+readonly SEP=$'\x1f'
+readonly ICON_PLAYING='󰐊' ICON_PAUSED='󰏤' ICON_STOPPED='󰓛' ICON_UNKNOWN='󰝚'
+readonly ICON_TOGGLE='󰐎' ICON_NEXT='󰒭' ICON_PREV='󰒮' ICON_BACK='󰁍' ICON_GROUP='󰉋'
 
-# --- Nerd Font Icons ---
-readonly ICON_PLAYING="󰐊"
-readonly ICON_PAUSED="󰏤"
-readonly ICON_STOPPED="󰓛"
-readonly ICON_UNKNOWN="󰝚"
-
-readonly ICON_TOGGLE="󰐎"
-readonly ICON_NEXT="󰒭"
-readonly ICON_PREV="󰒮"
-readonly ICON_MUTE="󰖁"
-readonly ICON_BACK="󰁍"
-readonly ICON_GROUP="󰉋"
-
-
-
-# --- Dependency Check ---
-declare -a REQ_CMDS=("pactl" "rofi" "notify-send" "busctl")
-for cmd in "${REQ_CMDS[@]}"; do
-    command -v "$cmd" >/dev/null || {
-        printf '%s: missing dependency: %s\n' "$APP_NAME" "$cmd" >&2
-        exit 1
-    }
-done
-
-readonly HAS_PLAYERCTL=$(command -v playerctl >/dev/null 2>&1 && echo 1 || echo 0)
-
-# --- Global Arrays for MPRIS mapping ---
-declare -A pid_to_player
-declare -A name_to_players_list
-
-_update_mpris_maps() {
-    unset pid_to_player name_to_players_list used_mpris_players used_cli_players player_to_pid
-    declare -g -A pid_to_player
-    declare -g -A player_to_pid
-    declare -g -A name_to_players_list
-    declare -g -A used_mpris_players
-    declare -g -A used_cli_players
-    
-    local bus_list
-    bus_list=$(busctl --user list 2>/dev/null || true)
-    if [[ -n "$bus_list" ]]; then
-        while IFS='|' read -r player p_pid; do
-            [[ -z "$player" ]] && continue
-            if [[ -n "$p_pid" && "$p_pid" != "-" ]]; then
-                pid_to_player["$p_pid"]="$player"
-                player_to_pid["$player"]="$p_pid"
-            fi
-            local base_name="${player%%.*}"
-            local bl="${base_name,,}"
-            if [[ -z "${name_to_players_list[$bl]:-}" ]]; then
-                name_to_players_list["$bl"]="$player"
-            else
-                name_to_players_list["$bl"]="${name_to_players_list[$bl]} $player"
-            fi
-        done <<< "$(printf '%s\n' "$bus_list" | awk '/org.mpris.MediaPlayer2\./ { split($1, a, "org.mpris.MediaPlayer2."); print a[2] "|" $2 }')"
-    fi
-}
-
-# --- Helper Functions ---
+HAS_MPRIS=0
+declare -a ids=() apps=() media=() corked=() muted=() pids=() binaries=() backends=() entries=() audible=()
+declare -a players=()
+declare -A player_pids=() metadata_cache=() used_backends=() pid_counts=() app_counts=()
+# Shared output variables avoid spawning subshells for string formatting.
+REPLY='' title='' artist='' position='' duration='' status=''
 
 _notify() {
-    local summary="$1"
-    local body="${2:-}"
+    local body=${2:-}
+    # Notification bodies support markup; metadata should display literally.
+    body=${body//&/\&amp;}; body=${body//</\&lt;}; body=${body//>/\&gt;}
     notify-send -a "$APP_NAME" -i "$NOTIFY_ICON" \
-        -h "string:x-canonical-private-synchronous:mpris_ctl" \
-        "$summary" "$body" || true
+        -h string:x-canonical-private-synchronous:mpris_ctl -- "$1" "$body" || true
 }
 
-_rofi_menu() {
-    local prompt="$1"
-    local output=""
-    local status=0
-    local -a rofi_args=(-dmenu -i -no-custom -p "$prompt" -theme-str "$ROFI_THEME")
-    shift
+_single_line() {
+    REPLY=${1//[$'\r\n\x1f']/ }
+}
 
-    [[ -f "$ROFI_CONFIG" ]] && rofi_args+=(-config "$ROFI_CONFIG")
-
-    set +e
-    output=$(
-        printf '%s\n' "$@" | rofi "${rofi_args[@]}"
-    )
-    status=$?
-    set -e
-
-    case $status in
-        0) printf '%s\n' "$output" ;;
-        1) return 1 ;;
-        *)
-            _notify "Execution Failed" "Rofi encountered an error."
-            exit 1
-            ;;
-    esac
+_clean_media_name() {
+    REPLY=$1
+    if [[ $REPLY == *'&'* && $REPLY == *'='* ]]; then
+        if [[ $REPLY == *' - '* ]]; then
+            REPLY=${REPLY##* - }
+            case $REPLY in mpv|vlc|firefox) REPLY='' ;; esac
+        else
+            REPLY=''
+        fi
+    fi
+    REPLY=${REPLY% - YouTube}
+    REPLY=${REPLY% - Twitch}
+    REPLY=${REPLY% - mpv}
+    REPLY=${REPLY% - VLC media player}
+    REPLY=${REPLY% - Firefox}
 }
 
 _status_icon() {
-    local status="$1"
-    case "${status,,}" in
-        playing)             printf '%s' "$ICON_PLAYING" ;;
-        paused|corked|muted) printf '%s' "$ICON_PAUSED"  ;;
-        stopped|suspended)   printf '%s' "$ICON_STOPPED" ;;
-        *)                   printf '%s' "$ICON_UNKNOWN" ;;
+    case ${1,,} in
+        playing) REPLY=$ICON_PLAYING ;;
+        paused|corked|muted) REPLY=$ICON_PAUSED ;;
+        stopped|suspended) REPLY=$ICON_STOPPED ;;
+        *) REPLY=$ICON_UNKNOWN ;;
     esac
 }
 
 _truncate() {
-    local text="$1"
-    local max="${2:-40}"
-    if ((${#text} > max)); then
-        printf '%s…' "${text:0:$((max - 1))}"
+    REPLY=$1
+    if ((${#REPLY} > $2)); then REPLY=${REPLY:0:$2-1}…; fi
+}
+
+_rofi_menu() {
+    local prompt=$1 output rc=0
+    shift
+    local -a args=(-dmenu -i -no-custom -no-multi-select -no-markup-rows
+        -format i -p "$prompt" -theme-str "$ROFI_THEME")
+    [[ ! -f $ROFI_CONFIG ]] || args+=(-config "$ROFI_CONFIG")
+    [[ -z ${ROFI_MESSAGE:-} ]] || args+=(-mesg "$ROFI_MESSAGE")
+    output=$(printf '%s\n' "$@" | rofi "${args[@]}") || rc=$?
+    case $rc in
+        0)
+            if [[ $output =~ ^[0-9]+$ ]] && ((10#$output < $#)); then
+                REPLY=$((10#$output))
+                return 0
+            fi
+            ;;
+        1) return 1 ;; # Cancelled, or accepted without a matching row.
+    esac
+    _notify 'Execution Failed' 'Rofi did not return a valid selection.'
+    return 2
+}
+
+_discover_sources() {
+    local sinks clients activity
+    sinks=$(pactl --format=json list sink-inputs) || return 1
+    # Resolve client PIDs only when a stream omits its own PID.
+    clients='[]'
+    if jq -e 'any(.[]; (.properties["application.process.id"] // "") == "")' \
+        >/dev/null <<< "$sinks"; then
+        clients=$(pactl --format=json list clients) || return 1
+    fi
+    activity=$(python3 "$SCRIPT_DIR/audio_activity.py" <<< "$sinks") || return 1
+    jq -r --argjson clients "$clients" --argjson activity "$activity" '
+        def text: tostring | gsub("[\u0000-\u001f]"; " ");
+        ($clients | map({key: (.index | tostring),
+            value: (.properties["application.process.id"] // "")}) | from_entries) as $pids
+        | sort_by(.corked, .index)[]
+        | .properties as $p
+        | [.index, ($p["application.name"] // ""), ($p["media.name"] // ""),
+           (if .corked then "yes" else "no" end), (if .mute then "yes" else "no" end),
+           (($p["application.process.id"] // "") as $pid
+             | if $pid != "" then $pid else ($pids[.client | tostring] // "") end),
+           ($p["application.process.binary"] // ""), ($activity[.index | tostring] // "unknown")]
+        | map(text) | join("\u001f")' <<< "$sinks"
+}
+
+_update_players() {
+    players=(); player_pids=()
+    ((HAS_MPRIS)) || return 0
+    local listing name pid rest
+    listing=$(busctl --user --no-pager --no-legend --full --acquired list) || return 0
+    while read -r name pid rest; do
+        [[ $name == org.mpris.MediaPlayer2.* ]] || continue
+        name=${name#org.mpris.MediaPlayer2.}
+        players+=("$name")
+        player_pids[$name]=$pid
+    done <<< "$listing"
+}
+
+_backend_metadata() {
+    local backend=$1 data=''
+    if [[ ${metadata_cache[$backend]+present} ]]; then
+        data=${metadata_cache[$backend]}
     else
-        printf '%s' "$text"
+        case $backend in
+            mpris:*)
+                local format="{{default(title,\"\")}}${SEP}{{default(artist,\"\")}}${SEP}{{duration(position)}}${SEP}{{duration(mpris:length)}}${SEP}{{status}}"
+                data=$(playerctl --player="${backend#mpris:}" metadata --format "$format" 2>/dev/null) || data=''
+                ;;
+            cli:*) data=$("$CONTROLLERS_DIR/${backend#cli:}" now 2>/dev/null) || data='' ;;
+        esac
+        data=${data//[$'\r\n']/ }
+        metadata_cache[$backend]=$data
     fi
+    title=''; artist=''; position=''; duration=''; status=''
+    IFS=$SEP read -r title artist position duration status <<< "$data"
 }
 
-_format_seconds() {
-    local total="${1%%.*}"
-    ((total > 0)) 2>/dev/null || { printf '0:00'; return; }
-    local m=$((total / 60))
-    local s=$((total % 60))
-    printf '%d:%02d' "$m" "$s"
+_matches_stream() {
+    local i=$1 stream_title
+    if [[ -z ${pids[i]} ]] || ((${pid_counts[${pids[i]}]:-0} < 2)); then return 0; fi
+    _clean_media_name "${media[i]}"; stream_title=$REPLY
+    _clean_media_name "$title"
+    [[ -n $stream_title && $stream_title == "$REPLY" ]]
 }
 
-
-
-_get_title_from_cmdline() {
-    local pid="$1"
-    local fallback="$2"
-
-    if [[ -z "$pid" || ! -f "/proc/$pid/cmdline" ]]; then
-        printf '%s' "$fallback"
-        return
-    fi
-
-    local cmdline
-    cmdline=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)
-    [[ -z "$cmdline" ]] && { printf '%s' "$fallback"; return; }
-
-    local title=""
-    local count=0
-    for arg in $cmdline; do
-        ((count++))
-        ((count == 1)) && continue
-        [[ "$arg" == -* ]] && continue
-        if [[ "$arg" == *"/"* || "$arg" == *.* ]]; then
-            title=$(basename "$arg")
-            break
-        fi
+_detect_backend() {
+    local i=$1 name player base candidate player_pid
+    REPLY=pactl
+    for name in "${binaries[i]}" "${apps[i]}"; do
+        name=${name,,}
+        [[ -n $name && $name != */* && -x $CONTROLLERS_DIR/$name ]] || continue
+        candidate=cli:$name
+        [[ ! ${used_backends[$candidate]+present} ]] || continue
+        _backend_metadata "$candidate"
+        [[ -n $status ]] || continue # An installed controller needs a working client.
+        _matches_stream "$i" || continue
+        used_backends[$candidate]=1
+        REPLY=$candidate
+        return 0
     done
-
-    if [[ -n "$title" ]]; then
-        printf '%s' "$title"
-    else
-        local comm=""
-        if [[ -f "/proc/$pid/comm" ]]; then
-            comm=$(cat "/proc/$pid/comm" 2>/dev/null || true)
+    for player in "${players[@]}"; do
+        candidate=mpris:$player
+        [[ ! ${used_backends[$candidate]+present} ]] || continue
+        player_pid=${player_pids[$player]}
+        base=${player%%.*}; base=${base,,}
+        if [[ -n ${pids[i]} && $player_pid == "${pids[i]}" ]]; then
+            :
+        elif [[ $player_pid =~ ^[0-9]+$ && -n ${pids[i]} ]]; then
+            continue
+        elif [[ $base != "${binaries[i],,}" && $base != "${apps[i],,}" ]]; then
+            continue
         fi
-        [[ -n "$comm" ]] && printf '%s' "$comm" || printf '%s' "$fallback"
+        _backend_metadata "$candidate"
+        [[ -n $status ]] || continue
+        # A global player may represent only one of several browser streams.
+        # Do not attach it to an arbitrary tab solely because their PIDs match.
+        _matches_stream "$i" || continue
+        used_backends[$candidate]=1
+        REPLY=$candidate
+        return 0
+    done
+    REPLY=pactl
+}
+
+_read_metadata() {
+    local i=$1
+    _backend_metadata "${backends[i]}"
+    _clean_media_name "${media[i]}"
+    if [[ ${backends[i]} == pactl ]]; then
+        case $REPLY in ''|'Audio Stream'|AudioStream|webm) title='Audio Stream' ;; esac
+    fi
+    if [[ ${2:-stream} == stream || -z $title ]]; then
+        case $REPLY in ''|'Audio Stream'|AudioStream|webm) ;; *) title=$REPLY ;; esac
+    fi
+    # /proc cmdline is NUL-separated; preserve spaces and wildcard characters.
+    if [[ -z $title && ${pids[i]} =~ ^[0-9]+$ ]]; then
+        local -a argv=()
+        local arg
+        if mapfile -d '' -t argv 2>/dev/null < "/proc/${pids[i]}/cmdline"; then
+            for arg in "${argv[@]:1}"; do
+                [[ $arg != -* && ( $arg == */* || $arg == *.* ) ]] || continue
+                _single_line "${arg##*/}"; title=$REPLY
+                break
+            done
+        fi
+    fi
+    title=${title:-${apps[i]}}
+    if [[ -z $status ]]; then
+        local process_stat=''
+        if [[ -n ${pids[i]} ]]; then
+            IFS= read -r process_stat 2>/dev/null < "/proc/${pids[i]}/stat" || true
+        fi
+        # comm may itself contain spaces or parentheses; state follows its closing ).
+        process_stat=${process_stat##*) }
+        if [[ $process_stat == T\ * || $process_stat == t\ * ]]; then status=Suspended
+        elif [[ ${corked[i]} == yes ]]; then status=Paused
+        elif [[ ${muted[i]} == yes ]]; then status=Muted
+        else status=Playing
+        fi
     fi
 }
 
-# =====================================================================
-# PLUGIN SYSTEM SETUP
-# =====================================================================
-
-_ensure_controllers() {
-    # Ensure controllers directory exists and scripts are executable
-    if [[ -d "$CONTROLLERS_DIR" ]]; then
-        find "$CONTROLLERS_DIR" -type f -exec chmod +x {} + 2>/dev/null || true
+_build_entry() {
+    local i=$1 icon track time=''
+    _read_metadata "$i"
+    _status_icon "$status"; icon=$REPLY
+    _truncate "$title" 45; track=$REPLY
+    if [[ -n $artist ]]; then
+        _truncate "$artist" 25; track="$REPLY · $track"
     fi
+    if [[ -n $position ]]; then
+        time="  [$position${duration:+/$duration}]"
+    fi
+    REPLY="$icon  ${apps[i]}  $track$time"
 }
 
-# =====================================================================
-# DISCOVERY: pactl sink-inputs + client matching
-# =====================================================================
-
-_discover_all_sources() {
-    local client_pids
-    client_pids=$(pactl list clients 2>/dev/null | awk '/^Client #/ { cid = $2; gsub(/#/, "", cid) } /application\.process\.id = / { s = $0; gsub(/.*= "/, "", s); gsub(/"$/, "", s); if (cid != "") print cid ":" s }' || true)
-
-    pactl list sink-inputs 2>/dev/null | awk -v client_pids_str="$client_pids" '
-        BEGIN {
-            n = split(client_pids_str, temp, "\n")
-            for (i = 1; i <= n; i++) {
-                split(temp[i], pair, ":")
-                client_to_pid[pair[1]] = pair[2]
-            }
-        }
-        /^Sink Input #/ {
-            if (id != "") {
-                if (pid == "" && client_id != "") pid = client_to_pid[client_id]
-                print id "|" app "|" media "|" corked "|" mute "|" pid "|" binary
-            }
-            id = $3; gsub(/#/, "", id)
-            app = ""; media = ""; corked = ""; mute = ""; pid = ""; binary = ""; client_id = ""
-        }
-        /^[ \t]*Client:/ { client_id = $2 }
-        /^[ \t]*Corked:/ { corked = $2 }
-        /^[ \t]*Mute:/   { mute   = $2 }
-        /application\.name = /        { s = $0; gsub(/.*= "/, "", s); gsub(/"$/, "", s); app    = s }
-        /media\.name = /              { s = $0; gsub(/.*= "/, "", s); gsub(/"$/, "", s); media  = s }
-        /application\.process\.id = / { s = $0; gsub(/.*= "/, "", s); gsub(/"$/, "", s); pid    = s }
-        /application\.process\.binary = / { s = $0; gsub(/.*= "/, "", s); gsub(/"$/, "", s); binary = s }
-        END {
-            if (id != "") {
-                if (pid == "" && client_id != "") pid = client_to_pid[client_id]
-                print id "|" app "|" media "|" corked "|" mute "|" pid "|" binary
-            }
-        }
-    ' | sort -t"|" -k4,4
-}
-
-# =====================================================================
-# CONTROL BACKEND DETECTION
-# =====================================================================
-
-_detect_control_backend() {
-    local app_name="$1"
-    local binary="$2"
-    local pid="$3"
-    local out_var="$4"
-
-    # 1. Custom CLI controllers in controllers dir
-    if [[ -d "$CONTROLLERS_DIR" ]]; then
-        local proc_name=""
-        if [[ -n "$pid" && -f "/proc/$pid/comm" ]]; then
-            proc_name=$(cat "/proc/$pid/comm" 2>/dev/null || true)
+_load_sources() {
+    local raw id app track cork mute pid binary activity i
+    if ! raw=$(_discover_sources); then
+        _notify 'Discovery Failed' 'Could not query the audio server.'
+        return 1
+    fi
+    ids=(); apps=(); media=(); corked=(); muted=(); pids=(); binaries=(); backends=(); entries=(); audible=()
+    metadata_cache=(); used_backends=(); pid_counts=(); app_counts=()
+    while IFS=$SEP read -r id app track cork mute pid binary activity; do
+        [[ -n $id ]] || continue
+        [[ $pid =~ ^[0-9]+$ ]] || pid=''
+        if [[ -z $binary && -n $pid ]]; then
+            IFS= read -r binary 2>/dev/null < "/proc/$pid/comm" || true
         fi
-        
-        for name in "$proc_name" "$binary" "$app_name"; do
-            [[ -z "$name" ]] && continue
-            local controller_path="$CONTROLLERS_DIR/${name,,}"
-            if [[ -x "$controller_path" ]]; then
-                local cli_id="cli:${name,,}"
-                if [[ -z "${used_cli_players[$cli_id]:-}" ]]; then
-                    used_cli_players["$cli_id"]=1
-                    printf -v "$out_var" '%s' "$cli_id"
-                    return
-                fi
+        app=${app:-${binary:-Unknown}}
+        ids+=("$id"); apps+=("$app"); media+=("$track"); corked+=("$cork")
+        muted+=("$mute"); pids+=("$pid"); binaries+=("$binary"); audible+=("$activity")
+        if [[ -n $pid ]]; then pid_counts[$pid]=$(( ${pid_counts[$pid]:-0} + 1 )); fi
+    done <<< "$raw"
+    _update_players
+    for i in "${!ids[@]}"; do
+        _detect_backend "$i"; backends+=("$REPLY")
+    done
+    # A paused player may have closed its audio stream. Its media session is
+    # still resumable, and its own title is authoritative even if no tab matches.
+    local player backend app binary
+    for player in "${players[@]}"; do
+        backend=mpris:$player
+        [[ ! ${used_backends[$backend]+present} ]] || continue
+        _backend_metadata "$backend"
+        [[ -n $title || -n $artist ]] || continue
+        case ${status,,} in playing|paused|stopped) ;; *) continue ;; esac
+        binary=${player%%.*}; app=$binary; pid=${player_pids[$player]}
+        for i in "${!ids[@]}"; do
+            if [[ -n ${pids[i]} && ${pids[i]} == "$pid" ]] ||
+                [[ ${binaries[i],,} == "${binary,,}" ]]; then
+                app=${apps[i]}
+                break
             fi
         done
-    fi
-
-    # 2. MPRIS players via playerctl
-    if ((HAS_PLAYERCTL)); then
-        # Direct PID match
-        if [[ -n "$pid" && -n "${pid_to_player[$pid]:-}" ]]; then
-            local player="${pid_to_player[$pid]}"
-            if [[ -z "${used_mpris_players[$player]:-}" ]]; then
-                used_mpris_players["$player"]=1
-                printf -v "$out_var" 'mpris:%s' "$player"
-                return
-            fi
-        fi
-
-        # Name-based match
-        _find_player() {
-            local search="$1"
-            local list="${name_to_players_list[$search]:-}"
-            if [[ -n "$list" ]]; then
-                local remaining=""
-                local found=""
-                for p in $list; do
-                    local p_pid="${player_to_pid[$p]:-}"
-                    if [[ -n "$p_pid" && "$p_pid" != "$pid" ]]; then
-                        remaining="${remaining}${remaining:+ }$p"
-                        continue
-                    fi
-                    
-                    if [[ -z "$found" && -z "${used_mpris_players[$p]:-}" ]]; then
-                        found="$p"
-                        used_mpris_players["$p"]=1
-                    else
-                        remaining="${remaining}${remaining:+ }$p"
-                    fi
-                done
-                name_to_players_list["$search"]="$remaining"
-                if [[ -n "$found" ]]; then
-                    printf -v "$out_var" 'mpris:%s' "$found"
-                    return 0
-                fi
-            fi
-            return 1
-        }
-
-        if [[ -n "$binary" ]]; then
-            if _find_player "${binary,,}"; then return; fi
-        fi
-        if [[ -n "$app_name" ]]; then
-            if _find_player "${app_name,,}"; then return; fi
-        fi
-        
-        # Fuzzy match
-        local k bin_lower app_lower
-        [[ -n "$binary" ]] && bin_lower="${binary,,}" || bin_lower=""
-        [[ -n "$app_name" ]] && app_lower="${app_name,,}" || app_lower=""
-        for k in "${!name_to_players_list[@]}"; do
-            if [[ -n "$bin_lower" && ( "$bin_lower" == *"$k"* || "$k" == *"$bin_lower"* ) ]]; then
-                if _find_player "$k"; then return; fi
-            fi
-            if [[ -n "$app_lower" && ( "$app_lower" == *"$k"* || "$k" == *"$app_lower"* ) ]]; then
-                if _find_player "$k"; then return; fi
-            fi
-        done
-    fi
-
-    printf -v "$out_var" 'pactl'
-}
-
-# =====================================================================
-# METADATA ENRICHMENT
-# =====================================================================
-
-_get_mpris_metadata() {
-    local player="$1"
-    local fallback_title="$2"
-    local fallback_app="$3"
-    local title artist position duration status
-
-    local meta_str=""
-    set +e
-    meta_str=$(playerctl -p "$player" metadata --format '{{status}}|{{default(title,"")}}|{{default(artist,"")}}|{{duration(position)}}|{{duration(mpris:length)}}' 2>/dev/null)
-    set -e
-
-    if [[ -n "$meta_str" ]]; then
-        IFS='|' read -r status title artist position duration <<< "$meta_str"
-    fi
-
-    [[ -z "$title" ]] && title="$fallback_title"
-    [[ -z "$title" ]] && title="$fallback_app"
-    [[ -z "$title" ]] && title="Audio Stream"
-
-    printf '%s|%s|%s|%s|%s\n' "$title" "$artist" "$position" "$duration" "${status:-Unknown}"
-}
-
-_get_cli_metadata() {
-    local type="$1"
-    local pid="$2"
-    local fallback_title="$3"
-    local fallback_app="$4"
-
-    local controller_path="$CONTROLLERS_DIR/$type"
-    local title="" artist="" position="" duration="" status=""
-
-    if [[ -x "$controller_path" ]]; then
-        local meta
-        set +e
-        meta=$("$controller_path" now 2>/dev/null)
-        set -e
-        if [[ -n "$meta" ]]; then
-            IFS='|' read -r title artist position duration status <<< "$meta"
-        fi
-    fi
-
-    [[ -z "$title" ]] && title="$fallback_title"
-    [[ -z "$title" ]] && title="$fallback_app"
-    [[ -z "$title" ]] && title="Audio Stream"
-
-    if [[ -z "$status" ]]; then
-        status="Playing"
-        if [[ -n "$pid" && -f "/proc/$pid/stat" ]]; then
-            local proc_state
-            proc_state=$(awk '{print $3}' "/proc/$pid/stat" 2>/dev/null || true)
-            [[ "$proc_state" == "T" ]] && status="Suspended"
-        fi
-    fi
-
-    printf '%s|%s|%s|%s|%s\n' "$title" "$artist" "$position" "$duration" "$status"
-}
-
-_get_pactl_metadata() {
-    local sink_id="$1"
-    local media_name="$2"
-    local app_name="$3"
-    local corked="$4"
-    local mute="$5"
-    local pid="$6"
-
-    local title artist position duration status
-    
-    title=$(_clean_media_name "$media_name")
-    
-    if [[ -z "$title" || "$title" == "Audio Stream" || "$title" == "webm" ]]; then
-        title=$(_get_title_from_cmdline "$pid" "$app_name")
-    fi
-    
-    [[ -z "$title" ]] && title="$app_name"
-    [[ -z "$title" ]] && title="Audio Stream"
-    
-    artist=""
-    position=""
-    duration=""
-
-    local proc_state=""
-    if [[ -n "$pid" && -f "/proc/$pid/stat" ]]; then
-        proc_state=$(awk '{print $3}' "/proc/$pid/stat" 2>/dev/null || true)
-    fi
-
-    if [[ "$proc_state" == "T" ]]; then
-        status="Suspended"
-    elif [[ "$corked" == "yes" ]]; then
-        status="Paused"
-    elif [[ "$mute" == "yes" ]]; then
-        status="Muted"
-    else
-        status="Playing"
-    fi
-
-    printf '%s|%s|%s|%s|%s\n' "$title" "$artist" "$position" "$duration" "$status"
-}
-
-# =====================================================================
-# DISPLAY BUILDER
-# =====================================================================
-
-_clean_media_name() {
-    local raw="$1"
-    # URL-like garbage (contains &key=value patterns)
-    if [[ "$raw" == *"&"* && "$raw" == *"="* ]]; then
-        # Some URL media names end with " - appname", extract it
-        if [[ "$raw" == *" - "* ]]; then
-            local suffix="${raw##* - }"
-            # If the suffix is just an app name like "mpv", return empty
-            if [[ "$suffix" == "mpv" || "$suffix" == "vlc" || "$suffix" == "firefox" ]]; then
-                printf ''
-            else
-                printf '%s' "$suffix"
+        [[ $pid =~ ^[0-9]+$ ]] || pid=''
+        ids+=("$backend"); apps+=("$app"); media+=("$title")
+        corked+=(yes); muted+=(no); pids+=("$pid"); binaries+=("$binary")
+        backends+=("$backend"); audible+=(no); used_backends[$backend]=1
+    done
+    # Keep the controllable media session plus every additional audible stream.
+    # Failed measurements are inconclusive: retain uncorked streams rather than
+    # silently losing real playback when a monitor cannot be sampled.
+    for i in "${!ids[@]}"; do
+        if [[ ${backends[i]} == pactl ]]; then
+            if [[ ${audible[i]} == no || ${corked[i]} == yes || ${muted[i]} == yes ]]; then
+                unset 'ids[i]' 'apps[i]' 'media[i]' 'corked[i]' 'muted[i]' \
+                    'pids[i]' 'binaries[i]' 'backends[i]' 'audible[i]'
+                continue
             fi
         else
-            printf ''
+            _backend_metadata "${backends[i]}"
+            if [[ -z $title && -z $artist ]]; then
+                unset 'ids[i]' 'apps[i]' 'media[i]' 'corked[i]' 'muted[i]' \
+                    'pids[i]' 'binaries[i]' 'backends[i]' 'audible[i]'
+                continue
+            fi
+            media[i]=$title
         fi
-        return
-    fi
-    local cleaned="$raw"
-    # Strip common trailing suffixes
-    cleaned="${cleaned% - YouTube}"
-    cleaned="${cleaned% - Twitch}"
-    cleaned="${cleaned% - mpv}"
-    cleaned="${cleaned% - VLC media player}"
-    cleaned="${cleaned% - Firefox}"
-    printf '%s' "$cleaned"
-}
-
-_build_source_entry() {
-    local app_name="$1" media_name="$2" corked="$3" mute="$4" backend="$5" sink_id="$6" pid="$7"
-    local title="" artist="" position="" duration="" status=""
-
-    # Get supplementary data (artist, position, duration, status) from the backend
-    if [[ "$backend" == mpris:* ]]; then
-        local player="${backend#mpris:}"
-        local mpris_meta
-        mpris_meta=$(_get_mpris_metadata "$player" "$media_name" "$app_name")
-        IFS='|' read -r title artist position duration status <<< "$mpris_meta"
-    elif [[ "$backend" == cli:* ]]; then
-        local type="${backend#cli:}"
-        local cli_meta
-        cli_meta=$(_get_cli_metadata "$type" "$pid" "$media_name" "$app_name")
-        IFS='|' read -r title artist position duration status <<< "$cli_meta"
-    else
-        local pactl_meta
-        pactl_meta=$(_get_pactl_metadata "$sink_id" "$media_name" "$app_name" "$corked" "$mute" "$pid")
-        IFS='|' read -r title artist position duration status <<< "$pactl_meta"
-    fi
-
-    # CRITICAL: Always prefer pactl's media_name as the display title.
-    # MPRIS/CLI titles are global (e.g. Firefox MPRIS only reports the active tab,
-    # CLI controllers like ytm report whichever instance they consider "active").
-    # pactl's media.name is per-stream unique and always accurate.
-    local pactl_title
-    pactl_title=$(_clean_media_name "$media_name")
-    if [[ -n "$pactl_title" && "$pactl_title" != "Audio Stream" && "$pactl_title" != "webm" && "$pactl_title" != "$app_name" ]]; then
-        title="$pactl_title"
-    fi
-
-    local icon
-    icon=$(_status_icon "$status")
-
-    title=$(_truncate "$title" 45)
-
-    local track_info
-    if [[ -n "$artist" ]]; then
-        artist=$(_truncate "$artist" 25)
-        track_info="${artist} · ${title}"
-    else
-        track_info="${title}"
-    fi
-
-    local time_info=""
-    if [[ -n "$position" && -n "$duration" && "$duration" != "0:00" && "$duration" != "" ]]; then
-        time_info="[${position}/${duration}]"
-    elif [[ -n "$position" && "$position" != "0:00" && "$position" != "" ]]; then
-        time_info="[${position}]"
-    fi
-
-    local suffix=""
-
-    if [[ -n "$time_info" ]]; then
-        printf '%s  %s  %s  %s%s' "$icon" "$app_name" "$track_info" "$time_info" "$suffix"
-    else
-        printf '%s  %s  %s%s' "$icon" "$app_name" "$track_info" "$suffix"
+        _build_entry "$i"; entries[i]=$REPLY
+        app=${apps[i]}
+        app_counts[$app]=$(( ${app_counts[$app]:-0} + 1 ))
+    done
+    if ((${#ids[@]} == 0)); then
+        _notify 'No Audio Sources' 'No active audio streams or loaded media sessions were found.'
     fi
 }
-
-# =====================================================================
-# PLAYBACK CONTROL
-# =====================================================================
 
 _control_source() {
-    local action="$1" backend="$2" sink_input_id="$3" pid="$4"
-
-    case "$backend" in
+    local action=$1 backend=$2
+    case $backend in
         mpris:*)
-            local player="${backend#mpris:}"
-            case "$action" in
-                toggle) playerctl -p "$player" play-pause 2>/dev/null || true ;;
-                next)   playerctl -p "$player" next 2>/dev/null || true ;;
-                prev)   playerctl -p "$player" previous 2>/dev/null || true ;;
-            esac
+            case $action in toggle) action=play-pause ;; prev) action=previous ;; esac
+            playerctl --player="${backend#mpris:}" "$action"
             ;;
-        cli:*)
-            local type="${backend#cli:}"
-            local controller_path="$CONTROLLERS_DIR/$type"
-            if [[ -x "$controller_path" ]]; then
-                "$controller_path" "$action" 2>/dev/null || true
-            fi
-            ;;
-        pactl)
-            # No controls for pactl fallback since user requested removal of mute/suspend
-            ;;
+        cli:*) "$CONTROLLERS_DIR/${backend#cli:}" "$action" ;;
+        *) return 1 ;;
     esac
 }
 
-_get_source_status_line() {
-    local app_name="$1" backend="$2" sink_id="$3" pid="$4"
-
-    local title artist position duration status
-    if [[ "$backend" == mpris:* ]]; then
-        local player="${backend#mpris:}"
-        local meta
-        meta=$(_get_mpris_metadata "$player" "" "$app_name")
-        IFS='|' read -r title artist position duration status <<< "$meta"
-    elif [[ "$backend" == cli:* ]]; then
-        local type="${backend#cli:}"
-        local meta
-        meta=$(_get_cli_metadata "$type" "$pid" "" "$app_name")
-        IFS='|' read -r title artist position duration status <<< "$meta"
-    else
-        local raw_info
-        raw_info=$(_discover_all_sources | grep "^${sink_id}|" || true)
-        if [[ -n "$raw_info" ]]; then
-            local s_id a_name m_name corked mute p_id bin
-            IFS='|' read -r s_id a_name m_name corked mute p_id bin <<< "$raw_info"
-            local meta
-            meta=$(_get_pactl_metadata "$s_id" "$m_name" "$a_name" "$corked" "$mute" "$p_id")
-            IFS='|' read -r title artist position duration status <<< "$meta"
-        else
-            title="Audio Stream"
-            status="Unknown"
-        fi
+_perform_action() {
+    local action=$1 i=$2
+    if ! _control_source "$action" "${backends[i]}"; then
+        _notify 'Playback Control Failed' "${apps[i]}: $action failed or is unsupported."
+        return 1
     fi
-
-    local icon
-    icon=$(_status_icon "$status")
-    if [[ "$backend" == mpris:* || "$backend" == cli:* ]]; then
-        if [[ -n "$artist" ]]; then
-            printf '%s %s: %s · %s (%s)' "$icon" "$app_name" "$artist" "$title" "$status"
-        else
-            printf '%s %s: %s (%s)' "$icon" "$app_name" "$title" "$status"
-        fi
-    else
-        printf '%s %s (pactl): %s (%s)' "$icon" "$app_name" "$title" "$status"
-    fi
+    # Let asynchronous players publish their new status before notifying.
+    case $action in toggle) sleep 0.2 ;; *) sleep 0.4 ;; esac
+    unset 'metadata_cache[${backends[i]}]'
+    _read_metadata "$i" backend
+    _status_icon "$status"
+    _notify "${apps[i]}" "$REPLY $title${artist:+ · $artist} ($status)"
 }
 
-# =====================================================================
-# ROFI FLOWS
-# =====================================================================
-
 show_control_menu() {
-    local app_name="$1" backend="$2" sink_input_id="$3" pid="$4"
-
+    local i=$1 label rc ROFI_MESSAGE=''
+    if [[ ${backends[i]} == pactl ]]; then
+        ROFI_MESSAGE='Playback controls are unavailable for this stream.'
+    fi
     while :; do
-        local -a controls=()
-        if [[ "$backend" == "pactl" ]]; then
-            controls=("${ICON_BACK}  Back to Sources")
-        else
-            local current_status="unknown"
-            if [[ "$backend" == mpris:* ]]; then
-                local player="${backend#mpris:}"
-                current_status=$(playerctl -p "$player" status 2>/dev/null || echo "unknown")
-            elif [[ "$backend" == cli:* ]]; then
-                local type="${backend#cli:}"
-                local meta
-                meta=$(_get_cli_metadata "$type" "$pid" "" "")
-                IFS='|' read -r _ _ _ _ current_status <<< "$meta"
-            fi
-            current_status="${current_status,,}"
-
-            local toggle_label
-            case "$current_status" in
-                playing) toggle_label="${ICON_TOGGLE}  Pause" ;;
-                paused)  toggle_label="${ICON_TOGGLE}  Play"  ;;
-                *)       toggle_label="${ICON_TOGGLE}  Play/Pause" ;;
-            esac
-
-            controls=(
-                "$toggle_label"
-                "${ICON_NEXT}  Next Track"
-                "${ICON_PREV}  Previous Track"
-                "${ICON_BACK}  Back to Sources"
-            )
+        local -a controls=("$ICON_BACK  Back to Sources")
+        if [[ ${backends[i]} != pactl ]]; then
+            unset 'metadata_cache[${backends[i]}]'
+            _read_metadata "$i"
+            case ${status,,} in playing) label=Pause ;; paused) label=Play ;; *) label=Play/Pause ;; esac
+            controls=("$ICON_TOGGLE  $label" "$ICON_NEXT  Next Track"
+                "$ICON_PREV  Previous Track" "$ICON_BACK  Back to Sources")
         fi
-
-        local choice
-        set +e
-        choice=$(_rofi_menu "$app_name" "${controls[@]}")
-        local rofi_status=$?
-        set -e
-
-        ((rofi_status != 0)) && return 0
-
-        case "$choice" in
-            *"Pause"*|*"Play/Pause"*|*"Play"*)
-                _control_source toggle "$backend" "$sink_input_id" "$pid"
-                sleep 0.2
-                local info
-                info=$(_get_source_status_line "$app_name" "$backend" "$sink_input_id" "$pid")
-                _notify "$app_name" "$info"
-                ;;
-            *"Next"*)
-                _control_source next "$backend" "$sink_input_id" "$pid"
-                sleep 0.4
-                local info
-                info=$(_get_source_status_line "$app_name" "$backend" "$sink_input_id" "$pid")
-                _notify "Next Track" "$info"
-                ;;
-            *"Previous"*)
-                _control_source prev "$backend" "$sink_input_id" "$pid"
-                sleep 0.4
-                local info
-                info=$(_get_source_status_line "$app_name" "$backend" "$sink_input_id" "$pid")
-                _notify "Previous Track" "$info"
-                ;;
-            *"Back"*)
-                return 0
-                ;;
-            *)
-                return 0
-                ;;
+        rc=0
+        _rofi_menu "${apps[i]}" "${controls[@]}" || rc=$?
+        ((rc == 0)) || return "$((rc == 1 ? 0 : rc))"
+        [[ ${backends[i]} != pactl ]] || return 0
+        case $REPLY in
+            0) _perform_action toggle "$i" || true ;;
+            1) _perform_action next "$i" || true ;;
+            2) _perform_action prev "$i" || true ;;
+            *) return 0 ;;
         esac
     done
 }
 
 show_source_menu() {
-    local open_group=""
-
+    local group='' app i rc selected
     while :; do
-        _update_mpris_maps
-
-        local raw_data
-        raw_data=$(_discover_all_sources)
-
-        if [[ -z "$raw_data" ]]; then
-            _notify "No Audio Sources" "No applications are currently producing audio."
-            exit 0
-        fi
-
-        local -a all_sink_ids=() all_app_names=() all_backends=() all_display_entries=() all_pids=()
-        local -a unique_apps=()
-        declare -A app_counts=()
-
-        while IFS='|' read -r sink_id app_name media_name corked mute pid binary; do
-            [[ -z "$sink_id" ]] && continue
-            if [[ -z "$binary" && -n "$pid" ]]; then
-                if [[ -f "/proc/$pid/comm" ]]; then
-                    binary=$(cat "/proc/$pid/comm" 2>/dev/null || true)
+        _load_sources || return 1
+        ((${#ids[@]})) || return 0
+        local -a rows=() source_map=() group_map=()
+        local -A seen=()
+        if [[ -n $group && ! ${app_counts[$group]+present} ]]; then group=''; fi
+        for i in "${!ids[@]}"; do
+            app=${apps[i]}
+            if [[ -n $group ]]; then
+                [[ $app == "$group" ]] || continue
+                rows+=("${entries[i]}"); source_map+=("$i"); group_map+=('')
+            elif [[ ! ${seen[$app]+present} ]]; then
+                seen[$app]=1
+                if ((${app_counts[$app]} > 1)); then
+                    rows+=("$ICON_GROUP  $app  (${app_counts[$app]} sources)")
+                    source_map+=(-1); group_map+=("$app")
+                else
+                    rows+=("${entries[i]}"); source_map+=("$i"); group_map+=('')
                 fi
-            fi
-
-            [[ -z "$app_name" ]] && app_name="${binary:-Unknown}"
-
-            local backend=""
-            _detect_control_backend "$app_name" "$binary" "$pid" "backend"
-
-            local entry
-            entry=$(_build_source_entry "$app_name" "$media_name" "$corked" "$mute" "$backend" "$sink_id" "$pid")
-
-            all_sink_ids+=("$sink_id")
-            all_app_names+=("$app_name")
-            all_backends+=("$backend")
-            all_display_entries+=("$entry")
-            all_pids+=("$pid")
-
-            local current_count=${app_counts["$app_name"]:-0}
-            if (( current_count == 0 )); then
-                unique_apps+=("$app_name")
-            fi
-            app_counts["$app_name"]=$(( current_count + 1 ))
-        done <<< "$raw_data"
-
-        if ((${#all_display_entries[@]} == 0)); then
-            _notify "No Audio Sources" "No applications are currently producing audio."
-            exit 0
-        fi
-
-        if [[ -n "$open_group" ]]; then
-            # Verify the group still exists
-            if [[ -z "${app_counts[$open_group]:-}" ]]; then
-                open_group="" # Group closed
-                continue
-            fi
-
-            # Submenu
-            local u_app="$open_group"
-            local -a sub_entries=()
-            local -a sub_all_idx=()
-            for i in "${!all_app_names[@]}"; do
-                if [[ "${all_app_names[i]}" == "$u_app" ]]; then
-                    sub_entries+=("${all_display_entries[i]}")
-                    sub_all_idx+=("$i")
-                fi
-            done
-            sub_entries+=("${ICON_BACK}  Back to Sources")
-            
-            local sub_choice
-            set +e
-            sub_choice=$(_rofi_menu "$u_app Sources" "${sub_entries[@]}")
-            local sub_status=$?
-            set -e
-            
-            if ((sub_status != 0)); then
-                open_group=""
-                continue
-            fi
-
-            if [[ "$sub_choice" == *Back* ]]; then
-                open_group=""
-                continue
-            fi
-
-            local chosen_sub_idx=""
-            for i in "${!sub_entries[@]}"; do
-                if [[ "${sub_entries[i]}" == "$sub_choice" ]]; then
-                    chosen_sub_idx="$i"
-                    break
-                fi
-            done
-            
-            if [[ -n "$chosen_sub_idx" ]]; then
-                local actual_idx="${sub_all_idx[$chosen_sub_idx]}"
-                show_control_menu "${all_app_names[$actual_idx]}" "${all_backends[$actual_idx]}" "${all_sink_ids[$actual_idx]}" "${all_pids[$actual_idx]}"
-            else
-                open_group=""
-            fi
-            continue
-        fi
-
-        # Build main menu entries
-        local -a main_menu_entries=()
-        local -a main_menu_app_map=()
-        local -a main_menu_source_idx=()
-
-        for u_app in "${unique_apps[@]}"; do
-            local count=${app_counts["$u_app"]}
-            if (( count > 1 )); then
-                main_menu_entries+=("${ICON_GROUP}  $u_app  ($count sources)")
-                main_menu_app_map+=("$u_app")
-                main_menu_source_idx+=("-1")
-            else
-                local idx=-1
-                for i in "${!all_app_names[@]}"; do
-                    if [[ "${all_app_names[i]}" == "$u_app" ]]; then
-                        idx=$i
-                        break
-                    fi
-                done
-                main_menu_entries+=("${all_display_entries[idx]}")
-                main_menu_app_map+=("$u_app")
-                main_menu_source_idx+=("$idx")
             fi
         done
-
-        local choice
-        set +e
-        choice=$(_rofi_menu "Audio Sources" "${main_menu_entries[@]}")
-        local rofi_status=$?
-        set -e
-
-        ((rofi_status != 0)) && exit 0
-
-        local selected_idx=""
-        for i in "${!main_menu_entries[@]}"; do
-            if [[ "${main_menu_entries[i]}" == "$choice" ]]; then
-                selected_idx="$i"
-                break
-            fi
-        done
-
-        [[ -z "$selected_idx" ]] && exit 0
-
-        local s_idx="${main_menu_source_idx[$selected_idx]}"
-        if [[ "$s_idx" == "-1" ]]; then
-            open_group="${main_menu_app_map[$selected_idx]}"
-        else
-            show_control_menu "${all_app_names[$s_idx]}" "${all_backends[$s_idx]}" "${all_sink_ids[$s_idx]}" "${all_pids[$s_idx]}"
+        if [[ -n $group ]]; then
+            rows+=("$ICON_BACK  Back to Sources"); source_map+=(-2); group_map+=('')
         fi
+        rc=0
+        _rofi_menu "${group:-Audio} Sources" "${rows[@]}" || rc=$?
+        if ((rc == 1)); then
+            [[ -n $group ]] || return 0
+            group=''; continue
+        elif ((rc != 0)); then return "$rc"
+        fi
+        selected=${source_map[REPLY]}
+        case $selected in
+            -1) group=${group_map[REPLY]} ;;
+            -2) group='' ;;
+            *) show_control_menu "$selected" || return $? ;;
+        esac
     done
 }
 
-# =====================================================================
-# CLI MODE (Direct Keybind Actions)
-# =====================================================================
-
-_resolve_active_source() {
-    _update_mpris_maps
-
-    local raw_data
-    raw_data=$(_discover_all_sources)
-    if [[ -z "$raw_data" ]]; then
-        _notify "No Audio Sources" "No applications are currently producing audio."
-        exit 0
-    fi
-
-    local best_backend="" best_sink_id="" best_app_name="" best_pid=""
-    local fallback_backend="" fallback_sink_id="" fallback_app_name="" fallback_pid=""
-
-    while IFS='|' read -r sink_id app_name media_name corked mute pid binary; do
-        [[ -z "$sink_id" ]] && continue
-        if [[ -z "$binary" && -n "$pid" ]]; then
-            if [[ -f "/proc/$pid/comm" ]]; then
-                binary=$(cat "/proc/$pid/comm" 2>/dev/null || true)
-            fi
+cli_action() {
+    local action=$1 i fallback=''
+    _load_sources || return 1
+    ((${#ids[@]})) || return 0
+    for i in "${!ids[@]}"; do
+        [[ ${backends[i]} != pactl ]] || continue
+        [[ -n $fallback ]] || fallback=$i
+        _read_metadata "$i"
+        if [[ ${status,,} == playing ]]; then
+            _perform_action "$action" "$i"
+            return $?
         fi
-        [[ -z "$app_name" ]] && app_name="${binary:-Unknown}"
-
-        local backend=""
-        _detect_control_backend "$app_name" "$binary" "$pid" "backend"
-
-        if [[ -z "$fallback_backend" ]]; then
-            fallback_backend="$backend"
-            fallback_sink_id="$sink_id"
-            fallback_app_name="$app_name"
-            fallback_pid="$pid"
-        fi
-
-        local is_playing=0
-        if [[ "$backend" == mpris:* ]]; then
-            local player="${backend#mpris:}"
-            local status
-            status=$(playerctl -p "$player" status 2>/dev/null || echo "Unknown")
-            if [[ "${status,,}" == "playing" ]]; then
-                is_playing=1
-            fi
-        elif [[ "$backend" == cli:* ]]; then
-            local type="${backend#cli:}"
-            local meta
-            meta=$(_get_cli_metadata "$type" "$pid" "" "")
-            local status
-            IFS='|' read -r _ _ _ _ status <<< "$meta"
-            if [[ "${status,,}" == "playing" ]]; then
-                is_playing=1
-            fi
-        else
-            if [[ "$corked" == "no" && "$mute" == "no" ]]; then
-                is_playing=1
-            fi
-        fi
-
-        if ((is_playing)); then
-            best_backend="$backend"
-            best_sink_id="$sink_id"
-            best_app_name="$app_name"
-            best_pid="$pid"
-            break
-        fi
-    done <<< "$raw_data"
-
-    if [[ -n "$best_backend" ]]; then
-        printf '%s|%s|%s|%s' "$best_backend" "$best_sink_id" "$best_app_name" "$best_pid"
+    done
+    if [[ -n $fallback ]]; then _perform_action "$action" "$fallback"
     else
-        printf '%s|%s|%s|%s' "$fallback_backend" "$fallback_sink_id" "$fallback_app_name" "$fallback_pid"
+        _notify 'No Playback Controls' 'The current audio streams have no playback interface.'
+        return 1
     fi
 }
-
-cli_toggle() {
-    local backend sink_id app_name pid
-    IFS='|' read -r backend sink_id app_name pid <<< "$(_resolve_active_source)"
-    _control_source toggle "$backend" "$sink_id" "$pid"
-    sleep 0.2
-    local info
-    info=$(_get_source_status_line "$app_name" "$backend" "$sink_id" "$pid")
-    _notify "Toggle" "$info"
-}
-
-cli_next() {
-    local backend sink_id app_name pid
-    IFS='|' read -r backend sink_id app_name pid <<< "$(_resolve_active_source)"
-    _control_source next "$backend" "$sink_id" "$pid"
-    sleep 0.4
-    local info
-    info=$(_get_source_status_line "$app_name" "$backend" "$sink_id" "$pid")
-    _notify "Next" "$info"
-}
-
-cli_prev() {
-    local backend sink_id app_name pid
-    IFS='|' read -r backend sink_id app_name pid <<< "$(_resolve_active_source)"
-    _control_source prev "$backend" "$sink_id" "$pid"
-    sleep 0.4
-    local info
-    info=$(_get_source_status_line "$app_name" "$backend" "$sink_id" "$pid")
-    _notify "Previous" "$info"
-}
-
 
 cli_status() {
-    _update_mpris_maps
-    local raw_data
-    raw_data=$(_discover_all_sources)
-
-    if [[ -z "$raw_data" ]]; then
-        _notify "No Audio Sources" "No applications are currently producing audio."
-        exit 0
-    fi
-
-    local body=""
-    while IFS='|' read -r sink_id app_name media_name corked mute pid binary; do
-        [[ -z "$sink_id" ]] && continue
-        if [[ -z "$binary" && -n "$pid" ]]; then
-            if [[ -f "/proc/$pid/comm" ]]; then
-                binary=$(cat "/proc/$pid/comm" 2>/dev/null || true)
-            fi
-        fi
-        [[ -z "$app_name" ]] && app_name="${binary:-Unknown}"
-        local backend=""
-        _detect_control_backend "$app_name" "$binary" "$pid" "backend"
-        local line
-        line=$(_get_source_status_line "$app_name" "$backend" "$sink_id" "$pid")
-        body+="${line}\n"
-    done <<< "$raw_data"
-
-    _notify "Active Audio Sources" "$(printf '%b' "$body")"
+    _load_sources || return 1
+    ((${#ids[@]})) || return 0
+    local i body=''
+    for i in "${!ids[@]}"; do body+="${entries[i]}"$'\n'; done
+    _notify 'Media Sources' "${body%$'\n'}"
 }
 
-# --- Usage ---
 usage() {
-    cat <<EOF
-Usage: $(basename "$0") [OPTION]
+    cat <<EOF_HELP
+Usage: ${0##*/} [OPTION]
 
-Audio source controller with rofi integration.
-Discovers ALL audio sources via PipeWire/PulseAudio sink inputs.
-Dynamically pairs streams to MPRIS control interfaces or fallback plugins/pactl backends.
+With no arguments, open the Rofi audio source menu.
+Lists media sessions and additional streams with measured audio activity.
+Paused media stays resumable. Silent idle connections are hidden.
+Playback controls require a matching MPRIS/CLI interface.
 
-Options:
-  (no args)     Open the interactive rofi source menu
-  --toggle      Play/Pause the most recently active source
-  --next        Skip to the next track
-  --prev        Skip to the previous track
-  --status      Show all active sources via notification
-  -h, --help    Show this help message
-EOF
+  --toggle      Play/Pause the first playing controllable source, or first controllable source
+  --next        Skip to its next track
+  --prev        Skip to its previous track
+  --status      Show available media sessions via notification
+  -h, --help    Show this help
+EOF_HELP
 }
 
-# --- Main Entry Point ---
 main() {
-    _ensure_controllers
-    case "${1:-}" in
-        --toggle)  cli_toggle  ;;
-        --next)    cli_next    ;;
-        --prev)    cli_prev    ;;
-        --status)  cli_status  ;;
-        -h|--help) usage       ;;
-        "")        show_source_menu ;;
-        *)
-            printf 'Unknown option: %s\n' "$1" >&2
-            usage >&2
-            exit 1
-            ;;
+    if (($# > 1)); then usage >&2; return 1; fi
+    case ${1:-} in
+        -h|--help) usage; return 0 ;;
+        ''|--toggle|--next|--prev|--status) ;;
+        *) printf 'Unknown option: %s\n' "$1" >&2; usage >&2; return 1 ;;
+    esac
+    local cmd
+    for cmd in pactl jq notify-send python3 parec; do
+        command -v "$cmd" >/dev/null || { printf '%s: missing dependency: %s\n' "$APP_NAME" "$cmd" >&2; return 1; }
+    done
+    if [[ -z ${1:-} ]]; then
+        command -v rofi >/dev/null || { printf '%s: missing dependency: rofi\n' "$APP_NAME" >&2; return 1; }
+    fi
+    if command -v playerctl >/dev/null && command -v busctl >/dev/null; then HAS_MPRIS=1; fi
+    case ${1:-} in
+        --toggle) cli_action toggle ;;
+        --next) cli_action next ;;
+        --prev) cli_action prev ;;
+        --status) cli_status ;;
+        '') show_source_menu ;;
     esac
 }
 
-main "$@"
+if [[ ${BASH_SOURCE[0]} == "$0" ]]; then main "$@"; fi

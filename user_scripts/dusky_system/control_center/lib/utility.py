@@ -19,7 +19,6 @@ import threading
 import tomllib
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from functools import lru_cache
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, Final, TypeVar, overload
 
@@ -228,7 +227,7 @@ def execute_command(
         return False
 
     if run_in_terminal:
-        terminal = _get_configured_terminal()
+        terminal = full_cmd[0]
         if shutil.which(terminal) is None:
             log.error("Terminal launcher '%s' was not found in PATH", terminal)
             return False
@@ -256,13 +255,33 @@ def execute_command(
         return False
 
 
+def execute_argv(argv: list[str]) -> bool:
+    """Launch a configured argument vector without interpreting its data as shell code."""
+    if not argv or not all(isinstance(arg, str) for arg in argv):
+        return False
+    expanded = [
+        str(Path.home() / arg[2:]) if arg.startswith("~/") else
+        str(Path.home() / arg[6:]) if arg.startswith("$HOME/") else arg
+        for arg in argv
+    ]
+    if shutil.which(expanded[0]) is None and not Path(expanded[0]).is_file():
+        log.error("Executable not found: %s", expanded[0])
+        return False
+    command = ["dusky-run", *expanded] if shutil.which("dusky-run") and expanded[0] != "dusky-run" else expanded
+    try:
+        GLib.spawn_async(command, flags=GLib.SpawnFlags.SEARCH_PATH)
+        return True
+    except GLib.Error as error:
+        log.error("Could not launch %s: %s", expanded[0], error.message)
+        return False
+
+
 def _normalize_command(cmd_string: str) -> str:
     cmd = cmd_string.strip()
-    home_dir = str(Path.home())
-    cmd = cmd.replace("$HOME", home_dir)
-    if cmd.startswith("~/"):
-        cmd = home_dir + cmd[1:]
-    cmd = cmd.replace(" ~/", f" {home_dir}/")
+    # Expand a leading executable path without requiring an extra shell.
+    for prefix in ("$HOME/", "~/"):
+        if cmd.startswith(prefix):
+            return shlex.quote(str(Path.home())) + "/" + cmd[len(prefix):]
     return cmd
 
 
@@ -292,13 +311,17 @@ def _requires_shell(command: str, parsed_args: list[str]) -> bool:
             continue
         if in_double:
             if ch == "\\":
-                escaped = True
+                # shlex does not implement the shell's double-quoted escape
+                # rules for dollar signs and backticks.
+                return True
             elif ch == '"':
                 in_double = False
             elif ch in "$`":
                 return True
             continue
         if ch.isspace():
+            if ch == "\n":
+                return True
             token_start = True
             continue
         if ch == "\\":
@@ -328,46 +351,52 @@ def _build_terminal_wrapped(
     terminal: str,
     safe_title: str,
     inner_args: list[str],
-) -> list[str]:
+) -> list[str] | None:
     """Wrap an inner command in the user's configured terminal emulator.
 
     Flag syntax differs per emulator; the known set mirrors the text-editor
     launcher. Unknown terminals fall back to the POSIX ``-e`` convention.
     """
-    term = terminal.lower()
+    try:
+        terminal_args = shlex.split(terminal)
+    except ValueError:
+        return None
+    if not terminal_args:
+        return None
+    term = Path(terminal_args[0]).name.lower()
 
-    if term == "foot":
+    if term in {"foot", "footclient"}:
         return [
-            terminal, "--app-id", "dusky-term", "--title", safe_title,
+            *terminal_args, "--app-id", "dusky-term", "--title", safe_title,
             "--hold", *inner_args
         ]
 
     if term == "kitty":
         return [
-            terminal, "--class", "dusky-term", "--title", safe_title,
+            *terminal_args, "--class", "dusky-term", "--title", safe_title,
             "--hold", *inner_args
         ]
 
     if term == "alacritty":
         return [
-            terminal, "--class", "dusky-term", "--title", safe_title,
+            *terminal_args, "--class", "dusky-term", "--title", safe_title,
             "--hold", "-e", *inner_args
         ]
 
     if term == "wezterm":
         return [
-            terminal, "start", "--class", "dusky-term", "--title", safe_title,
+            *terminal_args, "start", "--class", "dusky-term",
             "--", *inner_args
         ]
 
     # Generic fallback: $TERM -e <cmd...>
-    return [terminal, "-e", *inner_args]
+    return [*terminal_args, "-e", *inner_args]
 
 
 def _build_command_list(
     normalized_cmd: str, safe_title: str, run_in_terminal: bool, requires_root: bool
 ) -> list[str] | None:
-    terminal = _get_configured_terminal()
+    terminal = _get_configured_terminal() if run_in_terminal else ""
 
     if requires_root:
         if run_in_terminal:
@@ -533,11 +562,14 @@ def _validate_settings_path(key: str) -> Path | None:
     target = base / key
 
     try:
-        if target.exists():
-            return target.resolve(strict=True)
-        return target.parent.resolve(strict=True) / target.name
-    except OSError:
-        return target
+        resolved = target.resolve(strict=False)
+    except (OSError, RuntimeError) as error:
+        log.warning("Invalid settings path %r: %s", key, error)
+        return None
+    if resolved == base or not resolved.is_relative_to(base):
+        log.warning("Settings path escapes settings directory: %r", key)
+        return None
+    return resolved
 
 
 def _write_to_disk_atomic(target: Path, value: str) -> bool:
@@ -579,13 +611,14 @@ def _write_to_disk_atomic(target: Path, value: str) -> bool:
 
 class _SettingsWriteBuffer:
     """Thread-safe write buffer that flushes sequentially to preserve SSD life."""
-    __slots__ = ("_buffer", "_lock", "_source_id", "_executor")
+    __slots__ = ("_buffer", "_pending", "_lock", "_source_id", "_executor")
     _instance: _SettingsWriteBuffer | None = None
 
     def __new__(cls) -> _SettingsWriteBuffer:
         if cls._instance is None:
             inst = super().__new__(cls)
             inst._buffer = {}
+            inst._pending = {}
             inst._lock = threading.Lock()
             inst._source_id = 0
             inst._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="dusky-io-batch")
@@ -599,7 +632,9 @@ class _SettingsWriteBuffer:
             return False
 
         with self._lock:
-            self._buffer[target] = value
+            pending = (value,)
+            self._buffer[target] = pending
+            self._pending[target] = pending
             if self._source_id == 0:
                 self._source_id = GLib.timeout_add(250, self._flush_buffer_cb)
         return True
@@ -614,9 +649,13 @@ class _SettingsWriteBuffer:
             self._executor.submit(self._execute_batch, batch)
         return GLib.SOURCE_REMOVE
 
-    def _execute_batch(self, batch: dict[Path, str]) -> None:
-        for target, value in batch.items():
-            if not _write_to_disk_atomic(target, value):
+    def _execute_batch(self, batch: dict[Path, tuple[str]]) -> None:
+        for target, pending in batch.items():
+            saved = _write_to_disk_atomic(target, pending[0])
+            with self._lock:
+                if self._pending.get(target) is pending:
+                    self._pending.pop(target, None)
+            if not saved:
                 # Safely notify UI on the main thread if background save fails
                 GLib.idle_add(
                     toast,
@@ -629,12 +668,20 @@ class _SettingsWriteBuffer:
         with self._lock:
             batch = self._buffer.copy()
             self._buffer.clear()
+            source_id = self._source_id
+            self._source_id = 0
 
-        if batch:
-            for target, value in batch.items():
-                _write_to_disk_atomic(target, value)
-        
+        if source_id:
+            GLib.source_remove(source_id)
+        # Finish older batches before writing the newest values.
         self._executor.shutdown(wait=True)
+        if batch:
+            self._execute_batch(batch)
+
+
+def flush_settings() -> None:
+    if (buffer := _SettingsWriteBuffer._instance) is not None:
+        buffer._flush_synchronously()
 
 
 def save_setting(key: str, value: bool | int | float | str) -> bool:
@@ -642,23 +689,24 @@ def save_setting(key: str, value: bool | int | float | str) -> bool:
 
 
 @overload
-def load_setting(key: str, default: bool) -> bool: ...
+def load_setting(key: str, default: bool, *, preserve_whitespace: bool = False) -> bool: ...
 
 @overload
-def load_setting(key: str, default: int) -> int: ...
+def load_setting(key: str, default: int, *, preserve_whitespace: bool = False) -> int: ...
 
 @overload
-def load_setting(key: str, default: float) -> float: ...
+def load_setting(key: str, default: float, *, preserve_whitespace: bool = False) -> float: ...
 
 @overload
-def load_setting(key: str, default: str) -> str: ...
+def load_setting(key: str, default: str, *, preserve_whitespace: bool = False) -> str: ...
 
 @overload
-def load_setting(key: str, default: None = None) -> str | None: ...
+def load_setting(key: str, default: None = None, *, preserve_whitespace: bool = False) -> str | None: ...
 
 def load_setting(
     key: str,
     default: bool | int | float | str | None = None,
+    *, preserve_whitespace: bool = False,
 ) -> bool | int | float | str | None:
     target = _validate_settings_path(key)
     if target is None:
@@ -667,16 +715,16 @@ def load_setting(
     # Always check the dirty buffer first to prevent stale reads mid-flush
     buffer_inst = _SettingsWriteBuffer()
     with buffer_inst._lock:
-        if target in buffer_inst._buffer:
-            raw = buffer_inst._buffer[target]
-            return _coerce_type(raw, default)
+        if target in buffer_inst._pending:
+            raw = buffer_inst._pending[target][0]
+            return _coerce_type(raw if preserve_whitespace else raw.strip(), default)
 
     try:
-        raw = target.read_text(encoding="utf-8").strip()
-    except (FileNotFoundError, OSError):
+        raw = target.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
         return default
 
-    return _coerce_type(raw, default)
+    return _coerce_type(raw if preserve_whitespace else raw.strip(), default)
 
 
 def _coerce_type(raw: str, default: Any) -> Any:

@@ -1,19 +1,17 @@
 #!/usr/bin/env bash
-#d: Tune swappiness and VM policy for ZRAM
+# Tuner for ZRAM Swappiness, Virtual Memory Paging, and MGLRU Heuristics
+# Target: Arch Linux (Linux Kernel 7.3+, systemd 262+)
+# Scope: Focused strictly on VM memory balance and ZRAM paging efficiency.
 
 set -euo pipefail
 
 readonly CONFIG_FILE="/etc/sysctl.d/99-vm-zram-parameters.conf"
 readonly MGLRU_CONFIG="/etc/tmpfiles.d/99-mglru-optimize.conf"
 readonly SCRIPT_NAME="${0##*/}"
-
-# --- Save original args before shift destroys them (fix #1) ---
 ORIG_ARGS=("$@")
+SELF_PATH="$(realpath -e -- "${BASH_SOURCE[0]}")"
+readonly SELF_PATH
 
-# --- Strict Path Resolution ---
-readonly SELF_PATH="$(realpath -e -- "${BASH_SOURCE[0]}")"
-
-# --- Formatting ---
 if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
     C_RESET=$'\033[0m'
     C_GREEN=$'\033[1;32m'
@@ -36,371 +34,260 @@ print_help() {
 ${C_BOLD}Usage:${C_RESET} ${SCRIPT_NAME} [OPTIONS]
 
   --auto, -a           Auto-detect RAM size and set dynamic profile (default)
-  --aggressive, -A     Force 32GB+ "Absolute Max" RAM usage profile
-  --standard, -S       Force <32GB "Dynamic Efficiency" RAM savings profile
-  --dry-run, -n        Print the generated config and exit without applying
+  --performance, -p    Force >=32GB class "Performance Lean" profile
+  --savings, -s        Force <32GB class "Strict Dynamic Efficiency" profile
+  --dry-run, -n        Print the generated configuration and exit
   --help, -h           Show this help menu
 EOF
 }
 
 usage_error() { log_error "$1"; print_help >&2; exit 2; }
 
-# --- 1. CLI Parsing ---
 MODE="AUTO"
 declare -i DRY_RUN=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --auto|-a)           MODE="AUTO"; shift ;;
-        --aggressive|-A)     MODE="AGGRESSIVE"; shift ;;
-        --standard|-S)       MODE="STANDARD"; shift ;;
-        --dry-run|-n)        DRY_RUN=1; shift ;;
-        --help|-h)           print_help; exit 0 ;;
-        *)                   usage_error "Unknown argument: $1" ;;
+        --auto|-a)                                       MODE="AUTO"; shift ;;
+        --performance|-p|-A|--aggressive)               MODE="PERFORMANCE"; shift ;;
+        --savings|-s|-S|--standard|--efficiency)        MODE="SAVINGS"; shift ;;
+        --dry-run|-n)                                    DRY_RUN=1; shift ;;
+        --help|-h)                                       print_help; exit 0 ;;
+        *)                                               usage_error "Unknown argument: $1" ;;
     esac
 done
 
-# --- 2. Privilege Escalation (fixed: use ORIG_ARGS) ---
 if [[ $EUID -ne 0 && $DRY_RUN -eq 0 ]]; then
     command -v sudo >/dev/null 2>&1 || die "'sudo' is not available."
     log_info "Root privileges required. Escalating..."
     exec sudo -- /usr/bin/bash "$SELF_PATH" "${ORIG_ARGS[@]}"
 fi
 
-# --- 3. System State Detection ---
 declare -i SYSTEM_RAM_KB=0
 declare -i SYSTEM_RAM_GB=0
 declare -i ACTIVE_ZRAM_COUNT=0
-declare -i ACTIVE_OTHER_COUNT=0
+declare -i ACTIVE_DISK_COUNT=0
 ZRAM_MAX_PRIO=""
-OTHER_MAX_PRIO=""
+DISK_MAX_PRIO=""
 
 if [[ $(< /proc/meminfo) =~ MemTotal:[[:space:]]+([0-9]+) ]]; then
     SYSTEM_RAM_KB=$(( BASH_REMATCH[1] ))
-    SYSTEM_RAM_GB=$(( SYSTEM_RAM_KB / 1048576 ))
+    SYSTEM_RAM_GB=$(( (SYSTEM_RAM_KB + 524288) / 1048576 ))
 else
     die "FATAL: Could not parse /proc/meminfo natively."
 fi
 
-while read -r path _ _ _ prio; do
-    [[ "$path" == "Filename" ]] && continue
-    if [[ "$path" == /dev/zram* ]]; then
-        ACTIVE_ZRAM_COUNT+=1
-        if [[ -z "$ZRAM_MAX_PRIO" || "$prio" -gt "$ZRAM_MAX_PRIO" ]]; then ZRAM_MAX_PRIO="$prio"; fi
-    elif [[ -n "$path" ]]; then
-        ACTIVE_OTHER_COUNT+=1
-        if [[ -z "$OTHER_MAX_PRIO" || "$prio" -gt "$OTHER_MAX_PRIO" ]]; then OTHER_MAX_PRIO="$prio"; fi
-    fi
-done < /proc/swaps
-
-SWAP_LAYOUT="NONE"
-if (( ACTIVE_ZRAM_COUNT > 0 && ACTIVE_OTHER_COUNT > 0 )); then
-    SWAP_LAYOUT="HYBRID"
-elif (( ACTIVE_ZRAM_COUNT > 0 )); then
-    SWAP_LAYOUT="ZRAM_ONLY"
-elif (( ACTIVE_OTHER_COUNT > 0 )); then
-    SWAP_LAYOUT="DISK_ONLY"
+if [[ -f /proc/swaps ]]; then
+    while read -r path _ _ _ prio; do
+        [[ "$path" == "Filename" ]] && continue
+        if [[ "$path" == /dev/zram* ]]; then
+            ACTIVE_ZRAM_COUNT+=1
+            if [[ -z "$ZRAM_MAX_PRIO" || "$prio" -gt "$ZRAM_MAX_PRIO" ]]; then ZRAM_MAX_PRIO="$prio"; fi
+        elif [[ -n "$path" ]]; then
+            ACTIVE_DISK_COUNT+=1
+            if [[ -z "$DISK_MAX_PRIO" || "$prio" -gt "$DISK_MAX_PRIO" ]]; then DISK_MAX_PRIO="$prio"; fi
+        fi
+    done < /proc/swaps
 fi
 
-# --- 4. Tuning Profile Resolution ---
+if (( ACTIVE_ZRAM_COUNT == 0 )); then
+    die "FATAL: No active ZRAM device detected in /proc/swaps. This high-swappiness profile requires ZRAM swap."
+fi
+
+SWAP_LAYOUT="ZRAM_ONLY"
+if (( ACTIVE_DISK_COUNT > 0 )); then
+    SWAP_LAYOUT="HYBRID"
+fi
+
+if [[ "$SWAP_LAYOUT" == "HYBRID" && -n "$ZRAM_MAX_PRIO" && -n "$DISK_MAX_PRIO" ]]; then
+    if (( ZRAM_MAX_PRIO <= DISK_MAX_PRIO )); then
+        log_warn "PRIORITY INVERSION: Disk swap prio (${DISK_MAX_PRIO}) >= ZRAM prio (${ZRAM_MAX_PRIO})."
+        log_warn "With high swappiness, disk will be hit before ZRAM. Set ZRAM priority higher (e.g., 32767)."
+    fi
+fi
+
 declare -i EXPECTED_SWAPPINESS
 declare -i EXPECTED_VFS_PRESSURE
 declare -i EXPECTED_SCALE_FACTOR
+declare -i EXPECTED_COMPACTION
 declare -i EXPECTED_DIRTY_BYTES
 declare -i EXPECTED_DIRTY_BG_BYTES
-declare -i EXPECTED_DIRTY_WRITEBACK
-declare -i EXPECTED_DIRTY_EXPIRE
 declare -i EXPECTED_MGLRU_TTL
 
-# 30 GiB demarcation (note: GiB, not GB)
-declare -i THRESHOLD_KB=$((30 * 1048576))
-if [[ "$MODE" == "AGGRESSIVE" ]] || { [[ "$MODE" == "AUTO" ]] && (( SYSTEM_RAM_KB >= THRESHOLD_KB )); }; then
-    EXPECTED_MODE="PERFORMANCE_LEAN (32GB+)"
+# <=16 GiB-class systems (<=17 GiB usable) retain the lean profile.
+# Larger machines keep the existing balanced/performance paging settings.
+# THP interpolation is handled separately by 212; OOM response by 211.
+
+if [[ "$MODE" == "PERFORMANCE" ]] || { [[ "$MODE" == "AUTO" ]] && (( SYSTEM_RAM_KB >= 29360128 )); }; then
+    PROFILE_NAME="PERFORMANCE_LEAN (>=32GB class)"
     EXPECTED_SWAPPINESS=150
-    EXPECTED_VFS_PRESSURE=50           # 50 retains dentry/inode caches for maximum gaming asset loading & compilation
-    EXPECTED_SCALE_FACTOR=100          # 1.0% watermark boost
-    EXPECTED_DIRTY_BYTES=1073741824    # 1GiB
-    EXPECTED_DIRTY_BG_BYTES=268435456  # 256MiB
-    EXPECTED_DIRTY_WRITEBACK=500       # 5s  (must be < expire)
-    EXPECTED_DIRTY_EXPIRE=3000         # 30s (kernel default)
-    EXPECTED_MGLRU_TTL=1000
+    EXPECTED_VFS_PRESSURE=50
+    EXPECTED_SCALE_FACTOR=30             # 30 = ~98MB (32GB) / ~196MB (64GB) kswapd headroom
+    EXPECTED_COMPACTION=10               # 10 provides gentle background compaction for hugepages/iGPU
+    EXPECTED_DIRTY_BYTES=536870912       # 512MiB cap prevents massive multi-GB writeback stalls
+    EXPECTED_DIRTY_BG_BYTES=134217728    # 128MiB background flush
+    EXPECTED_MGLRU_TTL=0                 # 0ms prevents premature OOM under tight memory
+elif [[ "$MODE" == "AUTO" ]] && (( SYSTEM_RAM_KB > 17825792 )); then
+    PROFILE_NAME="BALANCED_EFFICIENCY (>16GB to <32GB class)"
+    EXPECTED_SWAPPINESS=180
+    EXPECTED_VFS_PRESSURE=125
+    EXPECTED_SCALE_FACTOR=10             # 10 maximizes MemAvailable across efficiency tiers
+    EXPECTED_COMPACTION=10               # 10 keeps order-4/order-9 blocks available
+    EXPECTED_DIRTY_BYTES=268435456       # 256MiB cap
+    EXPECTED_DIRTY_BG_BYTES=67108864     # 64MiB background flush
+    EXPECTED_MGLRU_TTL=0
+elif (( SYSTEM_RAM_KB >= 7340032 )); then
+    PROFILE_NAME="DYNAMIC_EFFICIENCY (8-16GB class or forced savings)"
+    EXPECTED_SWAPPINESS=180
+    EXPECTED_VFS_PRESSURE=125
+    EXPECTED_SCALE_FACTOR=10             # Kernel default headroom; avoid excessive early reclaim
+    EXPECTED_COMPACTION=0                # 0 disables proactive compaction to conserve battery
+    EXPECTED_DIRTY_BYTES=134217728       # 128MiB cap
+    EXPECTED_DIRTY_BG_BYTES=33554432     # 32MiB background flush
+    EXPECTED_MGLRU_TTL=0
 else
-    EXPECTED_MODE="STRICT_RAM_SAVINGS (<32GB)"
-    EXPECTED_SWAPPINESS=190            # 0-200 valid since 5.8, 200=max
-    EXPECTED_VFS_PRESSURE=130          # 130 reclaims slab moderately while preventing game asset/dentry thrashing
-    EXPECTED_SCALE_FACTOR=15           # 0.15% (15/10000)
-    EXPECTED_DIRTY_BYTES=134217728     # 128MiB
-    EXPECTED_DIRTY_BG_BYTES=33554432   # 32MiB
-    # FIX #2: writeback must be < expire. Original 1000/500 was inverted.
-    EXPECTED_DIRTY_WRITEBACK=100       # 1s  (was 1000, inverted)
-    EXPECTED_DIRTY_EXPIRE=500          # 5s  (now > writeback, per docs)
-    EXPECTED_MGLRU_TTL=100
+    PROFILE_NAME="DYNAMIC_EFFICIENCY (<8GB class)"
+    EXPECTED_SWAPPINESS=180
+    EXPECTED_VFS_PRESSURE=125
+    EXPECTED_SCALE_FACTOR=10             # 10 maximizes MemAvailable on low-RAM systems
+    EXPECTED_COMPACTION=0                # 0 disables proactive compaction to conserve battery
+    EXPECTED_DIRTY_BYTES=134217728       # 128MiB cap
+    EXPECTED_DIRTY_BG_BYTES=33554432     # 32MiB background flush
+    EXPECTED_MGLRU_TTL=0
 fi
 
-# Static Constants (verified still present in 7.1 docs)
-readonly EXPECTED_PAGE_CLUSTER=0        # disables swap readahead, good for ZRAM
-readonly EXPECTED_BOOST_FACTOR=0        # disables watermark boosting (default 15000, 0=off)
-readonly EXPECTED_COMPACTION=0          # 0-100 valid, 0 disables proactive compaction
-readonly EXPECTED_MAX_MAP_COUNT=1048576 # Arch default since 2024-04-07, was 65530. SteamOS uses 2147483642
+readonly EXPECTED_PAGE_CLUSTER=0        # Disables swap readahead
+readonly EXPECTED_BOOST_FACTOR=0        # Disables watermark boosting
+readonly EXPECTED_MAX_MAP_COUNT=2147483642 # SteamOS & modern Proton/Wine standard
+readonly EXPECTED_DIRTY_WRITEBACK_CENTISECS=500  # 5s flusher wakeups (smooth NVMe/SSD dirty writes, prevents freeze spikes)
+readonly EXPECTED_DIRTY_EXPIRE_CENTISECS=3000    # 30s dirty expiration bounds unwritten data age
+readonly EXPECTED_STAT_INTERVAL=1                # Kernel default vmstat fold interval; PSI has separate accounting
+readonly EXPECTED_VFS_DENOM=100               # Linux 7.3+ explicit VFS cache pressure denominator
+readonly EXPECTED_COMPACT_UNEVIC=1               # 1 allows full compaction across all pages (maximizes contiguous allocation success rate)
 
-# --- 5. Generation & Verification ---
-log_info "Initializing Platinum ZRAM & VM Policy Optimizer (fixed)..."
-log_info "Detected System RAM: ${C_BOLD}${SYSTEM_RAM_GB} GiB${C_RESET}"
-log_info "Detected Swap Layout: ${C_BOLD}${SWAP_LAYOUT}${C_RESET} (${ACTIVE_ZRAM_COUNT} ZRAM / ${ACTIVE_OTHER_COUNT} Disk)"
-
-if [[ "$SWAP_LAYOUT" == "DISK_ONLY" || "$SWAP_LAYOUT" == "NONE" ]]; then
-    die "Active ZRAM swap is required to utilize this tuning profile."
-fi
-
-# Priority Inversion Safety Guard
-if [[ "$SWAP_LAYOUT" == "HYBRID" && -n "$ZRAM_MAX_PRIO" && -n "$OTHER_MAX_PRIO" ]]; then
-    if (( ZRAM_MAX_PRIO <= OTHER_MAX_PRIO )); then
-        log_warn "PRIORITY INVERSION: Disk prio ${OTHER_MAX_PRIO} >= ZRAM prio ${ZRAM_MAX_PRIO}."
-        log_warn "With swappiness=${EXPECTED_SWAPPINESS}, disk will be hit before ZRAM."
-        log_warn "Fix /etc/systemd/zram-generator.conf priority (ZRAM should be highest, e.g. 100)."
-    else
-        log_info "Safety Check Passed: ZRAM (${ZRAM_MAX_PRIO}) overrides Disk (${OTHER_MAX_PRIO})."
-    fi
-fi
+log_info "Initializing VM Swappiness & Paging Optimizer..."
+log_info "Detected RAM: ${C_BOLD}${SYSTEM_RAM_GB} GB${C_RESET} (${SYSTEM_RAM_KB} KiB)"
+log_info "Detected Swap Topology: ${C_BOLD}${SWAP_LAYOUT}${C_RESET} (${ACTIVE_ZRAM_COUNT} ZRAM / ${ACTIVE_DISK_COUNT} Disk)"
 
 if [[ "$MODE" != "AUTO" ]]; then
-    log_warn "Manual Override Engaged: Mode forced to ${C_BOLD}${EXPECTED_MODE}${C_RESET}"
+    log_warn "Manual Profile Override: Forced to [${C_BOLD}${PROFILE_NAME}${C_RESET}]"
 fi
 
-# Secure temp files — single trap handling all (fix #11)
-tmpfile="$(umask 077 && mktemp)"
+tmpfile_sysctl="$(umask 077 && mktemp)"
 tmpfile_mglru="$(umask 077 && mktemp)"
-tmpfile_limits="$(umask 077 && mktemp)"
-tmpfile_sysd="$(umask 077 && mktemp)"
-trap 'rm -f "$tmpfile" "$tmpfile_mglru" "$tmpfile_limits" "$tmpfile_sysd"' EXIT
+trap 'rm -f "$tmpfile_sysctl" "$tmpfile_mglru"' EXIT
 
-# --- SYSCTL Payload (fixed for kernel 7.1 + systemd 261) ---
-cat > "$tmpfile" <<EOF
+cat > "$tmpfile_sysctl" <<EOF
 # Managed by ${SCRIPT_NAME}
-# Scope: Comprehensive ZRAM, Desktop Performance, & Network Matrix
-# Detected State: Layout=${SWAP_LAYOUT}, Mode=${EXPECTED_MODE}, RAM=${SYSTEM_RAM_GB}GiB
-# Kernel: 7.1.x (2026-06-14), systemd 261.1 (2026-06-26)
+# Profile: ${PROFILE_NAME} | Detected RAM: ${SYSTEM_RAM_GB}GB
+# Target: Arch Linux / Kernel 7.3+ / systemd 262+
 
-# --- SWAP CONFIGURATION ---
-# vm.swappiness: locked high for ZRAM-optimized systems to force immediate 
-# memory compression of inactive processes, freeing up physical memory.
+# --- ZRAM SWAP POLICY ---
 vm.swappiness = ${EXPECTED_SWAPPINESS}
-# vm.page-cluster: 0 disables swap readahead. While readahead helps slow HDDs,
-# it causes latency spikes on random access structures like compressed ZRAM.
 vm.page-cluster = ${EXPECTED_PAGE_CLUSTER}
 
-# --- DESKTOP SNAPPINESS (VFS & CACHE) ---
-# vm.vfs_cache_pressure: 100/200 reclaim inode/dentry caches to free memory.
+# --- VFS & CACHE RECLAMATION ---
 vm.vfs_cache_pressure = ${EXPECTED_VFS_PRESSURE}
-# vm.dirty_bytes: Maximum amount of memory (in bytes) that can be dirty before
-# background processes start blocking and writing directly to disk.
-# Caps memory footprint from large file transfers/downloads to prevent lag.
-vm.dirty_bytes = ${EXPECTED_DIRTY_BYTES}
-# vm.dirty_background_bytes: The threshold at which the kernel's background
-# flusher threads are woken up to begin writing out dirty memory blocks to disk.
-vm.dirty_background_bytes = ${EXPECTED_DIRTY_BG_BYTES}
-# vm.dirty_writeback_centisecs: Defines how often (in hundredths of a second) the
-# kernel flusher thread wakes up. 100 centiseconds = 1 second. Fast wakeups ensure
-# that expired pages are cleaned rapidly, preventing write spikes on SSDs/NVMe.
-vm.dirty_writeback_centisecs = ${EXPECTED_DIRTY_WRITEBACK}
-# vm.dirty_expire_centisecs: Defines the maximum age (in hundredths of a second)
-# of a dirty page before it is eligible to be written out. 500 = 5 seconds.
-vm.dirty_expire_centisecs = ${EXPECTED_DIRTY_EXPIRE}
+vm.vfs_cache_pressure_denom = ${EXPECTED_VFS_DENOM}
 
-# --- MEMORY ALLOCATION & COMPACTION ---
-# vm.watermark_scale_factor: Control scale factor of the watermark (high limit).
-# Higher values keep a larger safety buffer of free pages before direct reclaim.
+# --- WATERMARK HEADROOM & LATENCY ---
 vm.watermark_scale_factor = ${EXPECTED_SCALE_FACTOR}
-# vm.watermark_boost_factor: Disables watermark boosting (default 15000, 0=off).
-# Watermark boosting creates large, sudden free page requirements that can 
-# lead to direct reclaim stutters/UI lag during high memory usage spikes.
 vm.watermark_boost_factor = ${EXPECTED_BOOST_FACTOR}
-# vm.compaction_proactiveness: 0 disables proactive background memory compaction.
-# Prevents random, silent CPU spikes from running memory compaction in the background.
 vm.compaction_proactiveness = ${EXPECTED_COMPACTION}
+vm.compact_unevictable_allowed = ${EXPECTED_COMPACT_UNEVIC}
 
-# --- APPLICATION COMPATIBILITY ---
-# vm.max_map_count: Caps the maximum number of memory maps a process can make.
-# Arch Linux standard since April 2024 is 1048576 (was 65530). High maps are 
-# required for Steam/Proton/Wine gaming compatibility (SteamOS uses 2147483642).
+# --- WRITEBACK (NVMe & SSD PROTECTION) ---
+vm.dirty_bytes = ${EXPECTED_DIRTY_BYTES}
+vm.dirty_background_bytes = ${EXPECTED_DIRTY_BG_BYTES}
+vm.dirty_writeback_centisecs = ${EXPECTED_DIRTY_WRITEBACK_CENTISECS}
+vm.dirty_expire_centisecs = ${EXPECTED_DIRTY_EXPIRE_CENTISECS}
+
+# --- STATS & POWER OPTIMIZATION ---
+vm.stat_interval = ${EXPECTED_STAT_INTERVAL}
+
+# --- APPLICATION COMPATIBILITY & GAMING ---
 vm.max_map_count = ${EXPECTED_MAX_MAP_COUNT}
-
-# --- SYSTEM & HARDWARE EFFICIENCY ---
-# kernel.nmi_watchdog: 0 disables the hardware NMI watchdog, eliminating periodic
-# hardware interrupts and saving CPU power/battery on laptops and desktops (ignored in VMs without vPMU).
--kernel.nmi_watchdog = 0
-# kernel.printk: Suppresses low-priority kernel dmesg console spam while keeping warnings/errors.
-kernel.printk = 3 3 3 3
-
-# --- MODERN NETWORK STACK (BBR + CAKE) ---
-# net.ipv4.tcp_congestion_control: BBR handles congestion detection by measuring
-# bottleneck bandwidth and round-trip times, offering far better throughput.
-net.ipv4.tcp_congestion_control = bbr
-# net.core.default_qdisc: CAKE (Common Applications Kept Enhanced) performs active
-# queue management and fair queueing, preventing network bufferbloat on local 
-# client interfaces. Modern kernels (>=4.20) pace BBR internally, making CAKE compatible.
-net.core.default_qdisc = cake
-# net.ipv4.tcp_rmem / tcp_wmem: Optimize min, default, and max TCP buffer sizes
-# to allow high-throughput TCP window scaling.
-net.ipv4.tcp_rmem = 4096 65536 4194304
-net.ipv4.tcp_wmem = 4096 65536 4194304
-# net.core.netdev_max_backlog: Queue length for incoming packets before processing.
-# 4096 prevents packet drops during high-speed network bursts (gigabit / WiFi 6).
-net.core.netdev_max_backlog = 4096
-# net.ipv4.tcp_fastopen: 3 enables TCP Fast Open for both incoming and outgoing connections,
-# reducing round-trip latency on supported HTTP/TLS handshakes.
-net.ipv4.tcp_fastopen = 3
-# net.ipv4.tcp_slow_start_after_idle: 0 prevents the TCP congestion window from resetting
-# to initial size after idle periods, improving burst responsiveness on long-lived connections.
-net.ipv4.tcp_slow_start_after_idle = 0
-
-# --- eBPF PERFORMANCE (user requested max performance) ---
-# net.core.bpf_jit_enable: 1 compiles eBPF programs on run instead of interpreting.
-net.core.bpf_jit_enable = 1
-# net.core.bpf_jit_harden: 0 disables JIT hardening (constant blinding xor operations).
-# Disabling hardening yields maximum performance and lowers CPU usage when running
-# eBPF structures (CachyOS/Performance-focused custom systems default to 0).
-net.core.bpf_jit_harden = 0
 EOF
 
-# --- MGLRU Payload (path verified in 7.1 docs) ---
 cat > "$tmpfile_mglru" <<EOF
 # Managed by ${SCRIPT_NAME}
-# Scope: MGLRU ZRAM Thrash Protection
-# Writes N ms to /sys/kernel/mm/lru_gen/min_ttl_ms to prevent working set eviction
-w /sys/kernel/mm/lru_gen/min_ttl_ms - - - - ${EXPECTED_MGLRU_TTL}
+# Scope: Multi-Gen LRU (MGLRU) runtime optimization for ZRAM
+w- /sys/kernel/mm/lru_gen/enabled - - - - 0x0007
+w- /sys/kernel/mm/lru_gen/min_ttl_ms - - - - ${EXPECTED_MGLRU_TTL}
 EOF
 
-# Dry Run
 if (( DRY_RUN == 1 )); then
-    log_info "DRY RUN — generated configurations:"
-    echo -e "\n${C_BOLD}[ ${CONFIG_FILE} ]${C_RESET}"
-    cat "$tmpfile"
-    echo -e "\n${C_BOLD}[ ${MGLRU_CONFIG} ]${C_RESET}"
+    log_info "DRY RUN EXECUTED. Generated ${CONFIG_FILE}:"
+    cat "$tmpfile_sysctl"
+    echo "Generated ${MGLRU_CONFIG}:"
     cat "$tmpfile_mglru"
     exit 0
 fi
 
-# --- Apply Sysctl (use -e to ignore unknown keys if watermark_boost_factor is removed in future) ---
-if [[ -f "$CONFIG_FILE" ]] && cmp -s "$tmpfile" "$CONFIG_FILE"; then
-    log_info "Sysctl configuration already matches desired state."
+if [[ -f "$CONFIG_FILE" ]] && cmp -s "$tmpfile_sysctl" "$CONFIG_FILE"; then
+    log_info "Sysctl configuration already up to date in ${CONFIG_FILE}."
 else
-    install -Dm0644 "$tmpfile" "$CONFIG_FILE"
-    log_success "Configuration written to ${CONFIG_FILE}"
+    install -Dm0644 "$tmpfile_sysctl" "$CONFIG_FILE"
+    log_success "Wrote sysctl configuration to ${CONFIG_FILE}"
 fi
 
 log_info "Applying sysctl parameters to live kernel..."
-# Ensure BBR module is loaded if available
-if ! sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null | grep -qw bbr; then
-    modprobe tcp_bbr 2>/dev/null || log_warn "tcp_bbr module not available, BBR may fail."
-fi
-modprobe sch_cake 2>/dev/null || true
-
 if [[ -x "/usr/lib/systemd/systemd-sysctl" ]]; then
-    /usr/lib/systemd/systemd-sysctl "$CONFIG_FILE" >/dev/null 2>&1 || sysctl -e --load "$CONFIG_FILE" >/dev/null 2>&1 || true
+    /usr/lib/systemd/systemd-sysctl "$CONFIG_FILE" >/dev/null 2>&1 || sysctl -q --load "$CONFIG_FILE" >/dev/null 2>&1 || true
 else
-    sysctl -e --load "$CONFIG_FILE" >/dev/null 2>&1 || true
+    sysctl -q --load "$CONFIG_FILE" >/dev/null 2>&1 || true
 fi
 
-# --- Apply MGLRU Tmpfiles ---
-if [[ -d "/sys/kernel/mm/lru_gen" ]]; then
-    if [[ -f "$MGLRU_CONFIG" ]] && cmp -s "$tmpfile_mglru" "$MGLRU_CONFIG"; then
-        log_info "MGLRU configuration already matches desired state."
+if [[ -f "$MGLRU_CONFIG" ]] && cmp -s "$tmpfile_mglru" "$MGLRU_CONFIG"; then
+    log_info "MGLRU configuration already up to date in ${MGLRU_CONFIG}."
+else
+    install -Dm0644 "$tmpfile_mglru" "$MGLRU_CONFIG"
+    log_success "Wrote MGLRU tmpfiles configuration to ${MGLRU_CONFIG}"
+fi
+
+log_info "Applying MGLRU parameters via systemd-tmpfiles..."
+systemd-tmpfiles --create "$MGLRU_CONFIG" >/dev/null 2>&1 || log_warn "systemd-tmpfiles finished with warnings (normal if MGLRU not compiled in kernel)."
+
+declare -i VERIFY_ERRORS=0
+verify_param() {
+    local key="$1" expected="$2"
+    local actual
+    actual="$(sysctl -n "$key" 2>/dev/null || echo "MISSING")"
+    if [[ "$actual" == "$expected" ]]; then
+        log_success "  ${key} = ${actual}"
     else
-        install -Dm0644 "$tmpfile_mglru" "$MGLRU_CONFIG"
-        log_success "MGLRU Protection written to ${MGLRU_CONFIG}"
+        log_warn "  ${key} = ${actual} (expected: ${expected})"
+        VERIFY_ERRORS+=1
     fi
-    log_info "Applying MGLRU parameters..."
-    systemd-tmpfiles --create "$MGLRU_CONFIG" || log_warn "Failed to apply tmpfiles for MGLRU (check /sys/kernel/mm/lru_gen/min_ttl_ms exists)."
-else
-    log_warn "MGLRU not present at /sys/kernel/mm/lru_gen — skipping min_ttl_ms protection."
-fi
+}
 
-# --- NOFILE limits (systemd 261 still supports DefaultLimitNOFILE) ---
-log_info "Optimizing open file limits..."
-
-cat > "$tmpfile_limits" <<EOF
-# Managed by ${SCRIPT_NAME}
-* soft nofile 65536
-* hard nofile 524288
-EOF
-
-if [[ -f "/etc/security/limits.d/99-nofile-limits.conf" ]] && cmp -s "$tmpfile_limits" "/etc/security/limits.d/99-nofile-limits.conf"; then
-    log_info "PAM limits already match."
-else
-    install -Dm0644 "$tmpfile_limits" "/etc/security/limits.d/99-nofile-limits.conf"
-    log_success "PAM limits written."
-fi
-
-cat > "$tmpfile_sysd" <<EOF
-# Managed by ${SCRIPT_NAME}
-[Manager]
-DefaultLimitNOFILE=65536:524288
-EOF
-
-needs_reexec=0
-if [[ -f "/etc/systemd/system.conf.d/99-nofile-limits.conf" ]] && cmp -s "$tmpfile_sysd" "/etc/systemd/system.conf.d/99-nofile-limits.conf"; then
-    log_info "Systemd system limits already match."
-else
-    install -Dm0644 "$tmpfile_sysd" "/etc/systemd/system.conf.d/99-nofile-limits.conf"
-    log_success "Systemd system limits written."
-    needs_reexec=1
-fi
-
-if [[ -f "/etc/systemd/user.conf.d/99-nofile-limits.conf" ]] && cmp -s "$tmpfile_sysd" "/etc/systemd/user.conf.d/99-nofile-limits.conf"; then
-    log_info "Systemd user limits already match."
-else
-    install -Dm0644 "$tmpfile_sysd" "/etc/systemd/user.conf.d/99-nofile-limits.conf"
-    log_success "Systemd user limits written."
-    needs_reexec=1
-fi
-
-if (( needs_reexec )); then
-    systemctl daemon-reexec || true
-fi
-
-# --- Re-exec user manager instance for active sessions (fixed for systemd 261) ---
-if command -v loginctl >/dev/null 2>&1; then
-    while read -r uid username _; do
-        [[ "$uid" =~ ^[0-9]+$ ]] || continue
-        if ! systemctl --user -M "${username}@.host" daemon-reexec >/dev/null 2>&1; then
-            if [[ -d "/run/user/${uid}" ]]; then
-                runuser -u "$username" -- env XDG_RUNTIME_DIR="/run/user/${uid}" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${uid}/bus" systemctl --user daemon-reexec >/dev/null 2>&1 || true
-            fi
-        fi
-    done < <(loginctl --no-legend list-users 2>/dev/null || true)
-fi
-
-# --- Hardened Live Verification ---
-actual_swappiness="$(< /proc/sys/vm/swappiness)"
-actual_vfs="$(< /proc/sys/vm/vfs_cache_pressure)"
-actual_scale="$(< /proc/sys/vm/watermark_scale_factor)"
-actual_compaction="$(< /proc/sys/vm/compaction_proactiveness)"
-actual_bpf_harden="$(< /proc/sys/net/core/bpf_jit_harden)"
-
-[[ "$actual_swappiness" == "$EXPECTED_SWAPPINESS" ]] || die "Verification failed: vm.swappiness is '${actual_swappiness}', expected '${EXPECTED_SWAPPINESS}'."
-[[ "$actual_vfs" == "$EXPECTED_VFS_PRESSURE" ]] || die "Verification failed: vm.vfs_cache_pressure is '${actual_vfs}', expected '${EXPECTED_VFS_PRESSURE}'."
-[[ "$actual_scale" == "$EXPECTED_SCALE_FACTOR" ]] || die "Verification failed: vm.watermark_scale_factor is '${actual_scale}', expected '${EXPECTED_SCALE_FACTOR}'."
-[[ "$actual_compaction" == "$EXPECTED_COMPACTION" ]] || die "Verification failed: vm.compaction_proactiveness is '${actual_compaction}', expected '${EXPECTED_COMPACTION}'."
-[[ "$actual_bpf_harden" == "0" ]] || die "Verification failed: net.core.bpf_jit_harden is '${actual_bpf_harden}', expected '0' (performance mode)."
-
-log_success "Verified live kernel values:"
-log_success "  vm.swappiness = ${actual_swappiness}"
-log_success "  vm.vfs_cache_pressure = ${actual_vfs}"
-log_success "  vm.watermark_scale_factor = ${actual_scale}"
-log_success "  vm.compaction_proactiveness = ${actual_compaction}"
-log_success "  net.core.bpf_jit_harden = ${actual_bpf_harden} (hardening disabled / max perf)"
-log_success "  net.ipv4.tcp_congestion_control = $(< /proc/sys/net/ipv4/tcp_congestion_control)"
-log_success "  net.core.default_qdisc = $(< /proc/sys/net/core/default_qdisc)"
+log_info "Verifying applied kernel parameters:"
+verify_param "vm.swappiness" "$EXPECTED_SWAPPINESS"
+verify_param "vm.vfs_cache_pressure" "$EXPECTED_VFS_PRESSURE"
+verify_param "vm.vfs_cache_pressure_denom" "$EXPECTED_VFS_DENOM"
+verify_param "vm.watermark_scale_factor" "$EXPECTED_SCALE_FACTOR"
+verify_param "vm.watermark_boost_factor" "$EXPECTED_BOOST_FACTOR"
+verify_param "vm.compaction_proactiveness" "$EXPECTED_COMPACTION"
+verify_param "vm.compact_unevictable_allowed" "$EXPECTED_COMPACT_UNEVIC"
+verify_param "vm.page-cluster" "$EXPECTED_PAGE_CLUSTER"
+verify_param "vm.dirty_background_bytes" "$EXPECTED_DIRTY_BG_BYTES"
+verify_param "vm.dirty_bytes" "$EXPECTED_DIRTY_BYTES"
+verify_param "vm.dirty_writeback_centisecs" "$EXPECTED_DIRTY_WRITEBACK_CENTISECS"
+verify_param "vm.dirty_expire_centisecs" "$EXPECTED_DIRTY_EXPIRE_CENTISECS"
+verify_param "vm.stat_interval" "$EXPECTED_STAT_INTERVAL"
+verify_param "vm.max_map_count" "$EXPECTED_MAX_MAP_COUNT"
 
 if [[ -f "/sys/kernel/mm/lru_gen/min_ttl_ms" ]]; then
-    actual_ttl="$(< /sys/kernel/mm/lru_gen/min_ttl_ms)"
-    if [[ "$actual_ttl" == "$EXPECTED_MGLRU_TTL" ]]; then
-        log_success "  MGLRU min_ttl_ms = ${actual_ttl} (thrash protection active)"
-    else
-        log_warn "  MGLRU min_ttl_ms = ${actual_ttl}, expected ${EXPECTED_MGLRU_TTL}"
-    fi
+    actual_ttl="$(cat /sys/kernel/mm/lru_gen/min_ttl_ms 2>/dev/null || echo "N/A")"
+    log_success "  MGLRU min_ttl_ms = ${actual_ttl}"
+    [[ "$actual_ttl" == "$EXPECTED_MGLRU_TTL" ]] || VERIFY_ERRORS+=1
+fi
+if [[ -r "/sys/kernel/mm/lru_gen/enabled" ]]; then
+    actual_enabled="$(< /sys/kernel/mm/lru_gen/enabled)"
+    log_info "  MGLRU enabled = ${actual_enabled}"
+    (( actual_enabled == 0x7 )) || VERIFY_ERRORS+=1
 fi
 
-log_success "  Active Tuning Profile: [${C_BOLD}${EXPECTED_MODE}${C_RESET}]"
+(( VERIFY_ERRORS == 0 )) || die "${VERIFY_ERRORS} live kernel settings did not match the generated profile."
+log_success "Profile [${C_BOLD}${PROFILE_NAME}${C_RESET}] successfully deployed."
 exit 0

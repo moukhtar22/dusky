@@ -25,20 +25,12 @@ readonly C_OK="35"
 #===============================================================================
 # UTILITY FUNCTIONS
 #===============================================================================
-declare TEMP_FILE=""
 declare -i HAS_GUM=0
 
 _check_gum() {
     command -v gum &>/dev/null && HAS_GUM=1 || HAS_GUM=0
 }
 _check_gum
-
-cleanup() {
-    if [[ -n "$TEMP_FILE" && -f "$TEMP_FILE" ]]; then
-        rm -f "$TEMP_FILE"
-    fi
-}
-trap cleanup EXIT
 
 die() {
     if ((HAS_GUM)); then
@@ -74,38 +66,36 @@ warn() {
 }
 
 is_valid_percent() {
-    [[ -n "${1:-}" && "${1:-}" =~ ^[0-9]+$ && "${1:-}" -ge 1 && "${1:-}" -le 100 ]]
+    [[ ${1:-} =~ ^[0-9]{1,4}$ ]] && (( 10#$1 >= 1 && 10#$1 <= 100 ))
 }
 
 #===============================================================================
 # BATTERY DETECTION
 #===============================================================================
 check_battery() {
-    # Method 1: upower (preferred)
-    if command -v upower &>/dev/null; then
-        if upower -e 2>/dev/null | grep -qiE 'BAT|battery'; then
-            return 0
-        fi
+    local info type_file type_val scope present
+    # DisplayDevice excludes peripheral batteries and includes system UPS devices.
+    if command -v upower >/dev/null &&
+        info=$(LC_ALL=C upower --show-info /org/freedesktop/UPower/devices/DisplayDevice 2>/dev/null); then
+        [[ $info =~ present:[[:space:]]*yes([[:space:]]|$) &&
+           $info =~ power\ supply:[[:space:]]*yes([[:space:]]|$) &&
+           $info =~ $'\n'[[:space:]]*(battery|ups)([[:space:]]|$) ]]
+        return
     fi
-
-    # Method 2: sysfs check of type
-    local type_file
+    # Allow configuration while the daemon is unavailable, using kernel metadata.
     for type_file in /sys/class/power_supply/*/type; do
-        if [[ -f "${type_file}" ]]; then
-            local type_val
-            type_val=$(tr '[:upper:]' '[:lower:]' < "${type_file}" 2>/dev/null | tr -d '[:space:]') || true
-            if [[ "${type_val}" == "battery" ]]; then
-                return 0
-            fi
+        [[ -r $type_file ]] || continue
+        IFS= read -r type_val < "$type_file" || continue
+        [[ $type_val == Battery || $type_val == UPS ]] || continue
+        scope=System present=1
+        if [[ -r ${type_file%type}scope ]]; then
+            IFS= read -r scope < "${type_file%type}scope" || continue
         fi
+        if [[ -r ${type_file%type}present ]]; then
+            IFS= read -r present < "${type_file%type}present" || continue
+        fi
+        [[ $scope == System && $present == 1 ]] && return 0
     done
-
-    # Method 3: sysfs fallback glob
-    local bat_path
-    for bat_path in /sys/class/power_supply/BAT*; do
-        [[ -d "$bat_path" ]] && return 0
-    done
-
     return 1
 }
 
@@ -121,43 +111,44 @@ get_current_value() {
         return 0
     fi
 
-    # Anchored regex with negative lookbehind to avoid partial matches
-    local value
-    value=$(grep -oP "(?<![A-Za-z_])${var_name}:-\K[0-9]+" "$NOTIFY_SCRIPT" 2>/dev/null | head -1) || true
-    printf '%s' "${value:-$default}"
+    local line value
+    local pattern='^[[:space:]]*readonly[[:space:]]+'"$var_name"'="\$\{'"$var_name"':-([0-9]{1,4})\}"([[:space:]]*(#.*)?)$'
+    while IFS= read -r line; do
+        if [[ $line =~ $pattern ]]; then
+            value=${BASH_REMATCH[1]}
+            if is_valid_percent "$value"; then
+                printf '%s' "$((10#$value))"
+                return 0
+            fi
+        fi
+    done < "$NOTIFY_SCRIPT"
+    printf '%s' "$default"
 }
 
 update_config() {
-    local full="$1"
-    local low="$2"
-    local critical="$3"
-
-    [[ ! -f "$NOTIFY_SCRIPT" ]] && die "Notify script not found: $NOTIFY_SCRIPT"
-    [[ ! -w "$NOTIFY_SCRIPT" ]] && die "Notify script not writable: $NOTIFY_SCRIPT"
-
-    TEMP_FILE=$(mktemp) || die "Failed to create temp file"
-
-    # Update all three thresholds in one pass
-    if ! sed -e "s/\(BATTERY_FULL_THRESHOLD:-\)[0-9]\+/\1${full}/" \
-             -e "s/\(BATTERY_LOW_THRESHOLD:-\)[0-9]\+/\1${low}/" \
-             -e "s/\(BATTERY_CRITICAL_THRESHOLD:-\)[0-9]\+/\1${critical}/" \
-             "$NOTIFY_SCRIPT" > "$TEMP_FILE"; then
-        die "Failed to process configuration with sed"
+    local full=$1 low=$2 critical=$3
+    if ! is_valid_percent "$full" || ! is_valid_percent "$low" || ! is_valid_percent "$critical"; then
+        die "Thresholds must be decimal percentages in 1..100"
     fi
+    full=$((10#$full)) low=$((10#$low)) critical=$((10#$critical))
+    (( critical < low && low < full )) || die "Thresholds must satisfy CRITICAL < LOW < FULL"
 
-    # Validate output
-    [[ ! -s "$TEMP_FILE" ]] && die "Generated config is empty - aborting"
+    # Reuse the TUI writer's atomic replacement and permission preservation.
+    python3 - "$NOTIFY_SCRIPT" "$HOME/user_scripts/dusky_tui" "$full" "$low" "$critical" <<'PYTHON'
+import sys
+sys.path.insert(0, sys.argv[2])
+from python.engines.shell_fallback import ShellFallbackEngine
 
-    local orig_size new_size
-    orig_size=$(wc -c < "$NOTIFY_SCRIPT")
-    new_size=$(wc -c < "$TEMP_FILE")
-
-    # Sanity check: file shouldn't shrink dramatically
-    ((new_size < orig_size / 2)) && die "Generated file too small - aborting"
-
-    mv -f "$TEMP_FILE" "$NOTIFY_SCRIPT" || die "Failed to update config"
-    TEMP_FILE=""  # Clear reference after successful move
-    chmod +x "$NOTIFY_SCRIPT"
+engine = ShellFallbackEngine(sys.argv[1])
+engine.load_state()
+keys = ("BATTERY_FULL_THRESHOLD", "BATTERY_LOW_THRESHOLD", "BATTERY_CRITICAL_THRESHOLD")
+ok, message, _ = engine.write_batch([
+    (key, "DEFAULT", value, "int") for key, value in zip(keys, sys.argv[3:], strict=True)
+])
+if not ok:
+    print(message, file=sys.stderr)
+    raise SystemExit(1)
+PYTHON
 }
 
 restart_service() {
@@ -167,7 +158,8 @@ restart_service() {
         return 0
     fi
 
-    if systemctl --user is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
+    if systemctl --user is-active --quiet "$SERVICE_NAME" 2>/dev/null ||
+       systemctl --user is-failed --quiet "$SERVICE_NAME" 2>/dev/null; then
         if systemctl --user restart "$SERVICE_NAME" 2>/dev/null; then
             success "Service restarted"
         else
@@ -198,7 +190,7 @@ EXAMPLES:
     ${SCRIPT_NAME}           # Interactive TUI mode
     ${SCRIPT_NAME} --default # Apply defaults non-interactively
 
-NOTE: This script requires a laptop with a battery.
+NOTE: This script requires a system battery or UPS.
       Config path: ${NOTIFY_SCRIPT}
 EOF
 }
@@ -223,19 +215,7 @@ apply_defaults() {
 # TUI MODE
 #===============================================================================
 ensure_gum() {
-    ((HAS_GUM)) && return 0
-
-    printf 'Error: gum is required for TUI mode.\n'
-    read -rn1 -p "Install via pacman? [y/N] " REPLY
-    printf '\n'
-
-    if [[ "${REPLY:-n}" =~ ^[Yy]$ ]]; then
-        sudo pacman -S --needed --noconfirm gum || die "Failed to install gum"
-        _check_gum
-        ((HAS_GUM)) || die "gum not found after install"
-    else
-        die "Use --default for non-interactive mode, or install gum manually"
-    fi
+    ((HAS_GUM)) || die "gum is required for TUI mode. Use --default or install gum first."
 }
 
 show_header() {
@@ -259,23 +239,21 @@ prompt_value() {
         }
 
         if is_valid_percent "$result"; then
-            printf '%s' "$result"
+            printf '%s' "$((10#$result))"
             return 0
         elif [[ -z "$result" ]]; then
             printf '%s' "$current"
             return 0
         else
-            warn "Enter a value between 1 and 100"
-            sleep 0.8
+            warn "Enter a value between 1 and 100" >&2
         fi
     done
 }
 
 run_tui() {
-    ensure_gum
-
     # Must be interactive terminal
     [[ ! -t 0 || ! -t 1 ]] && die "TUI requires interactive terminal. Use --default flag."
+    ensure_gum
 
     # Load current values
     local CUR_FULL CUR_LOW CUR_CRITICAL
@@ -323,7 +301,7 @@ run_tui() {
                 NEW_CRITICAL="$PRESET_CRITICAL"
 
                 printf '\n'
-                gum spin --spinner dot --title "Applying defaults..." -- sleep 0.3
+                info "Applying defaults..."
                 update_config "$NEW_FULL" "$NEW_LOW" "$NEW_CRITICAL"
                 success "Defaults applied"
                 printf '\n'
@@ -356,9 +334,10 @@ run_tui() {
                         "Expected order: Critical < Low < Full"
 
                     printf '\n'
-                    if ! gum confirm --affirmative="Apply Anyway" --negative="Go Back"; then
-                        continue
+                    if ! gum confirm --affirmative="Go Back" --negative="Exit" "Return to the menu?"; then
+                        return 0
                     fi
+                    continue
                 fi
 
                 # Check for actual changes
@@ -372,7 +351,7 @@ run_tui() {
                 fi
 
                 printf '\n'
-                gum spin --spinner dot --title "Updating configuration..." -- sleep 0.3
+                info "Updating configuration..."
                 update_config "$NEW_FULL" "$NEW_LOW" "$NEW_CRITICAL"
                 success "Configuration saved"
                 printf '\n'
@@ -398,35 +377,20 @@ run_tui() {
 # MAIN ENTRY POINT
 #===============================================================================
 main() {
-
-# Battery check - fail fast for desktops
-    if ! check_battery; then
-        info "No battery detected. Skipping configuration (Desktop detected)."
-        exit 0
-    fi
-
-    # Verify notify script exists
-    if [[ ! -f "$NOTIFY_SCRIPT" ]]; then
-        die "Battery notify script not found at: $NOTIFY_SCRIPT
-
-Please ensure the battery notification system is installed first."
-    fi
-
-    # Parse arguments
+    (( $# <= 1 )) || die "Expected at most one option: --default or --help"
     case "${1:-}" in
-        --default)
-            apply_defaults
-            ;;
-        -h|--help)
-            show_usage
-            ;;
-        "")
-            run_tui
-            ;;
-        *)
-            die "Unknown option: $1 (use --help for usage)"
-            ;;
+        -h|--help) show_usage; return 0 ;;
+        ""|--default) ;;
+        *) die "Unknown option: $1 (use --help for usage)" ;;
     esac
+    if ! check_battery; then
+        info "No system battery or UPS available. Skipping configuration."
+        return 0
+    fi
+    [[ -f "$NOTIFY_SCRIPT" ]] || die "Battery notify script not found: $NOTIFY_SCRIPT"
+    if [[ ${1:-} == --default ]]; then apply_defaults; else run_tui; fi
 }
 
-main "$@"
+if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
+    main "$@"
+fi

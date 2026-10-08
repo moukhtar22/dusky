@@ -1,11 +1,9 @@
 #!/usr/bin/env bash
-#
-# battery_notify.sh — Hyprland-only Event-Driven Battery Monitor (Fixed)
-# Arch bleeding-edge, Hyprland 0.55.4+ (July 2026), systemd 261+, bash 5.2+, upower 1.90+
-# No backwards compat, Part of hyprland-session.target
-#
+# Event-driven battery notifications for the Hyprland user session.
+# Requires Bash 5.3+, systemd 262+, and UPower (including DisplayDevice).
 set -uo pipefail
-export LC_NUMERIC=C
+# UPower's human-readable field names and decimal separator must be stable.
+export LC_ALL=C
 
 ##########################
 # CONFIGURATION — EDIT ME
@@ -30,244 +28,307 @@ readonly SOUND_PLUG="${SOUND_PLUG:-/usr/share/sounds/freedesktop/stereo/device-a
 readonly SOUND_UNPLUG="${SOUND_UNPLUG:-/usr/share/sounds/freedesktop/stereo/device-removed.oga}"
 
 readonly MAX_RETRIES=5
+readonly BATTERY_PATH="${BATTERY_DEVICE:-/org/freedesktop/UPower/devices/DisplayDevice}"
 
-declare -g RUNNING=true
-declare -g MON_FD=-1
-declare -g UPMON_PID=""
-declare -g CURRENT_MODE=""
-
-declare -g HAS_NOTIFY=false
-declare -g HAS_PAPLAY=false
-declare -g HAS_PWPLAY=false
-
-declare -g STATE_LAST=""
-declare -g STATE_LAST_PERCENTAGE=999
-declare -g STATE_LAST_FULL_NOTIFY=0
-declare -g STATE_LAST_LOW_NOTIFY=0
-declare -g STATE_LAST_CRITICAL_NOTIFY=0
-declare -g STATE_LAST_SUSPEND_MONO=0
+MON_FD=-1
+MONITOR_PID=""
+LAST_ON_BATTERY=""
+LAST_FULL_NOTIFY=-1
+LAST_LOW_NOTIFY=-1
+LAST_CRITICAL_NOTIFY=-1
+SUSPEND_DEADLINE=-1
+READ_FAILED=false
+HAS_NOTIFY=false
+SOUND_PLAYER=""
 
 log() { printf '[%(%Y-%m-%d %H:%M:%S)T] [battery_notify] %s\n' -1 "$*" >&2; }
-die() { log "FATAL: $*"; exit 1; }
-is_integer() { [[ ${1:-} =~ ^[0-9]+$ ]]; }
-get_wall_now() { printf '%s' "$EPOCHSECONDS"; }
-get_mono_now() { local up; if up=$(awk '{print int($1)}' /proc/uptime 2>/dev/null) && is_integer "$up"; then printf '%s' "$up"; else printf '%s' "$SECONDS"; fi; }
-get_icon() {
-    local perc="${1:-0}" state="${2:-Discharging}"; perc="${perc%%.*}"; is_integer "$perc" || perc=0
-    (( perc < 0 )) && perc=0; (( perc > 100 )) && perc=100
-    if [[ "$state" == "Charging" ]]; then
-        if (( perc <= 10 )); then printf 'battery-empty-charging'
-        elif (( perc <= 20 )); then printf 'battery-caution-charging'
-        elif (( perc <= 40 )); then printf 'battery-low-charging'
-        elif (( perc <= 80 )); then printf 'battery-good-charging'
-        else printf 'battery-full-charging'; fi
-    else
-        if (( perc <= 10 )); then printf 'battery-empty'
-        elif (( perc <= 20 )); then printf 'battery-caution'
-        elif (( perc <= 40 )); then printf 'battery-low'
-        elif (( perc <= 80 )); then printf 'battery-good'
-        else printf 'battery-full'; fi
-    fi
-}
-play_sound() {
-    local sound="${1:-}"; [[ -z "$sound" || "$sound" == "disabled" ]] && return 0; [[ -r "$sound" ]] || return 0
-    if [[ "$HAS_PAPLAY" == "true" ]]; then paplay "$sound" >/dev/null 2>&1 & disown || true
-    elif [[ "$HAS_PWPLAY" == "true" ]]; then pw-play "$sound" >/dev/null 2>&1 & disown || true; fi
-}
-fn_notify() {
-    local urgency="$1" title="$2" body="$3" icon="$4" sound="$5"
-    local runtime_dir="${XDG_RUNTIME_DIR:-/run/user/${UID:-}}"
-    local bus_path="$runtime_dir/bus"
-    if [[ -z "${DBUS_SESSION_BUS_ADDRESS:-}" && -S "$bus_path" ]]; then export DBUS_SESSION_BUS_ADDRESS="unix:path=$bus_path"; fi
-    if [[ "$HAS_NOTIFY" == "true" ]]; then
-        local err
-        if [[ "$urgency" == "critical" ]]; then err=$(notify-send -a "Battery Monitor" -u "$urgency" --hint=string:x-canonical-private-synchronous:battery-status -i "$icon" -- "$title" "$body" 2>&1) || log "notify-send failed: $err"
-        else err=$(notify-send -a "Battery Monitor" -u "$urgency" --hint=string:x-canonical-private-synchronous:battery-status -t 5000 -i "$icon" -- "$title" "$body" 2>&1) || log "notify-send failed: $err"; fi
-    else log "Notification: [$urgency] $title - $body"; fi
-    play_sound "$sound"
-}
-parse_upower_block() {
-    local info="$1" state="" perc="" energy="" energy_full=""
-    state=$(grep -i -m1 '^[[:space:]]*state:' <<< "$info" | cut -d: -f2- | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-    perc=$(grep -i -m1 '^[[:space:]]*percentage:' <<< "$info" | grep -oE '[0-9]+(\.[0-9]+)?' | head -n1)
-    energy=$(grep -i -m1 '^[[:space:]]*energy:[[:space:]]' <<< "$info" | grep -oE '[0-9]+(\.[0-9]+)?' | head -n1)
-    energy_full=$(grep -i -m1 '^[[:space:]]*energy-full:' <<< "$info" | grep -oE '[0-9]+(\.[0-9]+)?' | head -n1)
-    [[ -z "$state" ]] && return 1
-    printf '%s|%s|%s|%s' "$state" "${perc:-}" "${energy:-}" "${energy_full:-}"
-}
-normalize_state() {
-    local s="${1,,}"; s=$(echo "$s" | xargs)
-    case "$s" in
-        discharging) echo "Discharging" ;;
-        not\ charging|not-charging) echo "Charging" ;;
-        charging|pending\ charge|pending-charge) echo "Charging" ;;
-        fully\ charged|fully-charged|full) echo "Full" ;;
-        empty) echo "Empty" ;;
-        *) echo "Unknown" ;;
-    esac
-}
-read_battery_aggregated() {
-    local dev info parsed state perc energy e_full
-    if [[ -n "$BATTERY_DEVICE" ]]; then
-        info=$(upower -i "$BATTERY_DEVICE" 2>/dev/null) || return 1
-        parsed=$(parse_upower_block "$info") || return 1
-        IFS='|' read -r state perc energy e_full <<< "$parsed"
-        state=$(normalize_state "$state"); perc="${perc%%.*}"; is_integer "$perc" || return 1
-        printf '%s;%s;%s' "$state" "$perc" "device:$BATTERY_DEVICE"; return 0
-    fi
-    local dd="/org/freedesktop/UPower/devices/DisplayDevice"
-    info=$(upower -i "$dd" 2>/dev/null)
-    if [[ -n "$info" ]]; then
-        parsed=$(parse_upower_block "$info") || true
-        if [[ -n "$parsed" ]]; then
-            IFS='|' read -r state perc energy e_full <<< "$parsed"
-            if [[ -n "$perc" ]]; then
-                state=$(normalize_state "$state")
-                if [[ "$state" != "Unknown" ]]; then
-                    perc="${perc%%.*}"; is_integer "$perc" || perc=0
-                    printf '%s;%s;%s' "$state" "$perc" "DisplayDevice"; return 0
-                fi
-            fi
-        fi
-    fi
-    local -a devices; mapfile -t devices < <(upower -e 2>/dev/null | grep -i 'battery\|BAT' | grep -v -i 'hidpp\|keyboard\|mouse\|headset' || true)
-    (( ${#devices[@]} == 0 )) && mapfile -t devices < <(upower -e 2>/dev/null)
-    local total_energy=0 total_energy_full=0 sum_perc=0 count=0 any_charging=false any_discharging=false any_full=false any_empty=false
-    for dev in "${devices[@]}"; do
-        info=$(upower -i "$dev" 2>/dev/null) || continue
-        grep -qi 'power supply:[[:space:]]*yes' <<< "$info" || continue
-        parsed=$(parse_upower_block "$info") || continue
-        IFS='|' read -r state perc energy e_full <<< "$parsed"; [[ -z "$perc" ]] && continue
-        state=$(normalize_state "$state")
-        case "$state" in Charging) any_charging=true;; Discharging) any_discharging=true;; Full) any_full=true;; Empty) any_empty=true; any_discharging=true;; esac
-        sum_perc=$(awk -v a="$sum_perc" -v b="$perc" 'BEGIN{print a+b}'); ((count++))
-        if [[ -n "$energy" && -n "$e_full" ]]; then total_energy=$(awk -v a="$total_energy" -v b="$energy" 'BEGIN{print a+b}'); total_energy_full=$(awk -v a="$total_energy_full" -v b="$e_full" 'BEGIN{print a+b}'); fi
-    done
-    (( count == 0 )) && return 1
-    local final_perc
-    if awk -v tf="$total_energy_full" 'BEGIN{exit!(tf>0)}'; then final_perc=$(awk -v te="$total_energy" -v tf="$total_energy_full" 'BEGIN{printf "%.0f", (te/tf)*100}')
-    else final_perc=$(awk -v sp="$sum_perc" -v c="$count" 'BEGIN{printf "%.0f", sp/c}'); fi
-    is_integer "${final_perc%%.*}" || return 1; final_perc="${final_perc%%.*}"; (( final_perc < 0 )) && final_perc=0; (( final_perc > 100 )) && final_perc=100
-    local final_state="Unknown"; if [[ "$any_charging" == "true" ]]; then final_state="Charging"; elif [[ "$any_discharging" == "true" ]]; then final_state="Discharging"; elif [[ "$any_full" == "true" ]]; then final_state="Full"; fi
-    printf '%s;%s;%s' "$final_state" "$final_perc" "aggregate:$count"
-}
-do_suspend() {
-    log "Attempting suspend (ignore inhibitors for critical)"
-    if busctl --system call org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.login1.Manager SuspendWithFlags "t" 1 2>&1; then return 0; fi
-    if busctl --system call org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.login1.Manager Suspend "b" false 2>&1; then return 0; fi
-    if command -v systemctl >/dev/null; then systemctl suspend --no-block 2>&1 && return 0; systemctl suspend 2>&1 && return 0; fi
-    return 1
-}
+
 startup_checks() {
-    local errors=0
-    command -v upower &>/dev/null || { log "Missing upower"; ((errors++)); }
-    command -v notify-send &>/dev/null && HAS_NOTIFY=true
-    command -v paplay &>/dev/null && HAS_PAPLAY=true
-    command -v pw-play &>/dev/null && HAS_PWPLAY=true
-    for var in BATTERY_FULL_THRESHOLD BATTERY_LOW_THRESHOLD BATTERY_CRITICAL_THRESHOLD BATTERY_UNPLUG_THRESHOLD REPEAT_FULL_MIN REPEAT_LOW_MIN REPEAT_CRITICAL_MIN SUSPEND_GRACE_SEC SAFETY_POLL_INTERVAL; do local val="${!var}"; is_integer "$val" || { log "Invalid $var='$val'"; ((errors++)); }; done
-    (( 10#$BATTERY_FULL_THRESHOLD < 1 || 10#$BATTERY_FULL_THRESHOLD > 100 )) && { log "FULL 1..100"; ((errors++)); }
-    (( 10#$BATTERY_LOW_THRESHOLD < 0 || 10#$BATTERY_LOW_THRESHOLD > 100 )) && { log "LOW 0..100"; ((errors++)); }
-    (( 10#$BATTERY_CRITICAL_THRESHOLD < 0 || 10#$BATTERY_CRITICAL_THRESHOLD > 100 )) && { log "CRITICAL 0..100"; ((errors++)); }
-    (( 10#$SAFETY_POLL_INTERVAL < 5 || 10#$SAFETY_POLL_INTERVAL > 600 )) && { log "POLL 5..600"; ((errors++)); }
-    (( 10#$SUSPEND_GRACE_SEC < 0 || 10#$SUSPEND_GRACE_SEC > 3600 )) && { log "GRACE 0..3600"; ((errors++)); }
-    (( 10#$BATTERY_CRITICAL_THRESHOLD >= 10#$BATTERY_LOW_THRESHOLD )) && { log "FATAL: CRITICAL must < LOW"; ((errors++)); }
-    (( 10#$BATTERY_LOW_THRESHOLD >= 10#$BATTERY_FULL_THRESHOLD )) && { log "FATAL: LOW must < FULL"; ((errors++)); }
-    (( errors > 0 )) && return 1; return 0
+    local cmd var val max errors=0
+    for cmd in upower busctl; do
+        command -v "$cmd" >/dev/null || { log "Missing command: $cmd"; ((errors++)); }
+    done
+    if [[ $DO_SUSPEND == true ]]; then
+        command -v systemctl >/dev/null || { log 'Missing command: systemctl'; ((errors++)); }
+    elif [[ $DO_SUSPEND != false ]]; then
+        log 'DO_SUSPEND must be true or false'; ((errors++))
+    fi
+    command -v notify-send >/dev/null && HAS_NOTIFY=true
+    if command -v pw-play >/dev/null; then SOUND_PLAYER=pw-play
+    elif command -v paplay >/dev/null; then SOUND_PLAYER=paplay
+    fi
+    for var in BATTERY_FULL_THRESHOLD BATTERY_LOW_THRESHOLD BATTERY_CRITICAL_THRESHOLD \
+               BATTERY_UNPLUG_THRESHOLD REPEAT_FULL_MIN REPEAT_LOW_MIN REPEAT_CRITICAL_MIN \
+               SUSPEND_GRACE_SEC SAFETY_POLL_INTERVAL; do
+        val=${!var}
+        # Bound length before arithmetic to avoid overflow; leading zeros are decimal.
+        if [[ ! $val =~ ^[0-9]{1,4}$ ]]; then
+            log "Invalid $var='$val': expected up to four decimal digits"
+            ((errors++)); continue
+        fi
+        case $var in
+            BATTERY_*_THRESHOLD) max=100 ;;
+            REPEAT_*_MIN) max=1440 ;;
+            SUSPEND_GRACE_SEC) max=3600 ;;
+            SAFETY_POLL_INTERVAL) max=600 ;;
+        esac
+        if (( 10#$val > max )); then
+            log "$var must be 0..$max"; ((errors++))
+        fi
+    done
+    (( errors == 0 )) || return 1
+    if (( 10#$BATTERY_CRITICAL_THRESHOLD >= 10#$BATTERY_LOW_THRESHOLD ||
+          10#$BATTERY_LOW_THRESHOLD >= 10#$BATTERY_FULL_THRESHOLD )); then
+        log 'Thresholds must satisfy CRITICAL < LOW < FULL'; return 1
+    fi
+    if (( 10#$SAFETY_POLL_INTERVAL < 5 || 10#$REPEAT_FULL_MIN < 1 ||
+          10#$REPEAT_LOW_MIN < 1 || 10#$REPEAT_CRITICAL_MIN < 1 )); then
+        log 'Poll interval must be at least 5s; repeat intervals at least 1 minute'; return 1
+    fi
 }
+
+get_icon() {
+    local percentage=$1 state=$2 icon
+    if (( percentage <= 10 )); then icon=battery-empty
+    elif (( percentage <= 20 )); then icon=battery-caution
+    elif (( percentage <= 40 )); then icon=battery-low
+    elif (( percentage <= 80 )); then icon=battery-good
+    else icon=battery-full
+    fi
+    [[ $state == Charging ]] && icon+=-charging
+    printf '%s' "$icon"
+}
+
+fn_notify() {
+    local urgency=$1 title=$2 body=$3 icon=$4 sound=$5 err timeout=5000
+    [[ $urgency == critical ]] && timeout=0
+    if [[ $HAS_NOTIFY == true ]]; then
+        if ! err=$(notify-send --app-name='Battery Monitor' --urgency="$urgency" \
+            --hint=string:x-canonical-private-synchronous:battery-status \
+            --expire-time="$timeout" --icon="$icon" -- "$title" "$body" 2>&1); then
+            log "notify-send failed: $err"
+        fi
+    else
+        log "Notification: [$urgency] $title - $body"
+    fi
+    if [[ -n $SOUND_PLAYER && $sound != disabled && -r $sound ]]; then
+        "$SOUND_PLAYER" -- "$sound" >/dev/null 2>&1 &
+    fi
+}
+
+# Return 2 for a confirmed absent battery, 1 for unavailable/invalid data.
+# DisplayDevice is UPower's documented composite battery/UPS; do not reaggregate it.
+read_battery() {
+    local info key value state="" percentage="" present="" supply="" kind="" power
+    info=$(upower --show-info "$BATTERY_PATH" 2>/dev/null) || return 1
+    while IFS= read -r value; do
+        if [[ $value =~ ^[[:space:]]*(battery|ups)[[:space:]]*$ ]]; then
+            kind=${BASH_REMATCH[1]}
+        elif [[ $value =~ ^[[:space:]]*([^:]+):[[:space:]]*(.*[^[:space:]])[[:space:]]*$ ]]; then
+            key=${BASH_REMATCH[1]} value=${BASH_REMATCH[2]}
+            case $key in
+                state) state=$value ;;
+                percentage) percentage=$value ;;
+                present) present=$value ;;
+                'power supply') supply=$value ;;
+            esac
+        fi
+    done <<< "$info"
+    [[ $present == no ]] && return 2
+    [[ $present == yes && $supply == yes && -n $kind ]] || return 1
+    [[ $percentage =~ ^([0-9]{1,3})(\.[0-9]+)?%$ ]] || return 1
+    percentage=$((10#${BASH_REMATCH[1]}))
+    (( percentage <= 100 )) || return 1
+    case $state in
+        discharging|pending-discharge) state=Discharging ;;
+        charging|pending-charge) state=Charging ;;
+        fully-charged) state=Full ;;
+        empty) state=Empty ;;
+        *) return 1 ;;
+    esac
+    power=$(busctl --system get-property org.freedesktop.UPower /org/freedesktop/UPower \
+        org.freedesktop.UPower OnBattery 2>/dev/null) || return 1
+    case $power in
+        'b true') power=true ;;
+        'b false') power=false ;;
+        *) return 1 ;;
+    esac
+    printf '%s;%s;%s\n' "$state" "$percentage" "$power"
+}
+
+is_critical() {
+    [[ $3 == true && ( $1 == Discharging || $1 == Empty ) ]] &&
+        (( $2 <= 10#$BATTERY_CRITICAL_THRESHOLD ))
+}
+
+do_suspend() {
+    # Preserve the intended critical-battery inhibitor override, without prompting.
+    # systemctl returns when the request is enqueued, not after resume.
+    systemctl --no-ask-password --check-inhibitors=no suspend
+}
+
 process_battery_event() {
-    local state="$1" percentage="$2" mono_now="$3"
-    percentage="${percentage%%.*}"; is_integer "$percentage" || return 0
-    [[ "$state" == "Charging" || "$state" == "Full" ]] && STATE_LAST_SUSPEND_MONO=0
-    if [[ "$STATE_LAST" == "Charging" || "$STATE_LAST" == "Full" ]] && [[ "$state" == "Discharging" || "$state" == "Empty" ]]; then
-        (( 10#$percentage <= 10#$BATTERY_UNPLUG_THRESHOLD )) && fn_notify "normal" "Power Disconnected" "$percentage% — On Battery" "battery-ac-adapter" "$SOUND_UNPLUG"
-    fi
-    if [[ "$STATE_LAST" == "Discharging" || "$STATE_LAST" == "Empty" ]] && [[ "$state" == "Charging" ]]; then
-        fn_notify "normal" "Power Connected" "$percentage% — Charging" "$(get_icon "$percentage" "$state")" "$SOUND_PLUG"
-    fi
-    if [[ "$STATE_LAST" != "Full" && "$state" == "Full" ]] || { [[ "$state" == "Charging" ]] && (( 10#$percentage >= 10#$BATTERY_FULL_THRESHOLD )) && (( 10#$STATE_LAST_PERCENTAGE < 10#$BATTERY_FULL_THRESHOLD )); }; then
-        local now_diff=$(( 10#$mono_now - 10#$STATE_LAST_FULL_NOTIFY ))
-        if (( 10#$STATE_LAST_FULL_NOTIFY == 0 || now_diff >= 10#$REPEAT_FULL_MIN * 60 )); then
-            fn_notify "normal" "Battery Charged" "$percentage% — Charged" "battery-full-charged" "$SOUND_PLUG"; STATE_LAST_FULL_NOTIFY=$mono_now
+    local state=$1 percentage=$2 on_battery=$3 now=$4 message reading state2 perc2 power2
+    if [[ -n $LAST_ON_BATTERY && $on_battery != "$LAST_ON_BATTERY" ]]; then
+        if [[ $on_battery == true ]]; then
+            if (( percentage <= 10#$BATTERY_UNPLUG_THRESHOLD )); then
+                fn_notify normal 'Power Disconnected' "$percentage% — On Battery" battery-ac-adapter "$SOUND_UNPLUG"
+            fi
+        else
+            fn_notify normal 'Power Connected' "$percentage% — External Power" "$(get_icon "$percentage" "$state")" "$SOUND_PLUG"
         fi
     fi
-    if [[ "$state" == "Discharging" || "$state" == "Empty" ]]; then
-        if (( 10#$percentage <= 10#$BATTERY_LOW_THRESHOLD && 10#$percentage > 10#$BATTERY_CRITICAL_THRESHOLD )); then
-            local crossed=false; (( 10#$STATE_LAST_PERCENTAGE > 10#$BATTERY_LOW_THRESHOLD )) && crossed=true
-            local elapsed=$(( 10#$mono_now - 10#$STATE_LAST_LOW_NOTIFY ))
-            if [[ "$crossed" == "true" ]] || (( 10#$STATE_LAST_LOW_NOTIFY == 0 || elapsed >= 10#$REPEAT_LOW_MIN * 60 )); then
-                fn_notify "normal" "Battery Low" "$percentage% — Low Battery" "battery-caution" "$SOUND_LOW"; STATE_LAST_LOW_NOTIFY=$mono_now
+    if [[ $on_battery == false ]] && { [[ $state == Full ]] || (( percentage >= 10#$BATTERY_FULL_THRESHOLD )); }; then
+        if (( LAST_FULL_NOTIFY < 0 || now - LAST_FULL_NOTIFY >= 10#$REPEAT_FULL_MIN * 60 )); then
+            fn_notify normal 'Battery Charged' "$percentage% — Charged" battery-full-charged "$SOUND_PLUG"
+            LAST_FULL_NOTIFY=$now
+        fi
+    else
+        LAST_FULL_NOTIFY=-1
+    fi
+    if [[ $on_battery == true && ( $state == Discharging || $state == Empty ) ]] &&
+        (( percentage <= 10#$BATTERY_LOW_THRESHOLD && percentage > 10#$BATTERY_CRITICAL_THRESHOLD )); then
+        if (( LAST_LOW_NOTIFY < 0 || now - LAST_LOW_NOTIFY >= 10#$REPEAT_LOW_MIN * 60 )); then
+            fn_notify normal 'Battery Low' "$percentage% — Low Battery" battery-caution "$SOUND_LOW"
+            LAST_LOW_NOTIFY=$now
+        fi
+    else
+        LAST_LOW_NOTIFY=-1
+    fi
+    if is_critical "$state" "$percentage" "$on_battery"; then
+        if [[ $DO_SUSPEND == true ]]; then
+            (( SUSPEND_DEADLINE < 0 )) && SUSPEND_DEADLINE=$((now + 10#$SUSPEND_GRACE_SEC))
+            message="$percentage% — $MSG_CRITICAL (in $(( SUSPEND_DEADLINE > now ? SUSPEND_DEADLINE - now : 0 ))s)"
+        else
+            message="$percentage% — Auto-suspend disabled"
+        fi
+        if (( LAST_CRITICAL_NOTIFY < 0 || now - LAST_CRITICAL_NOTIFY >= 10#$REPEAT_CRITICAL_MIN * 60 )); then
+            fn_notify critical 'Battery Critical' "$message" battery-empty "$SOUND_CRITICAL"
+            LAST_CRITICAL_NOTIFY=$now
+        fi
+        if [[ $DO_SUSPEND == true ]] && (( now >= SUSPEND_DEADLINE )); then
+            # Require a fresh, confirmed critical reading immediately before suspend.
+            if reading=$(read_battery); then
+                IFS=';' read -r state2 perc2 power2 <<< "$reading"
+                if is_critical "$state2" "$perc2" "$power2"; then
+                    log "Critical $perc2% — requesting suspend"
+                    if do_suspend; then log 'Suspend request accepted'; else log 'Suspend request failed'; fi
+                else
+                    log "Suspend cancelled: $state2 $perc2%, on-battery=$power2"
+                    SUSPEND_DEADLINE=-1
+                fi
+            else
+                log 'Suspend deferred: battery recheck unavailable'
+            fi
+            if (( SUSPEND_DEADLINE >= 0 )); then
+                # CLOCK_MONOTONIC excludes sleep: this also grants time after resume.
+                SUSPEND_DEADLINE=$((BASH_MONOSECONDS + (10#$SUSPEND_GRACE_SEC > 5 ? 10#$SUSPEND_GRACE_SEC : 5)))
             fi
         fi
+    else
+        SUSPEND_DEADLINE=-1
+        LAST_CRITICAL_NOTIFY=-1
     fi
-    if [[ "$state" == "Discharging" || "$state" == "Empty" ]] && (( 10#$percentage <= 10#$BATTERY_CRITICAL_THRESHOLD )); then
-        local in_grace=false grace_rem=0
-        if (( 10#$STATE_LAST_SUSPEND_MONO > 0 )); then local diff=$(( 10#$mono_now - 10#$STATE_LAST_SUSPEND_MONO )); grace_rem=$(( 10#$SUSPEND_GRACE_SEC - diff )); (( grace_rem > 0 )) && in_grace=true; fi
-        local crossed_crit=false; (( 10#$STATE_LAST_PERCENTAGE > 10#$BATTERY_CRITICAL_THRESHOLD )) && crossed_crit=true
-        local elapsed_c=$(( 10#$mono_now - 10#$STATE_LAST_CRITICAL_NOTIFY ))
-        if [[ "$crossed_crit" == "true" ]] || (( 10#$STATE_LAST_CRITICAL_NOTIFY == 0 || elapsed_c >= 10#$REPEAT_CRITICAL_MIN * 60 )); then
-            local msg; if [[ "$in_grace" == "true" ]]; then msg="$percentage% — Grace: ${grace_rem}s"; else msg="$percentage% — Suspending"; fi
-            fn_notify "critical" "Battery Critical" "$msg" "battery-empty" "$SOUND_CRITICAL"; STATE_LAST_CRITICAL_NOTIFY=$mono_now
-        fi
-        if [[ "$DO_SUSPEND" == "true" && "$in_grace" == "false" ]]; then
-            log "Critical $percentage% — will suspend in 2s (re-checking)"; sleep 2
-            local reread state2 perc2 mode2
-            if reread=$(read_battery_aggregated); then
-                IFS=';' read -r state2 perc2 mode2 <<< "$reread"; perc2="${perc2%%.*}"
-                if [[ "$state2" == "Charging" || "$state2" == "Full" ]]; then log "Abort suspend — now $state2"
-                elif is_integer "$perc2" && (( 10#$perc2 > 10#$BATTERY_CRITICAL_THRESHOLD )); then log "Abort suspend — now $perc2% > critical"
-                else log "Executing suspend"; if do_suspend; then STATE_LAST_SUSPEND_MONO=$(get_mono_now); log "Resumed — grace ${SUSPEND_GRACE_SEC}s"; else log "Suspend failed"; fi; fi
-            else log "Re-read failed, suspending anyway"; if do_suspend; then STATE_LAST_SUSPEND_MONO=$(get_mono_now); fi; fi
-        elif [[ "$in_grace" == "true" ]]; then log "Grace active ${grace_rem}s"; fi
-    fi
-    STATE_LAST="$state"; STATE_LAST_PERCENTAGE=$percentage
+    LAST_ON_BATTERY=$on_battery
 }
-reset_state() { STATE_LAST=""; STATE_LAST_PERCENTAGE=999; STATE_LAST_FULL_NOTIFY=0; STATE_LAST_LOW_NOTIFY=0; STATE_LAST_CRITICAL_NOTIFY=0; STATE_LAST_SUSPEND_MONO=0; }
-start_monitor() {
-    if (( MON_FD >= 0 )); then exec {MON_FD}<&- 2>/dev/null || true; MON_FD=-1; fi
-    coproc UPMON { exec upower --monitor 2>/dev/null; }; UPMON_PID=$!
-    if [[ -n "${UPMON[0]:-}" ]]; then exec {MON_FD}<&${UPMON[0]}; else MON_FD=-1; fi
-    log "Monitor started PID=$UPMON_PID fd=$MON_FD mode=$CURRENT_MODE poll=${SAFETY_POLL_INTERVAL}s"
-}
+
 stop_monitor() {
-    if (( MON_FD >= 0 )); then exec {MON_FD}<&- 2>/dev/null || true; MON_FD=-1; fi
-    if [[ -n "$UPMON_PID" ]] && kill -0 "$UPMON_PID" 2>/dev/null; then kill "$UPMON_PID" 2>/dev/null || true; wait "$UPMON_PID" 2>/dev/null || true; fi
-    UPMON_PID=""
+    if (( MON_FD >= 0 )); then
+        { exec {MON_FD}<&-; } 2>/dev/null
+        MON_FD=-1
+    fi
+    if [[ -n $MONITOR_PID ]]; then
+        kill "$MONITOR_PID" 2>/dev/null || true
+        wait "$MONITOR_PID" 2>/dev/null || true
+        MONITOR_PID=""
+    fi
 }
-cleanup() { [[ "$RUNNING" == "true" ]] && log "Shutting down"; RUNNING=false; stop_monitor; }
-trap cleanup EXIT TERM INT HUP
-main_loop() {
-    reset_state; local retry=0 reading
-    while ! reading=$(read_battery_aggregated); do
-        ((retry++))
-        if (( retry >= MAX_RETRIES )); then
-            log "No battery detected after $MAX_RETRIES attempts. Exiting cleanly (likely a desktop system)."
-            exit 0
-        fi
-        log "No battery yet (attempt $retry/$MAX_RETRIES), retrying 2s..."; sleep 2
-    done
-    local state perc mode; IFS=';' read -r state perc mode <<< "$reading"; CURRENT_MODE="$mode"
-    local mono_now; mono_now=$(get_mono_now)
-    log "Initial: $state $perc% ($CURRENT_MODE) thresholds Full=$BATTERY_FULL_THRESHOLD% Low=$BATTERY_LOW_THRESHOLD% Critical=$BATTERY_CRITICAL_THRESHOLD%"
-    STATE_LAST="$state"; process_battery_event "$state" "$perc" "$mono_now"
-    start_monitor
-    local line
-    while [[ "$RUNNING" == "true" ]]; do
-        if IFS= read -r -t "$SAFETY_POLL_INTERVAL" -u "$MON_FD" line; then
-            sleep 0.1; while IFS= read -r -t 0.05 -u "$MON_FD" _discard; do :; done
-            if reading=$(read_battery_aggregated); then IFS=';' read -r state perc mode <<< "$reading"; CURRENT_MODE="$mode"; mono_now=$(get_mono_now); process_battery_event "$state" "$perc" "$mono_now"; fi
-        else
-            local rc=$?
-            if (( rc > 128 )); then
-                if reading=$(read_battery_aggregated); then IFS=';' read -r state perc mode <<< "$reading"; CURRENT_MODE="$mode"; mono_now=$(get_mono_now); process_battery_event "$state" "$perc" "$mono_now"; fi
-            else log "Monitor died rc=$rc, restarting"; stop_monitor; sleep 0.5; start_monitor; fi
-        fi
-        if [[ -n "$UPMON_PID" ]] && ! kill -0 "$UPMON_PID" 2>/dev/null; then log "Monitor PID vanished, restarting"; stop_monitor; start_monitor; fi
-    done
+
+start_monitor() {
+    local input_fd
+    coproc UPMON { exec upower --monitor; }
+    MONITOR_PID=$!
+    if [[ -n ${UPMON[0]:-} ]]; then
+        exec {MON_FD}<&"${UPMON[0]}"
+        input_fd=${UPMON[1]}
+        exec {input_fd}>&-
+        log "Monitor started PID=$MONITOR_PID"
+    else
+        log 'UPower monitor failed to start'; return 1
+    fi
 }
+
+sample_battery() {
+    local reading state percentage power
+    if reading=$(read_battery); then
+        [[ $READ_FAILED == true ]] && log 'Battery readings recovered'
+        READ_FAILED=false
+        IFS=';' read -r state percentage power <<< "$reading"
+        process_battery_event "$state" "$percentage" "$power" "$BASH_MONOSECONDS"
+    else
+        [[ $READ_FAILED == false ]] && log 'Battery reading unavailable; waiting for recovery'
+        READ_FAILED=true
+        # Avoid a busy loop if a critical deadline expires while UPower is unavailable.
+        if (( SUSPEND_DEADLINE >= 0 && BASH_MONOSECONDS >= SUSPEND_DEADLINE )); then
+            SUSPEND_DEADLINE=$((BASH_MONOSECONDS + 5))
+        fi
+    fi
+}
+
 main() {
-    log "=== Battery Monitor Starting PID=$$ (Hyprland-only) ==="
-    startup_checks || die "Startup checks failed"
-    main_loop
-    log "=== Stopped ==="
+    local reading state percentage power rc=1 retry next_poll wait_sec count spec last interval deadline
+    startup_checks || { log 'Startup checks failed'; return 2; }
+    trap stop_monitor EXIT
+    trap 'exit 0' TERM INT HUP
+    for ((retry=1; retry<=MAX_RETRIES; retry++)); do
+        if reading=$(read_battery); then rc=0; break; else rc=$?; fi
+        (( retry < MAX_RETRIES )) && sleep 2
+    done
+    if (( rc == 2 )); then log 'No battery present; exiting'; return 0; fi
+    if (( rc != 0 )); then log 'Unable to read battery after retries'; return 1; fi
+    IFS=';' read -r state percentage power <<< "$reading"
+    log "Initial: $state $percentage%, on-battery=$power ($BATTERY_PATH)"
+    start_monitor || return 1
+    process_battery_event "$state" "$percentage" "$power" "$BASH_MONOSECONDS"
+    next_poll=$((BASH_MONOSECONDS + 10#$SAFETY_POLL_INTERVAL))
+    while true; do
+        wait_sec=$((next_poll - BASH_MONOSECONDS))
+        if (( SUSPEND_DEADLINE >= 0 && SUSPEND_DEADLINE - BASH_MONOSECONDS < wait_sec )); then
+            wait_sec=$((SUSPEND_DEADLINE - BASH_MONOSECONDS))
+        fi
+        if [[ $READ_FAILED == false ]]; then
+            for spec in LAST_FULL_NOTIFY:REPEAT_FULL_MIN LAST_LOW_NOTIFY:REPEAT_LOW_MIN LAST_CRITICAL_NOTIFY:REPEAT_CRITICAL_MIN; do
+                last=${spec%:*} interval=${spec#*:}
+                if (( ${!last} >= 0 )); then
+                    deadline=$(( ${!last} + 10#${!interval} * 60 - BASH_MONOSECONDS ))
+                    (( deadline < wait_sec )) && wait_sec=$deadline
+                fi
+            done
+        fi
+        (( wait_sec < 1 )) && wait_sec=1
+        if IFS= read -r -t "$wait_sec" -u "$MON_FD"; then
+            # Coalesce bursts and limit queries to five per second during a storm.
+            sleep 0.2
+            # Bound draining so a busy event stream cannot starve deadlines.
+            for ((count=0; count<64; count++)); do
+                IFS= read -r -t 0.01 -u "$MON_FD" || break
+            done
+        else
+            rc=$?
+            if (( rc <= 128 )); then
+                log 'UPower monitor exited; restarting'
+                stop_monitor
+                sleep 1
+                start_monitor || return 1
+            fi
+        fi
+        sample_battery
+        if (( BASH_MONOSECONDS >= next_poll )); then
+            next_poll=$((BASH_MONOSECONDS + 10#$SAFETY_POLL_INTERVAL))
+        fi
+    done
 }
-main "$@"
+
+if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
+    main "$@"
+fi

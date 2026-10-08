@@ -1,0 +1,5779 @@
+{
+  "format_version": 2,
+  "label": "8 W; final retained snapshots and shared rule observations; headless",
+  "runs": 5,
+  "stats": {
+    "launcher_enter_ms": {
+      "median": 566.469454,
+      "mean": 566.4731862,
+      "min": 565.081609,
+      "max": 567.515695
+    },
+    "app_run_enter_ms": {
+      "median": 1730.179879,
+      "mean": 1838.735222,
+      "min": 1729.046647,
+      "max": 2274.815718
+    },
+    "app_mount_enter_ms": {
+      "median": 2398.374938,
+      "mean": 2502.822855,
+      "min": 2388.940597,
+      "max": 2936.312056
+    },
+    "app_mount_return_ms": {
+      "median": 2405.061684,
+      "mean": 2509.5369035999997,
+      "min": 2395.719788,
+      "max": 2943.043589
+    },
+    "first_compositor_callback_ms": {
+      "median": 3302.649929,
+      "mean": 3396.887653,
+      "min": 3266.052946,
+      "max": 3827.435467
+    },
+    "first_after_refresh_ms": {
+      "median": 3579.866039,
+      "mean": 3676.3950126,
+      "min": 3543.486412,
+      "max": 4109.009373
+    },
+    "active_data_refresh_ms": {
+      "median": 7166.115924,
+      "mean": 7241.524863,
+      "min": 7079.592755,
+      "max": 7644.089317
+    },
+    "boot_refresh_ms": {
+      "median": 7167.237925,
+      "mean": 7242.666910800001,
+      "min": 7080.751617,
+      "max": 7645.24109
+    },
+    "viewport_width": {
+      "median": 120,
+      "mean": 120,
+      "min": 120,
+      "max": 120
+    },
+    "viewport_height": {
+      "median": 40,
+      "mean": 40,
+      "min": 40,
+      "max": 40
+    },
+    "widgets_at_boot": {
+      "median": 106,
+      "mean": 106,
+      "min": 106,
+      "max": 106
+    },
+    "custom_widgets_at_boot": {
+      "median": 1,
+      "mean": 1,
+      "min": 1,
+      "max": 1
+    },
+    "observation_end_ms": {
+      "median": 14850.621429,
+      "mean": 14890.4576406,
+      "min": 14678.127084,
+      "max": 15324.966976
+    },
+    "launcher_return_ms": {
+      "median": 14919.12562,
+      "mean": 14958.8652814,
+      "min": 14747.139171,
+      "max": 15393.782272
+    },
+    "startup_factory_count": {
+      "median": 1,
+      "mean": 1,
+      "min": 1,
+      "max": 1
+    },
+    "startup_factory_inclusive_ms": {
+      "median": 1.371119,
+      "mean": 1.4572948,
+      "min": 1.343361,
+      "max": 1.612411
+    },
+    "startup_collector_count": {
+      "median": 1,
+      "mean": 1,
+      "min": 1,
+      "max": 1
+    },
+    "startup_collector_inclusive_ms": {
+      "median": 2086.148422,
+      "mean": 2082.2668628,
+      "min": 2057.620412,
+      "max": 2099.788327
+    },
+    "startup_command_count": {
+      "median": 6,
+      "mean": 6,
+      "min": 6,
+      "max": 6
+    },
+    "startup_command_inclusive_ms": {
+      "median": 3425.534313,
+      "mean": 3424.4303362,
+      "min": 3405.422271,
+      "max": 3437.627087
+    },
+    "startup_compose_step_count": {
+      "median": 32,
+      "mean": 32,
+      "min": 32,
+      "max": 32
+    },
+    "startup_compose_step_inclusive_ms": {
+      "median": 25.598453,
+      "mean": 25.4717768,
+      "min": 25.178994,
+      "max": 25.670097000000002
+    },
+    "max_rss_kib": {
+      "median": 57012,
+      "mean": 59032,
+      "min": 56856,
+      "max": 67108
+    },
+    "process_cpu_ms": {
+      "median": 7349.983394,
+      "mean": 7384.1652694,
+      "min": 7141.899804000001,
+      "max": 7837.528453
+    }
+  },
+  "records": [
+    {
+      "metrics": {
+        "launcher_enter_ms": 565.081609,
+        "app_run_enter_ms": 2274.815718,
+        "app_mount_enter_ms": 2936.312056,
+        "app_mount_return_ms": 2943.043589,
+        "first_compositor_callback_ms": 3827.435467,
+        "first_after_refresh_ms": 4109.009373,
+        "active_data_refresh_ms": 7644.089317,
+        "boot_refresh_ms": 7645.24109,
+        "viewport_width": 120,
+        "viewport_height": 40,
+        "widgets_at_boot": 106,
+        "custom_widgets_at_boot": 1,
+        "observation_end_ms": 15324.966976,
+        "launcher_return_ms": 15393.782272,
+        "startup_factory_count": 1,
+        "startup_factory_inclusive_ms": 1.371119,
+        "startup_collector_count": 1,
+        "startup_collector_inclusive_ms": 2088.653721,
+        "startup_command_count": 6,
+        "startup_command_inclusive_ms": 3429.660143,
+        "startup_compose_step_count": 32,
+        "startup_compose_step_inclusive_ms": 25.662069,
+        "max_rss_kib": 67108,
+        "process_cpu_ms": 7837.528453
+      },
+      "spans": [
+        {
+          "kind": "import_inclusive",
+          "name": "dusky_schema_tui_ufw",
+          "phase": "startup",
+          "start_ms": 622.076855,
+          "duration_ms": 285.213183,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "import_inclusive",
+          "name": "textual",
+          "phase": "startup",
+          "start_ms": 1364.183112,
+          "duration_ms": 210.030162,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "import_inclusive",
+          "name": "textual.app",
+          "phase": "startup",
+          "start_ms": 1574.677051,
+          "duration_ms": 389.558437,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "import_inclusive",
+          "name": "python.frontend.ui",
+          "phase": "startup",
+          "start_ms": 908.39993,
+          "duration_ms": 1334.5304,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "method",
+          "name": "__init__",
+          "phase": "startup",
+          "start_ms": 2243.253102,
+          "duration_ms": 31.486846,
+          "thread": "MainThread",
+          "argument": null
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 2371.4335,
+          "duration_ms": 1.044062,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 2372.52755,
+          "duration_ms": 6.770537,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 2379.357159,
+          "duration_ms": 0.32057,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 2379.70428,
+          "duration_ms": 0.292298,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 2380.014555,
+          "duration_ms": 1.566525,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 2381.608835,
+          "duration_ms": 0.881809,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 2382.515853,
+          "duration_ms": 0.484486,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 2383.02169,
+          "duration_ms": 0.383481,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 2383.425446,
+          "duration_ms": 0.78157,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 2384.22923,
+          "duration_ms": 0.41671,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 2384.662841,
+          "duration_ms": 0.661474,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 2385.341853,
+          "duration_ms": 0.693198,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 2386.059175,
+          "duration_ms": 1.356868,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 2387.440661,
+          "duration_ms": 0.418022,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 2387.87859,
+          "duration_ms": 0.744156,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 2388.642746,
+          "duration_ms": 0.476496,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 2389.136757,
+          "duration_ms": 0.77705,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 2389.932375,
+          "duration_ms": 0.357911,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 2390.308645,
+          "duration_ms": 0.390033,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 2390.72259,
+          "duration_ms": 0.652359,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 2391.392722,
+          "duration_ms": 0.358582,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 2391.766857,
+          "duration_ms": 0.65325,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 2392.435796,
+          "duration_ms": 0.402437,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 2392.855149,
+          "duration_ms": 0.622934,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 2393.493275,
+          "duration_ms": 0.982215,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 2394.496392,
+          "duration_ms": 0.708627,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 2395.224877,
+          "duration_ms": 0.362229,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 2395.605769,
+          "duration_ms": 0.370333,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 2395.994977,
+          "duration_ms": 0.43274,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 2396.444156,
+          "duration_ms": 0.987293,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 2397.453339,
+          "duration_ms": 0.277989,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 2397.750391,
+          "duration_ms": 0.033825,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "startup",
+          "start_ms": 3827.409043,
+          "duration_ms": 0.055964,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "startup",
+          "start_ms": 3880.241169,
+          "duration_ms": 0.046204,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "startup",
+          "start_ms": 3908.836749,
+          "duration_ms": 0.031444,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "method",
+          "name": "_populate_option_list",
+          "phase": "startup",
+          "start_ms": 3921.210817,
+          "duration_ms": 0.511728,
+          "thread": "MainThread",
+          "argument": "0"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "startup",
+          "start_ms": 4086.854853,
+          "duration_ms": 0.040038,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "startup",
+          "start_ms": 4101.517417,
+          "duration_ms": 0.031397,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "startup",
+          "start_ms": 4141.425668,
+          "duration_ms": 0.033307,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "command",
+          "name": "['ufw', 'status', 'verbose']",
+          "phase": "startup",
+          "start_ms": 3917.933286,
+          "duration_ms": 678.381931,
+          "thread": "asyncio_0",
+          "returncode": 0
+        },
+        {
+          "kind": "command",
+          "name": "['ufw', 'status', 'numbered']",
+          "phase": "startup",
+          "start_ms": 4609.791494,
+          "duration_ms": 668.560314,
+          "thread": "asyncio_0",
+          "returncode": 0
+        },
+        {
+          "kind": "method",
+          "name": "_load_one_engine_sync",
+          "phase": "startup",
+          "start_ms": 3917.577704,
+          "duration_ms": 1367.003761,
+          "thread": "asyncio_0",
+          "argument": "('ufw', '/etc/default/ufw')"
+        },
+        {
+          "kind": "method",
+          "name": "_populate_option_list",
+          "phase": "startup",
+          "start_ms": 5285.499502,
+          "duration_ms": 0.922872,
+          "thread": "MainThread",
+          "argument": "0"
+        },
+        {
+          "kind": "method",
+          "name": "_populate_option_list",
+          "phase": "startup",
+          "start_ms": 5295.760253,
+          "duration_ms": 6.149952,
+          "thread": "MainThread",
+          "argument": "1"
+        },
+        {
+          "kind": "method",
+          "name": "_populate_option_list",
+          "phase": "startup",
+          "start_ms": 5309.046263,
+          "duration_ms": 15.907233,
+          "thread": "MainThread",
+          "argument": "3"
+        },
+        {
+          "kind": "method",
+          "name": "_populate_option_list",
+          "phase": "startup",
+          "start_ms": 5334.283673,
+          "duration_ms": 12.779242,
+          "thread": "MainThread",
+          "argument": "5"
+        },
+        {
+          "kind": "method",
+          "name": "_populate_option_list",
+          "phase": "startup",
+          "start_ms": 5353.485957,
+          "duration_ms": 3.927029,
+          "thread": "MainThread",
+          "argument": "7"
+        },
+        {
+          "kind": "method",
+          "name": "_populate_option_list",
+          "phase": "startup",
+          "start_ms": 5364.517119,
+          "duration_ms": 13.013236,
+          "thread": "MainThread",
+          "argument": "8"
+        },
+        {
+          "kind": "method",
+          "name": "_populate_option_list",
+          "phase": "startup",
+          "start_ms": 5394.472804,
+          "duration_ms": 9.578388,
+          "thread": "MainThread",
+          "argument": "10"
+        },
+        {
+          "kind": "method",
+          "name": "_populate_option_list",
+          "phase": "startup",
+          "start_ms": 5411.643251,
+          "duration_ms": 9.03177,
+          "thread": "MainThread",
+          "argument": "11"
+        },
+        {
+          "kind": "method",
+          "name": "_populate_option_list",
+          "phase": "startup",
+          "start_ms": 5425.125254,
+          "duration_ms": 3.959603,
+          "thread": "MainThread",
+          "argument": "12"
+        },
+        {
+          "kind": "method",
+          "name": "_populate_option_list",
+          "phase": "startup",
+          "start_ms": 5438.120196,
+          "duration_ms": 8.35239,
+          "thread": "MainThread",
+          "argument": "13"
+        },
+        {
+          "kind": "command",
+          "name": "['ufw', 'status', 'numbered']",
+          "phase": "startup",
+          "start_ms": 5300.170885,
+          "duration_ms": 666.490936,
+          "thread": "asyncio_1",
+          "returncode": 0
+        },
+        {
+          "kind": "command",
+          "name": "['ufw', 'status', 'verbose']",
+          "phase": "startup",
+          "start_ms": 5967.985176,
+          "duration_ms": 670.960305,
+          "thread": "asyncio_1",
+          "returncode": 0
+        },
+        {
+          "kind": "command",
+          "name": "['ip', '-4', 'route', 'show', 'default']",
+          "phase": "startup",
+          "start_ms": 6639.430742,
+          "duration_ms": 9.05696,
+          "thread": "asyncio_1",
+          "returncode": 0
+        },
+        {
+          "kind": "command",
+          "name": "['ufw', 'show', 'listening']",
+          "phase": "startup",
+          "start_ms": 6651.118775,
+          "duration_ms": 736.209697,
+          "thread": "asyncio_1",
+          "returncode": 0
+        },
+        {
+          "kind": "collector",
+          "name": "custom-view-0",
+          "phase": "startup",
+          "start_ms": 5299.866249,
+          "duration_ms": 2088.653721,
+          "thread": "asyncio_1"
+        },
+        {
+          "kind": "factory",
+          "name": "custom-view-0",
+          "phase": "startup",
+          "start_ms": 7389.400365,
+          "duration_ms": 1.371119,
+          "thread": "MainThread",
+          "ancestor_display": true
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "startup",
+          "start_ms": 7552.176086,
+          "duration_ms": 0.038347,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "startup",
+          "start_ms": 7642.625565,
+          "duration_ms": 0.037095,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "command",
+          "name": "['ufw', 'status', 'numbered']",
+          "phase": "idle_observation",
+          "start_ms": 9290.629191,
+          "duration_ms": 667.49662,
+          "thread": "asyncio_0",
+          "returncode": 0
+        },
+        {
+          "kind": "command",
+          "name": "['ufw', 'status', 'verbose']",
+          "phase": "idle_observation",
+          "start_ms": 9960.007389,
+          "duration_ms": 669.246245,
+          "thread": "asyncio_0",
+          "returncode": 0
+        },
+        {
+          "kind": "command",
+          "name": "['ip', '-4', 'route', 'show', 'default']",
+          "phase": "idle_observation",
+          "start_ms": 10629.746109,
+          "duration_ms": 7.644204,
+          "thread": "asyncio_0",
+          "returncode": 0
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_1_first_visit",
+          "start_ms": 10898.294862,
+          "duration_ms": 0.046706,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_1_first_visit",
+          "start_ms": 11118.02365,
+          "duration_ms": 0.041504,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_1_first_visit",
+          "start_ms": 11133.187626,
+          "duration_ms": 0.032825,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_1_first_visit",
+          "start_ms": 11203.904872,
+          "duration_ms": 0.035797,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_1_first_visit",
+          "start_ms": 11307.544566,
+          "duration_ms": 0.038548,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_1_first_visit",
+          "start_ms": 11323.064136,
+          "duration_ms": 0.032787,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_1_revisit",
+          "start_ms": 11358.21747,
+          "duration_ms": 0.033191,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "command",
+          "name": "['ufw', 'show', 'listening']",
+          "phase": "idle_observation",
+          "start_ms": 10639.071552,
+          "duration_ms": 747.484296,
+          "thread": "asyncio_0",
+          "returncode": 0
+        },
+        {
+          "kind": "collector",
+          "name": "custom-view-0",
+          "phase": "idle_observation",
+          "start_ms": 9290.297878,
+          "duration_ms": 2096.572244,
+          "thread": "asyncio_0"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_1_revisit",
+          "start_ms": 11466.292561,
+          "duration_ms": 0.038608,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_1_revisit",
+          "start_ms": 11481.598838,
+          "duration_ms": 0.030075,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_1_revisit",
+          "start_ms": 11540.32939,
+          "duration_ms": 0.034551,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_1_revisit",
+          "start_ms": 11648.360601,
+          "duration_ms": 0.036192,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_1_revisit",
+          "start_ms": 11662.804067,
+          "duration_ms": 0.050706,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_2_first_visit",
+          "start_ms": 11712.486957,
+          "duration_ms": 0.036592,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "method",
+          "name": "_populate_option_list",
+          "phase": "tab_2_first_visit",
+          "start_ms": 11725.105929,
+          "duration_ms": 0.473381,
+          "thread": "MainThread",
+          "argument": "2"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_2_first_visit",
+          "start_ms": 11806.871865,
+          "duration_ms": 0.040735,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_2_first_visit",
+          "start_ms": 11821.541581,
+          "duration_ms": 0.032784,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "command",
+          "name": "['ss', '-H', '-tlunp']",
+          "phase": "tab_2_first_visit",
+          "start_ms": 11727.529527,
+          "duration_ms": 112.081643,
+          "thread": "asyncio_2",
+          "returncode": 0
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_2_first_visit",
+          "start_ms": 11855.803478,
+          "duration_ms": 0.034983,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "command",
+          "name": "['ufw', 'status', 'numbered']",
+          "phase": "tab_2_first_visit",
+          "start_ms": 11839.931012,
+          "duration_ms": 672.855593,
+          "thread": "asyncio_2",
+          "returncode": 0
+        },
+        {
+          "kind": "command",
+          "name": "['ufw', 'status', 'verbose']",
+          "phase": "tab_2_first_visit",
+          "start_ms": 12514.621837,
+          "duration_ms": 662.05498,
+          "thread": "asyncio_2",
+          "returncode": 0
+        },
+        {
+          "kind": "collector",
+          "name": "custom-view-2",
+          "phase": "tab_2_first_visit",
+          "start_ms": 11727.21549,
+          "duration_ms": 1458.179986,
+          "thread": "asyncio_2"
+        },
+        {
+          "kind": "factory",
+          "name": "custom-view-2",
+          "phase": "tab_2_first_visit",
+          "start_ms": 13187.133454,
+          "duration_ms": 1.174102,
+          "thread": "MainThread",
+          "ancestor_display": true
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_2_first_visit",
+          "start_ms": 13374.574236,
+          "duration_ms": 0.045183,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_2_first_visit",
+          "start_ms": 13500.178183,
+          "duration_ms": 0.047369,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_2_first_visit",
+          "start_ms": 13645.48337,
+          "duration_ms": 0.04667,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_2_first_visit",
+          "start_ms": 13661.478951,
+          "duration_ms": 0.032129,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_2_revisit",
+          "start_ms": 13762.043781,
+          "duration_ms": 0.037754,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_2_revisit",
+          "start_ms": 13776.78407,
+          "duration_ms": 0.030544,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_2_revisit",
+          "start_ms": 13877.591155,
+          "duration_ms": 0.036849,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_2_revisit",
+          "start_ms": 13892.330156,
+          "duration_ms": 0.031453,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_14_first_visit",
+          "start_ms": 13946.766466,
+          "duration_ms": 0.038223,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "method",
+          "name": "_populate_option_list",
+          "phase": "tab_14_first_visit",
+          "start_ms": 13965.292982,
+          "duration_ms": 0.538259,
+          "thread": "MainThread",
+          "argument": "14"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_14_first_visit",
+          "start_ms": 14055.39549,
+          "duration_ms": 0.040842,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_14_first_visit",
+          "start_ms": 14069.852003,
+          "duration_ms": 0.031592,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_14_first_visit",
+          "start_ms": 14127.131482,
+          "duration_ms": 0.038177,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "command",
+          "name": "['ufw', 'show', 'listening']",
+          "phase": "tab_14_first_visit",
+          "start_ms": 13961.962005,
+          "duration_ms": 747.614905,
+          "thread": "asyncio_2",
+          "returncode": 0
+        },
+        {
+          "kind": "collector",
+          "name": "custom-view-14",
+          "phase": "tab_14_first_visit",
+          "start_ms": 13961.640942,
+          "duration_ms": 748.021967,
+          "thread": "asyncio_2"
+        },
+        {
+          "kind": "factory",
+          "name": "custom-view-14",
+          "phase": "tab_14_first_visit",
+          "start_ms": 14710.52925,
+          "duration_ms": 0.257845,
+          "thread": "MainThread",
+          "ancestor_display": true
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_14_first_visit",
+          "start_ms": 14742.233006,
+          "duration_ms": 0.035174,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_14_first_visit",
+          "start_ms": 14791.137104,
+          "duration_ms": 0.037553,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_14_first_visit",
+          "start_ms": 14886.073544,
+          "duration_ms": 0.044505,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_14_first_visit",
+          "start_ms": 14900.988724,
+          "duration_ms": 0.033162,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_14_revisit",
+          "start_ms": 14953.416296,
+          "duration_ms": 0.038172,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_14_revisit",
+          "start_ms": 15038.284534,
+          "duration_ms": 0.04079,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_14_revisit",
+          "start_ms": 15053.102547,
+          "duration_ms": 0.032311,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_14_revisit",
+          "start_ms": 15100.447103,
+          "duration_ms": 0.040486,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_14_revisit",
+          "start_ms": 15299.623713,
+          "duration_ms": 0.052937,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_14_revisit",
+          "start_ms": 15314.853353,
+          "duration_ms": 0.031067,
+          "thread": "MainThread"
+        }
+      ],
+      "switches": [
+        {
+          "tab": 1,
+          "visit": "first_visit",
+          "warmed_before": true,
+          "children_before": 1,
+          "retained_content_before": false,
+          "dirty_collector_before": false,
+          "duration_ms": 346.432908
+        },
+        {
+          "tab": 1,
+          "visit": "revisit",
+          "warmed_before": true,
+          "children_before": 1,
+          "retained_content_before": false,
+          "dirty_collector_before": false,
+          "duration_ms": 211.113754
+        },
+        {
+          "tab": 2,
+          "visit": "first_visit",
+          "warmed_before": false,
+          "children_before": 1,
+          "retained_content_before": false,
+          "dirty_collector_before": false,
+          "duration_ms": 1830.24012
+        },
+        {
+          "tab": 2,
+          "visit": "revisit",
+          "warmed_before": true,
+          "children_before": 1,
+          "retained_content_before": true,
+          "dirty_collector_before": false,
+          "duration_ms": 118.499734
+        },
+        {
+          "tab": 14,
+          "visit": "first_visit",
+          "warmed_before": false,
+          "children_before": 1,
+          "retained_content_before": false,
+          "dirty_collector_before": false,
+          "duration_ms": 894.220905
+        },
+        {
+          "tab": 14,
+          "visit": "revisit",
+          "warmed_before": true,
+          "children_before": 1,
+          "retained_content_before": true,
+          "dirty_collector_before": false,
+          "duration_ms": 189.703584
+        }
+      ],
+      "errors": [],
+      "environment": {
+        "python": "3.14.7 (main, Aug 10 2026, 07:46:56) [GCC 16.1.1 20260728]",
+        "executable": "/usr/bin/python3",
+        "textual": "8.2.8",
+        "kernel": "7.3.0-rc4-dusky-battery",
+        "uid": 0,
+        "home": "/home/dusk",
+        "gil_enabled": true,
+        "cpu_count": 14,
+        "affinity": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          12,
+          13
+        ],
+        "term": "xterm-kitty",
+        "term_program": null,
+        "mode": "headless",
+        "size": [
+          120,
+          40
+        ],
+        "pycache_prefix": "/home/dusk/.cache/dusky_tui",
+        "power_limits_uw": {
+          "/sys/devices/virtual/powercap/intel-rapl/intel-rapl:0/constraint_2_power_limit_uw": 20000000,
+          "/sys/devices/virtual/powercap/intel-rapl/intel-rapl:0/constraint_1_power_limit_uw": 8000000,
+          "/sys/devices/virtual/powercap/intel-rapl/intel-rapl:0/constraint_0_power_limit_uw": 8000000,
+          "/sys/devices/virtual/powercap/intel-rapl/intel-rapl:0/intel-rapl:0:0/constraint_0_power_limit_uw": 0,
+          "/sys/devices/virtual/powercap/intel-rapl/intel-rapl:0/intel-rapl:0:1/constraint_0_power_limit_uw": 0,
+          "/sys/devices/virtual/powercap/intel-rapl-mmio/intel-rapl-mmio:0/constraint_2_power_limit_uw": 20000000,
+          "/sys/devices/virtual/powercap/intel-rapl-mmio/intel-rapl-mmio:0/constraint_1_power_limit_uw": 60000000,
+          "/sys/devices/virtual/powercap/intel-rapl-mmio/intel-rapl-mmio:0/constraint_0_power_limit_uw": 50000000
+        },
+        "source_sha256": {
+          "/mnt/zram1/performance_tui/benchmark_startup.py": "a9e8aeb95da8cac2837d13d906c63b68149a8e1ad192c84c8753c646317a4a3a",
+          "/home/dusk/user_scripts/dusky_tui/python/main/main.py": "1c10ba654a40465c521bc6dba699da9df3b70fcd838a4b20bbdcb93448f8a764",
+          "/home/dusk/user_scripts/network_manager/tui_ufw.py": "0a4829bdec76fc9343f99dafeef5ad02698a53c7b5d112b27e0218a4fbfda622",
+          "/home/dusk/user_scripts/dusky_tui/python/frontend/ui.py": "01eec4cdc4a29c4082807ad023056e0f7b0f534943ee88a0a8a9095bbe2c959b"
+        },
+        "sync_output_detected": false
+      },
+      "schema": "/home/dusk/user_scripts/network_manager/tui_ufw.py",
+      "launcher": "/home/dusk/user_scripts/dusky_tui/python/main/main.py",
+      "stderr": ""
+    },
+    {
+      "metrics": {
+        "launcher_enter_ms": 566.469454,
+        "app_run_enter_ms": 1730.284368,
+        "app_mount_enter_ms": 2388.940597,
+        "app_mount_return_ms": 2395.719788,
+        "first_compositor_callback_ms": 3266.052946,
+        "first_after_refresh_ms": 3543.486412,
+        "active_data_refresh_ms": 7079.592755,
+        "boot_refresh_ms": 7080.751617,
+        "viewport_width": 120,
+        "viewport_height": 40,
+        "widgets_at_boot": 106,
+        "custom_widgets_at_boot": 1,
+        "observation_end_ms": 14678.127084,
+        "launcher_return_ms": 14747.139171,
+        "startup_factory_count": 1,
+        "startup_factory_inclusive_ms": 1.367997,
+        "startup_collector_count": 1,
+        "startup_collector_inclusive_ms": 2086.148422,
+        "startup_command_count": 6,
+        "startup_command_inclusive_ms": 3425.534313,
+        "startup_compose_step_count": 32,
+        "startup_compose_step_inclusive_ms": 25.598453,
+        "max_rss_kib": 56856,
+        "process_cpu_ms": 7141.899804000001
+      },
+      "spans": [
+        {
+          "kind": "import_inclusive",
+          "name": "dusky_schema_tui_ufw",
+          "phase": "startup",
+          "start_ms": 623.429943,
+          "duration_ms": 161.75639,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "import_inclusive",
+          "name": "textual",
+          "phase": "startup",
+          "start_ms": 797.779197,
+          "duration_ms": 218.51204,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "import_inclusive",
+          "name": "textual.app",
+          "phase": "startup",
+          "start_ms": 1016.750419,
+          "duration_ms": 399.437682,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "import_inclusive",
+          "name": "python.frontend.ui",
+          "phase": "startup",
+          "start_ms": 786.310554,
+          "duration_ms": 911.583289,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "method",
+          "name": "__init__",
+          "phase": "startup",
+          "start_ms": 1698.205058,
+          "duration_ms": 32.002201,
+          "thread": "MainThread",
+          "argument": null
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1826.434174,
+          "duration_ms": 1.056497,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1827.541042,
+          "duration_ms": 6.876556,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1834.471802,
+          "duration_ms": 0.301328,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1834.800359,
+          "duration_ms": 0.298617,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1835.117428,
+          "duration_ms": 1.561467,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1836.706935,
+          "duration_ms": 0.878295,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1837.612067,
+          "duration_ms": 0.524142,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1838.157812,
+          "duration_ms": 0.427289,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1838.604017,
+          "duration_ms": 0.772115,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1839.396445,
+          "duration_ms": 0.439011,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1839.852728,
+          "duration_ms": 0.372086,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1840.240795,
+          "duration_ms": 0.749408,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1841.018415,
+          "duration_ms": 1.2903,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1842.327804,
+          "duration_ms": 0.403912,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1842.749896,
+          "duration_ms": 0.704003,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1843.473341,
+          "duration_ms": 0.472095,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1843.970422,
+          "duration_ms": 0.732776,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1844.71924,
+          "duration_ms": 0.424651,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1845.160366,
+          "duration_ms": 0.376766,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1845.554673,
+          "duration_ms": 0.651756,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1846.231195,
+          "duration_ms": 0.361083,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1846.608132,
+          "duration_ms": 0.703846,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1847.328619,
+          "duration_ms": 0.349694,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1847.693735,
+          "duration_ms": 0.677515,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1848.388855,
+          "duration_ms": 1.044611,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1849.461733,
+          "duration_ms": 0.731433,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1850.211265,
+          "duration_ms": 0.400822,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1850.629692,
+          "duration_ms": 0.325377,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1850.982537,
+          "duration_ms": 0.383854,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1851.380604,
+          "duration_ms": 0.990445,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1852.39231,
+          "duration_ms": 0.278754,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1852.690482,
+          "duration_ms": 0.037949,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "startup",
+          "start_ms": 3266.02792,
+          "duration_ms": 0.055405,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "startup",
+          "start_ms": 3318.321074,
+          "duration_ms": 0.043907,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "startup",
+          "start_ms": 3346.30293,
+          "duration_ms": 0.033396,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "method",
+          "name": "_populate_option_list",
+          "phase": "startup",
+          "start_ms": 3358.711241,
+          "duration_ms": 0.525921,
+          "thread": "MainThread",
+          "argument": "0"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "startup",
+          "start_ms": 3521.922469,
+          "duration_ms": 0.041612,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "startup",
+          "start_ms": 3536.230405,
+          "duration_ms": 0.03193,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "startup",
+          "start_ms": 3578.638512,
+          "duration_ms": 0.03401,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "command",
+          "name": "['ufw', 'status', 'verbose']",
+          "phase": "startup",
+          "start_ms": 3355.51677,
+          "duration_ms": 678.057166,
+          "thread": "asyncio_0",
+          "returncode": 0
+        },
+        {
+          "kind": "command",
+          "name": "['ufw', 'status', 'numbered']",
+          "phase": "startup",
+          "start_ms": 4047.377662,
+          "duration_ms": 667.320938,
+          "thread": "asyncio_0",
+          "returncode": 0
+        },
+        {
+          "kind": "method",
+          "name": "_load_one_engine_sync",
+          "phase": "startup",
+          "start_ms": 3355.152032,
+          "duration_ms": 1365.23452,
+          "thread": "asyncio_0",
+          "argument": "('ufw', '/etc/default/ufw')"
+        },
+        {
+          "kind": "method",
+          "name": "_populate_option_list",
+          "phase": "startup",
+          "start_ms": 4722.133007,
+          "duration_ms": 0.664219,
+          "thread": "MainThread",
+          "argument": "0"
+        },
+        {
+          "kind": "method",
+          "name": "_populate_option_list",
+          "phase": "startup",
+          "start_ms": 4729.465765,
+          "duration_ms": 3.845332,
+          "thread": "MainThread",
+          "argument": "1"
+        },
+        {
+          "kind": "method",
+          "name": "_populate_option_list",
+          "phase": "startup",
+          "start_ms": 4739.925144,
+          "duration_ms": 11.298183,
+          "thread": "MainThread",
+          "argument": "3"
+        },
+        {
+          "kind": "method",
+          "name": "_populate_option_list",
+          "phase": "startup",
+          "start_ms": 4763.812687,
+          "duration_ms": 8.087623,
+          "thread": "MainThread",
+          "argument": "5"
+        },
+        {
+          "kind": "method",
+          "name": "_populate_option_list",
+          "phase": "startup",
+          "start_ms": 4781.491552,
+          "duration_ms": 8.777603,
+          "thread": "MainThread",
+          "argument": "7"
+        },
+        {
+          "kind": "method",
+          "name": "_populate_option_list",
+          "phase": "startup",
+          "start_ms": 4797.110213,
+          "duration_ms": 7.029126,
+          "thread": "MainThread",
+          "argument": "8"
+        },
+        {
+          "kind": "method",
+          "name": "_populate_option_list",
+          "phase": "startup",
+          "start_ms": 4815.100886,
+          "duration_ms": 6.488975,
+          "thread": "MainThread",
+          "argument": "10"
+        },
+        {
+          "kind": "method",
+          "name": "_populate_option_list",
+          "phase": "startup",
+          "start_ms": 4831.074036,
+          "duration_ms": 6.261552,
+          "thread": "MainThread",
+          "argument": "11"
+        },
+        {
+          "kind": "method",
+          "name": "_populate_option_list",
+          "phase": "startup",
+          "start_ms": 4848.394934,
+          "duration_ms": 6.630109,
+          "thread": "MainThread",
+          "argument": "12"
+        },
+        {
+          "kind": "method",
+          "name": "_populate_option_list",
+          "phase": "startup",
+          "start_ms": 4864.491207,
+          "duration_ms": 5.906751,
+          "thread": "MainThread",
+          "argument": "13"
+        },
+        {
+          "kind": "command",
+          "name": "['ufw', 'status', 'numbered']",
+          "phase": "startup",
+          "start_ms": 4734.337453,
+          "duration_ms": 674.453996,
+          "thread": "asyncio_1",
+          "returncode": 0
+        },
+        {
+          "kind": "command",
+          "name": "['ufw', 'status', 'verbose']",
+          "phase": "startup",
+          "start_ms": 5410.148775,
+          "duration_ms": 666.543143,
+          "thread": "asyncio_1",
+          "returncode": 0
+        },
+        {
+          "kind": "command",
+          "name": "['ip', '-4', 'route', 'show', 'default']",
+          "phase": "startup",
+          "start_ms": 6077.166524,
+          "duration_ms": 8.712953,
+          "thread": "asyncio_1",
+          "returncode": 0
+        },
+        {
+          "kind": "command",
+          "name": "['ufw', 'show', 'listening']",
+          "phase": "startup",
+          "start_ms": 6088.467001,
+          "duration_ms": 730.446117,
+          "thread": "asyncio_1",
+          "returncode": 0
+        },
+        {
+          "kind": "collector",
+          "name": "custom-view-0",
+          "phase": "startup",
+          "start_ms": 4734.009099,
+          "duration_ms": 2086.148422,
+          "thread": "asyncio_1"
+        },
+        {
+          "kind": "factory",
+          "name": "custom-view-0",
+          "phase": "startup",
+          "start_ms": 6821.043315,
+          "duration_ms": 1.367997,
+          "thread": "MainThread",
+          "ancestor_display": true
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "startup",
+          "start_ms": 6984.489852,
+          "duration_ms": 0.041452,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "startup",
+          "start_ms": 7078.147935,
+          "duration_ms": 0.038238,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "command",
+          "name": "['ufw', 'status', 'numbered']",
+          "phase": "idle_observation",
+          "start_ms": 8726.412876,
+          "duration_ms": 660.861291,
+          "thread": "asyncio_0",
+          "returncode": 0
+        },
+        {
+          "kind": "command",
+          "name": "['ufw', 'status', 'verbose']",
+          "phase": "idle_observation",
+          "start_ms": 9389.232858,
+          "duration_ms": 668.623311,
+          "thread": "asyncio_0",
+          "returncode": 0
+        },
+        {
+          "kind": "command",
+          "name": "['ip', '-4', 'route', 'show', 'default']",
+          "phase": "idle_observation",
+          "start_ms": 10058.322986,
+          "duration_ms": 7.570553,
+          "thread": "asyncio_0",
+          "returncode": 0
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_1_first_visit",
+          "start_ms": 10320.216841,
+          "duration_ms": 0.038651,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_1_first_visit",
+          "start_ms": 10475.448468,
+          "duration_ms": 0.04027,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_1_first_visit",
+          "start_ms": 10490.344142,
+          "duration_ms": 0.032148,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_1_first_visit",
+          "start_ms": 10556.118583,
+          "duration_ms": 0.038131,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_1_first_visit",
+          "start_ms": 10659.739158,
+          "duration_ms": 0.038536,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_1_first_visit",
+          "start_ms": 10674.830987,
+          "duration_ms": 0.031854,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_1_revisit",
+          "start_ms": 10709.561365,
+          "duration_ms": 0.035712,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_1_revisit",
+          "start_ms": 10820.714788,
+          "duration_ms": 0.041829,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "command",
+          "name": "['ufw', 'show', 'listening']",
+          "phase": "idle_observation",
+          "start_ms": 10067.55011,
+          "duration_ms": 758.053658,
+          "thread": "asyncio_0",
+          "returncode": 0
+        },
+        {
+          "kind": "collector",
+          "name": "custom-view-0",
+          "phase": "idle_observation",
+          "start_ms": 8726.120024,
+          "duration_ms": 2099.805275,
+          "thread": "asyncio_0"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_1_revisit",
+          "start_ms": 10837.012817,
+          "duration_ms": 0.032386,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_1_revisit",
+          "start_ms": 10894.223762,
+          "duration_ms": 0.039121,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_1_revisit",
+          "start_ms": 10924.064885,
+          "duration_ms": 0.035246,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_1_revisit",
+          "start_ms": 11009.28066,
+          "duration_ms": 0.041198,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_1_revisit",
+          "start_ms": 11023.816022,
+          "duration_ms": 0.033785,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_2_first_visit",
+          "start_ms": 11060.432094,
+          "duration_ms": 0.035775,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "method",
+          "name": "_populate_option_list",
+          "phase": "tab_2_first_visit",
+          "start_ms": 11097.947213,
+          "duration_ms": 0.510794,
+          "thread": "MainThread",
+          "argument": "2"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_2_first_visit",
+          "start_ms": 11181.38083,
+          "duration_ms": 0.043015,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_2_first_visit",
+          "start_ms": 11195.790488,
+          "duration_ms": 0.030567,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "command",
+          "name": "['ss', '-H', '-tlunp']",
+          "phase": "tab_2_first_visit",
+          "start_ms": 11100.306422,
+          "duration_ms": 114.999579,
+          "thread": "asyncio_1",
+          "returncode": 0
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_2_first_visit",
+          "start_ms": 11242.444429,
+          "duration_ms": 0.037005,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "command",
+          "name": "['ufw', 'status', 'numbered']",
+          "phase": "tab_2_first_visit",
+          "start_ms": 11215.600829,
+          "duration_ms": 673.219008,
+          "thread": "asyncio_1",
+          "returncode": 0
+        },
+        {
+          "kind": "command",
+          "name": "['ufw', 'status', 'verbose']",
+          "phase": "tab_2_first_visit",
+          "start_ms": 11890.676103,
+          "duration_ms": 676.195773,
+          "thread": "asyncio_1",
+          "returncode": 0
+        },
+        {
+          "kind": "collector",
+          "name": "custom-view-2",
+          "phase": "tab_2_first_visit",
+          "start_ms": 11100.007437,
+          "duration_ms": 1481.235002,
+          "thread": "asyncio_1"
+        },
+        {
+          "kind": "factory",
+          "name": "custom-view-2",
+          "phase": "tab_2_first_visit",
+          "start_ms": 12582.157903,
+          "duration_ms": 1.190523,
+          "thread": "MainThread",
+          "ancestor_display": true
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_2_first_visit",
+          "start_ms": 12772.545778,
+          "duration_ms": 0.04384,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_2_first_visit",
+          "start_ms": 12887.348989,
+          "duration_ms": 0.04976,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_2_first_visit",
+          "start_ms": 13030.459689,
+          "duration_ms": 0.045532,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_2_first_visit",
+          "start_ms": 13046.573855,
+          "duration_ms": 0.030067,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_2_revisit",
+          "start_ms": 13146.368582,
+          "duration_ms": 0.039204,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_2_revisit",
+          "start_ms": 13160.979892,
+          "duration_ms": 0.03024,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_2_revisit",
+          "start_ms": 13196.455437,
+          "duration_ms": 0.033507,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_2_revisit",
+          "start_ms": 13276.814749,
+          "duration_ms": 0.040818,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_2_revisit",
+          "start_ms": 13291.745238,
+          "duration_ms": 0.030847,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_14_first_visit",
+          "start_ms": 13329.438555,
+          "duration_ms": 0.035271,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "method",
+          "name": "_populate_option_list",
+          "phase": "tab_14_first_visit",
+          "start_ms": 13355.530279,
+          "duration_ms": 0.484677,
+          "thread": "MainThread",
+          "argument": "14"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_14_first_visit",
+          "start_ms": 13438.70468,
+          "duration_ms": 0.040946,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_14_first_visit",
+          "start_ms": 13453.068504,
+          "duration_ms": 0.029989,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_14_first_visit",
+          "start_ms": 13522.559648,
+          "duration_ms": 0.035911,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "command",
+          "name": "['ufw', 'show', 'listening']",
+          "phase": "tab_14_first_visit",
+          "start_ms": 13357.634641,
+          "duration_ms": 735.283543,
+          "thread": "asyncio_2",
+          "returncode": 0
+        },
+        {
+          "kind": "collector",
+          "name": "custom-view-14",
+          "phase": "tab_14_first_visit",
+          "start_ms": 13357.30245,
+          "duration_ms": 735.712636,
+          "thread": "asyncio_2"
+        },
+        {
+          "kind": "factory",
+          "name": "custom-view-14",
+          "phase": "tab_14_first_visit",
+          "start_ms": 14093.863558,
+          "duration_ms": 0.264408,
+          "thread": "MainThread",
+          "ancestor_display": true
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_14_first_visit",
+          "start_ms": 14138.521664,
+          "duration_ms": 0.047491,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_14_first_visit",
+          "start_ms": 14185.06344,
+          "duration_ms": 0.043609,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_14_first_visit",
+          "start_ms": 14322.611285,
+          "duration_ms": 0.047636,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_14_first_visit",
+          "start_ms": 14346.692376,
+          "duration_ms": 0.039603,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_14_revisit",
+          "start_ms": 14408.494558,
+          "duration_ms": 0.03721,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_14_revisit",
+          "start_ms": 14492.857935,
+          "duration_ms": 0.041661,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_14_revisit",
+          "start_ms": 14507.658395,
+          "duration_ms": 0.029193,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_14_revisit",
+          "start_ms": 14554.302542,
+          "duration_ms": 0.038764,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_14_revisit",
+          "start_ms": 14653.423778,
+          "duration_ms": 0.040768,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_14_revisit",
+          "start_ms": 14668.248885,
+          "duration_ms": 0.030645,
+          "thread": "MainThread"
+        }
+      ],
+      "switches": [
+        {
+          "tab": 1,
+          "visit": "first_visit",
+          "warmed_before": true,
+          "children_before": 1,
+          "retained_content_before": false,
+          "dirty_collector_before": false,
+          "duration_ms": 266.131801
+        },
+        {
+          "tab": 1,
+          "visit": "revisit",
+          "warmed_before": true,
+          "children_before": 1,
+          "retained_content_before": false,
+          "dirty_collector_before": false,
+          "duration_ms": 215.379945
+        },
+        {
+          "tab": 2,
+          "visit": "first_visit",
+          "warmed_before": false,
+          "children_before": 1,
+          "retained_content_before": false,
+          "dirty_collector_before": false,
+          "duration_ms": 1859.287295
+        },
+        {
+          "tab": 2,
+          "visit": "revisit",
+          "warmed_before": true,
+          "children_before": 1,
+          "retained_content_before": true,
+          "dirty_collector_before": false,
+          "duration_ms": 116.797219
+        },
+        {
+          "tab": 14,
+          "visit": "first_visit",
+          "warmed_before": false,
+          "children_before": 1,
+          "retained_content_before": false,
+          "dirty_collector_before": false,
+          "duration_ms": 889.065707
+        },
+        {
+          "tab": 14,
+          "visit": "revisit",
+          "warmed_before": true,
+          "children_before": 1,
+          "retained_content_before": true,
+          "dirty_collector_before": false,
+          "duration_ms": 191.875471
+        }
+      ],
+      "errors": [],
+      "environment": {
+        "python": "3.14.7 (main, Aug 10 2026, 07:46:56) [GCC 16.1.1 20260728]",
+        "executable": "/usr/bin/python3",
+        "textual": "8.2.8",
+        "kernel": "7.3.0-rc4-dusky-battery",
+        "uid": 0,
+        "home": "/home/dusk",
+        "gil_enabled": true,
+        "cpu_count": 14,
+        "affinity": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          12,
+          13
+        ],
+        "term": "xterm-kitty",
+        "term_program": null,
+        "mode": "headless",
+        "size": [
+          120,
+          40
+        ],
+        "pycache_prefix": "/home/dusk/.cache/dusky_tui",
+        "power_limits_uw": {
+          "/sys/devices/virtual/powercap/intel-rapl/intel-rapl:0/constraint_2_power_limit_uw": 20000000,
+          "/sys/devices/virtual/powercap/intel-rapl/intel-rapl:0/constraint_1_power_limit_uw": 8000000,
+          "/sys/devices/virtual/powercap/intel-rapl/intel-rapl:0/constraint_0_power_limit_uw": 8000000,
+          "/sys/devices/virtual/powercap/intel-rapl/intel-rapl:0/intel-rapl:0:0/constraint_0_power_limit_uw": 0,
+          "/sys/devices/virtual/powercap/intel-rapl/intel-rapl:0/intel-rapl:0:1/constraint_0_power_limit_uw": 0,
+          "/sys/devices/virtual/powercap/intel-rapl-mmio/intel-rapl-mmio:0/constraint_2_power_limit_uw": 20000000,
+          "/sys/devices/virtual/powercap/intel-rapl-mmio/intel-rapl-mmio:0/constraint_1_power_limit_uw": 60000000,
+          "/sys/devices/virtual/powercap/intel-rapl-mmio/intel-rapl-mmio:0/constraint_0_power_limit_uw": 50000000
+        },
+        "source_sha256": {
+          "/mnt/zram1/performance_tui/benchmark_startup.py": "a9e8aeb95da8cac2837d13d906c63b68149a8e1ad192c84c8753c646317a4a3a",
+          "/home/dusk/user_scripts/dusky_tui/python/main/main.py": "1c10ba654a40465c521bc6dba699da9df3b70fcd838a4b20bbdcb93448f8a764",
+          "/home/dusk/user_scripts/network_manager/tui_ufw.py": "0a4829bdec76fc9343f99dafeef5ad02698a53c7b5d112b27e0218a4fbfda622",
+          "/home/dusk/user_scripts/dusky_tui/python/frontend/ui.py": "01eec4cdc4a29c4082807ad023056e0f7b0f534943ee88a0a8a9095bbe2c959b"
+        },
+        "sync_output_detected": false
+      },
+      "schema": "/home/dusk/user_scripts/network_manager/tui_ufw.py",
+      "launcher": "/home/dusk/user_scripts/dusky_tui/python/main/main.py",
+      "stderr": ""
+    },
+    {
+      "metrics": {
+        "launcher_enter_ms": 567.515695,
+        "app_run_enter_ms": 1730.179879,
+        "app_mount_enter_ms": 2389.073774,
+        "app_mount_return_ms": 2395.727086,
+        "first_compositor_callback_ms": 3274.432014,
+        "first_after_refresh_ms": 3555.315686,
+        "active_data_refresh_ms": 7114.713995,
+        "boot_refresh_ms": 7115.861341,
+        "viewport_width": 120,
+        "viewport_height": 40,
+        "widgets_at_boot": 106,
+        "custom_widgets_at_boot": 1,
+        "observation_end_ms": 14744.136424,
+        "launcher_return_ms": 14811.485591,
+        "startup_factory_count": 1,
+        "startup_factory_inclusive_ms": 1.343361,
+        "startup_collector_count": 1,
+        "startup_collector_inclusive_ms": 2099.788327,
+        "startup_command_count": 6,
+        "startup_command_inclusive_ms": 3437.627087,
+        "startup_compose_step_count": 32,
+        "startup_compose_step_inclusive_ms": 25.670097000000002,
+        "max_rss_kib": 56996,
+        "process_cpu_ms": 7215.8457450000005
+      },
+      "spans": [
+        {
+          "kind": "import_inclusive",
+          "name": "dusky_schema_tui_ufw",
+          "phase": "startup",
+          "start_ms": 624.325401,
+          "duration_ms": 161.893108,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "import_inclusive",
+          "name": "textual",
+          "phase": "startup",
+          "start_ms": 798.779987,
+          "duration_ms": 220.676469,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "import_inclusive",
+          "name": "textual.app",
+          "phase": "startup",
+          "start_ms": 1019.90231,
+          "duration_ms": 397.373587,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "import_inclusive",
+          "name": "python.frontend.ui",
+          "phase": "startup",
+          "start_ms": 787.365626,
+          "duration_ms": 910.687895,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "method",
+          "name": "__init__",
+          "phase": "startup",
+          "start_ms": 1698.365923,
+          "duration_ms": 31.74033,
+          "thread": "MainThread",
+          "argument": null
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1825.803428,
+          "duration_ms": 1.062626,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1826.915559,
+          "duration_ms": 6.982815,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1833.951586,
+          "duration_ms": 0.331991,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1834.311389,
+          "duration_ms": 0.275872,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1834.606916,
+          "duration_ms": 1.590559,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1836.225376,
+          "duration_ms": 0.932198,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1837.184727,
+          "duration_ms": 0.450704,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1837.654858,
+          "duration_ms": 0.371031,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1838.043582,
+          "duration_ms": 0.846058,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1838.918115,
+          "duration_ms": 0.476966,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1839.414731,
+          "duration_ms": 0.359943,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1839.790527,
+          "duration_ms": 0.764217,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1840.583104,
+          "duration_ms": 1.24826,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1841.853406,
+          "duration_ms": 0.37349,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1842.244292,
+          "duration_ms": 0.790951,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1843.055491,
+          "duration_ms": 0.423607,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1843.503053,
+          "duration_ms": 0.735473,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1844.25589,
+          "duration_ms": 0.418849,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1844.691119,
+          "duration_ms": 0.35832,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1845.062786,
+          "duration_ms": 0.69931,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1845.78821,
+          "duration_ms": 0.414613,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1846.217855,
+          "duration_ms": 0.663424,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1846.899028,
+          "duration_ms": 0.344346,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1847.259416,
+          "duration_ms": 0.620739,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1847.895889,
+          "duration_ms": 0.985668,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1848.901151,
+          "duration_ms": 0.747996,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1849.668314,
+          "duration_ms": 0.382448,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1850.067175,
+          "duration_ms": 0.340567,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1850.42572,
+          "duration_ms": 0.401476,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1850.841557,
+          "duration_ms": 0.964911,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1851.829348,
+          "duration_ms": 0.27395,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1852.11962,
+          "duration_ms": 0.036719,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "startup",
+          "start_ms": 3274.408316,
+          "duration_ms": 0.05399,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "startup",
+          "start_ms": 3327.422918,
+          "duration_ms": 0.04086,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "startup",
+          "start_ms": 3355.836713,
+          "duration_ms": 0.032184,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "method",
+          "name": "_populate_option_list",
+          "phase": "startup",
+          "start_ms": 3372.445228,
+          "duration_ms": 0.57783,
+          "thread": "MainThread",
+          "argument": "0"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "startup",
+          "start_ms": 3533.33612,
+          "duration_ms": 0.041207,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "startup",
+          "start_ms": 3548.086528,
+          "duration_ms": 0.031432,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "startup",
+          "start_ms": 3596.952339,
+          "duration_ms": 0.035475,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "command",
+          "name": "['ufw', 'status', 'verbose']",
+          "phase": "startup",
+          "start_ms": 3369.24593,
+          "duration_ms": 680.351129,
+          "thread": "asyncio_0",
+          "returncode": 0
+        },
+        {
+          "kind": "command",
+          "name": "['ufw', 'status', 'numbered']",
+          "phase": "startup",
+          "start_ms": 4063.066985,
+          "duration_ms": 664.008288,
+          "thread": "asyncio_0",
+          "returncode": 0
+        },
+        {
+          "kind": "method",
+          "name": "_load_one_engine_sync",
+          "phase": "startup",
+          "start_ms": 3368.883762,
+          "duration_ms": 1363.834078,
+          "thread": "asyncio_0",
+          "argument": "('ufw', '/etc/default/ufw')"
+        },
+        {
+          "kind": "method",
+          "name": "_populate_option_list",
+          "phase": "startup",
+          "start_ms": 4734.462824,
+          "duration_ms": 0.748492,
+          "thread": "MainThread",
+          "argument": "0"
+        },
+        {
+          "kind": "method",
+          "name": "_populate_option_list",
+          "phase": "startup",
+          "start_ms": 4743.722734,
+          "duration_ms": 6.323292,
+          "thread": "MainThread",
+          "argument": "1"
+        },
+        {
+          "kind": "method",
+          "name": "_populate_option_list",
+          "phase": "startup",
+          "start_ms": 4756.990965,
+          "duration_ms": 16.465558,
+          "thread": "MainThread",
+          "argument": "3"
+        },
+        {
+          "kind": "method",
+          "name": "_populate_option_list",
+          "phase": "startup",
+          "start_ms": 4785.449383,
+          "duration_ms": 12.574347,
+          "thread": "MainThread",
+          "argument": "5"
+        },
+        {
+          "kind": "method",
+          "name": "_populate_option_list",
+          "phase": "startup",
+          "start_ms": 4802.884147,
+          "duration_ms": 6.302621,
+          "thread": "MainThread",
+          "argument": "7"
+        },
+        {
+          "kind": "method",
+          "name": "_populate_option_list",
+          "phase": "startup",
+          "start_ms": 4816.640849,
+          "duration_ms": 10.66831,
+          "thread": "MainThread",
+          "argument": "8"
+        },
+        {
+          "kind": "method",
+          "name": "_populate_option_list",
+          "phase": "startup",
+          "start_ms": 4834.278293,
+          "duration_ms": 9.284228,
+          "thread": "MainThread",
+          "argument": "10"
+        },
+        {
+          "kind": "method",
+          "name": "_populate_option_list",
+          "phase": "startup",
+          "start_ms": 4864.353963,
+          "duration_ms": 8.92887,
+          "thread": "MainThread",
+          "argument": "11"
+        },
+        {
+          "kind": "method",
+          "name": "_populate_option_list",
+          "phase": "startup",
+          "start_ms": 4882.324916,
+          "duration_ms": 10.061925,
+          "thread": "MainThread",
+          "argument": "12"
+        },
+        {
+          "kind": "method",
+          "name": "_populate_option_list",
+          "phase": "startup",
+          "start_ms": 4899.872093,
+          "duration_ms": 8.217518,
+          "thread": "MainThread",
+          "argument": "13"
+        },
+        {
+          "kind": "command",
+          "name": "['ufw', 'status', 'numbered']",
+          "phase": "startup",
+          "start_ms": 4748.187846,
+          "duration_ms": 677.554453,
+          "thread": "asyncio_1",
+          "returncode": 0
+        },
+        {
+          "kind": "command",
+          "name": "['ufw', 'status', 'verbose']",
+          "phase": "startup",
+          "start_ms": 5427.630308,
+          "duration_ms": 673.632739,
+          "thread": "asyncio_1",
+          "returncode": 0
+        },
+        {
+          "kind": "command",
+          "name": "['ip', '-4', 'route', 'show', 'default']",
+          "phase": "startup",
+          "start_ms": 6101.741224,
+          "duration_ms": 7.613046,
+          "thread": "asyncio_1",
+          "returncode": 0
+        },
+        {
+          "kind": "command",
+          "name": "['ufw', 'show', 'listening']",
+          "phase": "startup",
+          "start_ms": 6111.993115,
+          "duration_ms": 734.467432,
+          "thread": "asyncio_1",
+          "returncode": 0
+        },
+        {
+          "kind": "collector",
+          "name": "custom-view-0",
+          "phase": "startup",
+          "start_ms": 4747.884316,
+          "duration_ms": 2099.788327,
+          "thread": "asyncio_1"
+        },
+        {
+          "kind": "factory",
+          "name": "custom-view-0",
+          "phase": "startup",
+          "start_ms": 6848.532827,
+          "duration_ms": 1.343361,
+          "thread": "MainThread",
+          "ancestor_display": true
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "startup",
+          "start_ms": 7012.192638,
+          "duration_ms": 0.042402,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "startup",
+          "start_ms": 7113.278774,
+          "duration_ms": 0.037621,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "command",
+          "name": "['ufw', 'status', 'numbered']",
+          "phase": "idle_observation",
+          "start_ms": 8738.876594,
+          "duration_ms": 662.222929,
+          "thread": "asyncio_2",
+          "returncode": 0
+        },
+        {
+          "kind": "command",
+          "name": "['ufw', 'status', 'verbose']",
+          "phase": "idle_observation",
+          "start_ms": 9402.968679,
+          "duration_ms": 656.99921,
+          "thread": "asyncio_2",
+          "returncode": 0
+        },
+        {
+          "kind": "command",
+          "name": "['ip', '-4', 'route', 'show', 'default']",
+          "phase": "idle_observation",
+          "start_ms": 10060.330057,
+          "duration_ms": 7.625637,
+          "thread": "asyncio_2",
+          "returncode": 0
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_1_first_visit",
+          "start_ms": 10356.426798,
+          "duration_ms": 0.037234,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_1_first_visit",
+          "start_ms": 10513.24104,
+          "duration_ms": 0.041088,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_1_first_visit",
+          "start_ms": 10528.839435,
+          "duration_ms": 0.03202,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_1_first_visit",
+          "start_ms": 10608.555256,
+          "duration_ms": 0.039629,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_1_first_visit",
+          "start_ms": 10711.40418,
+          "duration_ms": 0.038637,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_1_first_visit",
+          "start_ms": 10726.567815,
+          "duration_ms": 0.028828,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_1_revisit",
+          "start_ms": 10762.065312,
+          "duration_ms": 0.032951,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "command",
+          "name": "['ufw', 'show', 'listening']",
+          "phase": "idle_observation",
+          "start_ms": 10069.703554,
+          "duration_ms": 749.977478,
+          "thread": "asyncio_2",
+          "returncode": 0
+        },
+        {
+          "kind": "collector",
+          "name": "custom-view-0",
+          "phase": "idle_observation",
+          "start_ms": 8738.536255,
+          "duration_ms": 2081.517135,
+          "thread": "asyncio_2"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_1_revisit",
+          "start_ms": 10876.711682,
+          "duration_ms": 0.039453,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_1_revisit",
+          "start_ms": 10892.434195,
+          "duration_ms": 0.030948,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_1_revisit",
+          "start_ms": 10942.405117,
+          "duration_ms": 0.035729,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_1_revisit",
+          "start_ms": 11045.731683,
+          "duration_ms": 0.036543,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_1_revisit",
+          "start_ms": 11060.534337,
+          "duration_ms": 0.031614,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_2_first_visit",
+          "start_ms": 11096.4107,
+          "duration_ms": 0.032714,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "method",
+          "name": "_populate_option_list",
+          "phase": "tab_2_first_visit",
+          "start_ms": 11123.629918,
+          "duration_ms": 0.484257,
+          "thread": "MainThread",
+          "argument": "2"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_2_first_visit",
+          "start_ms": 11204.347855,
+          "duration_ms": 0.040897,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_2_first_visit",
+          "start_ms": 11219.009675,
+          "duration_ms": 0.031313,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_2_first_visit",
+          "start_ms": 11259.752678,
+          "duration_ms": 0.036042,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "command",
+          "name": "['ss', '-H', '-tlunp']",
+          "phase": "tab_2_first_visit",
+          "start_ms": 11126.144204,
+          "duration_ms": 136.333804,
+          "thread": "asyncio_0",
+          "returncode": 0
+        },
+        {
+          "kind": "command",
+          "name": "['ufw', 'status', 'numbered']",
+          "phase": "tab_2_first_visit",
+          "start_ms": 11262.863308,
+          "duration_ms": 665.010914,
+          "thread": "asyncio_0",
+          "returncode": 0
+        },
+        {
+          "kind": "command",
+          "name": "['ufw', 'status', 'verbose']",
+          "phase": "tab_2_first_visit",
+          "start_ms": 11929.789602,
+          "duration_ms": 673.272568,
+          "thread": "asyncio_0",
+          "returncode": 0
+        },
+        {
+          "kind": "collector",
+          "name": "custom-view-2",
+          "phase": "tab_2_first_visit",
+          "start_ms": 11125.772444,
+          "duration_ms": 1492.106828,
+          "thread": "asyncio_0"
+        },
+        {
+          "kind": "factory",
+          "name": "custom-view-2",
+          "phase": "tab_2_first_visit",
+          "start_ms": 12619.636927,
+          "duration_ms": 1.187699,
+          "thread": "MainThread",
+          "ancestor_display": true
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_2_first_visit",
+          "start_ms": 12808.528921,
+          "duration_ms": 0.047521,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_2_first_visit",
+          "start_ms": 12920.476896,
+          "duration_ms": 0.043246,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_2_first_visit",
+          "start_ms": 13063.971128,
+          "duration_ms": 0.040443,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_2_first_visit",
+          "start_ms": 13079.897472,
+          "duration_ms": 0.028536,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_2_revisit",
+          "start_ms": 13179.774893,
+          "duration_ms": 0.03625,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_2_revisit",
+          "start_ms": 13194.772176,
+          "duration_ms": 0.029583,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_2_revisit",
+          "start_ms": 13230.752113,
+          "duration_ms": 0.031693,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_2_revisit",
+          "start_ms": 13311.336824,
+          "duration_ms": 0.038438,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_2_revisit",
+          "start_ms": 13326.520635,
+          "duration_ms": 0.03215,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_14_first_visit",
+          "start_ms": 13364.822914,
+          "duration_ms": 0.031973,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "method",
+          "name": "_populate_option_list",
+          "phase": "tab_14_first_visit",
+          "start_ms": 13390.930058,
+          "duration_ms": 0.479245,
+          "thread": "MainThread",
+          "argument": "14"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_14_first_visit",
+          "start_ms": 13485.349058,
+          "duration_ms": 0.040353,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_14_first_visit",
+          "start_ms": 13500.229289,
+          "duration_ms": 0.02823,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_14_first_visit",
+          "start_ms": 13565.593859,
+          "duration_ms": 0.03914,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "command",
+          "name": "['ufw', 'show', 'listening']",
+          "phase": "tab_14_first_visit",
+          "start_ms": 13393.154625,
+          "duration_ms": 748.417409,
+          "thread": "asyncio_1",
+          "returncode": 0
+        },
+        {
+          "kind": "collector",
+          "name": "custom-view-14",
+          "phase": "tab_14_first_visit",
+          "start_ms": 13392.858166,
+          "duration_ms": 748.808582,
+          "thread": "asyncio_1"
+        },
+        {
+          "kind": "factory",
+          "name": "custom-view-14",
+          "phase": "tab_14_first_visit",
+          "start_ms": 14143.198306,
+          "duration_ms": 0.205595,
+          "thread": "MainThread",
+          "ancestor_display": true
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_14_first_visit",
+          "start_ms": 14174.516017,
+          "duration_ms": 0.03476,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_14_first_visit",
+          "start_ms": 14213.091994,
+          "duration_ms": 0.037723,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_14_first_visit",
+          "start_ms": 14307.208873,
+          "duration_ms": 0.039042,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_14_first_visit",
+          "start_ms": 14322.107756,
+          "duration_ms": 0.029942,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_14_revisit",
+          "start_ms": 14374.110201,
+          "duration_ms": 0.036785,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_14_revisit",
+          "start_ms": 14458.224044,
+          "duration_ms": 0.040954,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_14_revisit",
+          "start_ms": 14473.084833,
+          "duration_ms": 0.030911,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_14_revisit",
+          "start_ms": 14521.390871,
+          "duration_ms": 0.038548,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_14_revisit",
+          "start_ms": 14718.642297,
+          "duration_ms": 0.045015,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_14_revisit",
+          "start_ms": 14733.980096,
+          "duration_ms": 0.031626,
+          "thread": "MainThread"
+        }
+      ],
+      "switches": [
+        {
+          "tab": 1,
+          "visit": "first_visit",
+          "warmed_before": true,
+          "children_before": 1,
+          "retained_content_before": false,
+          "dirty_collector_before": false,
+          "duration_ms": 281.305919
+        },
+        {
+          "tab": 1,
+          "visit": "revisit",
+          "warmed_before": true,
+          "children_before": 1,
+          "retained_content_before": false,
+          "dirty_collector_before": false,
+          "duration_ms": 210.655766
+        },
+        {
+          "tab": 2,
+          "visit": "first_visit",
+          "warmed_before": false,
+          "children_before": 1,
+          "retained_content_before": false,
+          "dirty_collector_before": false,
+          "duration_ms": 1855.524931
+        },
+        {
+          "tab": 2,
+          "visit": "revisit",
+          "warmed_before": true,
+          "children_before": 1,
+          "retained_content_before": true,
+          "dirty_collector_before": false,
+          "duration_ms": 118.113061
+        },
+        {
+          "tab": 14,
+          "visit": "first_visit",
+          "warmed_before": false,
+          "children_before": 1,
+          "retained_content_before": false,
+          "dirty_collector_before": false,
+          "duration_ms": 881.904648
+        },
+        {
+          "tab": 14,
+          "visit": "revisit",
+          "warmed_before": true,
+          "children_before": 1,
+          "retained_content_before": true,
+          "dirty_collector_before": false,
+          "duration_ms": 189.815433
+        }
+      ],
+      "errors": [],
+      "environment": {
+        "python": "3.14.7 (main, Aug 10 2026, 07:46:56) [GCC 16.1.1 20260728]",
+        "executable": "/usr/bin/python3",
+        "textual": "8.2.8",
+        "kernel": "7.3.0-rc4-dusky-battery",
+        "uid": 0,
+        "home": "/home/dusk",
+        "gil_enabled": true,
+        "cpu_count": 14,
+        "affinity": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          12,
+          13
+        ],
+        "term": "xterm-kitty",
+        "term_program": null,
+        "mode": "headless",
+        "size": [
+          120,
+          40
+        ],
+        "pycache_prefix": "/home/dusk/.cache/dusky_tui",
+        "power_limits_uw": {
+          "/sys/devices/virtual/powercap/intel-rapl/intel-rapl:0/constraint_2_power_limit_uw": 20000000,
+          "/sys/devices/virtual/powercap/intel-rapl/intel-rapl:0/constraint_1_power_limit_uw": 8000000,
+          "/sys/devices/virtual/powercap/intel-rapl/intel-rapl:0/constraint_0_power_limit_uw": 8000000,
+          "/sys/devices/virtual/powercap/intel-rapl/intel-rapl:0/intel-rapl:0:0/constraint_0_power_limit_uw": 0,
+          "/sys/devices/virtual/powercap/intel-rapl/intel-rapl:0/intel-rapl:0:1/constraint_0_power_limit_uw": 0,
+          "/sys/devices/virtual/powercap/intel-rapl-mmio/intel-rapl-mmio:0/constraint_2_power_limit_uw": 20000000,
+          "/sys/devices/virtual/powercap/intel-rapl-mmio/intel-rapl-mmio:0/constraint_1_power_limit_uw": 60000000,
+          "/sys/devices/virtual/powercap/intel-rapl-mmio/intel-rapl-mmio:0/constraint_0_power_limit_uw": 50000000
+        },
+        "source_sha256": {
+          "/mnt/zram1/performance_tui/benchmark_startup.py": "a9e8aeb95da8cac2837d13d906c63b68149a8e1ad192c84c8753c646317a4a3a",
+          "/home/dusk/user_scripts/dusky_tui/python/main/main.py": "1c10ba654a40465c521bc6dba699da9df3b70fcd838a4b20bbdcb93448f8a764",
+          "/home/dusk/user_scripts/network_manager/tui_ufw.py": "0a4829bdec76fc9343f99dafeef5ad02698a53c7b5d112b27e0218a4fbfda622",
+          "/home/dusk/user_scripts/dusky_tui/python/frontend/ui.py": "01eec4cdc4a29c4082807ad023056e0f7b0f534943ee88a0a8a9095bbe2c959b"
+        },
+        "sync_output_detected": false
+      },
+      "schema": "/home/dusk/user_scripts/network_manager/tui_ufw.py",
+      "launcher": "/home/dusk/user_scripts/dusky_tui/python/main/main.py",
+      "stderr": ""
+    },
+    {
+      "metrics": {
+        "launcher_enter_ms": 565.92158,
+        "app_run_enter_ms": 1729.046647,
+        "app_mount_enter_ms": 2401.41291,
+        "app_mount_return_ms": 2408.132371,
+        "first_compositor_callback_ms": 3313.867909,
+        "first_after_refresh_ms": 3594.297553,
+        "active_data_refresh_ms": 7203.112324,
+        "boot_refresh_ms": 7204.242581,
+        "viewport_width": 120,
+        "viewport_height": 40,
+        "widgets_at_boot": 106,
+        "custom_widgets_at_boot": 1,
+        "observation_end_ms": 14850.621429,
+        "launcher_return_ms": 14919.12562,
+        "startup_factory_count": 1,
+        "startup_factory_inclusive_ms": 1.612411,
+        "startup_collector_count": 1,
+        "startup_collector_inclusive_ms": 2079.123432,
+        "startup_command_count": 6,
+        "startup_command_inclusive_ms": 3423.907867,
+        "startup_compose_step_count": 32,
+        "startup_compose_step_inclusive_ms": 25.249271,
+        "max_rss_kib": 57188,
+        "process_cpu_ms": 7349.983394
+      },
+      "spans": [
+        {
+          "kind": "import_inclusive",
+          "name": "dusky_schema_tui_ufw",
+          "phase": "startup",
+          "start_ms": 622.953254,
+          "duration_ms": 161.970088,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "import_inclusive",
+          "name": "textual",
+          "phase": "startup",
+          "start_ms": 797.383315,
+          "duration_ms": 219.069572,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "import_inclusive",
+          "name": "textual.app",
+          "phase": "startup",
+          "start_ms": 1016.897888,
+          "duration_ms": 398.232246,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "import_inclusive",
+          "name": "python.frontend.ui",
+          "phase": "startup",
+          "start_ms": 786.050401,
+          "duration_ms": 911.187394,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "method",
+          "name": "__init__",
+          "phase": "startup",
+          "start_ms": 1697.540686,
+          "duration_ms": 31.429372,
+          "thread": "MainThread",
+          "argument": null
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1825.337316,
+          "duration_ms": 1.068637,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1826.454089,
+          "duration_ms": 6.722172,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1833.231183,
+          "duration_ms": 0.315793,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1833.577963,
+          "duration_ms": 0.266699,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1833.863632,
+          "duration_ms": 1.606336,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1835.499754,
+          "duration_ms": 0.917111,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1836.44288,
+          "duration_ms": 0.454267,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1836.918573,
+          "duration_ms": 0.370897,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1837.308142,
+          "duration_ms": 0.759805,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1838.087935,
+          "duration_ms": 0.458672,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1838.563665,
+          "duration_ms": 0.355585,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1838.934557,
+          "duration_ms": 0.740522,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1839.703432,
+          "duration_ms": 1.261903,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1840.9866,
+          "duration_ms": 0.395871,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1841.398883,
+          "duration_ms": 0.718355,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1842.134535,
+          "duration_ms": 0.433161,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1842.591405,
+          "duration_ms": 0.732736,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1843.341459,
+          "duration_ms": 0.389141,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1843.744636,
+          "duration_ms": 0.347669,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1844.10905,
+          "duration_ms": 0.692625,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1844.853478,
+          "duration_ms": 0.426297,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1845.298004,
+          "duration_ms": 0.672875,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1845.988729,
+          "duration_ms": 0.374381,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1846.377818,
+          "duration_ms": 0.643323,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1847.038027,
+          "duration_ms": 1.032528,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1848.088758,
+          "duration_ms": 0.705782,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1848.812359,
+          "duration_ms": 0.372477,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1849.201077,
+          "duration_ms": 0.340924,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1849.559423,
+          "duration_ms": 0.389161,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1849.96375,
+          "duration_ms": 0.959159,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1850.945305,
+          "duration_ms": 0.285136,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1851.250794,
+          "duration_ms": 0.039271,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "startup",
+          "start_ms": 3313.844527,
+          "duration_ms": 0.053776,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "startup",
+          "start_ms": 3366.339127,
+          "duration_ms": 0.04498,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "startup",
+          "start_ms": 3394.589171,
+          "duration_ms": 0.035469,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "method",
+          "name": "_populate_option_list",
+          "phase": "startup",
+          "start_ms": 3410.996729,
+          "duration_ms": 0.554161,
+          "thread": "MainThread",
+          "argument": "0"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "startup",
+          "start_ms": 3572.863811,
+          "duration_ms": 0.040911,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "startup",
+          "start_ms": 3587.159177,
+          "duration_ms": 0.033781,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "startup",
+          "start_ms": 3635.620201,
+          "duration_ms": 0.038388,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "command",
+          "name": "['ufw', 'status', 'verbose']",
+          "phase": "startup",
+          "start_ms": 3408.003755,
+          "duration_ms": 680.769432,
+          "thread": "asyncio_0",
+          "returncode": 0
+        },
+        {
+          "kind": "command",
+          "name": "['ufw', 'status', 'numbered']",
+          "phase": "startup",
+          "start_ms": 4103.501425,
+          "duration_ms": 669.964598,
+          "thread": "asyncio_0",
+          "returncode": 0
+        },
+        {
+          "kind": "method",
+          "name": "_load_one_engine_sync",
+          "phase": "startup",
+          "start_ms": 3407.646848,
+          "duration_ms": 1371.462668,
+          "thread": "asyncio_0",
+          "argument": "('ufw', '/etc/default/ufw')"
+        },
+        {
+          "kind": "method",
+          "name": "_populate_option_list",
+          "phase": "startup",
+          "start_ms": 4781.019856,
+          "duration_ms": 0.848295,
+          "thread": "MainThread",
+          "argument": "0"
+        },
+        {
+          "kind": "method",
+          "name": "_populate_option_list",
+          "phase": "startup",
+          "start_ms": 4790.79068,
+          "duration_ms": 6.164175,
+          "thread": "MainThread",
+          "argument": "1"
+        },
+        {
+          "kind": "method",
+          "name": "_populate_option_list",
+          "phase": "startup",
+          "start_ms": 4803.91273,
+          "duration_ms": 16.484818,
+          "thread": "MainThread",
+          "argument": "3"
+        },
+        {
+          "kind": "method",
+          "name": "_populate_option_list",
+          "phase": "startup",
+          "start_ms": 4837.728825,
+          "duration_ms": 12.585318,
+          "thread": "MainThread",
+          "argument": "5"
+        },
+        {
+          "kind": "method",
+          "name": "_populate_option_list",
+          "phase": "startup",
+          "start_ms": 4857.609267,
+          "duration_ms": 12.529464,
+          "thread": "MainThread",
+          "argument": "7"
+        },
+        {
+          "kind": "method",
+          "name": "_populate_option_list",
+          "phase": "startup",
+          "start_ms": 4878.503034,
+          "duration_ms": 10.47027,
+          "thread": "MainThread",
+          "argument": "8"
+        },
+        {
+          "kind": "method",
+          "name": "_populate_option_list",
+          "phase": "startup",
+          "start_ms": 4898.317564,
+          "duration_ms": 9.484578,
+          "thread": "MainThread",
+          "argument": "10"
+        },
+        {
+          "kind": "method",
+          "name": "_populate_option_list",
+          "phase": "startup",
+          "start_ms": 4916.794467,
+          "duration_ms": 9.062938,
+          "thread": "MainThread",
+          "argument": "11"
+        },
+        {
+          "kind": "method",
+          "name": "_populate_option_list",
+          "phase": "startup",
+          "start_ms": 4934.794137,
+          "duration_ms": 9.716701,
+          "thread": "MainThread",
+          "argument": "12"
+        },
+        {
+          "kind": "method",
+          "name": "_populate_option_list",
+          "phase": "startup",
+          "start_ms": 4953.311521,
+          "duration_ms": 8.399591,
+          "thread": "MainThread",
+          "argument": "13"
+        },
+        {
+          "kind": "command",
+          "name": "['ufw', 'status', 'numbered']",
+          "phase": "startup",
+          "start_ms": 4795.2879,
+          "duration_ms": 664.753735,
+          "thread": "asyncio_1",
+          "returncode": 0
+        },
+        {
+          "kind": "command",
+          "name": "['ufw', 'status', 'verbose']",
+          "phase": "startup",
+          "start_ms": 5461.397913,
+          "duration_ms": 671.200465,
+          "thread": "asyncio_1",
+          "returncode": 0
+        },
+        {
+          "kind": "command",
+          "name": "['ip', '-4', 'route', 'show', 'default']",
+          "phase": "startup",
+          "start_ms": 6133.092415,
+          "duration_ms": 8.801681,
+          "thread": "asyncio_1",
+          "returncode": 0
+        },
+        {
+          "kind": "command",
+          "name": "['ufw', 'show', 'listening']",
+          "phase": "startup",
+          "start_ms": 6144.465185,
+          "duration_ms": 728.417956,
+          "thread": "asyncio_1",
+          "returncode": 0
+        },
+        {
+          "kind": "collector",
+          "name": "custom-view-0",
+          "phase": "startup",
+          "start_ms": 4794.992602,
+          "duration_ms": 2079.123432,
+          "thread": "asyncio_1"
+        },
+        {
+          "kind": "factory",
+          "name": "custom-view-0",
+          "phase": "startup",
+          "start_ms": 6875.666661,
+          "duration_ms": 1.612411,
+          "thread": "MainThread",
+          "ancestor_display": true
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "startup",
+          "start_ms": 7110.29479,
+          "duration_ms": 0.040269,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "startup",
+          "start_ms": 7201.647509,
+          "duration_ms": 0.038444,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "command",
+          "name": "['ufw', 'status', 'numbered']",
+          "phase": "idle_observation",
+          "start_ms": 8785.496753,
+          "duration_ms": 660.183253,
+          "thread": "asyncio_2",
+          "returncode": 0
+        },
+        {
+          "kind": "command",
+          "name": "['ufw', 'status', 'verbose']",
+          "phase": "idle_observation",
+          "start_ms": 9447.485984,
+          "duration_ms": 670.570997,
+          "thread": "asyncio_2",
+          "returncode": 0
+        },
+        {
+          "kind": "command",
+          "name": "['ip', '-4', 'route', 'show', 'default']",
+          "phase": "idle_observation",
+          "start_ms": 10118.55171,
+          "duration_ms": 7.555535,
+          "thread": "asyncio_2",
+          "returncode": 0
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_1_first_visit",
+          "start_ms": 10444.097863,
+          "duration_ms": 0.038099,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_1_first_visit",
+          "start_ms": 10600.520162,
+          "duration_ms": 0.039606,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_1_first_visit",
+          "start_ms": 10615.761696,
+          "duration_ms": 0.034297,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_1_first_visit",
+          "start_ms": 10678.698138,
+          "duration_ms": 0.038551,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_1_first_visit",
+          "start_ms": 10783.998049,
+          "duration_ms": 0.0391,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_1_first_visit",
+          "start_ms": 10798.918949,
+          "duration_ms": 0.033223,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_1_revisit",
+          "start_ms": 10834.591539,
+          "duration_ms": 0.03401,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "command",
+          "name": "['ufw', 'show', 'listening']",
+          "phase": "idle_observation",
+          "start_ms": 10127.874599,
+          "duration_ms": 759.388184,
+          "thread": "asyncio_2",
+          "returncode": 0
+        },
+        {
+          "kind": "collector",
+          "name": "custom-view-0",
+          "phase": "idle_observation",
+          "start_ms": 8785.170048,
+          "duration_ms": 2102.407979,
+          "thread": "asyncio_2"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_1_revisit",
+          "start_ms": 10949.79105,
+          "duration_ms": 0.038814,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_1_revisit",
+          "start_ms": 10965.386263,
+          "duration_ms": 0.03261,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_1_revisit",
+          "start_ms": 11015.093703,
+          "duration_ms": 0.035979,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_1_revisit",
+          "start_ms": 11119.006988,
+          "duration_ms": 0.037906,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_1_revisit",
+          "start_ms": 11133.549569,
+          "duration_ms": 0.032347,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_2_first_visit",
+          "start_ms": 11169.374514,
+          "duration_ms": 0.035067,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "method",
+          "name": "_populate_option_list",
+          "phase": "tab_2_first_visit",
+          "start_ms": 11197.941709,
+          "duration_ms": 0.506834,
+          "thread": "MainThread",
+          "argument": "2"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_2_first_visit",
+          "start_ms": 11278.280556,
+          "duration_ms": 0.04283,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_2_first_visit",
+          "start_ms": 11292.991783,
+          "duration_ms": 0.033553,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_2_first_visit",
+          "start_ms": 11332.083385,
+          "duration_ms": 0.035718,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "command",
+          "name": "['ss', '-H', '-tlunp']",
+          "phase": "tab_2_first_visit",
+          "start_ms": 11200.421313,
+          "duration_ms": 134.580712,
+          "thread": "asyncio_0",
+          "returncode": 0
+        },
+        {
+          "kind": "command",
+          "name": "['ufw', 'status', 'numbered']",
+          "phase": "tab_2_first_visit",
+          "start_ms": 11335.328408,
+          "duration_ms": 663.937575,
+          "thread": "asyncio_0",
+          "returncode": 0
+        },
+        {
+          "kind": "command",
+          "name": "['ufw', 'status', 'verbose']",
+          "phase": "tab_2_first_visit",
+          "start_ms": 12001.120399,
+          "duration_ms": 669.129125,
+          "thread": "asyncio_0",
+          "returncode": 0
+        },
+        {
+          "kind": "collector",
+          "name": "custom-view-2",
+          "phase": "tab_2_first_visit",
+          "start_ms": 11200.145375,
+          "duration_ms": 1484.700955,
+          "thread": "asyncio_0"
+        },
+        {
+          "kind": "factory",
+          "name": "custom-view-2",
+          "phase": "tab_2_first_visit",
+          "start_ms": 12686.396932,
+          "duration_ms": 1.181062,
+          "thread": "MainThread",
+          "ancestor_display": true
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_2_first_visit",
+          "start_ms": 12875.87171,
+          "duration_ms": 0.04285,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_2_first_visit",
+          "start_ms": 12993.538265,
+          "duration_ms": 0.046373,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_2_first_visit",
+          "start_ms": 13137.790137,
+          "duration_ms": 0.038403,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_2_first_visit",
+          "start_ms": 13153.506402,
+          "duration_ms": 0.030979,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_2_revisit",
+          "start_ms": 13254.305915,
+          "duration_ms": 0.046071,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_2_revisit",
+          "start_ms": 13269.142049,
+          "duration_ms": 0.031445,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_2_revisit",
+          "start_ms": 13370.524819,
+          "duration_ms": 0.038753,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_2_revisit",
+          "start_ms": 13385.420557,
+          "duration_ms": 0.031059,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_14_first_visit",
+          "start_ms": 13443.735522,
+          "duration_ms": 0.035735,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "method",
+          "name": "_populate_option_list",
+          "phase": "tab_14_first_visit",
+          "start_ms": 13459.584583,
+          "duration_ms": 0.46961,
+          "thread": "MainThread",
+          "argument": "14"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_14_first_visit",
+          "start_ms": 13549.040007,
+          "duration_ms": 0.036913,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_14_first_visit",
+          "start_ms": 13563.712232,
+          "duration_ms": 0.030938,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_14_first_visit",
+          "start_ms": 13620.127212,
+          "duration_ms": 0.036175,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "command",
+          "name": "['ufw', 'show', 'listening']",
+          "phase": "tab_14_first_visit",
+          "start_ms": 13461.983987,
+          "duration_ms": 764.043241,
+          "thread": "asyncio_0",
+          "returncode": 0
+        },
+        {
+          "kind": "collector",
+          "name": "custom-view-14",
+          "phase": "tab_14_first_visit",
+          "start_ms": 13461.684945,
+          "duration_ms": 764.4345,
+          "thread": "asyncio_0"
+        },
+        {
+          "kind": "factory",
+          "name": "custom-view-14",
+          "phase": "tab_14_first_visit",
+          "start_ms": 14226.909426,
+          "duration_ms": 0.248177,
+          "thread": "MainThread",
+          "ancestor_display": true
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_14_first_visit",
+          "start_ms": 14258.870737,
+          "duration_ms": 0.035625,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_14_first_visit",
+          "start_ms": 14300.569276,
+          "duration_ms": 0.037182,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_14_first_visit",
+          "start_ms": 14330.861473,
+          "duration_ms": 0.032853,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_14_first_visit",
+          "start_ms": 14409.351189,
+          "duration_ms": 0.039363,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_14_first_visit",
+          "start_ms": 14424.519846,
+          "duration_ms": 0.031994,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_14_revisit",
+          "start_ms": 14482.389325,
+          "duration_ms": 0.040304,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_14_revisit",
+          "start_ms": 14561.779844,
+          "duration_ms": 0.038475,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_14_revisit",
+          "start_ms": 14576.722945,
+          "duration_ms": 0.033033,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_14_revisit",
+          "start_ms": 14627.933505,
+          "duration_ms": 0.038223,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_14_revisit",
+          "start_ms": 14825.41575,
+          "duration_ms": 0.038464,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_14_revisit",
+          "start_ms": 14840.556622,
+          "duration_ms": 0.030121,
+          "thread": "MainThread"
+        }
+      ],
+      "switches": [
+        {
+          "tab": 1,
+          "visit": "first_visit",
+          "warmed_before": true,
+          "children_before": 1,
+          "retained_content_before": false,
+          "dirty_collector_before": false,
+          "duration_ms": 265.408887
+        },
+        {
+          "tab": 1,
+          "visit": "revisit",
+          "warmed_before": true,
+          "children_before": 1,
+          "retained_content_before": false,
+          "dirty_collector_before": false,
+          "duration_ms": 210.065319
+        },
+        {
+          "tab": 2,
+          "visit": "first_visit",
+          "warmed_before": false,
+          "children_before": 1,
+          "retained_content_before": false,
+          "dirty_collector_before": false,
+          "duration_ms": 1854.877276
+        },
+        {
+          "tab": 2,
+          "visit": "revisit",
+          "warmed_before": true,
+          "children_before": 1,
+          "retained_content_before": true,
+          "dirty_collector_before": false,
+          "duration_ms": 118.90336
+        },
+        {
+          "tab": 14,
+          "visit": "first_visit",
+          "warmed_before": false,
+          "children_before": 1,
+          "retained_content_before": false,
+          "dirty_collector_before": false,
+          "duration_ms": 910.684202
+        },
+        {
+          "tab": 14,
+          "visit": "revisit",
+          "warmed_before": true,
+          "children_before": 1,
+          "retained_content_before": true,
+          "dirty_collector_before": false,
+          "duration_ms": 193.354115
+        }
+      ],
+      "errors": [],
+      "environment": {
+        "python": "3.14.7 (main, Aug 10 2026, 07:46:56) [GCC 16.1.1 20260728]",
+        "executable": "/usr/bin/python3",
+        "textual": "8.2.8",
+        "kernel": "7.3.0-rc4-dusky-battery",
+        "uid": 0,
+        "home": "/home/dusk",
+        "gil_enabled": true,
+        "cpu_count": 14,
+        "affinity": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          12,
+          13
+        ],
+        "term": "xterm-kitty",
+        "term_program": null,
+        "mode": "headless",
+        "size": [
+          120,
+          40
+        ],
+        "pycache_prefix": "/home/dusk/.cache/dusky_tui",
+        "power_limits_uw": {
+          "/sys/devices/virtual/powercap/intel-rapl/intel-rapl:0/constraint_2_power_limit_uw": 20000000,
+          "/sys/devices/virtual/powercap/intel-rapl/intel-rapl:0/constraint_1_power_limit_uw": 8000000,
+          "/sys/devices/virtual/powercap/intel-rapl/intel-rapl:0/constraint_0_power_limit_uw": 8000000,
+          "/sys/devices/virtual/powercap/intel-rapl/intel-rapl:0/intel-rapl:0:0/constraint_0_power_limit_uw": 0,
+          "/sys/devices/virtual/powercap/intel-rapl/intel-rapl:0/intel-rapl:0:1/constraint_0_power_limit_uw": 0,
+          "/sys/devices/virtual/powercap/intel-rapl-mmio/intel-rapl-mmio:0/constraint_2_power_limit_uw": 20000000,
+          "/sys/devices/virtual/powercap/intel-rapl-mmio/intel-rapl-mmio:0/constraint_1_power_limit_uw": 60000000,
+          "/sys/devices/virtual/powercap/intel-rapl-mmio/intel-rapl-mmio:0/constraint_0_power_limit_uw": 50000000
+        },
+        "source_sha256": {
+          "/mnt/zram1/performance_tui/benchmark_startup.py": "a9e8aeb95da8cac2837d13d906c63b68149a8e1ad192c84c8753c646317a4a3a",
+          "/home/dusk/user_scripts/dusky_tui/python/main/main.py": "1c10ba654a40465c521bc6dba699da9df3b70fcd838a4b20bbdcb93448f8a764",
+          "/home/dusk/user_scripts/network_manager/tui_ufw.py": "0a4829bdec76fc9343f99dafeef5ad02698a53c7b5d112b27e0218a4fbfda622",
+          "/home/dusk/user_scripts/dusky_tui/python/frontend/ui.py": "01eec4cdc4a29c4082807ad023056e0f7b0f534943ee88a0a8a9095bbe2c959b"
+        },
+        "sync_output_detected": false
+      },
+      "schema": "/home/dusk/user_scripts/network_manager/tui_ufw.py",
+      "launcher": "/home/dusk/user_scripts/dusky_tui/python/main/main.py",
+      "stderr": ""
+    },
+    {
+      "metrics": {
+        "launcher_enter_ms": 567.377593,
+        "app_run_enter_ms": 1729.349498,
+        "app_mount_enter_ms": 2398.374938,
+        "app_mount_return_ms": 2405.061684,
+        "first_compositor_callback_ms": 3302.649929,
+        "first_after_refresh_ms": 3579.866039,
+        "active_data_refresh_ms": 7166.115924,
+        "boot_refresh_ms": 7167.237925,
+        "viewport_width": 120,
+        "viewport_height": 40,
+        "widgets_at_boot": 106,
+        "custom_widgets_at_boot": 1,
+        "observation_end_ms": 14854.43629,
+        "launcher_return_ms": 14922.793753,
+        "startup_factory_count": 1,
+        "startup_factory_inclusive_ms": 1.591586,
+        "startup_collector_count": 1,
+        "startup_collector_inclusive_ms": 2057.620412,
+        "startup_command_count": 6,
+        "startup_command_inclusive_ms": 3405.422271,
+        "startup_compose_step_count": 32,
+        "startup_compose_step_inclusive_ms": 25.178994,
+        "max_rss_kib": 57012,
+        "process_cpu_ms": 7375.568951
+      },
+      "spans": [
+        {
+          "kind": "import_inclusive",
+          "name": "dusky_schema_tui_ufw",
+          "phase": "startup",
+          "start_ms": 624.250909,
+          "duration_ms": 161.795099,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "import_inclusive",
+          "name": "textual",
+          "phase": "startup",
+          "start_ms": 798.659309,
+          "duration_ms": 219.623587,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "import_inclusive",
+          "name": "textual.app",
+          "phase": "startup",
+          "start_ms": 1018.763013,
+          "duration_ms": 397.530757,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "import_inclusive",
+          "name": "python.frontend.ui",
+          "phase": "startup",
+          "start_ms": 787.185133,
+          "duration_ms": 910.085305,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "method",
+          "name": "__init__",
+          "phase": "startup",
+          "start_ms": 1697.583864,
+          "duration_ms": 31.688538,
+          "thread": "MainThread",
+          "argument": null
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1824.59305,
+          "duration_ms": 1.057001,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1825.697983,
+          "duration_ms": 6.630088,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1832.380191,
+          "duration_ms": 0.305522,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1832.717249,
+          "duration_ms": 0.265495,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1833.003213,
+          "duration_ms": 1.569861,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1834.60172,
+          "duration_ms": 0.923535,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1835.552943,
+          "duration_ms": 0.513875,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1836.086251,
+          "duration_ms": 0.404494,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1836.508364,
+          "duration_ms": 0.789324,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1837.317939,
+          "duration_ms": 0.416416,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1837.751357,
+          "duration_ms": 0.354715,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1838.121789,
+          "duration_ms": 0.77124,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1838.921373,
+          "duration_ms": 1.241395,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1840.184148,
+          "duration_ms": 0.387243,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1840.587496,
+          "duration_ms": 0.703028,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1841.316884,
+          "duration_ms": 0.485353,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1841.825921,
+          "duration_ms": 0.716225,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1842.559348,
+          "duration_ms": 0.393245,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1842.968573,
+          "duration_ms": 0.348042,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1843.331557,
+          "duration_ms": 0.65786,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1844.014154,
+          "duration_ms": 0.367683,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1844.396877,
+          "duration_ms": 0.644408,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1845.05728,
+          "duration_ms": 0.387749,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1845.460617,
+          "duration_ms": 0.69244,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1846.16949,
+          "duration_ms": 1.02536,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1847.214043,
+          "duration_ms": 0.715554,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1847.947696,
+          "duration_ms": 0.379421,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1848.344936,
+          "duration_ms": 0.352816,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1848.714448,
+          "duration_ms": 0.397526,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1849.125608,
+          "duration_ms": 0.962673,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1850.109412,
+          "duration_ms": 0.281412,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "compose_step",
+          "name": "compose",
+          "phase": "startup",
+          "start_ms": 1850.410937,
+          "duration_ms": 0.037995,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "startup",
+          "start_ms": 3302.625215,
+          "duration_ms": 0.053881,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "startup",
+          "start_ms": 3354.934853,
+          "duration_ms": 0.040313,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "startup",
+          "start_ms": 3382.988334,
+          "duration_ms": 0.031392,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "method",
+          "name": "_populate_option_list",
+          "phase": "startup",
+          "start_ms": 3394.66867,
+          "duration_ms": 0.493835,
+          "thread": "MainThread",
+          "argument": "0"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "startup",
+          "start_ms": 3557.925409,
+          "duration_ms": 0.037856,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "startup",
+          "start_ms": 3572.492772,
+          "duration_ms": 0.032546,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "startup",
+          "start_ms": 3615.256128,
+          "duration_ms": 0.033455,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "command",
+          "name": "['ufw', 'status', 'verbose']",
+          "phase": "startup",
+          "start_ms": 3392.151734,
+          "duration_ms": 692.492028,
+          "thread": "asyncio_0",
+          "returncode": 0
+        },
+        {
+          "kind": "command",
+          "name": "['ufw', 'status', 'numbered']",
+          "phase": "startup",
+          "start_ms": 4099.238967,
+          "duration_ms": 661.67818,
+          "thread": "asyncio_0",
+          "returncode": 0
+        },
+        {
+          "kind": "method",
+          "name": "_load_one_engine_sync",
+          "phase": "startup",
+          "start_ms": 3391.775052,
+          "duration_ms": 1374.747223,
+          "thread": "asyncio_0",
+          "argument": "('ufw', '/etc/default/ufw')"
+        },
+        {
+          "kind": "method",
+          "name": "_populate_option_list",
+          "phase": "startup",
+          "start_ms": 4768.18623,
+          "duration_ms": 0.713638,
+          "thread": "MainThread",
+          "argument": "0"
+        },
+        {
+          "kind": "method",
+          "name": "_populate_option_list",
+          "phase": "startup",
+          "start_ms": 4775.510326,
+          "duration_ms": 3.936991,
+          "thread": "MainThread",
+          "argument": "1"
+        },
+        {
+          "kind": "method",
+          "name": "_populate_option_list",
+          "phase": "startup",
+          "start_ms": 4786.75642,
+          "duration_ms": 9.730058,
+          "thread": "MainThread",
+          "argument": "3"
+        },
+        {
+          "kind": "method",
+          "name": "_populate_option_list",
+          "phase": "startup",
+          "start_ms": 4816.680815,
+          "duration_ms": 8.158858,
+          "thread": "MainThread",
+          "argument": "5"
+        },
+        {
+          "kind": "method",
+          "name": "_populate_option_list",
+          "phase": "startup",
+          "start_ms": 4833.668873,
+          "duration_ms": 8.818868,
+          "thread": "MainThread",
+          "argument": "7"
+        },
+        {
+          "kind": "method",
+          "name": "_populate_option_list",
+          "phase": "startup",
+          "start_ms": 4851.233134,
+          "duration_ms": 7.143032,
+          "thread": "MainThread",
+          "argument": "8"
+        },
+        {
+          "kind": "method",
+          "name": "_populate_option_list",
+          "phase": "startup",
+          "start_ms": 4867.113914,
+          "duration_ms": 6.519396,
+          "thread": "MainThread",
+          "argument": "10"
+        },
+        {
+          "kind": "method",
+          "name": "_populate_option_list",
+          "phase": "startup",
+          "start_ms": 4884.833307,
+          "duration_ms": 6.191083,
+          "thread": "MainThread",
+          "argument": "11"
+        },
+        {
+          "kind": "method",
+          "name": "_populate_option_list",
+          "phase": "startup",
+          "start_ms": 4900.731534,
+          "duration_ms": 6.70048,
+          "thread": "MainThread",
+          "argument": "12"
+        },
+        {
+          "kind": "method",
+          "name": "_populate_option_list",
+          "phase": "startup",
+          "start_ms": 4917.021768,
+          "duration_ms": 5.881545,
+          "thread": "MainThread",
+          "argument": "13"
+        },
+        {
+          "kind": "command",
+          "name": "['ufw', 'status', 'numbered']",
+          "phase": "startup",
+          "start_ms": 4780.224963,
+          "duration_ms": 664.789036,
+          "thread": "asyncio_1",
+          "returncode": 0
+        },
+        {
+          "kind": "command",
+          "name": "['ufw', 'status', 'verbose']",
+          "phase": "startup",
+          "start_ms": 5446.922187,
+          "duration_ms": 652.600216,
+          "thread": "asyncio_1",
+          "returncode": 0
+        },
+        {
+          "kind": "command",
+          "name": "['ip', '-4', 'route', 'show', 'default']",
+          "phase": "startup",
+          "start_ms": 6099.914467,
+          "duration_ms": 8.83254,
+          "thread": "asyncio_1",
+          "returncode": 0
+        },
+        {
+          "kind": "command",
+          "name": "['ufw', 'show', 'listening']",
+          "phase": "startup",
+          "start_ms": 6111.284197,
+          "duration_ms": 725.030271,
+          "thread": "asyncio_1",
+          "returncode": 0
+        },
+        {
+          "kind": "collector",
+          "name": "custom-view-0",
+          "phase": "startup",
+          "start_ms": 4779.902975,
+          "duration_ms": 2057.620412,
+          "thread": "asyncio_1"
+        },
+        {
+          "kind": "factory",
+          "name": "custom-view-0",
+          "phase": "startup",
+          "start_ms": 6839.349588,
+          "duration_ms": 1.591586,
+          "thread": "MainThread",
+          "ancestor_display": true
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "startup",
+          "start_ms": 7074.082328,
+          "duration_ms": 0.04177,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "startup",
+          "start_ms": 7164.66501,
+          "duration_ms": 0.036132,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "command",
+          "name": "['ufw', 'status', 'numbered']",
+          "phase": "idle_observation",
+          "start_ms": 8772.39558,
+          "duration_ms": 664.217667,
+          "thread": "asyncio_0",
+          "returncode": 0
+        },
+        {
+          "kind": "command",
+          "name": "['ufw', 'status', 'verbose']",
+          "phase": "idle_observation",
+          "start_ms": 9438.468842,
+          "duration_ms": 667.475427,
+          "thread": "asyncio_0",
+          "returncode": 0
+        },
+        {
+          "kind": "command",
+          "name": "['ip', '-4', 'route', 'show', 'default']",
+          "phase": "idle_observation",
+          "start_ms": 10106.36254,
+          "duration_ms": 7.61202,
+          "thread": "asyncio_0",
+          "returncode": 0
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_1_first_visit",
+          "start_ms": 10408.701754,
+          "duration_ms": 0.037204,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_1_first_visit",
+          "start_ms": 10569.414995,
+          "duration_ms": 0.03948,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_1_first_visit",
+          "start_ms": 10584.590238,
+          "duration_ms": 0.029963,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_1_first_visit",
+          "start_ms": 10659.756942,
+          "duration_ms": 0.037168,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_1_first_visit",
+          "start_ms": 10762.455272,
+          "duration_ms": 0.037375,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_1_first_visit",
+          "start_ms": 10777.502606,
+          "duration_ms": 0.030313,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_1_revisit",
+          "start_ms": 10812.946734,
+          "duration_ms": 0.035114,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "command",
+          "name": "['ufw', 'show', 'listening']",
+          "phase": "idle_observation",
+          "start_ms": 10115.70927,
+          "duration_ms": 747.984508,
+          "thread": "asyncio_0",
+          "returncode": 0
+        },
+        {
+          "kind": "collector",
+          "name": "custom-view-0",
+          "phase": "idle_observation",
+          "start_ms": 8772.12334,
+          "duration_ms": 2091.923707,
+          "thread": "asyncio_0"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_1_revisit",
+          "start_ms": 10926.80158,
+          "duration_ms": 0.039745,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_1_revisit",
+          "start_ms": 10942.283482,
+          "duration_ms": 0.030506,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_1_revisit",
+          "start_ms": 10995.440766,
+          "duration_ms": 0.036261,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_1_revisit",
+          "start_ms": 11100.07697,
+          "duration_ms": 0.035316,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_1_revisit",
+          "start_ms": 11114.669534,
+          "duration_ms": 0.031785,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_2_first_visit",
+          "start_ms": 11165.261738,
+          "duration_ms": 0.036368,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "method",
+          "name": "_populate_option_list",
+          "phase": "tab_2_first_visit",
+          "start_ms": 11177.986045,
+          "duration_ms": 0.496343,
+          "thread": "MainThread",
+          "argument": "2"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_2_first_visit",
+          "start_ms": 11259.566284,
+          "duration_ms": 0.038729,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_2_first_visit",
+          "start_ms": 11274.163405,
+          "duration_ms": 0.033047,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "command",
+          "name": "['ss', '-H', '-tlunp']",
+          "phase": "tab_2_first_visit",
+          "start_ms": 11180.387404,
+          "duration_ms": 105.870809,
+          "thread": "asyncio_1",
+          "returncode": 0
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_2_first_visit",
+          "start_ms": 11311.559332,
+          "duration_ms": 0.036618,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "command",
+          "name": "['ufw', 'status', 'numbered']",
+          "phase": "tab_2_first_visit",
+          "start_ms": 11286.574762,
+          "duration_ms": 666.393298,
+          "thread": "asyncio_1",
+          "returncode": 0
+        },
+        {
+          "kind": "command",
+          "name": "['ufw', 'status', 'verbose']",
+          "phase": "tab_2_first_visit",
+          "start_ms": 11954.834114,
+          "duration_ms": 671.116312,
+          "thread": "asyncio_1",
+          "returncode": 0
+        },
+        {
+          "kind": "collector",
+          "name": "custom-view-2",
+          "phase": "tab_2_first_visit",
+          "start_ms": 11180.114982,
+          "duration_ms": 1460.249786,
+          "thread": "asyncio_1"
+        },
+        {
+          "kind": "factory",
+          "name": "custom-view-2",
+          "phase": "tab_2_first_visit",
+          "start_ms": 12641.922808,
+          "duration_ms": 1.179787,
+          "thread": "MainThread",
+          "ancestor_display": true
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_2_first_visit",
+          "start_ms": 12830.552039,
+          "duration_ms": 0.045339,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_2_first_visit",
+          "start_ms": 12940.373804,
+          "duration_ms": 0.042651,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_2_first_visit",
+          "start_ms": 13084.687866,
+          "duration_ms": 0.042302,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_2_first_visit",
+          "start_ms": 13100.19762,
+          "duration_ms": 0.033501,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_2_revisit",
+          "start_ms": 13200.184527,
+          "duration_ms": 0.037696,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_2_revisit",
+          "start_ms": 13214.886811,
+          "duration_ms": 0.030691,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_2_revisit",
+          "start_ms": 13315.170322,
+          "duration_ms": 0.038505,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_2_revisit",
+          "start_ms": 13330.095664,
+          "duration_ms": 0.030182,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_14_first_visit",
+          "start_ms": 13369.634117,
+          "duration_ms": 0.034421,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "method",
+          "name": "_populate_option_list",
+          "phase": "tab_14_first_visit",
+          "start_ms": 13399.918739,
+          "duration_ms": 0.502617,
+          "thread": "MainThread",
+          "argument": "14"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_14_first_visit",
+          "start_ms": 13492.312752,
+          "duration_ms": 0.043814,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_14_first_visit",
+          "start_ms": 13507.092079,
+          "duration_ms": 0.033258,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_14_first_visit",
+          "start_ms": 13584.85367,
+          "duration_ms": 0.045398,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "command",
+          "name": "['ufw', 'show', 'listening']",
+          "phase": "tab_14_first_visit",
+          "start_ms": 13402.165469,
+          "duration_ms": 740.421824,
+          "thread": "asyncio_2",
+          "returncode": 0
+        },
+        {
+          "kind": "collector",
+          "name": "custom-view-14",
+          "phase": "tab_14_first_visit",
+          "start_ms": 13401.825196,
+          "duration_ms": 740.861955,
+          "thread": "asyncio_2"
+        },
+        {
+          "kind": "factory",
+          "name": "custom-view-14",
+          "phase": "tab_14_first_visit",
+          "start_ms": 14144.441998,
+          "duration_ms": 0.256569,
+          "thread": "MainThread",
+          "ancestor_display": true
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_14_first_visit",
+          "start_ms": 14189.313469,
+          "duration_ms": 0.048848,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_14_first_visit",
+          "start_ms": 14238.326539,
+          "duration_ms": 0.046302,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_14_first_visit",
+          "start_ms": 14377.770073,
+          "duration_ms": 0.050578,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_14_first_visit",
+          "start_ms": 14402.635467,
+          "duration_ms": 0.046628,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_14_revisit",
+          "start_ms": 14468.170385,
+          "duration_ms": 0.03884,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_14_revisit",
+          "start_ms": 14552.09455,
+          "duration_ms": 0.043391,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_14_revisit",
+          "start_ms": 14567.472291,
+          "duration_ms": 0.032448,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_14_revisit",
+          "start_ms": 14624.187868,
+          "duration_ms": 0.038834,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_14_revisit",
+          "start_ms": 14828.72873,
+          "duration_ms": 0.04278,
+          "thread": "MainThread"
+        },
+        {
+          "kind": "display",
+          "name": "compositor",
+          "phase": "tab_14_revisit",
+          "start_ms": 14844.290557,
+          "duration_ms": 0.033092,
+          "thread": "MainThread"
+        }
+      ],
+      "switches": [
+        {
+          "tab": 1,
+          "visit": "first_visit",
+          "warmed_before": true,
+          "children_before": 1,
+          "retained_content_before": false,
+          "dirty_collector_before": false,
+          "duration_ms": 280.483503
+        },
+        {
+          "tab": 1,
+          "visit": "revisit",
+          "warmed_before": true,
+          "children_before": 1,
+          "retained_content_before": false,
+          "dirty_collector_before": false,
+          "duration_ms": 214.001309
+        },
+        {
+          "tab": 2,
+          "visit": "first_visit",
+          "warmed_before": false,
+          "children_before": 1,
+          "retained_content_before": false,
+          "dirty_collector_before": false,
+          "duration_ms": 1818.608381
+        },
+        {
+          "tab": 2,
+          "visit": "revisit",
+          "warmed_before": true,
+          "children_before": 1,
+          "retained_content_before": true,
+          "dirty_collector_before": false,
+          "duration_ms": 117.985916
+        },
+        {
+          "tab": 14,
+          "visit": "first_visit",
+          "warmed_before": false,
+          "children_before": 1,
+          "retained_content_before": false,
+          "dirty_collector_before": false,
+          "duration_ms": 904.193111
+        },
+        {
+          "tab": 14,
+          "visit": "revisit",
+          "warmed_before": true,
+          "children_before": 1,
+          "retained_content_before": true,
+          "dirty_collector_before": false,
+          "duration_ms": 206.609843
+        }
+      ],
+      "errors": [],
+      "environment": {
+        "python": "3.14.7 (main, Aug 10 2026, 07:46:56) [GCC 16.1.1 20260728]",
+        "executable": "/usr/bin/python3",
+        "textual": "8.2.8",
+        "kernel": "7.3.0-rc4-dusky-battery",
+        "uid": 0,
+        "home": "/home/dusk",
+        "gil_enabled": true,
+        "cpu_count": 14,
+        "affinity": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          12,
+          13
+        ],
+        "term": "xterm-kitty",
+        "term_program": null,
+        "mode": "headless",
+        "size": [
+          120,
+          40
+        ],
+        "pycache_prefix": "/home/dusk/.cache/dusky_tui",
+        "power_limits_uw": {
+          "/sys/devices/virtual/powercap/intel-rapl/intel-rapl:0/constraint_2_power_limit_uw": 20000000,
+          "/sys/devices/virtual/powercap/intel-rapl/intel-rapl:0/constraint_1_power_limit_uw": 8000000,
+          "/sys/devices/virtual/powercap/intel-rapl/intel-rapl:0/constraint_0_power_limit_uw": 8000000,
+          "/sys/devices/virtual/powercap/intel-rapl/intel-rapl:0/intel-rapl:0:0/constraint_0_power_limit_uw": 0,
+          "/sys/devices/virtual/powercap/intel-rapl/intel-rapl:0/intel-rapl:0:1/constraint_0_power_limit_uw": 0,
+          "/sys/devices/virtual/powercap/intel-rapl-mmio/intel-rapl-mmio:0/constraint_2_power_limit_uw": 20000000,
+          "/sys/devices/virtual/powercap/intel-rapl-mmio/intel-rapl-mmio:0/constraint_1_power_limit_uw": 60000000,
+          "/sys/devices/virtual/powercap/intel-rapl-mmio/intel-rapl-mmio:0/constraint_0_power_limit_uw": 50000000
+        },
+        "source_sha256": {
+          "/mnt/zram1/performance_tui/benchmark_startup.py": "a9e8aeb95da8cac2837d13d906c63b68149a8e1ad192c84c8753c646317a4a3a",
+          "/home/dusk/user_scripts/dusky_tui/python/main/main.py": "1c10ba654a40465c521bc6dba699da9df3b70fcd838a4b20bbdcb93448f8a764",
+          "/home/dusk/user_scripts/network_manager/tui_ufw.py": "0a4829bdec76fc9343f99dafeef5ad02698a53c7b5d112b27e0218a4fbfda622",
+          "/home/dusk/user_scripts/dusky_tui/python/frontend/ui.py": "01eec4cdc4a29c4082807ad023056e0f7b0f534943ee88a0a8a9095bbe2c959b"
+        },
+        "sync_output_detected": false
+      },
+      "schema": "/home/dusk/user_scripts/network_manager/tui_ufw.py",
+      "launcher": "/home/dusk/user_scripts/dusky_tui/python/main/main.py",
+      "stderr": ""
+    }
+  ],
+  "caveats": [
+    "Fresh interpreters; filesystem and bytecode caches are uncontrolled, not cold disk.",
+    "Timestamp milestones overlap: do not add them or inclusive diagnostic spans.",
+    "Headless callbacks do not measure terminal output or optical presentation.",
+    "Driver flush return is not terminal/compositor presentation acknowledgement.",
+    "Active data refresh is a readiness proxy, not proven input-to-pixel TTI.",
+    "First visit may already be warmed; see per-switch metadata.",
+    "CPU/RSS include observation, switches and shutdown."
+  ]
+}

@@ -1,53 +1,21 @@
 #!/usr/bin/env python3
 # DUSKY_INTERACTIVE=true
 """
-030_partitioning.py - DUSKY Final Fixed - Python 3.14.6 + Rich 15.0.0 + systemd 261 + util-linux 2.42.1
-All fixes integrated July 2026:
- [1] sfdisk --lock=yes single token
- [2] removeprefix("/dev/") not lstrip
- [3] BTRFS NOCOW: chattr +C alone
- [4] swapoff safe for /mnt/swap/swapfile
- [5] mkfs.btrfs crc32c modern defaults
- [6] EFI hardened fmask=0177,dmask=0077,noexec,nosuid,nodev
- [7] Panel width: Panel.fit + Align.center + safe_box=False fixes +---+ ASCII
- [8] Arrow menus: termios raw with Rich fallback, no extra deps, handles CSI + SS3
- [9] cfdisk TTY wrapper: /dev/tty passthrough, TERM sanitization, stty sane, returncode check, fdisk fallback
- [10] EFI default 1.3G decimal support
- [11] Fixed SyntaxError global console
- [12] Preserved cfdisk -> fdisk fallback
- [13] Fixed or True EFI filter bug
- [14] Fixed force_terminal ANSI log pollution -> auto-detect None
- [15] Fixed Ctrl+C terminal destruction -> SIG_IGN in parent + DFL in child via preexec
- [16] Fixed abort trap -> q/Esc exits cleanly
- [17] Fixed 10-item number lockout -> multi-digit buffer + Enter
- [18] Fixed dumb TERM setdefault -> direct assignment
- [19] FIXED duplicate numbering in arrow_menu fallback
- [20] ADDED recursive loop structure enabling safe return / back operations
+Prepare disk partitions and filesystems for the offline DUSKY installer.
+Supports whole-disk installation, existing partitions, manual editing, and rescue.
+Writes the selected storage layout for 040_disk_mount.py to consume.
 """
 
 from __future__ import annotations
-import os, sys, re, json, time, shlex, shutil, getpass, signal, argparse, subprocess, tempfile, select
+import os, sys, re, json, time, shlex, getpass, signal, argparse, subprocess, tempfile, select
 from pathlib import Path
-from typing import Literal, List, Tuple, Optional
+from typing import Literal
 
 def _ensure_rich():
     import importlib.util
-    try:
-        if importlib.util.find_spec("rich") is not None:
-            return
-    except ModuleNotFoundError:
-        pass
-    if not hasattr(os, "geteuid") or os.geteuid() != 0:
-        print("python-rich missing", file=sys.stderr)
-        sys.exit(1)
-    try:
-        du = shutil.disk_usage("/run/archiso/cowspace")
-        if du.free < 250*1024*1024:
-            subprocess.run(["mount","-o","remount,size=2G","/run/archiso/cowspace"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except:
-        pass
-    print(">> Installing python-rich...", file=sys.stderr)
-    subprocess.run(["pacman","-Sy","--needed","--noconfirm","python-rich"], stdout=sys.stderr, stderr=sys.stderr)
+    if importlib.util.find_spec("rich") is None:
+        print("python-rich is required in the offline ISO", file=sys.stderr)
+        raise SystemExit(1)
 
 _ensure_rich()
 from rich.console import Console
@@ -55,6 +23,7 @@ from rich.table import Table
 from rich.panel import Panel
 from rich.align import Align
 from rich.text import Text
+from rich.markup import escape
 from rich.prompt import Confirm, Prompt
 from rich import box
 
@@ -84,32 +53,54 @@ DUSKY_ROOT_PARTNAME = "DUSKY_ROOT"
 STATE_ENV = Path("/tmp/arch_install_state.env")
 STATE_JSON = Path("/tmp/dusky_state.json")
 VALID_PART_RE = re.compile(r"^[a-zA-Z0-9_./-]+$")
-BTRFS_CSUM = "crc32c"
+BTRFS_CSUM = "blake2"
 
 def run(*cmd, check=True, capture=True, input_text=None, timeout=300):
     argv = [os.fspath(c) for c in cmd]
+    binary = isinstance(input_text, (bytes, bytearray))
     try:
-        if isinstance(input_text, (bytes, bytearray)):
-            return subprocess.run(argv, check=check, text=False, capture_output=capture, input=bytes(input_text), timeout=timeout)
-        elif isinstance(input_text, str):
-            return subprocess.run(argv, check=check, text=True, capture_output=capture, input=input_text, timeout=timeout)
-        return subprocess.run(argv, check=check, text=True, capture_output=capture, timeout=timeout)
-    except subprocess.CalledProcessError as e:
-        if check:
-            console.print(f"[red]Failed {shlex.join([str(x) for x in argv])}[/red]")
-            err = getattr(e, 'stderr', None)
-            if err:
-                if isinstance(err, bytes): err = err.decode('utf-8', 'replace')
-                err = err.strip()
-                if err: console.print(f"[red]Details: {err}[/red]")
+        return subprocess.run(
+            argv, check=check, capture_output=capture, timeout=timeout,
+            env=os.environ | {"LC_ALL": "C"},
+            input=bytes(input_text) if binary else input_text,
+            **({} if binary else {"encoding": "utf-8", "errors": "replace"}),
+        )
+    except subprocess.CalledProcessError as error:
+        console.print(Text(f"Failed {shlex.join(argv)}", style="red"))
+        detail = error.stderr
+        if isinstance(detail, bytes):
+            detail = detail.decode("utf-8", "replace")
+        if detail and detail.strip():
+            console.print(Text(f"Details: {detail.strip()}", style="red"))
         raise
+    except OSError:
+        if check:
+            raise
+        detail = f"{argv[0]}: not available"
+        return subprocess.CompletedProcess(
+            argv, 127, stdout=b"" if binary else "",
+            stderr=detail.encode() if binary else detail,
+        )
+
+
+def mountinfo_targets(text: str, prefix: str = "/mnt") -> list[str]:
+    """Return a mount tree, decoding mountinfo path escapes."""
+    targets = set()
+    for line in text.splitlines():
+        fields = line.split()
+        if len(fields) < 6 or " - " not in line:
+            continue
+        target = re.sub(r"\\([0-7]{3})", lambda match: chr(int(match[1], 8)), fields[4])
+        if target == prefix or target.startswith(prefix.rstrip("/") + "/"):
+            targets.add(target)
+    return sorted(targets, key=lambda path: (path.count("/"), len(path)), reverse=True)
 
 def print_banner(boot_mode: str):
     txt = Text.from_markup(f"[bold cyan]DUSKY[/] Partitioning [dim]{boot_mode}[/]", justify="center")
     panel = Panel.fit(txt, box=box.ROUNDED, border_style="cyan", padding=(0,2))
     console.print(Align.center(panel))
 
-def arrow_menu(title: str, options: List[Tuple[str,str]], default_idx: int = 0) -> Optional[str]:
+def arrow_menu(title: str, options: list[tuple[str, str]], default_idx: int = 0) -> str | None:
     """
     Returns value or None if aborted via q/Esc/Ctrl-C.
     - TTY: raw arrow navigation, numbers 1-9 quick select, multi-digit + Enter for >=10
@@ -126,7 +117,7 @@ def arrow_menu(title: str, options: List[Tuple[str,str]], default_idx: int = 0) 
     if not is_tty:
         console.print(Panel.fit(f"[bold]{title}[/]", box=box.ROUNDED, border_style="white"))
         for i,(label,_) in enumerate(options,1):
-            console.print(f"[cyan]{i})[/] {label}")
+            console.print(f"[cyan]{i})[/] {escape(label)}")
         while True:
             ans = Prompt.ask(f"{title} (1-{len(options)} or q to abort)", console=console, default=str(default_idx+1))
             if ans.lower() in ("q","quit","exit"):
@@ -145,7 +136,7 @@ def arrow_menu(title: str, options: List[Tuple[str,str]], default_idx: int = 0) 
     except ImportError:
         console.print(Panel.fit(f"[bold]{title}[/]", box=box.ROUNDED))
         for i,(label,_) in enumerate(options,1):
-            console.print(f"[cyan]{i})[/] {label}")
+            console.print(f"[cyan]{i})[/] {escape(label)}")
         ans = Prompt.ask(f"{title} (1-{len(options)} or q to abort)", console=console, default=str(default_idx+1))
         if ans.lower() in ("q","quit"):
             return None
@@ -165,7 +156,7 @@ def arrow_menu(title: str, options: List[Tuple[str,str]], default_idx: int = 0) 
         console.print(Align.center(banner_panel))
         console.print()
         for i,(label,_) in enumerate(options):
-            disp = f"{i+1}) {label}"
+            disp = escape(f"{i+1}) {label}")
             if i==idx:
                 console.print(f"[reverse][bold cyan] > {disp} [/][/]", highlight=False)
             else:
@@ -181,7 +172,7 @@ def arrow_menu(title: str, options: List[Tuple[str,str]], default_idx: int = 0) 
     except Exception:
         console.print(Panel.fit(f"[bold]{title}[/]", box=box.ROUNDED))
         for i,(label,_) in enumerate(options,1):
-            console.print(f"[cyan]{i})[/] {label}")
+            console.print(f"[cyan]{i})[/] {escape(label)}")
         ans = Prompt.ask(f"{title} (1-{len(options)} or q to abort)", console=console, default=str(default_idx+1))
         if ans.lower() in ("q","quit"):
             return None
@@ -302,7 +293,9 @@ def parse_credentials(path="./.arch_credentials"):
     try:
         script = f'set +u; source {shlex.quote(str(cred))} 2>/dev/null; printf "TARGET_USER=%s\\nENCRYPT_ROOT=%s\\nROOT_PASS=%s\\n" "$TARGET_USER" "$ENCRYPT_ROOT" "$ROOT_PASS"'
         r = subprocess.run(["bash","-c",script], text=True, capture_output=True, check=False, timeout=5)
-        for line in r.stdout.splitlines():
+        # Only the printf record separator is a newline; Unicode separators
+        # inside the password must not be interpreted as record boundaries.
+        for line in r.stdout.split("\n"):
             if "=" not in line:
                 continue
             k,v = line.split("=",1)
@@ -335,94 +328,42 @@ def list_disks():
         disks.append(dev)
     return disks
 
-def get_pkname(dev_path):
-    try:
-        r = run("lsblk","-ndlo","PKNAME",dev_path, check=False, capture=True)
-        pk = r.stdout.strip().splitlines()[0].strip() if r.stdout.strip() else ""
-        if pk:
-            return f"/dev/{pk}"
-    except:
-        pass
-    return ""
-
-def get_immediate_backing(dev):
-    try:
-        real = str(Path(dev).resolve())
-        if dev.startswith("/dev/mapper/") or real.startswith("/dev/dm-"):
-            mapper = Path(dev).name if dev.startswith("/dev/mapper/") else None
-            if not mapper:
-                try:
-                    p = Path(f"/sys/class/block/{Path(real).name}/dm/name")
-                    if p.exists():
-                        mapper = p.read_text().strip()
-                except:
-                    mapper = None
-            if mapper:
-                try:
-                    rr = run("cryptsetup","status",mapper, check=False, capture=True)
-                    for line in rr.stdout.splitlines():
-                        if line.strip().lower().startswith("device:"):
-                            backing = line.split(":",1)[1].strip()
-                            if backing and Path(backing).exists():
-                                return str(Path(backing).resolve())
-                except:
-                    pass
-            try:
-                dmk = Path(real).name
-                sd = Path(f"/sys/class/block/{dmk}/slaves")
-                if sd.is_dir():
-                    for c in sd.iterdir():
-                        return f"/dev/{c.name}"
-            except:
-                pass
-        pk = get_pkname(dev)
-        if pk:
-            return pk
-        try:
-            k = Path(dev).name
-            sl = Path(f"/sys/class/block/{k}/slaves")
-            if sl.is_dir():
-                for s in sl.iterdir():
-                    return f"/dev/{s.name}"
-        except:
-            pass
-    except:
-        pass
-    return None
-
 def device_is_on_disk(node, disk, max_depth=32):
-    try:
-        cur = str(Path(node).resolve())
-        target = str(Path(disk).resolve())
-        depth=0
-        while depth < max_depth:
-            if cur == target:
-                return True
-            nxt = get_immediate_backing(cur)
-            if not nxt:
-                pk = get_pkname(cur)
-                if not pk:
-                    return False
-                cur = str(Path(pk).resolve())
-            else:
-                cur = str(Path(nxt).resolve())
-            depth += 1
-        return False
-    except:
-        return False
+    """Walk every sysfs backing device, including multi-device LVM/DM stacks."""
+    target = Path(disk).resolve().name
+    pending = [(Path(node).resolve().name, 0)]
+    seen = set()
+    while pending:
+        name, depth = pending.pop()
+        if name in seen or depth >= max_depth:
+            continue
+        seen.add(name)
+        if name == target:
+            return True
+        block = Path("/sys/class/block") / name
+        try:
+            if (block / "partition").exists():
+                pending.append((block.resolve().parent.name, depth + 1))
+            slaves = block / "slaves"
+            if slaves.is_dir():
+                pending.extend((slave.name, depth + 1) for slave in slaves.iterdir())
+        except OSError:
+            continue
+    return False
+
 
 def findmnt_targets(prefix="/mnt"):
     try:
-        r = run("findmnt","--json","--list","--submounts","--output","TARGET","--target",prefix, check=False, capture=True)
+        r = run("findmnt","--json","--list","--submounts","--output","TARGET","--mountpoint",prefix, check=False, capture=True)
         if r.returncode == 0 and r.stdout.strip():
             data = json.loads(r.stdout)
-            t = [fs.get("target","") for fs in data.get("filesystems",[]) if fs.get("target","").startswith(prefix)]
+            t = [fs.get("target","") for fs in data.get("filesystems",[]) if fs.get("target","") == prefix or fs.get("target","").startswith(prefix.rstrip("/") + "/")]
             return sorted(set(t), key=lambda p:(p.count("/"),len(p)), reverse=True)
     except:
         pass
     try:
-        r = run("findmnt","-rn","-o","TARGET", check=False, capture=True)
-        targets = [l.strip() for l in r.stdout.splitlines() if l.strip().startswith(prefix)]
+        text = Path("/proc/self/mountinfo").read_text()
+        targets = mountinfo_targets(text, prefix)
         return sorted(targets, key=lambda p:(p.count("/"),len(p)), reverse=True)
     except:
         return []
@@ -489,61 +430,28 @@ def detect_windows_esp(disk):
             if ptype != EFI_GUID and fstype not in ("vfat","fat32"):
                 continue
             mnt = is_mounted(path)
-            tmp_obj = None
-            tmp_path = mnt
+            temporary = None
             try:
                 if not mnt:
-                    tmp_obj = tempfile.TemporaryDirectory(prefix="dusky_efi_check_")
-                    tmp_path = tmp_obj.name
-                    run("mount","--mkdir","-t","vfat","-o","ro,noexec,nosuid,nodev",path,tmp_path, check=False, capture=True)
-                if Path(tmp_path,"EFI","Microsoft","Boot","bootmgfw.efi").exists() or Path(tmp_path,"EFI","Microsoft").is_dir():
-                    if tmp_obj:
-                        run("umount",tmp_path, check=False, capture=True)
-                        tmp_obj.cleanup()
+                    temporary = tempfile.mkdtemp(prefix="dusky_efi_check_")
+                    result = run("mount", "-t", "vfat", "-o", "ro,noexec,nosuid,nodev",
+                                 path, temporary, check=False)
+                    if result.returncode != 0:
+                        continue
+                    mnt = temporary
+                if Path(mnt, "EFI", "Microsoft").is_dir():
                     return True, path
-                if tmp_obj:
-                    run("umount",tmp_path, check=False, capture=True)
-            except:
-                try:
-                    if tmp_obj:
-                        run("umount",tmp_path, check=False, capture=True)
-                        tmp_obj.cleanup()
-                except:
-                    pass
+            except (OSError, subprocess.TimeoutExpired):
+                continue
+            finally:
+                if temporary:
+                    run("umount", temporary, check=False)
+                    try:
+                        Path(temporary).rmdir()
+                    except OSError:
+                        pass
     return False, None
 
-def check_filesystem_health(dev_path: str, fstype: str) -> Tuple[bool, str]:
-    if fstype in ("ntfs", "ntfs-3g"):
-        r = run("ntfsfix", "-n", dev_path, check=False, capture=True)
-        if r.returncode != 0 or "Volume is dirty" in (r.stdout or ""):
-            return False, f"NTFS volume {dev_path} is dirty or Windows Fast Startup is active. Boot into Windows and shut down cleanly."
-        return True, "NTFS clean"
-    elif fstype in ("ext4", "ext3", "ext2"):
-        r = run("e2fsck", "-f", "-n", dev_path, check=False, capture=True)
-        if r.returncode >= 4:
-            return False, f"ext4 filesystem errors detected on {dev_path}."
-        return True, "ext4 clean"
-    elif fstype == "btrfs":
-        r = run("btrfs", "check", "--readonly", dev_path, check=False, capture=True)
-        if r.returncode != 0:
-            return False, f"Btrfs integrity check failed on {dev_path}."
-        return True, "Btrfs clean"
-    return True, "OK"
-
-def shrink_partition_ntfs(dev_path: str, target_size_bytes: int) -> bool:
-    ok, msg = check_filesystem_health(dev_path, "ntfs")
-    if not ok:
-        console.print(f"[red]{msg}[/red]")
-        return False
-    r = run("ntfsresize", "--info", "--force", dev_path, check=False, capture=True)
-    if r.returncode != 0:
-        return False
-    r = run("ntfsresize", "--no-action", "--size", str(target_size_bytes), dev_path, check=False, capture=True)
-    if r.returncode != 0:
-        return False
-    console.print(f"[cyan]Shrinking NTFS {dev_path} to {target_size_bytes // (1024**2)} MiB...[/cyan]")
-    run("ntfsresize", "--force", "--size", str(target_size_bytes), dev_path, capture=True)
-    return True
 
 def safe_deactivate_swaps_for_device(target_dev):
     wanted = {"/mnt/swap/swapfile","/swap/swapfile"}
@@ -562,7 +470,7 @@ def safe_deactivate_swaps_for_device(target_dev):
         pass
     for name in candidates:
         try:
-            if name in wanted or (name.startswith("/mnt/") and name.endswith("swapfile")) or (Path(name).name == "swapfile" and (name.startswith("/mnt/") or name == "/swap/swapfile")):
+            if device_is_on_disk(name, target_dev) or name in wanted or (name.startswith("/mnt/") and name.endswith("swapfile")) or (Path(name).name == "swapfile" and (name.startswith("/mnt/") or name == "/swap/swapfile")):
                 if target_dev:
                     check_src = name
                     if Path(name).is_file():
@@ -593,7 +501,6 @@ def teardown_target_storage(target_dev: str, max_retries: int = 4) -> None:
         run("sync", check=False, capture=True)
 
         # 2. Aggressive Swap Deactivation
-        run("swapoff", "-a", check=False, capture=True)
         try:
             safe_deactivate_swaps_for_device(resolved_disk)
         except Exception:
@@ -615,19 +522,30 @@ def teardown_target_storage(target_dev: str, max_retries: int = 4) -> None:
                         if run("umount", "-R", tgt, check=False, capture=True).returncode != 0:
                             run("umount", "-R", "-f", "-l", tgt, check=False, capture=True)
 
-            # Precision systemd 261 mount namespace purging
+            # Mount namespace cleanup
+            seen_ns_inodes = set()
             for proc_dir in Path("/proc").glob("[0-9]*"):
                 try:
+                    ns_mnt = proc_dir / "ns" / "mnt"
+                    if not ns_mnt.exists():
+                        continue
+                    ino = ns_mnt.stat().st_ino
+                    if ino in seen_ns_inodes:
+                        continue
+                    seen_ns_inodes.add(ino)
                     mi = proc_dir / "mountinfo"
                     if mi.is_file():
                         text = mi.read_text(errors="ignore")
-                        if "/mnt" in text or resolved_disk in text:
-                            for line in text.splitlines():
-                                if "/mnt" in line or resolved_disk in line:
-                                    parts = line.split()
-                                    if len(parts) >= 5:
-                                        target_mp = parts[4]
-                                        run("nsenter", f"--mount=/proc/{proc_dir.name}/ns/mnt", "umount", "-R", "-f", "-l", target_mp, check=False, capture=True)
+                        targets = set(mountinfo_targets(text))
+                        for line in text.splitlines():
+                            fields, separator, filesystem = line.partition(" - ")
+                            before, after = fields.split(), filesystem.split()
+                            if separator and len(before) >= 5 and len(after) >= 2:
+                                source = re.sub(r"\\([0-7]{3})", lambda match: chr(int(match[1], 8)), after[1])
+                                if device_is_on_disk(source, resolved_disk):
+                                    targets.add(re.sub(r"\\([0-7]{3})", lambda match: chr(int(match[1], 8)), before[4]))
+                        for target_mp in sorted(targets, key=lambda path: (path.count("/"), len(path)), reverse=True):
+                            run("nsenter", f"--mount=/proc/{proc_dir.name}/ns/mnt", "umount", "-R", "-f", "-l", target_mp, check=False, capture=True)
                 except Exception:
                     pass
         except Exception:
@@ -647,9 +565,6 @@ def teardown_target_storage(target_dev: str, max_retries: int = 4) -> None:
                         if run("cryptsetup", "close", dm_name, check=False, capture=True).returncode != 0:
                             run("dmsetup", "remove", "--force", "--retry", dm_name, check=False, capture=True)
 
-            if Path(f"/dev/mapper/{TARGET_CRYPT_NAME}").exists():
-                if run("cryptsetup", "close", TARGET_CRYPT_NAME, check=False, capture=True).returncode != 0:
-                    run("dmsetup", "remove", "--force", "--retry", TARGET_CRYPT_NAME, check=False, capture=True)
         except Exception:
             pass
 
@@ -695,9 +610,12 @@ def teardown_target_storage(target_dev: str, max_retries: int = 4) -> None:
                 busy_found = True
                 break
 
+        block_paths = []
         if not busy_found:
-            dev_name = Path(resolved_disk).name
-            for block_path in Path("/sys/class/block").glob(f"{dev_name}*"):
+            disk_path = (Path("/sys/class/block") / Path(resolved_disk).name).resolve()
+            block_paths = [disk_path]
+            block_paths.extend(path for path in disk_path.iterdir() if (path / "partition").exists())
+            for block_path in block_paths:
                 holders_path = block_path / "holders"
                 if holders_path.is_dir() and any(holders_path.iterdir()):
                     busy_found = True
@@ -705,8 +623,7 @@ def teardown_target_storage(target_dev: str, max_retries: int = 4) -> None:
 
         # Also check for stale btrfs kernel claims via O_EXCL test
         if not busy_found:
-            dev_name = Path(resolved_disk).name
-            for block_path in Path("/sys/class/block").glob(f"{dev_name}[0-9]*"):
+            for block_path in block_paths:
                 part_dev = f"/dev/{block_path.name}"
                 if Path(part_dev).exists():
                     try:
@@ -726,7 +643,7 @@ def teardown_target_storage(target_dev: str, max_retries: int = 4) -> None:
 
         time.sleep(1.5)
 
-    console.print(f"[yellow]>> Teardown completed after {max_retries} attempts. Proceeding to wipe.[/yellow]")
+    raise RuntimeError(f"Storage on {resolved_disk} is still busy after {max_retries} teardown attempts")
 
 teardown_device = teardown_target_storage
 
@@ -766,10 +683,30 @@ def write_gpt_sfdisk(disk, boot_mode, encrypt, efi_size="1.3G"):
         sfdisk_input += f'size=+, type={root_type}, name="{DUSKY_ROOT_PARTNAME}"\n'
     console.print(f"[cyan]Writing GPT to {disk} (wipe) EFI={efi_size}[/cyan]")
     
-    # Freeze udev execution queue during wipefs/sfdisk to prevent udev locks
+    # 1. Annihilate existing GPT structures (primary and backup header/table) and MBR
+    console.print(f"[cyan]Destroying all GPT/MBR structures and backup tables on {disk}...[/cyan]")
+    run("blkdiscard", "--force", disk, check=False, capture=True, timeout=None)
+    run("sgdisk", "--zap-all", disk, check=False, capture=True)
+    run("wipefs", "--all", "--force", disk, check=False, capture=True)
+    try:
+        # Zero out the first 10MB (20480 sectors) to eliminate MBR, primary GPT, and initial filesystem headers
+        run("dd", "if=/dev/zero", f"of={disk}", "bs=512", "count=20480", "conv=fsync", check=False, capture=True)
+        r_sz = run("blockdev", "--getsz", disk, check=False, capture=True)
+        if r_sz.returncode == 0 and r_sz.stdout.strip().isdigit():
+            total_sectors = int(r_sz.stdout.strip())
+            if total_sectors > 20480:
+                # Zero out the last 10MB (20480 sectors) to completely eliminate secondary/backup GPT down to the final byte
+                run("dd", "if=/dev/zero", f"of={disk}", "bs=512", f"seek={total_sectors - 20480}", "count=20480", "conv=fsync", check=False, capture=True)
+    except Exception:
+        pass
+    run("blockdev", "--rereadpt", disk, check=False, capture=True)
+    run("udevadm", "settle", "--timeout=5", check=False, capture=True)
+
+    # 2. Write new GPT partition table
+    # Freeze udev execution queue during sfdisk to prevent udev locks
     run("udevadm", "control", "--stop-exec-queue", check=False, capture=True)
     try:
-        run("wipefs", "--all", "--force", "--lock=yes", disk, check=False, capture=True)
+        run("wipefs", "--all", "--force", disk, check=False, capture=True)
         try:
             run("sfdisk", "--force", "--wipe", "always", "--wipe-partitions", "always", "--label", "gpt", "--lock=yes", disk, input_text=sfdisk_input, capture=True)
         except subprocess.CalledProcessError:
@@ -787,11 +724,11 @@ def write_gpt_sfdisk(disk, boot_mode, encrypt, efi_size="1.3G"):
     finally:
         run("udevadm", "control", "--start-exec-queue", check=False, capture=True)
     try:
-        run("udevadm","trigger","--settle","-w","--timeout=10",disk, check=False, capture=True)
+        run("udevadm", "trigger", "--settle", "-w", "--timeout=10", disk, check=False, capture=True)
     except:
-        run("udevadm","settle","--timeout=10", check=False, capture=True)
+        run("udevadm", "settle", "--timeout=10", check=False, capture=True)
     try:
-        run("udevadm","wait","--timeout=10","--settle",f"{get_partition_path(disk,1)}",f"{get_partition_path(disk,2)}", check=False, capture=True)
+        run("udevadm", "wait", "--timeout=10", "--initialized=yes", "--settle", f"{get_partition_path(disk,1)}", f"{get_partition_path(disk,2)}", check=False, capture=True)
     except:
         pass
     efi_part = get_partition_path(disk,1) if boot_mode=="UEFI" else None
@@ -813,7 +750,7 @@ def show_disks_table(disks):
             sz = f"{int(d.get('size',0))/1024**3:.1f}G"
         except:
             sz = str(d.get("size",""))
-        table.add_row(str(i),d.get("path") or d.get("name"),sz,(d.get("model") or "")[:30])
+        table.add_row(str(i),d.get("path") or d.get("name"),sz,Text((d.get("model") or "")[:30]))
     console.print(Align.center(table))
 
 def validate_part_input(raw):
@@ -859,7 +796,7 @@ def choose_disk(disks):
 
 def show_partitions_table(disk):
     r = run("lsblk","-l","-o","NAME,SIZE,TYPE,FSTYPE,PARTLABEL,LABEL",disk, check=False, capture=True)
-    panel = Panel.fit(r.stdout, title=f"Partitions on {disk}", box=box.ROUNDED, border_style="yellow")
+    panel = Panel.fit(Text(r.stdout), title=f"Partitions on {disk}", box=box.ROUNDED, border_style="yellow")
     console.print(Align.center(panel))
 
 def flatten_lsblk(data):
@@ -887,6 +824,14 @@ def get_partitions_list(disk):
     except:
         return []
 
+def _same_dev(a, b):
+    if not a or not b:
+        return False
+    try:
+        return Path(a).resolve() == Path(b).resolve()
+    except Exception:
+        return str(a) == str(b)
+
 def prompt_root_and_efi(target_dev, boot_mode, has_win, win_esp):
     show_partitions_table(target_dev)
     parts = get_partitions_list(target_dev)
@@ -898,7 +843,7 @@ def prompt_root_and_efi(target_dev, boot_mode, has_win, win_esp):
             fstype = p.get("fstype","") or "no-fs"
             label = f"{path} {sz} {fstype} {p.get('partlabel','')}".strip()
             root_opts.append((label, path))
-        root_sel = arrow_menu(f"Select ROOT on {target_dev}", root_opts, default_idx=len(root_opts)-1 if root_opts else 0)
+        root_sel = arrow_menu(f"Select ROOT on {target_dev} (the partition dusky installs to - it WILL be formatted)", root_opts, default_idx=len(root_opts)-1 if root_opts else 0)
         if root_sel is None:
             return None, None, None
         root = root_sel
@@ -912,34 +857,63 @@ def prompt_root_and_efi(target_dev, boot_mode, has_win, win_esp):
                 root = str(rp)
                 break
             except Exception as e:
-                console.print(f"[red]{e}[/red]")
+                console.print(Text(str(e), style="red"))
     efi = ""
     format_efi = True
     if boot_mode == "UEFI":
         if parts:
-            efi_opts = []
-            for p in parts:
-                path = p.get("path","")
-                sz = p.get("size","")
-                fstype = p.get("fstype","") or "no-fs"
-                label = f"{path} {sz} {fstype}".strip()
-                efi_opts.append((label, path))
-            if efi_opts:
-                efi_sel = arrow_menu(f"Select EFI on {target_dev}", efi_opts, default_idx=0)
+            while True:
+                efi_opts = []
+                for p in parts:
+                    path = p.get("path","")
+                    sz = p.get("size","")
+                    fstype = p.get("fstype","") or "no-fs"
+                    label = f"{path} {sz} {fstype}".strip()
+                    if _same_dev(path, root):
+                        # Same partition for ROOT and EFI means mkfs.fat would
+                        # overwrite the fresh btrfs root in format_root_and_efi,
+                        # and 040 then dies with a bare "not btrfs". Keep it
+                        # selectable but loudly marked so nobody picks it blind.
+                        label += "  [SAME AS ROOT - DO NOT PICK]"
+                    efi_opts.append((label, path))
+
+                # Allow manual entry so single-partition disks or secondary-drive ESPs aren't trapped
+                efi_opts.append(("Specify EFI partition manually (e.g. from another disk)...", "__manual__"))
+
+                # Choose best default cursor index (first valid non-root candidate)
+                default_idx = 0
+                for idx, (_, val) in enumerate(efi_opts):
+                    if val != "__manual__" and not _same_dev(val, root):
+                        default_idx = idx
+                        p_fs = next((p.get("fstype","") for p in parts if _same_dev(p.get("path"), val)), "")
+                        if p_fs.lower() in ("vfat", "fat32") or (has_win and win_esp and _same_dev(val, win_esp)):
+                            break
+
+                efi_sel = arrow_menu(f"Select EFI on {target_dev}", efi_opts, default_idx=default_idx)
                 if efi_sel is None:
                     return None, None, None
-                efi = efi_sel
-            else:
-                while True:
-                    try:
-                        raw = Prompt.ask(f"Enter EFI partition (q to abort)", console=console)
-                        if raw.lower() in ("q","quit"):
-                            return None, None, None
-                        ep = validate_part_input(raw)
-                        efi = str(ep)
+                if _same_dev(efi_sel, root):
+                    console.print("[red]EFI and ROOT cannot be the same partition - the EFI format would wipe the freshly formatted root.[/red]")
+                    continue
+                if efi_sel == "__manual__":
+                    while True:
+                        try:
+                            raw = Prompt.ask("Enter EFI partition (e.g. /dev/nvme0n1p1, q to abort)", console=console)
+                            if raw.lower() in ("q","quit"):
+                                return None, None, None
+                            ep = validate_part_input(raw)
+                            if _same_dev(ep, root):
+                                console.print("[red]EFI and ROOT cannot be the same partition.[/red]")
+                                continue
+                            efi = str(ep)
+                            break
+                        except Exception as e:
+                            console.print(Text(str(e), style="red"))
+                    if efi:
                         break
-                    except Exception as e:
-                        console.print(f"[red]{e}[/red]")
+                    continue
+                efi = efi_sel
+                break
         else:
             while True:
                 try:
@@ -947,20 +921,38 @@ def prompt_root_and_efi(target_dev, boot_mode, has_win, win_esp):
                     if raw.lower() in ("q","quit"):
                         return None, None, None
                     ep = validate_part_input(raw)
+                    if _same_dev(ep, root):
+                        console.print("[red]EFI and ROOT cannot be the same partition.[/red]")
+                        continue
                     efi = str(ep)
                     break
                 except Exception as e:
-                    console.print(f"[red]{e}[/red]")
-        if has_win and efi == win_esp:
+                    console.print(Text(str(e), style="red"))
+        if has_win and win_esp and _same_dev(efi, win_esp):
             format_efi = Confirm.ask(f"EFI {efi} looks like Windows ESP {win_esp}. Format? [red]NO keeps Windows[/red]", console=console, default=False)
         else:
-            ans = Prompt.ask(f"Format EFI {efi} as {DUSKY_EFI_LABEL}? (y/n/q)", choices=["y","n","q"], default="y", show_choices=False, console=console)
+            ans = Prompt.ask(f"Format EFI {efi} as {DUSKY_EFI_LABEL}? (y/n/q)", choices=["y","n","q"], default="n", show_choices=False, console=console)
             if ans == "q":
                 return None, None, None
             format_efi = (ans == "y")
     return root, efi, format_efi
 
 def format_root_and_efi(root_part, efi_part, format_efi, do_encrypt, boot_mode, has_win, win_esp, creds, luks_ba=None):
+    # Validate the shared ESP before modifying ROOT or its encryption header.
+    if boot_mode == "UEFI":
+        if not efi_part or _same_dev(root_part, efi_part):
+            raise ValueError("UEFI requires a separate EFI partition")
+        esp_type = run("blkid", "-p", "-c", "/dev/null", "-o", "value", "-s", "PART_ENTRY_TYPE", efi_part, check=False)
+        if esp_type.stdout.strip().lower() not in (EFI_GUID, "0xef"):
+            raise ValueError("Select a partition marked as EFI System Partition")
+        if not format_efi:
+            fs = run("blkid", "-p", "-c", "/dev/null", "-o", "value", "-s", "TYPE", efi_part, check=False)
+            if fs.stdout.strip() != "vfat":
+                raise ValueError("The preserved EFI partition must contain FAT")
+    if do_encrypt and not luks_ba:
+        raise ValueError("Encryption requires a nonempty passphrase")
+    if do_encrypt and Path(f"/dev/mapper/{TARGET_CRYPT_NAME}").exists():
+        raise ValueError("cryptroot must be closed before formatting encrypted ROOT")
     if run("cryptsetup","isLuks",root_part, check=False, capture=True).returncode == 0:
         console.print(f"[yellow]Existing LUKS on {root_part}, erasing header[/yellow]")
         run("cryptsetup","--batch-mode","erase",root_part, check=False, capture=True)
@@ -980,21 +972,38 @@ def format_root_and_efi(root_part, efi_part, format_efi, do_encrypt, boot_mode, 
         mem_kb = get_ram_kb()
         pbkdf = []
         if mem_kb < 3_000_000:
-            pbkdf = ["--pbkdf-memory","256","--pbkdf-parallel","1"]
+            pbkdf = ["--pbkdf-memory", "262144", "--pbkdf-parallel", "1"]
         elif mem_kb < 4_200_000:
-            pbkdf = ["--pbkdf-memory","512"]
+            pbkdf = ["--pbkdf-memory", "524288"]
+        # Let cryptsetup select sectors from device topology, including 512e/4Kn.
         try:
-            fmt = ["cryptsetup","--batch-mode","--type","luks2","--pbkdf","argon2id","--label",DUSKY_ROOT_LABEL] + pbkdf + ["luksFormat","--key-file","-",root_part]
+            fmt = ["cryptsetup", "--batch-mode", "--type", "luks2", "--pbkdf", "argon2id", "--label", DUSKY_ROOT_LABEL] + pbkdf + ["luksFormat", "--key-file", "-", root_part]
             r = run(*fmt, input_text=luks_ba, check=False, capture=True)
             if r.returncode == 3:
-                fmt = ["cryptsetup","--batch-mode","--type","luks2","--pbkdf","argon2id","--label",DUSKY_ROOT_LABEL,"--pbkdf-memory","256","--pbkdf-parallel","1","luksFormat","--key-file","-",root_part]
+                fmt = ["cryptsetup", "--batch-mode", "--type", "luks2", "--pbkdf", "argon2id", "--label", DUSKY_ROOT_LABEL, "--pbkdf-memory", "262144", "--pbkdf-parallel", "1"] + ["luksFormat", "--key-file", "-", root_part]
                 r = run(*fmt, input_text=luks_ba, check=False, capture=True)
             if r.returncode != 0:
                 console.print(f"[red]luksFormat fail {r.returncode}[/red]")
+                console.print((r.stderr or b"").decode("utf-8", "replace"), markup=False)
                 sys.exit(1)
-            ro = run("cryptsetup","open","--type","luks2","--allow-discards","--key-file","-",root_part,TARGET_CRYPT_NAME, input_text=luks_ba, check=False, capture=True)
+            crypt_open_args = ["cryptsetup", "open", "--type", "luks2", "--allow-discards"]
+            try:
+                pname = Path(root_part).resolve().name
+                rot_cand = Path(f"/sys/class/block/{pname}/queue/rotational")
+                if not rot_cand.exists():
+                    block = Path(f"/sys/class/block/{pname}").resolve()
+                    if (block / "partition").exists():
+                        block = block.parent
+                    rot_cand = block / "queue/rotational"
+                if rot_cand.exists() and rot_cand.read_text().strip() == "0":
+                    crypt_open_args += ["--perf-no_read_workqueue", "--perf-no_write_workqueue"]
+            except Exception:
+                pass
+            crypt_open_args += ["--key-file", "-", root_part, TARGET_CRYPT_NAME]
+            ro = run(*crypt_open_args, input_text=luks_ba, check=False, capture=True)
             if ro.returncode != 0:
                 console.print("[red]cryptsetup open fail[/red]")
+                console.print((ro.stderr or b"").decode("utf-8", "replace"), markup=False)
                 sys.exit(1)
         finally:
             if luks_ba:
@@ -1003,8 +1012,8 @@ def format_root_and_efi(root_part, efi_part, format_efi, do_encrypt, boot_mode, 
         btrfs_target = f"/dev/mapper/{TARGET_CRYPT_NAME}"
         
     mkfs_cmd = ["mkfs.btrfs", "-f"]
-    if BTRFS_CSUM == "blake2":
-        mkfs_cmd += ["--csum", "blake2", "-O", "no-holes"]
+    if BTRFS_CSUM != "crc32c":
+        mkfs_cmd += ["--checksum", BTRFS_CSUM]
     mkfs_cmd += ["-L", DUSKY_ROOT_LABEL, btrfs_target]
 
     for mkfs_attempt in range(1, 6):
@@ -1019,29 +1028,13 @@ def format_root_and_efi(root_part, efi_part, format_efi, do_encrypt, boot_mode, 
                 time.sleep(2)
             else:
                 console.print(f"[red]Failed mkfs.btrfs -f -L {DUSKY_ROOT_LABEL} {btrfs_target}[/red]")
-                console.print(f"[red]Details: {detail}[/red]")
+                console.print(Text(f"Details: {detail}", style="red"))
                 raise
         
-    if boot_mode == "UEFI" and efi_part:
-        if format_efi:
-            if has_win and efi_part == win_esp:
-                console.print("[yellow]Preserving Windows ESP[/yellow]")
-            else:
-                for attempt in range(1, 4):
-                    try:
-                        run("wipefs", "--all", "--force", "--lock=yes", efi_part, capture=True)
-                        break
-                    except subprocess.CalledProcessError:
-                        if attempt == 3:
-                            run("wipefs", "--all", "--force", efi_part, check=False, capture=True)
-                        time.sleep(1)
-                run("mkfs.fat","-F","32","-n",DUSKY_EFI_LABEL,efi_part, capture=True)
-        else:
-            if not has_win:
-                try:
-                    run("fatlabel",efi_part,DUSKY_EFI_LABEL, check=False, capture=True)
-                except:
-                    pass
+    if boot_mode == "UEFI" and efi_part and format_efi:
+        run("wipefs", "--all", "--force", "--lock=yes", efi_part, capture=True)
+        run("mkfs.fat", "-F", "32", "-n", DUSKY_EFI_LABEL, efi_part, capture=True)
+    run("udevadm", "settle", "--timeout=5", check=False, capture=True)
     return btrfs_target
 
 def choose_strategy_interactive():
@@ -1056,10 +1049,7 @@ def choose_strategy_interactive():
         return None
     return int(sel)
 
-def parse_strategy_cli(args, raw_argv):
-    argv_lower = [a.lower() for a in raw_argv]
-    if any("rescue" in a for a in argv_lower):
-        return 4
+def parse_strategy_cli(args):
     if args.rescue:
         return 4
     if args.strategy:
@@ -1211,7 +1201,8 @@ def strategy_wipe(target_dev, boot_mode, do_encrypt, efi_size, has_win, win_esp,
             console.print(f"[yellow]Partition {root_part} still busy, waiting... ({_settle+1}/5)[/yellow]")
             time.sleep(2)
 
-    format_root_and_efi(root_part, efi_part, True, do_encrypt, boot_mode, has_win, win_esp, creds, luks_ba)
+    # When wiping the entire drive, always format the EFI partition (never preserve old Windows ESP on target disk)
+    format_root_and_efi(root_part, efi_part, True, do_encrypt, boot_mode, False, None, creds, luks_ba)
 
     env=f'PROVISIONED_ROOT_PART="{root_part}"\n'
     if efi_part:
@@ -1287,10 +1278,10 @@ def strategy_manual(target_dev, boot_mode, do_encrypt, creds, has_win, win_esp):
     except:
         pass
     try:
-        run("udevadm","trigger","--settle","-w","--timeout=10",target_dev, check=False, capture=True)
-        run("udevadm","wait","--timeout=10","--settle",f"{get_partition_path(target_dev,1)}",f"{get_partition_path(target_dev,2)}", check=False, capture=True)
+        run("udevadm", "trigger", "--settle", "-w", "--timeout=10", target_dev, check=False, capture=True)
+        run("udevadm", "wait", "--timeout=10", "--initialized=yes", "--settle", f"{get_partition_path(target_dev,1)}", f"{get_partition_path(target_dev,2)}", check=False, capture=True)
     except:
-        run("udevadm","settle","--timeout=10", check=False, capture=True)
+        run("udevadm", "settle", "--timeout=10", check=False, capture=True)
     time.sleep(1)
     
     parts = get_partitions_list(target_dev)
@@ -1362,7 +1353,7 @@ def strategy_rescue(target_dev, boot_mode, creds, has_win, win_esp):
                 root_part = str(rp)
                 break
             except Exception as e:
-                console.print(f"[red]{e}[/red]")
+                console.print(Text(str(e), style="red"))
                 
     efi_part = ""
     if boot_mode == "UEFI":
@@ -1386,7 +1377,7 @@ def strategy_rescue(target_dev, boot_mode, creds, has_win, win_esp):
                     efi_part = str(ep)
                     break
                 except Exception as e:
-                    console.print(f"[red]{e}[/red]")
+                    console.print(Text(str(e), style="red"))
                     
     is_luks = run("cryptsetup","isLuks",root_part, check=False, capture=True).returncode == 0
     encrypt_flag = 0
@@ -1394,6 +1385,11 @@ def strategy_rescue(target_dev, boot_mode, creds, has_win, win_esp):
         console.print(f"[yellow]{root_part} is LUKS, unlocking without formatting...[/yellow]")
         ensure_mapper_free(target_dev)
         if Path(f"/dev/mapper/{TARGET_CRYPT_NAME}").exists():
+            status = run("cryptsetup", "status", TARGET_CRYPT_NAME)
+            backing = next((line.split(":", 1)[1].strip() for line in status.stdout.splitlines()
+                            if line.strip().startswith("device:")), "")
+            if not backing or not _same_dev(backing, root_part):
+                raise ValueError("cryptroot belongs to another device")
             console.print(f"[yellow]Mapper {TARGET_CRYPT_NAME} already exists, using it[/yellow]")
         else:
             if creds.get("ROOT_PASS"):
@@ -1438,8 +1434,9 @@ def strategy_rescue(target_dev, boot_mode, creds, has_win, win_esp):
     return True
 
 def valid_efi_size(s: str) -> str:
-    if re.match(r'^\d+(\.\d+)?\s*(M|MiB|G|GiB)\s*$', s, re.I):
-        return s.strip().replace(" ","")
+    s_clean = s.strip()
+    if re.match(r'^\d+(\.\d+)?\s*(M|MiB|G|GiB)\s*$', s_clean, re.I):
+        return s_clean.replace(" ", "")
     raise argparse.ArgumentTypeError(f"Invalid EFI size {s}, use like 1.3G, 1331M, 2G")
 
 def main():
@@ -1452,7 +1449,12 @@ def main():
     parser.add_argument("--allow-bios", action="store_true", help="Allow BIOS mode")
     parser.add_argument("--strategy", type=str, default=None, help="Partitioning strategy: wipe|existing|manual|rescue (1-4)")
     parser.add_argument("--rescue", action="store_true", help="Shortcut for --strategy rescue")
+    parser.add_argument("--csum", choices=["blake2", "crc32c", "xxhash", "sha256"], default="blake2", help="BTRFS checksum algorithm (default: blake2)")
     args = parser.parse_args()
+
+    global BTRFS_CSUM
+    if args.csum:
+        BTRFS_CSUM = args.csum
 
     if hasattr(os, "geteuid") and os.geteuid() != 0:
         console.print("[red]Need root[/red]")
@@ -1498,12 +1500,14 @@ def main():
                     sys.exit(0)
                     
         target_dev = str(Path(target_dev).resolve())
+        if not any(_same_dev(target_dev, disk.get("path") or disk.get("name")) for disk in disks):
+            raise ValueError(f"{target_dev} is not an available whole disk of at least 1 GiB")
 
         has_win, win_esp = detect_windows_esp(target_dev)
         if has_win:
             console.print(Align.center(Panel.fit(f"[yellow]Windows ESP {win_esp} detected - will preserve unless you format[/yellow]", title="Dual-Boot", box=box.ROUNDED, border_style="yellow")))
 
-        forced_strategy = parse_strategy_cli(args, sys.argv)
+        forced_strategy = parse_strategy_cli(args)
         go_back_to_disk = False
         
         while True:

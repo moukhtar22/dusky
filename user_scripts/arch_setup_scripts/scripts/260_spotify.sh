@@ -97,6 +97,23 @@ run_spotx() {
     bash <(cat "$SPOTX_TMP") -f
 }
 
+reconcile_spicetify() {
+    # SpotX just rewrote Spotify's files, which reverts any spicetify patch
+    # (the matugen theme). If spicetify is set up, re-capture the freshly
+    # SpotX'd files as its new backup and re-apply the theme on top, so the
+    # adblock and the theme survive each other instead of fighting.
+    local spicetify_conf="${XDG_CONFIG_HOME:-$HOME/.config}/spicetify/config-xpui.ini"
+
+    if command -v spicetify &>/dev/null && [[ -f "$spicetify_conf" ]]; then
+        log_info "SpotX patched Spotify, re-applying the spicetify theme..."
+        if spicetify backup apply; then
+            log_success "Spicetify theme re-applied on top of SpotX."
+        else
+            log_error "Spicetify re-apply failed. Run 'spicetify backup apply' manually."
+        fi
+    fi
+}
+
 # --- Main Logic ---
 
 # 1. User Confirmation
@@ -117,5 +134,8 @@ install_packages "$AUR_HELPER" spotify unzip perl
 
 # 4. Run SpotX
 run_spotx
+
+# 5. Spicetify and SpotX patch the same Spotify files; make peace between them
+reconcile_spicetify
 
 log_success "Process finished. Spotify is ready."

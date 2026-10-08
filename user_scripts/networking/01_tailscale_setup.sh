@@ -55,7 +55,8 @@ trap 'exit 143' TERM
 backup_file() {
     local file="$1"
     if [[ -f "$file" && ! -L "$file" ]]; then
-        local backup="${file}.bak.$(date +%s)"
+        local backup
+        backup="${file}.bak.$(date +%s)"
         cp -a "$file" "$backup"
         log_info "Backed up $file to $backup"
     fi
@@ -146,7 +147,7 @@ if cmd_exists NetworkManager; then
 unmanaged-devices=interface-name:tailscale0
 EOF
     if svc_active NetworkManager; then
-        systemctl reload NetworkManager || systemctl restart NetworkManager
+        nmcli general reload conf
     fi
     log_succ "NetworkManager instructed to ignore tailscale0."
 fi
@@ -158,23 +159,13 @@ echo "uinput" > "${MODULES_LOAD_DIR}/99-tailscale-uinput.conf"
 modprobe uinput || log_warn "Failed to immediately modprobe uinput."
 log_succ "uinput module persistence enabled."
 
-if pkg_installed xdg-desktop-portal-wlr; then
-    log_warn "Purging conflicting xdg-desktop-portal-wlr..."
-    if pacman -Rns --noconfirm xdg-desktop-portal-wlr; then
-        log_succ "Conflict eliminated."
-    else
-        log_warn "Failed to cleanly remove xdg-desktop-portal-wlr. Manual check advised."
-    fi
-fi
-
 # --- Phase 1: Tailscale ---
 log_step "Phase 1: Tailscale Network"
 
 pkg_installed tailscale || { log_info "Installing Tailscale..."; pacman -S --needed --noconfirm tailscale; }
 
-log_info "Restarting Tailscale daemon..."
-systemctl restart tailscaled
-systemctl enable tailscaled
+log_info "Ensuring Tailscale daemon is enabled and running..."
+systemctl enable --now tailscaled
 
 # Mitigate IPC socket race condition
 log_info "Awaiting tailscaled IPC socket readiness..."
@@ -193,9 +184,9 @@ log_succ "Tailscale IPC socket is ready."
 
 log_info "Applying firewall policies..."
 if cmd_exists firewall-cmd && svc_active firewalld; then
-    firewall-cmd --zone=trusted --add-interface=tailscale0 --permanent >/dev/null 2>&1 || true
-    firewall-cmd --reload >/dev/null 2>&1 || true
-    log_succ "Firewalld updated."
+    firewall-cmd --zone=trusted --change-interface=tailscale0 >/dev/null
+    firewall-cmd --permanent --zone=trusted --change-interface=tailscale0 >/dev/null
+    log_succ "Firewalld updated (runtime and permanent)."
 elif cmd_exists ufw && svc_active ufw; then
     ufw allow in on tailscale0 >/dev/null 2>&1 || true
     log_succ "UFW updated."

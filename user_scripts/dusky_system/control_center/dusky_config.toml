@@ -13,7 +13,7 @@ type = "toggle_card"
 [pages.layout.items.properties]
 title = "Bluetooth"
 icon = "bluetooth-active-symbolic"
-state_command = "rfkill list bluetooth | grep -q 'Soft blocked: no' && echo yes"
+state_command = "$HOME/user_scripts/dusky_system/control_center/lib/radio_status.py bluetooth"
 interval = 5
 [pages.layout.items.on_toggle.enabled]
 type = "exec"
@@ -29,7 +29,7 @@ type = "toggle_card"
 [pages.layout.items.properties]
 title = "Wi-Fi"
 icon = "network-wireless-symbolic"
-state_command = "rfkill list wifi | grep -q 'Soft blocked: no' && echo yes"
+state_command = "$HOME/user_scripts/dusky_system/control_center/lib/radio_status.py wlan"
 interval = 5
 [pages.layout.items.on_toggle.enabled]
 type = "exec"
@@ -47,6 +47,7 @@ type = "toggle_card"
 title = "Dark Mode"
 icon = "weather-clear-night-symbolic"
 key = "dusky_theme/state"
+persistence = "action"
 [pages.layout.items.on_toggle.enabled]
 type = "exec"
 command = "$HOME/user_scripts/theme_matugen/theme_ctl.sh set --mode dark"
@@ -78,7 +79,7 @@ button_text_map = { "0" = "Updated", "default" = "Available" }
 style_map = { "0" = "default", "default" = "suggested" }
 [pages.layout.items.on_press]
 type = "exec"
-command = "dusky-run kitty --class update_dusky.py --title \"System Updater\" --hold sh -c \"$HOME/user_scripts/update_dusky/python/update_dusky.py\""
+command = "dusky-run kitty --class update_dusky.py --title \"System Updater\" --hold sh -c \"$HOME/user_scripts/update_dusky/python/update_dusky_supervisor.py\""
 terminal = false
 
 [[pages.layout.items]]
@@ -305,7 +306,7 @@ button_text_map = { "0" = "Updated", "default" = "Available" }
 style_map = { "0" = "normal", "default" = "suggested" }
 [pages.layout.items.layout.items.on_press]
 type = "exec"
-command = "dusky-run kitty --class update_dusky.py --title \"System Updater\" --hold sh -c \"$HOME/user_scripts/update_dusky/python/update_dusky.py\""
+command = "dusky-run kitty --class update_dusky.py --title \"System Updater\" --hold sh -c \"$HOME/user_scripts/update_dusky/python/update_dusky_supervisor.py\""
 terminal = false
 
 [[pages.layout.items.layout.items]]
@@ -408,13 +409,18 @@ title = "TTY Auto Login"
 description = "Automatically login to TTY1 on boot"
 icon = "avatar-default-symbolic"
 key = "auto_login_tty"
+persistence = "action"
+state_command = "$HOME/user_scripts/arch_setup_scripts/scripts/285_tty_autologin.sh --status"
+interval = 2
 [pages.layout.items.on_toggle.enabled]
 type = "exec"
 command = "kitty --class 285_tty_autologin.sh --hold sh -c \"$HOME/user_scripts/arch_setup_scripts/scripts/285_tty_autologin.sh --auto\""
+mode = "launch"
 terminal = false
 [pages.layout.items.on_toggle.disabled]
 type = "exec"
 command = "kitty --class 285_tty_autologin.sh --hold sh -c \"$HOME/user_scripts/arch_setup_scripts/scripts/285_tty_autologin.sh --revert --auto\""
+mode = "launch"
 terminal = false
 
 [[pages.layout]]
@@ -577,8 +583,501 @@ icon = "system-software-install-symbolic"
 style = "suggested"
 [pages.layout.items.on_press]
 type = "exec"
-command = "kitty --class dusky_kernel_compile --title \"Dusky Kernel Compiler\" --hold python3 $HOME/user_scripts/kernel/dusky_kernal_compile.py"
+command = "kitty --class dusky_kernel_compile --title \"Dusky Kernel Compiler\" --hold python3 $HOME/user_scripts/kernel/dusky_kernel_compiler/dusky_kernal_compile.py"
 
+
+[[pages]]
+id = "memory"
+title = "Memory"
+icon = "memory-symbolic"
+
+[[pages.layout]]
+type = "section"
+[pages.layout.properties]
+title = "Topology Overview"
+icon = "dialog-information-symbolic"
+
+[[pages.layout.items]]
+type = "label"
+[pages.layout.items.properties]
+title = "ZRAM0 Swap"
+icon = "memory-symbolic"
+interval = 3
+[pages.layout.items.value]
+type = "exec"
+command = "$HOME/user_scripts/performance/zram/zram_swap_manager.py --zram0-status"
+
+[[pages.layout.items]]
+type = "label"
+[pages.layout.items.properties]
+title = "ZRAM1 Mount"
+icon = "drive-harddisk-symbolic"
+interval = 3
+[pages.layout.items.value]
+type = "exec"
+command = "$HOME/user_scripts/performance/zram/zram_swap_manager.py --zram1-status"
+
+[[pages.layout.items]]
+type = "label"
+[pages.layout.items.properties]
+title = "Disk Swap"
+icon = "drive-harddisk-system-symbolic"
+interval = 3
+[pages.layout.items.value]
+type = "exec"
+command = "$HOME/user_scripts/performance/zram/zram_swap_manager.py --disk-swap-status"
+
+[[pages.layout.items]]
+type = "label"
+[pages.layout.items.properties]
+title = "Proactive Swap"
+icon = "preferences-system-symbolic"
+interval = 3
+[pages.layout.items.value]
+type = "exec"
+command = "$HOME/user_scripts/performance/zram/dusky_pro_active_swap_modifier_cc.py --status"
+
+[[pages.layout]]
+type = "section"
+[pages.layout.properties]
+title = "Manage & Tune"
+description = "Swap devices, proactive reclaim, and diagnostics"
+icon = "preferences-system-symbolic"
+
+[[pages.layout.items]]
+type = "navigation"
+[pages.layout.items.properties]
+title = "ZRAM & Disk Swap"
+description = "Configure ZRAM0, ZRAM1 RAM disk, and Disk Swap"
+icon = "memory-symbolic"
+
+[[pages.layout.items.layout]]
+type = "section"
+[pages.layout.items.layout.properties]
+title = "ZRAM0 (Compressed Swap)"
+icon = "memory-symbolic"
+
+[[pages.layout.items.layout.items]]
+type = "entry"
+[pages.layout.items.layout.items.properties]
+title = "ZRAM0 Size"
+description = "e.g. 80%, 50%, 20%, 6 GB, or auto"
+button_text = "Apply"
+icon = "edit-symbolic"
+value_command = "$HOME/user_scripts/performance/zram/zram_swap_manager.py --zram0-size"
+toast = "ZRAM0 size updated to {value}"
+[pages.layout.items.layout.items.on_action]
+type = "exec"
+command = "$HOME/user_scripts/performance/zram/zram_swap_manager.py --set-zram0-size {value}"
+terminal = false
+requires_root = true
+
+[[pages.layout.items.layout.items]]
+type = "toggle"
+[pages.layout.items.layout.items.properties]
+title = "ZRAM0 Swap Active"
+description = "Toggle compressed RAM swap on or off"
+icon = "memory-symbolic"
+state_command = "swapon --show | grep -q '/dev/zram0' && echo on || echo off"
+interval = 3
+[pages.layout.items.layout.items.on_toggle.enabled]
+type = "exec"
+command = "$HOME/user_scripts/performance/zram/zram_swap_manager.py --enable-zram0"
+terminal = false
+requires_root = true
+[pages.layout.items.layout.items.on_toggle.disabled]
+type = "exec"
+command = "$HOME/user_scripts/performance/zram/zram_swap_manager.py --disable-zram0"
+terminal = false
+requires_root = true
+
+[[pages.layout.items.layout]]
+type = "section"
+[pages.layout.items.layout.properties]
+title = "ZRAM1 (/mnt/zram1 RAM Disk)"
+icon = "folder-symbolic"
+
+[[pages.layout.items.layout.items]]
+type = "selection"
+[pages.layout.items.layout.items.properties]
+title = "ZRAM1 Mode"
+description = "Ext4 (Compressed) vs Tmpfs (Pure RAM) vs Disabled"
+icon = "drive-harddisk-symbolic"
+value_command = "$HOME/user_scripts/performance/zram/zram_swap_manager.py --zram1-backend"
+interval = 3
+options = ["Ext4", "Tmpfs", "Disabled"]
+options_map = { "ext4" = "Ext4", "zram" = "Ext4", "Ext4 ZRAM" = "Ext4", "tmpfs" = "Tmpfs", "disabled" = "Disabled", "none" = "Disabled" }
+[pages.layout.items.layout.items.on_change.Ext4]
+type = "exec"
+command = "$HOME/user_scripts/performance/zram/zram_swap_manager.py --set-zram1-backend zram"
+terminal = false
+requires_root = true
+[pages.layout.items.layout.items.on_change.Tmpfs]
+type = "exec"
+command = "$HOME/user_scripts/performance/zram/zram_swap_manager.py --set-zram1-backend tmpfs"
+terminal = false
+requires_root = true
+[pages.layout.items.layout.items.on_change.Disabled]
+type = "exec"
+command = "$HOME/user_scripts/performance/zram/zram_swap_manager.py --disable-zram1"
+terminal = false
+requires_root = true
+
+[[pages.layout.items.layout.items]]
+type = "entry"
+[pages.layout.items.layout.items.properties]
+title = "ZRAM1 Disk Size"
+description = "e.g. 100%, 8 GB, 4 GB, or ram"
+button_text = "Apply"
+icon = "edit-symbolic"
+value_command = "$HOME/user_scripts/performance/zram/zram_swap_manager.py --zram1-size"
+toast = "ZRAM1 size updated to {value}"
+[pages.layout.items.layout.items.on_action]
+type = "exec"
+command = "$HOME/user_scripts/performance/zram/zram_swap_manager.py --set-zram1-size {value}"
+terminal = false
+requires_root = true
+
+[[pages.layout.items.layout]]
+type = "section"
+[pages.layout.items.layout.properties]
+title = "Disk Swap (/swap/swapfile)"
+icon = "drive-harddisk-system-symbolic"
+
+[[pages.layout.items.layout.items]]
+type = "entry"
+[pages.layout.items.layout.items.properties]
+title = "Disk Swap Size"
+description = "e.g. 4 GB, 8 GB, 2 GB, 512 MB"
+button_text = "Allocate"
+icon = "edit-symbolic"
+value_command = "$HOME/user_scripts/performance/zram/zram_swap_manager.py --disk-swap-size"
+toast = "Disk swap allocated: {value}"
+[pages.layout.items.layout.items.on_action]
+type = "exec"
+command = "$HOME/user_scripts/performance/zram/zram_swap_manager.py --set-disk-swap-size {value}"
+timeout = 600
+terminal = false
+requires_root = true
+
+[[pages.layout.items.layout.items]]
+type = "toggle"
+[pages.layout.items.layout.items.properties]
+title = "Disk Swap Active"
+description = "Toggle disk swap on/off (Fallback swap @ priority -1)"
+icon = "drive-harddisk-symbolic"
+state_command = "swapon --show | grep -q '/swap/swapfile' && echo on || echo off"
+interval = 3
+[pages.layout.items.layout.items.on_toggle.enabled]
+type = "exec"
+command = "$HOME/user_scripts/performance/zram/zram_swap_manager.py --enable-disk-swap"
+terminal = false
+requires_root = true
+[pages.layout.items.layout.items.on_toggle.disabled]
+type = "exec"
+command = "$HOME/user_scripts/performance/zram/zram_swap_manager.py --disable-disk-swap"
+terminal = false
+requires_root = true
+
+[[pages.layout.items.layout]]
+type = "section"
+[pages.layout.items.layout.properties]
+title = "ZRAM Health & Kernel Tuning"
+icon = "utilities-system-monitor-symbolic"
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Run Deep Architecture Diagnostics"
+description = "Inspect memory limits, compression algorithm, and mount health"
+button_text = "Diagnose"
+icon = "dialog-information-symbolic"
+style = "suggested"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "kitty --class 208_check_zram0_zram1_setup.py --hold sh -c \"$HOME/user_scripts/arch_setup_scripts/scripts/208_check_zram0_zram1_setup.py\""
+terminal = false
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Optimize Kernel Swappiness & VM Policy"
+description = "Apply high-performance MGLRU and swappiness parameters"
+button_text = "Optimize"
+icon = "power-profile-performance-symbolic"
+style = "destructive"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "kitty --class 210_zram_optimize_swappiness.sh --hold sh -c \"$HOME/user_scripts/arch_setup_scripts/scripts/210_zram_optimize_swappiness.sh\""
+terminal = false
+
+[[pages.layout.items]]
+type = "navigation"
+[pages.layout.items.properties]
+title = "Proactive Memory Reclaim"
+description = "Automatically move idle slice memory into ZRAM (30% cap, 256 MB budget)"
+icon = "power-profile-performance-symbolic"
+
+[[pages.layout.items.layout]]
+type = "section"
+[pages.layout.items.layout.properties]
+title = "Proactive Swap Status & Controls"
+icon = "dialog-information-symbolic"
+
+[[pages.layout.items.layout.items]]
+type = "label"
+[pages.layout.items.layout.items.properties]
+title = "Daemon State"
+icon = "memory-symbolic"
+interval = 3
+[pages.layout.items.layout.items.value]
+type = "exec"
+command = "$HOME/user_scripts/performance/zram/dusky_pro_active_swap_modifier_cc.py --status"
+
+[[pages.layout.items.layout.items]]
+type = "label"
+[pages.layout.items.layout.items.properties]
+title = "Last Sweep"
+icon = "dialog-information-symbolic"
+interval = 5
+[pages.layout.items.layout.items.value]
+type = "exec"
+command = "$HOME/user_scripts/performance/zram/dusky_pro_active_swap_modifier_cc.py --last-sweep"
+
+[[pages.layout.items.layout.items]]
+type = "toggle"
+[pages.layout.items.layout.items.properties]
+title = "Proactive Sweep Timer"
+description = "Reclaim idle background memory into ZRAM"
+icon = "media-playback-start-symbolic"
+state_command = "$HOME/user_scripts/performance/zram/dusky_pro_active_swap_modifier_cc.py --is-active"
+interval = 3
+[pages.layout.items.layout.items.on_toggle.enabled]
+type = "exec"
+command = "$HOME/user_scripts/performance/zram/dusky_pro_active_swap_modifier_cc.py --enable"
+terminal = false
+requires_root = true
+[pages.layout.items.layout.items.on_toggle.disabled]
+type = "exec"
+command = "$HOME/user_scripts/performance/zram/dusky_pro_active_swap_modifier_cc.py --disable"
+terminal = false
+requires_root = true
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Immediate Sweep"
+description = "Execute a proactive memory reclaim pass right now"
+button_text = "Sweep Now"
+icon = "system-run-symbolic"
+style = "suggested"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "$HOME/user_scripts/performance/zram/dusky_pro_active_swap_modifier_cc.py --run-now --force"
+terminal = false
+requires_root = true
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "One-Time Boot Memory Flush"
+description = "Trigger the aggressive one-shot memory flush (cold boot pages)"
+button_text = "Flush Now"
+icon = "system-reboot-symbolic"
+style = "regular"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "$HOME/user_scripts/performance/zram/dusky_pro_active_swap_modifier_cc.py --boot-flush"
+terminal = false
+requires_root = true
+
+[[pages.layout.items.layout]]
+type = "warning_banner"
+[pages.layout.items.layout.properties]
+title = "Tuning Guidelines & Dial Reference"
+icon = "dialog-information-symbolic"
+compact = true
+message = """
+• Slice Reclaim Cap: Max idle anonymous RAM reclaimed per slice sweep (higher frees more memory, lower keeps apps warm).
+• Max Sweep Budget: Maximum RAM moved to ZRAM per pass to prevent CPU spikes and micro-stutters.
+• Reclaim Chunk Size: Memory batch size per pass (smaller = completely stutter-free UI, larger = faster sweeps).
+• Sweep Frequency: How often the background service checks and cleans idle memory.
+• RAM Trigger Threshold: Sweeps only activate when system RAM reaches this % (sleeps below it to save CPU and battery).
+• ZRAM Abort Threshold: Safety cutoff that stops sweeps if ZRAM is nearly full to prevent disk swap spills."""
+
+[[pages.layout.items.layout]]
+type = "section"
+[pages.layout.items.layout.properties]
+title = "MGLRU Skimmer Dials"
+icon = "preferences-system-symbolic"
+
+[[pages.layout.items.layout.items]]
+type = "entry"
+[pages.layout.items.layout.items.properties]
+title = "Slice Reclaim Cap"
+description = "Percentage of anon memory reclaimed per slice sweep (e.g. 30%, 25%, 50%)"
+button_text = "Apply"
+icon = "edit-symbolic"
+value_command = "$HOME/user_scripts/performance/zram/dusky_pro_active_swap_modifier_cc.py --get-ratio"
+toast = "Slice reclaim cap set to {value}"
+[pages.layout.items.layout.items.on_action]
+type = "exec"
+command = "$HOME/user_scripts/performance/zram/dusky_pro_active_swap_modifier_cc.py --set-ratio {value}"
+terminal = false
+requires_root = true
+
+[[pages.layout.items.layout.items]]
+type = "entry"
+[pages.layout.items.layout.items.properties]
+title = "Max Sweep Budget"
+description = "Memory ceiling per sweep to prevent micro-stutters (e.g. 256 MB, 512 MB, 1 GB, 2 GB)"
+button_text = "Apply"
+icon = "edit-symbolic"
+value_command = "$HOME/user_scripts/performance/zram/dusky_pro_active_swap_modifier_cc.py --get-max-budget"
+toast = "Max sweep budget set to {value}"
+[pages.layout.items.layout.items.on_action]
+type = "exec"
+command = "$HOME/user_scripts/performance/zram/dusky_pro_active_swap_modifier_cc.py --set-max-budget {value}"
+terminal = false
+requires_root = true
+
+[[pages.layout.items.layout.items]]
+type = "entry"
+[pages.layout.items.layout.items.properties]
+title = "Reclaim Chunk Size"
+description = "Kernel burst size per yield (e.g. 16 MB, 32 MB, 64 MB)"
+button_text = "Apply"
+icon = "edit-symbolic"
+value_command = "$HOME/user_scripts/performance/zram/dusky_pro_active_swap_modifier_cc.py --get-chunk-size"
+toast = "Reclaim chunk size set to {value}"
+[pages.layout.items.layout.items.on_action]
+type = "exec"
+command = "$HOME/user_scripts/performance/zram/dusky_pro_active_swap_modifier_cc.py --set-chunk-size {value}"
+terminal = false
+requires_root = true
+
+[[pages.layout.items.layout.items]]
+type = "selection"
+[pages.layout.items.layout.items.properties]
+title = "Sweep Frequency"
+description = "Periodic interval"
+icon = "alarm-symbolic"
+value_command = "$HOME/user_scripts/performance/zram/dusky_pro_active_swap_modifier_cc.py --get-interval"
+interval = 3
+options = ["1 min", "2 min", "3 min", "5 min", "6 min", "10 min", "15 min"]
+options_map = { "1min" = "1 min", "2min" = "2 min", "3min" = "3 min", "5min" = "5 min", "6min" = "6 min", "10min" = "10 min", "15min" = "15 min" }
+[pages.layout.items.layout.items.on_change."1 min"]
+type = "exec"
+command = "$HOME/user_scripts/performance/zram/dusky_pro_active_swap_modifier_cc.py --set-interval 1min"
+terminal = false
+requires_root = true
+[pages.layout.items.layout.items.on_change."2 min"]
+type = "exec"
+command = "$HOME/user_scripts/performance/zram/dusky_pro_active_swap_modifier_cc.py --set-interval 2min"
+terminal = false
+requires_root = true
+[pages.layout.items.layout.items.on_change."3 min"]
+type = "exec"
+command = "$HOME/user_scripts/performance/zram/dusky_pro_active_swap_modifier_cc.py --set-interval 3min"
+terminal = false
+requires_root = true
+[pages.layout.items.layout.items.on_change."5 min"]
+type = "exec"
+command = "$HOME/user_scripts/performance/zram/dusky_pro_active_swap_modifier_cc.py --set-interval 5min"
+terminal = false
+requires_root = true
+[pages.layout.items.layout.items.on_change."6 min"]
+type = "exec"
+command = "$HOME/user_scripts/performance/zram/dusky_pro_active_swap_modifier_cc.py --set-interval 6min"
+terminal = false
+requires_root = true
+[pages.layout.items.layout.items.on_change."10 min"]
+type = "exec"
+command = "$HOME/user_scripts/performance/zram/dusky_pro_active_swap_modifier_cc.py --set-interval 10min"
+terminal = false
+requires_root = true
+[pages.layout.items.layout.items.on_change."15 min"]
+type = "exec"
+command = "$HOME/user_scripts/performance/zram/dusky_pro_active_swap_modifier_cc.py --set-interval 15min"
+terminal = false
+requires_root = true
+
+[[pages.layout.items.layout.items]]
+type = "entry"
+[pages.layout.items.layout.items.properties]
+title = "RAM Trigger Threshold"
+description = "Minimum RAM % to trigger sweep"
+button_text = "Apply"
+icon = "memory-symbolic"
+value_command = "$HOME/user_scripts/performance/zram/dusky_pro_active_swap_modifier_cc.py --get-ram-threshold"
+toast = "RAM trigger threshold set to {value}"
+[pages.layout.items.layout.items.on_action]
+type = "exec"
+command = "$HOME/user_scripts/performance/zram/dusky_pro_active_swap_modifier_cc.py --set-ram-threshold {value}"
+terminal = false
+requires_root = true
+
+[[pages.layout.items.layout.items]]
+type = "entry"
+[pages.layout.items.layout.items.properties]
+title = "ZRAM Abort Threshold"
+description = "Halt sweep if ZRAM is above this capacity"
+button_text = "Apply"
+icon = "security-high-symbolic"
+value_command = "$HOME/user_scripts/performance/zram/dusky_pro_active_swap_modifier_cc.py --get-zram-limit"
+toast = "ZRAM safety limit set to {value}"
+[pages.layout.items.layout.items.on_action]
+type = "exec"
+command = "$HOME/user_scripts/performance/zram/dusky_pro_active_swap_modifier_cc.py --set-zram-limit {value}"
+terminal = false
+requires_root = true
+
+[[pages.layout.items.layout]]
+type = "section"
+[pages.layout.items.layout.properties]
+title = "Proactive Sweep Logs & Telemetry"
+icon = "utilities-terminal-symbolic"
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Sweep Journal Logs"
+description = "Monitor live background sweep activity and stolen memory"
+button_text = "View Logs"
+icon = "utilities-terminal-symbolic"
+style = "regular"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "kitty --class dusky_pro_active_logs --hold sh -c \"journalctl -u dusky_pro_active_zram_swap.service -u dusky_boot_zram_flush.service -n 50 -f\""
+terminal = false
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Deep Subsystem Diagnostics"
+description = "View memory topology, timer schedule, and compression stats"
+button_text = "Inspect"
+icon = "dialog-information-symbolic"
+style = "suggested"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "kitty --class dusky_pro_active_diag --hold sh -c \"$HOME/user_scripts/performance/zram/dusky_pro_active_swap_modifier_cc.py --status-full\""
+terminal = false
+[[pages.layout]]
+type = "section"
+[pages.layout.properties]
+title = "Monitoring & Safety"
+icon = "security-high-symbolic"
+description = "Live RAM safety alerts"
+
+[[pages.layout.items]]
+type = "service"
+[pages.layout.items.properties]
+title = "RAM Monitor"
+description = "Alerts on 95% RAM / 90% ZRAM"
+icon = "utilities-system-monitor-symbolic"
+service = "dusky_ram_monitor.service"
+scope = "user"
 
 [[pages]]
 id = "disk_and_files"
@@ -661,14 +1160,15 @@ title = "File Manager Switch"
 description = "Choose Default: thunar (GUI) vs Yazi (TUI)"
 icon = "system-file-manager-symbolic"
 key = "filemanager_switch"
+persistence = "action"
 options = ["Yazi", "thunar"]
 options_map = { "false" = "thunar", "true" = "Yazi" }
 [pages.layout.items.on_change.Yazi]
 type = "exec"
-command = "$HOME/user_scripts/arch_setup_scripts/scripts/235_file_manager_switch.sh --yazi"
+command = "$HOME/user_scripts/arch_setup_scripts/scripts/235_default_apps.py --file-manager --set yazi"
 [pages.layout.items.on_change.thunar]
 type = "exec"
-command = "$HOME/user_scripts/arch_setup_scripts/scripts/235_file_manager_switch.sh --thunar"
+command = "$HOME/user_scripts/arch_setup_scripts/scripts/235_default_apps.py --file-manager --set thunar"
 
 [[pages.layout.items]]
 type = "button"
@@ -754,6 +1254,7 @@ type = "toggle_card"
 title = "Warp"
 icon = "security-high-symbolic"
 key = "warp_state"
+persistence = "action"
 [pages.layout.items.on_toggle.enabled]
 type = "exec"
 command = "$HOME/user_scripts/networking/warp_toggle.py --connect"
@@ -768,7 +1269,7 @@ type = "toggle_card"
 [pages.layout.items.properties]
 title = "Bluetooth"
 icon = "bluetooth-active-symbolic"
-state_command = "rfkill list bluetooth | grep -q 'Soft blocked: no' && echo yes"
+state_command = "$HOME/user_scripts/dusky_system/control_center/lib/radio_status.py bluetooth"
 interval = 5
 [pages.layout.items.on_toggle.enabled]
 type = "exec"
@@ -784,7 +1285,7 @@ type = "toggle_card"
 [pages.layout.items.properties]
 title = "Wi-Fi"
 icon = "network-wireless-symbolic"
-state_command = "rfkill list wifi | grep -q 'Soft blocked: no' && echo yes"
+state_command = "$HOME/user_scripts/dusky_system/control_center/lib/radio_status.py wlan"
 interval = 5
 [pages.layout.items.on_toggle.enabled]
 type = "exec"
@@ -822,9 +1323,9 @@ command = "kitty --class dusky_tui --title \"Network Manager\" --hold python3 $H
 [[pages.layout]]
 type = "section"
 [pages.layout.properties]
-title = "Remote"
-icon = ""
-description = ""
+title = "Remote Access & SSH"
+icon = "network-vpn-symbolic"
+description = "Configure Tailscale mesh VPN, OpenSSH server, and remote filesystem mounts"
 
 [[pages.layout.items]]
 type = "button"
@@ -865,20 +1366,6 @@ style = "suggested"
 type = "exec"
 command = "kitty --class dusky_sshfs --title \"SSH Remote Filesystem Mounter\" --hold python3 $HOME/user_scripts/networking/dusky_ssh_filesystem.py"
 
-
-[[pages.layout.items]]
-type = "button"
-[pages.layout.items.properties]
-title = "Step 3: VNC / iOS Remote"
-button_text = "Setup"
-description = "WayVNC + Sunshine remote control setup"
-icon = "preferences-desktop-remote-desktop-symbolic"
-style = "suggested"
-[pages.layout.items.on_press]
-type = "exec"
-command = "kitty --class vnc_setup.py --hold sh -c \"python3 $HOME/user_scripts/networking/vnc/vnc_setup.py\""
-terminal = false
-
 [[pages.layout.items]]
 type = "button"
 [pages.layout.items.properties]
@@ -889,6 +1376,438 @@ icon = "user-trash-symbolic"
 type = "exec"
 command = "kitty --class tailscale_uninstall --hold sh -c \"$HOME/user_scripts/networking/uninstall_tailscale.sh\""
 terminal = false
+
+
+[[pages.layout]]
+type = "section"
+[pages.layout.properties]
+title = "Remote Displays & Streaming"
+icon = "preferences-desktop-remote-desktop-symbolic"
+description = "WayVNC desktop/phone display and Sunshine/Moonlight streaming"
+
+[[pages.layout.items]]
+type = "navigation"
+[pages.layout.items.properties]
+title = "Remote Displays & Streaming"
+description = "WayVNC (desktop/phone) & Sunshine/Moonlight streaming"
+icon = "preferences-desktop-remote-desktop-symbolic"
+
+[[pages.layout.items.layout]]
+type = "section"
+[pages.layout.items.layout.properties]
+title = "Remote Display Services"
+description = "Manage WayVNC and Moonlight background services"
+icon = "system-run-symbolic"
+
+[[pages.layout.items.layout.items]]
+type = "service"
+[pages.layout.items.layout.items.properties]
+title = "WayVNC Desktop Sharing"
+description = "Mirror primary desktop screen (TCP 5902)"
+icon = "video-display-symbolic"
+service = "dusky_vnc_desktop.service"
+scope = "user"
+
+[[pages.layout.items.layout.items]]
+type = "service"
+[pages.layout.items.layout.items.properties]
+title = "WayVNC Secondary Display"
+description = "Virtual secondary monitor (TCP 5901)"
+icon = "video-joined-displays-symbolic"
+service = "dusky_vnc_display.service"
+scope = "user"
+
+[[pages.layout.items.layout.items]]
+type = "service"
+[pages.layout.items.layout.items.properties]
+title = "Moonlight Secondary Display"
+description = "Hardware-accelerated Sunshine stream (Port 47989)"
+icon = "preferences-desktop-remote-desktop-symbolic"
+service = "dusky_moonlight_display.service"
+scope = "user"
+
+[[pages.layout.items.layout]]
+type = "section"
+[pages.layout.items.layout.properties]
+title = "WayVNC Desktop Sharing (TCP 5902)"
+description = "Mirror desktop display to RealVNC / TigerVNC viewer over network"
+icon = "video-display-symbolic"
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Setup Desktop Sharing"
+button_text = "Setup"
+description = "Install dependencies, configure firewall, and start service"
+icon = "preferences-system-symbolic"
+style = "suggested"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "kitty --class dusky_vnc --title \"WayVNC Desktop Setup\" --hold sh -c \"python3 $HOME/user_scripts/networking/vnc/vnc_setup.py --setup\""
+terminal = false
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Connection Status & Guide"
+button_text = "Status"
+description = "View network IPs, port 5902, and connection guide"
+icon = "dialog-information-symbolic"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "kitty --class dusky_vnc --title \"WayVNC Desktop Status\" --hold sh -c \"python3 $HOME/user_scripts/networking/vnc/vnc_setup.py --status\""
+terminal = false
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Desktop VNC Diagnostics"
+button_text = "Diagnose"
+description = "Check services, port 5902 RFB greeting, route, and capture"
+icon = "utilities-system-monitor-symbolic"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "kitty --class dusky_vnc --title \"WayVNC Desktop Diagnostics\" --hold sh -c \"python3 $HOME/user_scripts/networking/vnc/vnc_setup.py --diagnose\""
+terminal = false
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Reconnect Desktop Sharing"
+button_text = "Reconnect"
+description = "Restart service and restore desktop display capture"
+icon = "view-refresh-symbolic"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "kitty --class dusky_vnc --title \"WayVNC Desktop Reconnect\" --hold sh -c \"python3 $HOME/user_scripts/networking/vnc/vnc_setup.py --reconnect\""
+terminal = false
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Connected Viewers"
+button_text = "Viewers"
+description = "List active VNC viewer IDs and addresses"
+icon = "system-users-symbolic"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "kitty --class dusky_vnc --title \"WayVNC Connected Viewers\" --hold sh -c \"python3 $HOME/user_scripts/networking/vnc/vnc_setup.py --clients\""
+terminal = false
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Disconnect All Viewers"
+button_text = "Disconnect"
+description = "Drop all active desktop VNC sessions without stopping service"
+icon = "network-offline-symbolic"
+style = "destructive"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "kitty --class dusky_vnc --title \"Disconnect VNC Viewers\" --hold sh -c \"python3 $HOME/user_scripts/networking/vnc/vnc_setup.py --disconnect-all\""
+terminal = false
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Tailscale Remote Access"
+button_text = "Tailscale"
+description = "Enable Tailscale VPN for secure access away from home Wi-Fi"
+icon = "network-vpn-symbolic"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "kitty --class dusky_vnc --title \"WayVNC Tailscale Setup\" --hold sh -c \"python3 $HOME/user_scripts/networking/vnc/vnc_setup.py --remote\""
+terminal = false
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Offline Wi-Fi Hotspot"
+button_text = "Hotspot"
+description = "Create direct AP on a spare Wi-Fi adapter without displacing LAN"
+icon = "network-wireless-symbolic"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "kitty --class dusky_vnc --title \"WayVNC Offline Hotspot\" --hold sh -c \"python3 $HOME/user_scripts/networking/vnc/vnc_setup.py --offline\""
+terminal = false
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Stop All VNC Displays"
+button_text = "Stop All"
+description = "Disable and stop both desktop and secondary VNC services"
+icon = "process-stop-symbolic"
+style = "destructive"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "kitty --class dusky_vnc --title \"Stop WayVNC Services\" --hold sh -c \"python3 $HOME/user_scripts/networking/vnc/vnc_setup.py --stop\""
+terminal = false
+
+[[pages.layout.items.layout]]
+type = "section"
+[pages.layout.items.layout.properties]
+title = "WayVNC Secondary Display (TCP 5901)"
+description = "Headless secondary display positioned right of the desktop"
+icon = "video-joined-displays-symbolic"
+
+[[pages.layout.items.layout.items]]
+type = "selection"
+[pages.layout.items.layout.items.properties]
+title = "Display Orientation"
+description = "Landscape (1280x720) or Portrait (720x1280)"
+icon = "view-refresh-symbolic"
+value_command = "jq -r '.orientation // \"landscape\"' ~/.config/dusky/settings/remote/vnc_display.json 2>/dev/null || echo landscape"
+interval = 2
+options = ["Landscape", "Portrait"]
+options_map = { "landscape" = "Landscape", "portrait" = "Portrait" }
+[pages.layout.items.layout.items.on_change.Landscape]
+type = "exec"
+command = "python3 $HOME/user_scripts/networking/vnc/second_display.py orientation landscape"
+terminal = false
+[pages.layout.items.layout.items.on_change.Portrait]
+type = "exec"
+command = "python3 $HOME/user_scripts/networking/vnc/second_display.py orientation portrait"
+terminal = false
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Setup Secondary Display"
+button_text = "Setup"
+description = "Create virtual DUSKY-PHONE monitor and start VNC service"
+icon = "preferences-system-symbolic"
+style = "suggested"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "kitty --class dusky_vnc_second --title \"WayVNC Secondary Display Setup\" --hold sh -c \"python3 $HOME/user_scripts/networking/vnc/second_display.py --setup\""
+terminal = false
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Connection Status & Guide"
+button_text = "Status"
+description = "View port 5901 IP address, orientation, and instructions"
+icon = "dialog-information-symbolic"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "kitty --class dusky_vnc_second --title \"WayVNC Secondary Display Status\" --hold sh -c \"python3 $HOME/user_scripts/networking/vnc/second_display.py --status\""
+terminal = false
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Secondary Display Diagnostics"
+button_text = "Diagnose"
+description = "Inspect master service, port 5901 RFB greeting, and monitor"
+icon = "utilities-system-monitor-symbolic"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "kitty --class dusky_vnc_second --title \"WayVNC Secondary Diagnostics\" --hold sh -c \"python3 $HOME/user_scripts/networking/vnc/second_display.py --diagnose\""
+terminal = false
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Reconnect Secondary Display"
+button_text = "Reconnect"
+description = "Restart service and re-create virtual DUSKY-PHONE monitor"
+icon = "view-refresh-symbolic"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "kitty --class dusky_vnc_second --title \"WayVNC Secondary Reconnect\" --hold sh -c \"python3 $HOME/user_scripts/networking/vnc/second_display.py --reconnect\""
+terminal = false
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Connected Viewers"
+button_text = "Viewers"
+description = "List viewers connected to port 5901"
+icon = "system-users-symbolic"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "kitty --class dusky_vnc_second --title \"WayVNC Secondary Viewers\" --hold sh -c \"python3 $HOME/user_scripts/networking/vnc/second_display.py --clients\""
+terminal = false
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Disconnect Viewers"
+button_text = "Disconnect"
+description = "Drop active secondary display viewer sessions"
+icon = "network-offline-symbolic"
+style = "destructive"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "kitty --class dusky_vnc_second --title \"Disconnect Secondary Viewers\" --hold sh -c \"python3 $HOME/user_scripts/networking/vnc/second_display.py --disconnect-all\""
+terminal = false
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Stop Secondary Display"
+button_text = "Stop"
+description = "Stop secondary service and remove virtual DUSKY-PHONE monitor"
+icon = "process-stop-symbolic"
+style = "destructive"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "kitty --class dusky_vnc_second --title \"Stop Secondary Display\" --hold sh -c \"python3 $HOME/user_scripts/networking/vnc/second_display.py --stop\""
+terminal = false
+
+[[pages.layout.items.layout]]
+type = "section"
+[pages.layout.items.layout.properties]
+title = "Moonlight (Sunshine) Secondary Display (Port 47989)"
+description = "Low-latency hardware-accelerated video streaming to Moonlight clients"
+icon = "preferences-desktop-remote-desktop-symbolic"
+
+[[pages.layout.items.layout.items]]
+type = "selection"
+[pages.layout.items.layout.items.properties]
+title = "Moonlight Screen Orientation"
+description = "Landscape (1280x720) or Portrait (720x1280)"
+icon = "view-refresh-symbolic"
+value_command = "jq -r '.orientation // \"landscape\"' ~/.config/dusky/settings/remote/moonlight_display.json 2>/dev/null || echo landscape"
+interval = 2
+options = ["Landscape", "Portrait"]
+options_map = { "landscape" = "Landscape", "portrait" = "Portrait" }
+[pages.layout.items.layout.items.on_change.Landscape]
+type = "exec"
+command = "python3 $HOME/user_scripts/networking/moonlight/moonlight_setup.py orientation landscape"
+terminal = false
+[pages.layout.items.layout.items.on_change.Portrait]
+type = "exec"
+command = "python3 $HOME/user_scripts/networking/moonlight/moonlight_setup.py orientation portrait"
+terminal = false
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Setup Sunshine & Service"
+button_text = "Setup"
+description = "Install Sunshine, configure UFW firewall rules, and start service"
+icon = "preferences-system-symbolic"
+style = "suggested"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "kitty --class dusky_moonlight --title \"Moonlight Setup\" --hold sh -c \"python3 $HOME/user_scripts/networking/moonlight/moonlight_setup.py --setup\""
+terminal = false
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Pair Moonlight Client"
+button_text = "Pair"
+description = "Open Sunshine web UI (https://localhost:47990) to enter client PIN"
+icon = "network-wireless-symbolic"
+style = "suggested"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "kitty --class dusky_moonlight --title \"Moonlight Client Pairing\" --hold sh -c \"python3 $HOME/user_scripts/networking/moonlight/moonlight_setup.py --pair\""
+terminal = false
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Moonlight Connection Status"
+button_text = "Status"
+description = "Show IP addresses, streaming readiness, and connection steps"
+icon = "dialog-information-symbolic"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "kitty --class dusky_moonlight --title \"Moonlight Status\" --hold sh -c \"python3 $HOME/user_scripts/networking/moonlight/moonlight_setup.py --status\""
+terminal = false
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Test Display Video"
+button_text = "Test Video"
+description = "Show a high-contrast test window on the streamed virtual monitor"
+icon = "video-display-symbolic"
+style = "suggested"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "python3 $HOME/user_scripts/networking/moonlight/moonlight_setup.py --test-display"
+terminal = false
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Moonlight Diagnostics"
+button_text = "Diagnose"
+description = "Check GameStream HTTP listener, monitor, and duplicate identities"
+icon = "utilities-system-monitor-symbolic"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "kitty --class dusky_moonlight --title \"Moonlight Diagnostics\" --hold sh -c \"python3 $HOME/user_scripts/networking/moonlight/moonlight_setup.py --diagnose\""
+terminal = false
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Reconnect Moonlight Stream"
+button_text = "Reconnect"
+description = "Restart Sunshine and repair duplicate client certificates"
+icon = "view-refresh-symbolic"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "kitty --class dusky_moonlight --title \"Moonlight Reconnect\" --hold sh -c \"python3 $HOME/user_scripts/networking/moonlight/moonlight_setup.py --reconnect\""
+terminal = false
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Paired Moonlight Clients"
+button_text = "Clients"
+description = "List paired client devices and UUIDs"
+icon = "system-users-symbolic"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "kitty --class dusky_moonlight --title \"Moonlight Paired Clients\" --hold sh -c \"python3 $HOME/user_scripts/networking/moonlight/moonlight_setup.py --clients\""
+terminal = false
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Forget All Paired Clients"
+button_text = "Forget All"
+description = "Remove saved client certificates while preserving web UI credentials"
+icon = "user-trash-symbolic"
+style = "destructive"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "kitty --class dusky_moonlight --title \"Forget Moonlight Clients\" --hold sh -c \"python3 $HOME/user_scripts/networking/moonlight/moonlight_setup.py --forget-all\""
+terminal = false
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "iPhone USB Local Tethering"
+button_text = "Setup USB"
+description = "Configure USB tethering profile keeping Wi-Fi as default route"
+icon = "phone-apple-iphone-symbolic"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "kitty --class dusky_moonlight --title \"iPhone USB Tethering Setup\" --hold sh -c \"python3 $HOME/user_scripts/networking/moonlight/moonlight_setup.py --usb\""
+terminal = false
+
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Stop Moonlight Display"
+button_text = "Stop"
+description = "Disable and stop Sunshine; remove DUSKY-MOONLIGHT monitor"
+icon = "process-stop-symbolic"
+style = "destructive"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "kitty --class dusky_moonlight --title \"Stop Moonlight Display\" --hold sh -c \"python3 $HOME/user_scripts/networking/moonlight/moonlight_setup.py --stop\""
+terminal = false
+
 
 [[pages.layout]]
 type = "section"
@@ -968,15 +1887,15 @@ type = "toggle"
 title = "Enable Tunnel"
 description = "Bring tunnel up or down"
 icon = "network-vpn-symbolic"
-state_command = "[ -d /sys/class/net/{name} ] && echo yes || echo no"
+state_command = "$HOME/user_scripts/dusky_system/control_center/lib/wireguard_status.py {name}"
 interval = 5
 [pages.layout.items.layout.items.item_template.items.on_toggle.enabled]
 type = "exec"
-command = "sudo wg-quick up {path}"
+argv = ["sudo", "-n", "wg-quick", "up", "{path}"]
 terminal = false
 [pages.layout.items.layout.items.item_template.items.on_toggle.disabled]
 type = "exec"
-command = "sudo wg-quick down {path}"
+argv = ["sudo", "-n", "wg-quick", "down", "{path}"]
 terminal = false
 
 [[pages.layout.items.layout.items.item_template.items]]
@@ -987,7 +1906,7 @@ description = "{path}"
 icon = "document-edit-symbolic"
 [pages.layout.items.layout.items.item_template.items.on_press]
 type = "exec"
-command = "kitty --class dusky_wg_edit --hold sh -c 'sudo $EDITOR {path}'"
+argv = ["kitty", "--class", "dusky_wg_edit", "--hold", "sh", "-c", "sudoedit -- \"$1\"", "dusky-wg", "{path}"]
 terminal = false
 
 [[pages.layout.items.layout.items.item_template.items]]
@@ -998,7 +1917,7 @@ description = "Open wg show {name} in terminal"
 icon = "utilities-terminal-symbolic"
 [pages.layout.items.layout.items.item_template.items.on_press]
 type = "exec"
-command = "kitty --class dusky_wg_status --hold sh -c 'sudo wg show {name} 2>/dev/null || echo Inactive; echo; printf \"Press Enter to close...\"; read'"
+argv = ["kitty", "--class", "dusky_wg_status", "--hold", "sh", "-c", "sudo -n wg show \"$1\" 2>/dev/null || echo Inactive; echo; printf 'Press Enter to close...'; read -r", "dusky-wg", "{name}"]
 terminal = false
 
 [[pages.layout.items.layout.items.item_template.items]]
@@ -1009,7 +1928,7 @@ description = "Permanently remove {relpath}"
 icon = "list-remove-symbolic"
 [pages.layout.items.layout.items.item_template.items.on_press]
 type = "exec"
-command = "kitty --class dusky_wg_delete --hold sh -c 'printf \"\\e[1;31mDelete {relpath}?\\e[0m [y/N] \"; read c; case $c in [Yy]) sudo rm {path} && echo \"Deleted {relpath}.\" || echo \"Failed.\";; *) echo \"Aborted.\";; esac; echo; printf \"Press Enter to close...\"; read'"
+argv = ["kitty", "--class", "dusky_wg_delete", "--hold", "sh", "-c", "printf 'Delete %s? [y/N] ' \"$2\"; read -r c; case $c in [Yy]) sudo rm -- \"$1\" && printf 'Deleted %s.\\n' \"$2\" || echo Failed;; *) echo Aborted;; esac; printf 'Press Enter to close...'; read -r", "dusky-wg", "{path}", "{relpath}"]
 terminal = false
 
 [[pages.layout.items.layout]]
@@ -1129,6 +2048,39 @@ type = "exec"
 command = "foot --app-id=dusky_tui --hold python3 $HOME/user_scripts/network_manager/tui_dns.py"
 
 
+[[pages.layout]]
+type = "section"
+[pages.layout.properties]
+title = "Firewall & Security"
+icon = ""
+description = ""
+
+[[pages.layout.items]]
+type = "button"
+[pages.layout.items.properties]
+title = "Firewall (UFW)"
+description = "Bleeding-edge UFW rules, open/closed ports, NAT & domain lockdown"
+icon = "security-high-symbolic"
+
+[[pages.layout.items.properties.buttons]]
+icon = "document-edit-symbolic"
+[pages.layout.items.properties.buttons.on_press]
+type = "exec"
+command = "$HOME/user_scripts/dusky_system/control_center/dusky_text_editor.py \"/etc/default/ufw\""
+
+[[pages.layout.items.properties.buttons]]
+icon = "security-high-symbolic"
+style = "suggested"
+[pages.layout.items.properties.buttons.on_press]
+type = "exec"
+command = "foot --app-id=dusky_tui --hold python3 $HOME/user_scripts/network_manager/tui_firewall.py"
+
+[pages.layout.items.on_press]
+type = "exec"
+command = "foot --app-id=dusky_tui --hold python3 $HOME/user_scripts/network_manager/tui_firewall.py"
+terminal = false
+
+
 [[pages]]
 id = "hardware"
 title = "Hardware"
@@ -1177,13 +2129,16 @@ title = "Dusky Power Saver"
 icon = "battery-level-80-symbolic"
 description = "Optimize for battery life (TUI)"
 key = "power_saver_state"
+persistence = "action"
 [pages.layout.items.on_toggle.enabled]
 type = "exec"
 command = "foot --app-id=power_saver.sh --title \"Enable Power Saver\" sh -c \"$HOME/user_scripts/battery/power_saver.sh -e\""
+mode = "launch"
 terminal = false
 [pages.layout.items.on_toggle.disabled]
 type = "exec"
 command = "kitty --class power_saver_off.sh --title \"Disable Power Saver\" sh -c \"$HOME/user_scripts/battery/power_saver.sh -d\""
+mode = "launch"
 terminal = false
 
 [[pages.layout.items]]
@@ -1197,7 +2152,7 @@ icon = "preferences-system-power-symbolic"
 style = "suggested"
 [pages.layout.items.on_press]
 type = "exec"
-command = "kitty --class dusky_power.sh --title \"Power Manager\" --hold sh -c \"$HOME/user_scripts/power/dusky_power.sh\""
+command = "kitty --class dusky_tui --title \"Power Manager\" --hold python3 $HOME/user_scripts/power/tui_power.py"
 
 [[pages.layout]]
 type = "section"
@@ -1213,6 +2168,7 @@ title = "Left-Handed Mouse"
 icon = "input-mouse-symbolic"
 description = "Enable/Disable Left-Handed Mode"
 key = "left_handed_mouse"
+persistence = "app"
 [pages.layout.items.on_toggle.enabled]
 type = "exec"
 command = "$HOME/user_scripts/arch_setup_scripts/scripts/265_mouse_button_reverse.sh --left"
@@ -1322,7 +2278,7 @@ icon = "video-display-symbolic"
 style = "suggested"
 [pages.layout.items.on_press]
 type = "exec"
-command = "foot --app-id=dusky_tui --hold python3 ~/user_scripts/hypr/monitor/monitor_wizard.py"
+command = "foot --app-id=dusky_tui --hold python3 ~/user_scripts/hypr/monitor/tui_monitor_wizard.py"
 
 [[pages.layout.items]]
 type = "button"
@@ -1361,7 +2317,7 @@ icon = "video-display-symbolic"
 style = "suggested"
 [pages.layout.items.properties.buttons.on_press]
 type = "exec"
-command = "kitty --class dusky_tui --title \"Monitors & Refresh Rate Wizard\" --hold python3 $HOME/user_scripts/hypr/monitor/monitor_wizard.py"
+command = "kitty --class dusky_tui --title \"Monitors & Refresh Rate Wizard\" --hold python3 $HOME/user_scripts/hypr/monitor/tui_monitor_wizard.py"
 
 
 
@@ -1375,6 +2331,14 @@ type = "warning_banner"
 [pages.layout.properties]
 title = ""
 message = "Denoise requires Dusky Audio to be On."
+icon = ""
+compact = true
+
+[[pages.layout]]
+type = "warning_banner"
+[pages.layout.properties]
+title = ""
+message = "Wayclick needs to be setup first from the setup page"
 icon = ""
 compact = true
 
@@ -1421,6 +2385,7 @@ type = "toggle_card"
 title = "Mono Audio"
 icon = "audio-card-symbolic"
 key = "mono_audio"
+persistence = "action"
 [pages.layout.items.on_toggle.enabled]
 type = "exec"
 command = "$HOME/user_scripts/audio/mono_audio_pipewire.py"
@@ -1446,13 +2411,16 @@ type = "toggle_card"
 title = "Wayclick"
 icon = "input-keyboard-symbolic"
 key = "wayclick"
+persistence = "action"
 [pages.layout.items.on_toggle.enabled]
 type = "exec"
 command = "$HOME/user_scripts/wayclick/dusky_wayclick.sh"
+mode = "launch"
 terminal = false
 [pages.layout.items.on_toggle.disabled]
 type = "exec"
 command = "$HOME/user_scripts/wayclick/dusky_wayclick.sh"
+mode = "launch"
 terminal = false
 
 [[pages.layout.items]]
@@ -1638,15 +2606,6 @@ icon = "audio-x-generic-symbolic"
 service = "dusky_visualizer.service"
 scope = "user"
 
-[[pages.layout.items]]
-type = "service"
-[pages.layout.items.properties]
-title = "RAM Monitor"
-description = "Alerts on 95% RAM / 90% ZRAM"
-icon = "utilities-system-monitor-symbolic"
-service = "dusky_ram_monitor.service"
-scope = "user"
-
 [[pages.layout]]
 type = "section"
 [pages.layout.properties]
@@ -1693,6 +2652,7 @@ type = "toggle_card"
 title = "Dark Mode"
 icon = "weather-clear-night-symbolic"
 key = "dusky_theme/state"
+persistence = "action"
 [pages.layout.items.on_toggle.enabled]
 type = "exec"
 command = "$HOME/user_scripts/theme_matugen/theme_ctl.sh set --mode dark"
@@ -1718,6 +2678,7 @@ type = "toggle_card"
 title = "Blur"
 icon = "view-reveal-symbolic"
 key = "opacity_blur"
+persistence = "action"
 [pages.layout.items.on_toggle.enabled]
 type = "exec"
 command = "$HOME/user_scripts/hypr/hypr_blur_opacity_shadow_toggle.sh"
@@ -1815,6 +2776,16 @@ style = "suggested"
 type = "exec"
 command = "kitty --class dusky_tui --title \"Matugen Theme Generator Settings\" --hold python3 $HOME/user_scripts/theme_matugen/config/tui_matugen.py"
 
+[[pages.layout.items.layout.items]]
+type = "button"
+[pages.layout.items.layout.items.properties]
+title = "Firefox Theme & Websites"
+description = "Configure Firefox colors and opt-in website themes"
+icon = "web-browser-symbolic"
+style = "suggested"
+[pages.layout.items.layout.items.on_press]
+type = "exec"
+command = "kitty --class dusky_tui --title \"Firefox Theme & Websites\" --hold python3 $HOME/user_scripts/firefox/theme_matugen/tui_dusky_sites.py"
 
 [[pages.layout.items]]
 type = "navigation"
@@ -1970,15 +2941,18 @@ title = "Clipboard Persistence"
 description = "Configure clipboard history storage"
 icon = "edit-paste-symbolic"
 key = "clipboard_persistance"
+persistence = "action"
 options = ["RAM", "Disk"]
 options_map = { "false" = "RAM", "true" = "Disk" }
 [pages.layout.items.on_change.RAM]
 type = "exec"
 command = "kitty --class 390_clipboard_persistance.py --hold sh -c \"$HOME/user_scripts/arch_setup_scripts/scripts/390_clipboard_persistance.py --ram\""
+mode = "launch"
 terminal = false
 [pages.layout.items.on_change.Disk]
 type = "exec"
 command = "kitty --class 390_clipboard_persistance.py --hold sh -c \"$HOME/user_scripts/arch_setup_scripts/scripts/390_clipboard_persistance.py --disk\""
+mode = "launch"
 terminal = false
 
 [[pages.layout.items]]
@@ -1987,226 +2961,17 @@ type = "selection"
 title = "Clipboard Interface"
 description = "Toggle between Rofi and Terminal clipboards"
 icon = "edit-paste-symbolic"
-key = "clipboard_state"
+value_command = "$HOME/user_scripts/arch_setup_scripts/scripts/460_switch_clipboard.sh --status"
+watch_key = "clipboard_state"
+persistence = "action"
 options = ["Rofi", "Terminal"]
-options_map = { "false" = "Rofi", "true" = "Terminal" }
+options_map = { "rofi" = "Rofi", "terminal" = "Terminal" }
 [pages.layout.items.on_change.Rofi]
 type = "exec"
-command = "kitty --class 460_switch_clipboard.sh --hold sh -c \"$HOME/user_scripts/arch_setup_scripts/scripts/460_switch_clipboard.sh --rofi\""
-terminal = false
+argv = ["$HOME/user_scripts/arch_setup_scripts/scripts/460_switch_clipboard.sh", "--rofi"]
 [pages.layout.items.on_change.Terminal]
 type = "exec"
-command = "kitty --class 460_switch_clipboard.sh --hold sh -c \"$HOME/user_scripts/arch_setup_scripts/scripts/460_switch_clipboard.sh --terminal\""
-terminal = false
-
-[[pages.layout]]
-type = "section"
-[pages.layout.properties]
-title = "Memory & Optimization"
-icon = ""
-description = ""
-
-[[pages.layout.items]]
-type = "navigation"
-[pages.layout.items.properties]
-title = "Memory & Swap Management"
-description = "Configure ZRAM0, ZRAM1 RAM disk, and Disk Swap"
-icon = "memory-symbolic"
-
-[[pages.layout.items.layout]]
-type = "section"
-[pages.layout.items.layout.properties]
-title = "Topology Overview"
-icon = "dialog-information-symbolic"
-
-[[pages.layout.items.layout.items]]
-type = "label"
-[pages.layout.items.layout.items.properties]
-title = "ZRAM0 Swap"
-icon = "memory-symbolic"
-interval = 3
-[pages.layout.items.layout.items.value]
-type = "exec"
-command = "$HOME/user_scripts/performance/zram/zram_swap_manager.py --zram0-status"
-
-[[pages.layout.items.layout.items]]
-type = "label"
-[pages.layout.items.layout.items.properties]
-title = "ZRAM1 Mount"
-icon = "drive-harddisk-symbolic"
-interval = 3
-[pages.layout.items.layout.items.value]
-type = "exec"
-command = "$HOME/user_scripts/performance/zram/zram_swap_manager.py --zram1-status"
-
-[[pages.layout.items.layout.items]]
-type = "label"
-[pages.layout.items.layout.items.properties]
-title = "Disk Swap"
-icon = "drive-harddisk-system-symbolic"
-interval = 3
-[pages.layout.items.layout.items.value]
-type = "exec"
-command = "$HOME/user_scripts/performance/zram/zram_swap_manager.py --disk-swap-status"
-
-[[pages.layout.items.layout]]
-type = "section"
-[pages.layout.items.layout.properties]
-title = "ZRAM0 (Compressed Swap)"
-icon = "preferences-system-symbolic"
-
-[[pages.layout.items.layout.items]]
-type = "entry"
-[pages.layout.items.layout.items.properties]
-title = "ZRAM0 Size"
-description = "e.g. 80%, 50%, 20%, 6 GB, or auto"
-button_text = "Apply"
-icon = "edit-symbolic"
-value_command = "$HOME/user_scripts/performance/zram/zram_swap_manager.py --zram0-size"
-toast = "ZRAM0 size updated to {value}"
-[pages.layout.items.layout.items.on_action]
-type = "exec"
-command = "$HOME/user_scripts/performance/zram/zram_swap_manager.py --set-zram0-size {value}"
-terminal = false
-requires_root = true
-
-[[pages.layout.items.layout.items]]
-type = "toggle"
-[pages.layout.items.layout.items.properties]
-title = "ZRAM0 Swap Active"
-description = "Toggle compressed RAM swap on or off"
-icon = "memory-symbolic"
-state_command = "swapon --show | grep -q '/dev/zram0' && echo on || echo off"
-interval = 3
-[pages.layout.items.layout.items.on_toggle.enabled]
-type = "exec"
-command = "$HOME/user_scripts/performance/zram/zram_swap_manager.py --enable-zram0"
-terminal = false
-requires_root = true
-[pages.layout.items.layout.items.on_toggle.disabled]
-type = "exec"
-command = "$HOME/user_scripts/performance/zram/zram_swap_manager.py --disable-zram0"
-terminal = false
-requires_root = true
-
-[[pages.layout.items.layout]]
-type = "section"
-[pages.layout.items.layout.properties]
-title = "ZRAM1 (/mnt/zram1 RAM Disk)"
-icon = "folder-symbolic"
-
-[[pages.layout.items.layout.items]]
-type = "selection"
-[pages.layout.items.layout.items.properties]
-title = "ZRAM1 Mode"
-description = "Ext4 (Compressed) vs Tmpfs (Pure RAM) vs Disabled"
-icon = "drive-harddisk-symbolic"
-value_command = "$HOME/user_scripts/performance/zram/zram_swap_manager.py --zram1-backend"
-interval = 3
-options = ["Ext4", "Tmpfs", "Disabled"]
-options_map = { "ext4" = "Ext4", "zram" = "Ext4", "Ext4 ZRAM" = "Ext4", "tmpfs" = "Tmpfs", "disabled" = "Disabled", "none" = "Disabled" }
-[pages.layout.items.layout.items.on_change.Ext4]
-type = "exec"
-command = "$HOME/user_scripts/performance/zram/zram_swap_manager.py --set-zram1-backend zram"
-terminal = false
-requires_root = true
-[pages.layout.items.layout.items.on_change.Tmpfs]
-type = "exec"
-command = "$HOME/user_scripts/performance/zram/zram_swap_manager.py --set-zram1-backend tmpfs"
-terminal = false
-requires_root = true
-[pages.layout.items.layout.items.on_change.Disabled]
-type = "exec"
-command = "$HOME/user_scripts/performance/zram/zram_swap_manager.py --disable-zram1"
-terminal = false
-requires_root = true
-
-[[pages.layout.items.layout.items]]
-type = "entry"
-[pages.layout.items.layout.items.properties]
-title = "ZRAM1 Disk Size"
-description = "e.g. 100%, 8 GB, 4 GB, or ram"
-button_text = "Apply"
-icon = "edit-symbolic"
-value_command = "$HOME/user_scripts/performance/zram/zram_swap_manager.py --zram1-size"
-toast = "ZRAM1 size updated to {value}"
-[pages.layout.items.layout.items.on_action]
-type = "exec"
-command = "$HOME/user_scripts/performance/zram/zram_swap_manager.py --set-zram1-size {value}"
-terminal = false
-requires_root = true
-
-[[pages.layout.items.layout]]
-type = "section"
-[pages.layout.items.layout.properties]
-title = "Disk Swap (/swap/swapfile)"
-icon = "drive-harddisk-system-symbolic"
-
-[[pages.layout.items.layout.items]]
-type = "entry"
-[pages.layout.items.layout.items.properties]
-title = "Disk Swap Size"
-description = "e.g. 4 GB, 8 GB, 2 GB, 512 MB"
-button_text = "Allocate"
-icon = "edit-symbolic"
-value_command = "$HOME/user_scripts/performance/zram/zram_swap_manager.py --disk-swap-size"
-toast = "Disk swap allocated: {value}"
-[pages.layout.items.layout.items.on_action]
-type = "exec"
-command = "$HOME/user_scripts/performance/zram/zram_swap_manager.py --set-disk-swap-size {value}"
-terminal = false
-requires_root = true
-
-[[pages.layout.items.layout.items]]
-type = "toggle"
-[pages.layout.items.layout.items.properties]
-title = "Disk Swap Active"
-description = "Toggle disk swap on/off (Fallback swap @ priority -1)"
-icon = "drive-harddisk-symbolic"
-state_command = "swapon --show | grep -q '/swap/swapfile' && echo on || echo off"
-interval = 3
-[pages.layout.items.layout.items.on_toggle.enabled]
-type = "exec"
-command = "$HOME/user_scripts/performance/zram/zram_swap_manager.py --enable-disk-swap"
-terminal = false
-requires_root = true
-[pages.layout.items.layout.items.on_toggle.disabled]
-type = "exec"
-command = "$HOME/user_scripts/performance/zram/zram_swap_manager.py --disable-disk-swap"
-terminal = false
-requires_root = true
-
-[[pages.layout.items.layout]]
-type = "section"
-[pages.layout.items.layout.properties]
-title = "Diagnostics & Optimization"
-icon = "utilities-system-monitor-symbolic"
-
-[[pages.layout.items.layout.items]]
-type = "button"
-[pages.layout.items.layout.items.properties]
-title = "Run Deep Architecture Diagnostics"
-description = "Inspect memory limits, compression algorithm, and mount health"
-button_text = "Diagnose"
-icon = "dialog-information-symbolic"
-style = "suggested"
-[pages.layout.items.layout.items.on_press]
-type = "exec"
-command = "kitty --class 208_check_zram0_zram1_setup.py --hold sh -c \"$HOME/user_scripts/arch_setup_scripts/scripts/208_check_zram0_zram1_setup.py\""
-terminal = false
-
-[[pages.layout.items.layout.items]]
-type = "button"
-[pages.layout.items.layout.items.properties]
-title = "Optimize Kernel Swappiness & VM Policy"
-description = "Apply high-performance MGLRU and swappiness parameters"
-button_text = "Optimize"
-icon = "power-profile-performance-symbolic"
-style = "destructive"
-[pages.layout.items.layout.items.on_press]
-type = "exec"
-command = "kitty --class 210_zram_optimize_swappiness.sh --hold sh -c \"$HOME/user_scripts/arch_setup_scripts/scripts/210_zram_optimize_swappiness.sh\""
-terminal = false
+argv = ["$HOME/user_scripts/arch_setup_scripts/scripts/460_switch_clipboard.sh", "--terminal"]
 
 [[pages.layout]]
 type = "section"
@@ -2222,6 +2987,7 @@ title = "24-Hour Clock"
 description = "Toggle between 12hr (AM/PM) and 24hr format"
 icon = "preferences-system-time-symbolic"
 key = "time_format"
+persistence = "action"
 [pages.layout.items.on_toggle.enabled]
 type = "exec"
 command = "~/user_scripts/waybar/toggle_time.sh --24"
@@ -2308,7 +3074,7 @@ icon = "preferences-system-time-symbolic"
 style = "suggested"
 [pages.layout.items.items.on_press]
 type = "exec"
-command = "kitty --class dusky_hypridle.sh --hold sh -c \"$HOME/user_scripts/hypridle/dusky_hypridle.sh\""
+command = "foot --app-id=dusky_tui --hold python3 $HOME/user_scripts/hypridle/tui_dusky_hypridle.py"
 
 [[pages.layout.items.items]]
 type = "button"
@@ -2334,6 +3100,156 @@ title = "Management"
 center_title = true
 icon = ""
 description = ""
+
+[[pages.layout.items]]
+type = "navigation"
+[pages.layout.items.properties]
+title = "Quick Toggles"
+description = "Trim startup RAM: autostart + services"
+icon = "preferences-system-power-symbolic"
+
+[[pages.layout.items.layout]]
+type = "section"
+[pages.layout.items.layout.properties]
+title = "Startup Apps"
+description = "Launch at login — off saves RAM"
+
+[[pages.layout.items.layout.items]]
+type = "toggle"
+[pages.layout.items.layout.items.properties]
+title = "XWayland"
+description = "X11 compat layer (~30 MB RAM)"
+icon = "video-display-symbolic"
+state_command = "python3 $HOME/user_scripts/dusky_tui/python/main/main.py $HOME/user_scripts/hypr/misc/tui_autostart.py --export-state 2>/dev/null | grep -q '\"xwayland/enabled\": true' && echo yes || echo no"
+interval = 5
+[pages.layout.items.layout.items.on_toggle.enabled]
+type = "exec"
+command = "python3 $HOME/user_scripts/dusky_tui/python/main/main.py $HOME/user_scripts/hypr/misc/tui_autostart.py --set xwayland.enabled=true"
+terminal = false
+[pages.layout.items.layout.items.on_toggle.disabled]
+type = "exec"
+command = "python3 $HOME/user_scripts/dusky_tui/python/main/main.py $HOME/user_scripts/hypr/misc/tui_autostart.py --set xwayland.enabled=false"
+terminal = false
+
+[[pages.layout.items.layout.items]]
+type = "toggle"
+[pages.layout.items.layout.items.properties]
+title = "Wallpaper Engine"
+description = "awww daemon wallpaper renderer"
+icon = "image-x-generic-symbolic"
+state_command = "python3 $HOME/user_scripts/dusky_tui/python/main/main.py $HOME/user_scripts/hypr/misc/tui_autostart.py --export-state 2>/dev/null | grep -q '\"autostart/awww_daemon\": true' && echo yes || echo no"
+interval = 5
+[pages.layout.items.layout.items.on_toggle.enabled]
+type = "exec"
+command = "python3 $HOME/user_scripts/dusky_tui/python/main/main.py $HOME/user_scripts/hypr/misc/tui_autostart.py --set autostart.awww_daemon=true"
+terminal = false
+[pages.layout.items.layout.items.on_toggle.disabled]
+type = "exec"
+command = "python3 $HOME/user_scripts/dusky_tui/python/main/main.py $HOME/user_scripts/hypr/misc/tui_autostart.py --set autostart.awww_daemon=false"
+terminal = false
+
+[[pages.layout.items.layout.items]]
+type = "toggle"
+[pages.layout.items.layout.items.properties]
+title = "Status Bar"
+description = "Waybar panel on login"
+icon = "view-more-symbolic"
+state_command = "python3 $HOME/user_scripts/dusky_tui/python/main/main.py $HOME/user_scripts/hypr/misc/tui_autostart.py --export-state 2>/dev/null | grep -q '\"autostart/waybar\": true' && echo yes || echo no"
+interval = 5
+[pages.layout.items.layout.items.on_toggle.enabled]
+type = "exec"
+command = "python3 $HOME/user_scripts/dusky_tui/python/main/main.py $HOME/user_scripts/hypr/misc/tui_autostart.py --set autostart.waybar=true"
+terminal = false
+[pages.layout.items.layout.items.on_toggle.disabled]
+type = "exec"
+command = "python3 $HOME/user_scripts/dusky_tui/python/main/main.py $HOME/user_scripts/hypr/misc/tui_autostart.py --set autostart.waybar=false"
+terminal = false
+
+[[pages.layout.items.layout.items]]
+type = "toggle"
+[pages.layout.items.layout.items.properties]
+title = "Plugin Reload"
+description = "hyprpm reload on startup"
+icon = "application-x-addon-symbolic"
+state_command = "python3 $HOME/user_scripts/dusky_tui/python/main/main.py $HOME/user_scripts/hypr/misc/tui_autostart.py --export-state 2>/dev/null | grep -q '\"autostart/hyprpm_reload\": true' && echo yes || echo no"
+interval = 5
+[pages.layout.items.layout.items.on_toggle.enabled]
+type = "exec"
+command = "python3 $HOME/user_scripts/dusky_tui/python/main/main.py $HOME/user_scripts/hypr/misc/tui_autostart.py --set autostart.hyprpm_reload=true"
+terminal = false
+[pages.layout.items.layout.items.on_toggle.disabled]
+type = "exec"
+command = "python3 $HOME/user_scripts/dusky_tui/python/main/main.py $HOME/user_scripts/hypr/misc/tui_autostart.py --set autostart.hyprpm_reload=false"
+terminal = false
+
+[[pages.layout.items.layout]]
+type = "section"
+[pages.layout.items.layout.properties]
+title = "Background Services"
+description = "enable --now / disable --now"
+
+[[pages.layout.items.layout.items]]
+type = "service"
+[pages.layout.items.layout.items.properties]
+title = "Quick Panel"
+description = "Dusky quick access overlay"
+icon = "view-grid-symbolic"
+service = "dusky_quickpanal.service"
+scope = "user"
+
+[[pages.layout.items.layout.items]]
+type = "service"
+[pages.layout.items.layout.items.properties]
+title = "FTP Server"
+description = "vsftpd file sharing"
+icon = "network-server-symbolic"
+service = "vsftpd.service"
+scope = "system"
+
+[[pages.layout.items.layout.items]]
+type = "service"
+[pages.layout.items.layout.items.properties]
+title = "CPU Power Restorer"
+description = "Restore cores & power limits"
+icon = "cpu-symbolic"
+service = "dusky_cpu.service"
+scope = "system"
+
+[[pages.layout.items.layout.items]]
+type = "service"
+[pages.layout.items.layout.items.properties]
+title = "SSH Server"
+description = "OpenSSH remote access"
+icon = "system-users-symbolic"
+service = "sshd.service"
+scope = "system"
+
+[[pages.layout.items.layout.items]]
+type = "service"
+[pages.layout.items.layout.items.properties]
+title = "Cloudflare WARP"
+description = "WARP VPN daemon"
+icon = "security-high-symbolic"
+service = "warp-svc.service"
+scope = "system"
+
+[[pages.layout.items.layout.items]]
+type = "service"
+[pages.layout.items.layout.items.properties]
+title = "Tailscale"
+description = "Mesh VPN daemon"
+icon = "network-vpn-symbolic"
+service = "tailscaled.service"
+scope = "system"
+
+[[pages.layout.items.layout.items]]
+type = "service"
+[pages.layout.items.layout.items.properties]
+title = "Firewall"
+description = "UFW packet filter"
+icon = "security-high-symbolic"
+service = "ufw.service"
+scope = "system"
 
 [[pages.layout.items]]
 type = "button"
@@ -2489,7 +3405,7 @@ description = "Switch system-wide file manager"
 icon = "system-file-manager-symbolic"
 [pages.layout.items.layout.items.on_press]
 type = "exec"
-command = "kitty --class 235_file_manager_switch.sh --hold sh -c \"$HOME/user_scripts/arch_setup_scripts/scripts/235_file_manager_switch.sh\""
+command = "kitty --app-id 235_default_apps.py --hold \"$HOME/user_scripts/arch_setup_scripts/scripts/235_default_apps.py\" --file-manager"
 terminal = false
 
 [[pages.layout.items.layout.items]]
@@ -2500,7 +3416,7 @@ description = "Set default internet browser"
 icon = "web-browser-symbolic"
 [pages.layout.items.layout.items.on_press]
 type = "exec"
-command = "kitty --class 236_browser_switcher.sh --hold sh -c \"$HOME/user_scripts/arch_setup_scripts/scripts/236_browser_switcher.sh\""
+command = "kitty --app-id 235_default_apps.py --hold \"$HOME/user_scripts/arch_setup_scripts/scripts/235_default_apps.py\" --browser"
 terminal = false
 
 [[pages.layout.items.layout.items]]
@@ -2511,7 +3427,7 @@ description = "Set default code/text editor"
 icon = "text-editor-symbolic"
 [pages.layout.items.layout.items.on_press]
 type = "exec"
-command = "kitty --class 237_text_editer_switcher.sh --hold sh -c \"$HOME/user_scripts/arch_setup_scripts/scripts/237_text_editer_switcher.sh\""
+command = "kitty --app-id 235_default_apps.py --hold \"$HOME/user_scripts/arch_setup_scripts/scripts/235_default_apps.py\" --text-editor"
 terminal = false
 
 [[pages.layout.items.layout.items]]
@@ -2522,7 +3438,7 @@ description = "Set default system terminal"
 icon = "utilities-terminal-symbolic"
 [pages.layout.items.layout.items.on_press]
 type = "exec"
-command = "kitty --class 238_terminal_switcher.sh --hold sh -c \"$HOME/user_scripts/arch_setup_scripts/scripts/238_terminal_switcher.sh\""
+command = "kitty --app-id 235_default_apps.py --hold \"$HOME/user_scripts/arch_setup_scripts/scripts/235_default_apps.py\" --terminal"
 terminal = false
 
 [[pages.layout.items]]
@@ -2843,26 +3759,6 @@ icon = "document-edit-symbolic"
 type = "exec"
 command = "$HOME/user_scripts/dusky_system/control_center/dusky_text_editor.py \"$HOME/.config/hypr/edit_here/source/environment_variables.lua\""
 
-[[pages.layout.items.layout.items]]
-type = "button"
-[pages.layout.items.layout.items.properties]
-title = "Environment Global"
-description = "~/.config/hypr/conf/environment.conf"
-icon = "document-edit-symbolic"
-[pages.layout.items.layout.items.on_press]
-type = "exec"
-command = "$HOME/user_scripts/dusky_system/control_center/dusky_text_editor.py \"$HOME/.config/hypr/conf/environment.conf\""
-
-[[pages.layout.items.layout.items]]
-type = "button"
-[pages.layout.items.layout.items.properties]
-title = "Environment Hyprland"
-description = "~/.config/hypr/conf/environment-hyprland.conf"
-icon = "document-edit-symbolic"
-[pages.layout.items.layout.items.on_press]
-type = "exec"
-command = "$HOME/user_scripts/dusky_system/control_center/dusky_text_editor.py \"$HOME/.config/hypr/conf/environment-hyprland.conf\""
-
 [[pages.layout.items]]
 type = "navigation"
 [pages.layout.items.properties]
@@ -2893,7 +3789,7 @@ icon = "video-display-symbolic"
 style = "suggested"
 [pages.layout.items.layout.items.properties.buttons.on_press]
 type = "exec"
-command = "foot --app-id=dusky_tui --hold python3 ~/user_scripts/hypr/monitor/monitor_wizard.py"
+command = "foot --app-id=dusky_tui --hold python3 ~/user_scripts/hypr/monitor/tui_monitor_wizard.py"
 
 [[pages.layout.items.layout.items]]
 type = "button"
@@ -2991,7 +3887,7 @@ icon = "applications-graphics-symbolic"
 style = "suggested"
 [pages.layout.items.layout.items.properties.buttons.on_press]
 type = "exec"
-command = "foot --app-id=dusky_tui --hold python3 $HOME/user_scripts/hypr/rules/tui_workspace_rules.py"
+command = "foot --app-id=dusky_tui --hold python3 $HOME/user_scripts/hypr/workspace/tui_workspace_rules.py"
 
 [[pages.layout.items.layout.items]]
 type = "button"
@@ -3106,7 +4002,7 @@ description = "config.jsonc"
 icon = "preferences-system-symbolic"
 [pages.layout.items.layout.items.item_template.items.on_press]
 type = "exec"
-command = "$HOME/user_scripts/dusky_system/control_center/dusky_text_editor.py \"{path}/config.jsonc\""
+argv = ["$HOME/user_scripts/dusky_system/control_center/dusky_text_editor.py", "{path}/config.jsonc"]
 terminal = false
 
 [[pages.layout.items.layout.items.item_template.items]]
@@ -3117,7 +4013,7 @@ description = "style.css"
 icon = "document-edit-symbolic"
 [pages.layout.items.layout.items.item_template.items.on_press]
 type = "exec"
-command = "$HOME/user_scripts/dusky_system/control_center/dusky_text_editor.py \"{path}/style.css\""
+argv = ["$HOME/user_scripts/dusky_system/control_center/dusky_text_editor.py", "{path}/style.css"]
 terminal = false
 
 [[pages.layout.items]]
@@ -3259,7 +4155,7 @@ description = "hyprlock.conf"
 icon = "preferences-system-symbolic"
 [pages.layout.items.layout.items.item_template.items.on_press]
 type = "exec"
-command = "$HOME/user_scripts/dusky_system/control_center/dusky_text_editor.py \"{path}/hyprlock.conf\""
+argv = ["$HOME/user_scripts/dusky_system/control_center/dusky_text_editor.py", "{path}/hyprlock.conf"]
 terminal = false
 
 [[pages.layout.items.layout.items.item_template.items]]
@@ -3270,7 +4166,7 @@ description = "theme.json"
 icon = "document-edit-symbolic"
 [pages.layout.items.layout.items.item_template.items.on_press]
 type = "exec"
-command = "$HOME/user_scripts/dusky_system/control_center/dusky_text_editor.py \"{path}/theme.json\""
+argv = ["$HOME/user_scripts/dusky_system/control_center/dusky_text_editor.py", "{path}/theme.json"]
 terminal = false
 
 [[pages.layout.items]]
@@ -3387,9 +4283,9 @@ description = ""
 [[pages.layout.items]]
 type = "button"
 [pages.layout.items.properties]
-title = "Search Keybinds"
-button_text = "Search"
-description = "Search and list all active keybindings"
+title = "Edit Keybinds"
+button_text = "Edit"
+description = "Edit custom keybindings (TUI wizard)"
 icon = "edit-find-symbolic"
 
 style = "suggested"
@@ -3400,15 +4296,16 @@ command = "kitty --class dusky_keybinds.sh --hold sh -c \"$HOME/user_scripts/hyp
 [[pages.layout.items]]
 type = "button"
 [pages.layout.items.properties]
-title = "Dusky Keybind Manager"
-button_text = "Open"
-description = "Custom keybinding wizard (TUI)"
-icon = "input-keyboard-symbolic"
+title = "Search Keybinds"
+button_text = "Search"
+description = "Search and launch keybindings via Rofi"
+icon = "edit-find-symbolic"
 
 style = "suggested"
 [pages.layout.items.on_press]
 type = "exec"
-command = "foot --app-id=dusky_tui --hold python3 $HOME/user_scripts/hypr/input/tui_keybinds.py"
+command = "$HOME/user_scripts/hypr/input/rofi_keybinds/keybindings.sh"
+terminal = false
 
 [[pages.layout.items]]
 type = "button"
@@ -3421,7 +4318,7 @@ icon = "view-grid-symbolic"
 style = "suggested"
 [pages.layout.items.on_press]
 type = "exec"
-command = "kitty --class dusky_keybinds_cheatsheet --hold sh -c \"python3 $HOME/user_scripts/hypr/input/keybinds_cheatsheet.py\""
+command = "kitty --class DuskyKeybindsCheatsheet --title \"Dusky Keybinds Cheatsheet\" -e python3.14 $HOME/user_scripts/hypr/input/keybinds_cheatsheet.py"
 
 [[pages]]
 id = "tools_and_ai"
@@ -3613,7 +4510,7 @@ icon = "package-x-generic-symbolic"
 style = "suggested"
 [pages.layout.items.on_press]
 type = "exec"
-command = "kitty --class 080_aur_paru_fallback_yay.sh --hold sh -c \"$HOME/user_scripts/arch_setup_scripts/scripts/080_aur_paru_fallback_yay.sh\""
+command = "kitty --class 058_aur_paru_fallback_yay.sh --hold sh -c \"$HOME/user_scripts/arch_setup_scripts/scripts/058_aur_paru_fallback_yay.sh\""
 
 [[pages.layout.items]]
 type = "button"

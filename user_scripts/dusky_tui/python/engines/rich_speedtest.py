@@ -7,10 +7,12 @@ rendering a clean, unbordered live speed gauge, sparkline graph, and metrics.
 
 import sys
 import os
+import math
 import time
 import subprocess
 import shutil
 import select
+import signal
 import termios
 import tty
 from pathlib import Path
@@ -88,113 +90,147 @@ def run_phase(direction: str, script_path: str, live: Live) -> tuple[float | Non
         proc = subprocess.Popen(
             [script_path, direction],
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            bufsize=1,
-            env=env
+            stderr=subprocess.DEVNULL,
+            env=env,
+            start_new_session=True,
         )
     except Exception:
         return run_phase_native(direction, live)
 
-    start_time = time.time()
+    start_time = time.monotonic()
+    pending = bytearray()
+    measurement_window_ended = False
 
-    while True:
-        elapsed = time.time() - start_time
-
-        # Check for user cancel keypress
-        if check_cancel_key():
-            user_cancelled = True
-            proc.terminate()
-            try: proc.wait(timeout=1)
-            except Exception: proc.kill()
-            break
-
-        # Check for 10-second automatic timeout completion
-        if elapsed >= PHASE_TIMEOUT_SECONDS:
-            proc.terminate()
-            try: proc.wait(timeout=1)
-            except Exception: proc.kill()
-            break
-
-        # Use select to avoid blocking readline indefinitely (fix HIGH timeout issue)
-        if proc.stdout:
+    def stop_child() -> None:
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            proc.wait(timeout=1)
+        except subprocess.TimeoutExpired:
             try:
-                r, _, _ = select.select([proc.stdout], [], [], 0.1)
-                if not r:
-                    # No data yet, continue loop to check timeout/cancel
-                    if proc.poll() is not None:
-                        break
-                    continue
-                line = proc.stdout.readline()
-            except Exception:
-                line = ""
-        else:
-            line = ""
-        if not line and proc.poll() is not None:
-            break
-
-        line_clean = line.strip()
-        if line_clean:
-            try:
-                val = float(line_clean)
-                current = val
-                peak = max(peak, val)
-                samples.append(val)
-            except ValueError:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
                 pass
+            proc.wait()
 
-        avg = (sum(samples) / len(samples)) if samples else 0.0
-        sparkline = make_sparkline(samples, width=28)
+    try:
+        while True:
+            elapsed = time.monotonic() - start_time
 
-        scale_max = max(100.0, peak * 1.2)
-        pct = min(1.0, current / scale_max)
+            # Check for user cancel keypress
+            if check_cancel_key():
+                user_cancelled = True
+                stop_child()
+                break
 
-        # Unbordered Grid Layout
-        grid = Table.grid(expand=True)
-        grid.add_column(justify="center")
+            # Check for 10-second automatic timeout completion
+            if elapsed >= PHASE_TIMEOUT_SECONDS:
+                measurement_window_ended = True
+                stop_child()
+                break
 
-        grid.add_row(Text(f"🚀 DUSKY {label} SPEED TEST", style=f"bold {color}"))
-        grid.add_row(Text(""))
+            # Read available bytes; readline can wait indefinitely for a newline.
+            if proc.stdout:
+                try:
+                    r, _, _ = select.select([proc.stdout], [], [], 0.1)
+                    if not r:
+                        if proc.poll() is not None:
+                            break
+                        continue
+                    chunk = os.read(proc.stdout.fileno(), 4096)
+                    if chunk:
+                        pending.extend(chunk)
+                    elif proc.poll() is not None:
+                        break
+                except OSError:
+                    break
+            else:
+                break
 
-        speed_text = Text()
-        speed_text.append(f"{current:.1f}", style=f"bold underline {color}")
-        speed_text.append(" Mbps", style="bold white")
-        grid.add_row(Align.center(speed_text))
+            while b"\n" in pending:
+                line, _, rest = pending.partition(b"\n")
+                pending = bytearray(rest)
+                try:
+                    val = float(line.strip())
+                    if not math.isfinite(val) or val < 0:
+                        continue
+                    current = val
+                    peak = max(peak, val)
+                    samples.append(val)
+                except ValueError:
+                    pass
 
-        grid.add_row(Text(""))
-        bar_text = Text()
-        bar_text.append("Gauge: [", style="dim")
-        bar_cells = int(pct * 30)
-        bar_text.append("█" * bar_cells, style=f"bold {color}")
-        bar_text.append("░" * (30 - bar_cells), style="dim")
-        bar_text.append("]", style="dim")
-        grid.add_row(Align.center(bar_text))
+            avg = (sum(samples) / len(samples)) if samples else 0.0
+            sparkline = make_sparkline(samples, width=28)
 
-        grid.add_row(Text(""))
-        spark_text = Text()
-        spark_text.append("Live Graph: ", style="bold dim")
-        spark_text.append(sparkline, style=f"bold {color}")
-        grid.add_row(Align.center(spark_text))
+            scale_max = max(100.0, peak * 1.2)
+            pct = min(1.0, current / scale_max)
 
-        grid.add_row(Text(""))
-        stats_table = Table(show_header=False, show_edge=False, box=None, padding=(0, 2))
-        stats_table.add_column(style="dim", justify="right")
-        stats_table.add_column(style="bold white", justify="left")
-        stats_table.add_row("Peak Speed:", f"{peak:.1f} Mbps")
-        stats_table.add_row("Average Speed:", f"{avg:.1f} Mbps")
-        stats_table.add_row("Time Left:", f"{max(0.0, PHASE_TIMEOUT_SECONDS - elapsed):.1f}s")
-        stats_table.add_row("Samples Gathered:", f"{len(samples)}")
-        grid.add_row(Align.center(stats_table))
+            # Unbordered Grid Layout
+            grid = Table.grid(expand=True)
+            grid.add_column(justify="center")
 
-        grid.add_row(Text(""))
-        grid.add_row(Text("Press [q] or [Esc] at any time to stop & return to Dusky TUI", style="bold dim yellow"))
+            grid.add_row(Text(f"🚀 DUSKY {label} SPEED TEST", style=f"bold {color}"))
+            grid.add_row(Text(""))
 
-        live.update(grid)
+            speed_text = Text()
+            speed_text.append(f"{current:.1f}", style=f"bold underline {color}")
+            speed_text.append(" Mbps", style="bold white")
+            grid.add_row(Align.center(speed_text))
 
+            grid.add_row(Text(""))
+            bar_text = Text()
+            bar_text.append("Gauge: [", style="dim")
+            bar_cells = int(pct * 30)
+            bar_text.append("█" * bar_cells, style=f"bold {color}")
+            bar_text.append("░" * (30 - bar_cells), style="dim")
+            bar_text.append("]", style="dim")
+            grid.add_row(Align.center(bar_text))
+
+            grid.add_row(Text(""))
+            spark_text = Text()
+            spark_text.append("Live Graph: ", style="bold dim")
+            spark_text.append(sparkline, style=f"bold {color}")
+            grid.add_row(Align.center(spark_text))
+
+            grid.add_row(Text(""))
+            stats_table = Table(show_header=False, show_edge=False, box=None, padding=(0, 2))
+            stats_table.add_column(style="dim", justify="right")
+            stats_table.add_column(style="bold white", justify="left")
+            stats_table.add_row("Peak Speed:", f"{peak:.1f} Mbps")
+            stats_table.add_row("Average Speed:", f"{avg:.1f} Mbps")
+            stats_table.add_row("Time Left:", f"{max(0.0, PHASE_TIMEOUT_SECONDS - elapsed):.1f}s")
+            stats_table.add_row("Samples Gathered:", f"{len(samples)}")
+            grid.add_row(Align.center(stats_table))
+
+            grid.add_row(Text(""))
+            grid.add_row(Text("Press [q] or [Esc] at any time to stop & return to Dusky TUI", style="bold dim yellow"))
+
+            live.update(grid)
+
+    finally:
+        if proc.poll() is None:
+            stop_child()
+        if proc.stdout:
+            proc.stdout.close()
     if user_cancelled:
         return None, True
 
-    final_val = (sum(samples[-5:]) / len(samples[-5:])) if len(samples) >= 5 else (samples[-1] if samples else 0.0)
+    if pending.strip():
+        try:
+            value = float(pending.strip())
+            if math.isfinite(value) and value >= 0:
+                samples.append(value)
+        except ValueError:
+            pass
+    completed = proc.returncode == 0 or (measurement_window_ended and proc.returncode in {-signal.SIGTERM, -signal.SIGKILL})
+    if not completed or not samples:
+        return None, False
+    final_val = (sum(samples[-5:]) / len(samples[-5:])) if len(samples) >= 5 else samples[-1]
+    return final_val, False
+
 def run_phase_native(direction: str, live: Live) -> tuple[float | None, bool]:
     import urllib.request
     label = "DOWNLOAD" if direction == "down" else "UPLOAD"
@@ -204,29 +240,32 @@ def run_phase_native(direction: str, live: Live) -> tuple[float | None, bool]:
     peak: float = 0.0
     current: float = 0.0
     user_cancelled = False
-    start_time = time.time()
+    failed = False
+    start_time = time.monotonic()
+    response = None
 
     if direction == "down":
         try:
             url = "https://speed.cloudflare.com/__down?bytes=50000000"
             req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-            resp = urllib.request.urlopen(req, timeout=12)
+            response = urllib.request.urlopen(req, timeout=5)
             downloaded = 0
-            last_sample_time = time.time()
+            last_sample_time = time.monotonic()
             while True:
-                elapsed = time.time() - start_time
+                elapsed = time.monotonic() - start_time
                 if check_cancel_key():
                     user_cancelled = True
                     break
                 if elapsed >= PHASE_TIMEOUT_SECONDS:
                     break
 
-                chunk = resp.read(65536)
+                chunk = response.read(65536)
                 if not chunk:
                     break
                 downloaded += len(chunk)
 
-                now = time.time()
+                now = time.monotonic()
+                elapsed = max(now - start_time, 0.000001)
                 if now - last_sample_time >= 0.15:
                     current = (downloaded * 8) / (elapsed * 1_000_000)
                     peak = max(peak, current)
@@ -276,8 +315,14 @@ def run_phase_native(direction: str, live: Live) -> tuple[float | None, bool]:
                     grid.add_row(Text("Press [q] or [Esc] at any time to stop & return to Dusky TUI", style="bold dim yellow"))
                     live.update(grid)
 
+            if downloaded and not samples:
+                samples.append((downloaded * 8) / (max(time.monotonic() - start_time, 0.000001) * 1_000_000))
         except Exception as e:
-            console.print(f"[bold red]Native speed test error: {e}[/bold red]")
+            failed = True
+            console.print(Text(f"Native speed test error: {e}", style="bold red"))
+        finally:
+            if response is not None:
+                response.close()
 
     else:
         try:
@@ -285,10 +330,8 @@ def run_phase_native(direction: str, live: Live) -> tuple[float | None, bool]:
             chunk_size = 500_000
             data_chunk = b"0" * chunk_size
             uploaded = 0
-            last_sample_time = time.time()
-
             while True:
-                elapsed = time.time() - start_time
+                elapsed = time.monotonic() - start_time
                 if check_cancel_key():
                     user_cancelled = True
                     break
@@ -300,10 +343,12 @@ def run_phase_native(direction: str, live: Live) -> tuple[float | None, bool]:
                     headers={"User-Agent": "Mozilla/5.0", "Content-Type": "application/octet-stream"},
                     method="POST"
                 )
-                urllib.request.urlopen(req, timeout=5)
+                with urllib.request.urlopen(req, timeout=5):
+                    pass
                 uploaded += chunk_size
 
-                now = time.time()
+                now = time.monotonic()
+                elapsed = max(now - start_time, 0.000001)
                 current = (uploaded * 8) / (elapsed * 1_000_000)
                 peak = max(peak, current)
                 samples.append(current)
@@ -352,16 +397,20 @@ def run_phase_native(direction: str, live: Live) -> tuple[float | None, bool]:
                 live.update(grid)
 
         except Exception as e:
-            console.print(f"[bold red]Native upload test error: {e}[/bold red]")
+            failed = True
+            console.print(Text(f"Native upload test error: {e}", style="bold red"))
 
     if user_cancelled:
         return None, True
+    if failed or not samples:
+        return None, False
 
-    final_val = (sum(samples[-5:]) / len(samples[-5:])) if len(samples) >= 5 else (samples[-1] if samples else 0.0)
+    final_val = (sum(samples[-5:]) / len(samples[-5:])) if len(samples) >= 5 else samples[-1]
     return round(final_val, 1), False
 
 def main():
     mode = sys.argv[1] if len(sys.argv) > 1 else "full"
+    result_path = Path(sys.argv[2]) if len(sys.argv) > 2 else Path.home() / ".cache" / "dusky_tui" / "speedtest_last.json"
     script = find_speedtest_script()
 
     down_res: float | None = None
@@ -376,6 +425,10 @@ def main():
         except Exception:
             old_settings = None
 
+    def cancel_on_signal(signum, frame):
+        raise KeyboardInterrupt
+
+    previous_termination_handler = signal.signal(signal.SIGTERM, cancel_on_signal)
     try:
         with Live(console=console, refresh_per_second=10) as live:
             if mode in ("full", "down"):
@@ -394,6 +447,8 @@ def main():
 
             if was_cancelled:
                 summary_grid.add_row(Text("✕ SPEED TEST CANCELLED BY USER", style="bold red"))
+            elif (mode in ("full", "down") and down_res is None) or (mode in ("full", "up") and up_res is None):
+                summary_grid.add_row(Text("✕ SPEED TEST FAILED OR INCOMPLETE", style="bold red"))
             else:
                 summary_grid.add_row(Text("✓ DUSKY SPEED TEST COMPLETE", style="bold green"))
             summary_grid.add_row(Text(""))
@@ -414,20 +469,24 @@ def main():
             live.update(summary_grid)
             time.sleep(0.8)
 
+    except KeyboardInterrupt:
+        was_cancelled = True
     finally:
+        signal.signal(signal.SIGTERM, previous_termination_handler)
         if old_settings and sys.stdin.isatty():
             try:
                 termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
             except Exception:
                 pass
 
-    # Save results to temporary result file for NetworkManagerEngine readback
-    if down_res is not None or up_res is not None:
-        res_file = Path.home() / ".cache" / "dusky_tui" / "speedtest_last.json"
-        res_file.parent.mkdir(parents=True, exist_ok=True)
-        import json
-        with open(res_file, "w") as f:
-            json.dump({"down": down_res, "up": up_res, "time": time.time()}, f)
+    expected = ("down", "up") if mode == "full" else (mode,)
+    measured = {"down": down_res, "up": up_res}
+    status = "cancelled" if was_cancelled else "complete" if all(measured.get(part) is not None for part in expected) else "failed"
+    result_path.parent.mkdir(parents=True, exist_ok=True)
+    import json
+    replacement = result_path.with_name(result_path.name + ".tmp")
+    replacement.write_text(json.dumps({"down": down_res, "up": up_res, "status": status, "time": time.time()}), encoding="utf-8")
+    replacement.replace(result_path)
 
 if __name__ == "__main__":
     main()

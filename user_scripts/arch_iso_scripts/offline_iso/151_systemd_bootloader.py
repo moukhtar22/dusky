@@ -20,9 +20,21 @@ No backwards compat - pure 2026 methodology
 Pipeline: 070 masks hooks -> 120 optimizer -> 150 mkinitcpio -P (embeds microcode) -> 151 THIS (bootloader; grub-mkconfig sees final initramfs)
 """
 from __future__ import annotations
-import os, sys, re, json, shlex, shutil, signal, subprocess
+import os, sys, re, json, shlex, shutil, signal, subprocess, atexit
 from pathlib import Path
 from typing import Dict, List, Tuple
+
+_udev_mounted = False
+
+def _cleanup_udev_mount():
+    global _udev_mounted
+    if _udev_mounted:
+        try:
+            subprocess.run(["umount", "-l", "/run/udev"], check=False, capture_output=True)
+        except Exception:
+            pass
+
+atexit.register(_cleanup_udev_mount)
 
 def _ensure_rich():
     import importlib.util
@@ -207,6 +219,15 @@ def ensure_esp():
     fstype = r.stdout.strip().splitlines()[0].strip().lower() if r.stdout.strip() else ""
     if fstype not in ("vfat", "fat32", "msdos"):
         console.print(f"[red]{ESP_MNT} is {fstype}, but systemd-boot requires FAT32[/red]"); sys.exit(1)
+    try:
+        stat = os.statvfs(str(ESP_MNT))
+        free_mb = (stat.f_bavail * stat.f_frsize) / (1024 * 1024)
+        total_mb = (stat.f_blocks * stat.f_frsize) / (1024 * 1024)
+        console.print(f"[cyan]ESP capacity: {total_mb:.1f} MiB total, {free_mb:.1f} MiB available[/cyan]")
+        if free_mb < 150:
+            console.print(f"[yellow]WARNING: Low ESP space ({free_mb:.1f} MiB available). Arch kernels & initramfs require sufficient space.[/yellow]")
+    except Exception as e:
+        console.print(f"[dim]Could not query ESP space: {e}[/dim]")
 
 def get_kernels() -> List[Tuple[Path, str]]:
     kernels = []
@@ -234,7 +255,20 @@ def build_cmdlines(topo: Dict, luks: Dict, hooks_str: str) -> Tuple[str, str, st
     if luks["found"]:
         if " sd-encrypt " in hooks_str:
             console.print("[green]Using sd-encrypt hook (systemd native)[/green]")
-            luks_part = f"rd.luks.name={luks['LUKS_UUID']}={luks['MAPPER_NAME']} rd.luks.options=discard root=UUID={topo['ROOT_UUID']}"
+            sd_luks_opts = ["discard"]
+            try:
+                bname = Path(luks["BACKING_DEV"]).resolve().name
+                rot_cand = Path(f"/sys/class/block/{bname}/queue/rotational")
+                if not rot_cand.exists():
+                    block = Path(f"/sys/class/block/{bname}").resolve()
+                    if (block / "partition").exists():
+                        block = block.parent
+                    rot_cand = block / "queue/rotational"
+                if rot_cand.exists() and rot_cand.read_text().strip() == "0":
+                    sd_luks_opts += ["no-read-workqueue", "no-write-workqueue"]
+            except Exception:
+                pass
+            luks_part = f"rd.luks.name={luks['LUKS_UUID']}={luks['MAPPER_NAME']} rd.luks.options={','.join(sd_luks_opts)} root=UUID={topo['ROOT_UUID']}"
         elif " encrypt " in hooks_str:
             console.print("[yellow]Using legacy encrypt hook[/yellow]")
             luks_part = f"cryptdevice=UUID={luks['LUKS_UUID']}:{luks['MAPPER_NAME']}:allow-discards root=/dev/mapper/{luks['MAPPER_NAME']}"
@@ -276,8 +310,11 @@ def generate_secondary_linux_bls_entries(esp_mnt: Path):
             console.print(f"[green]Generated secondary Linux BLS entry: {conf_path}[/green]")
 
 def ensure_udev_bind_mount_in_chroot():
+    global _udev_mounted
     run_udev_data = Path("/run/udev/data")
     if not run_udev_data.exists():
+        return
+    if is_mountpoint(Path("/run/udev")):
         return
     chroot_udev = Path("/run/udev")
     if not chroot_udev.exists():
@@ -286,8 +323,10 @@ def ensure_udev_bind_mount_in_chroot():
         except Exception:
             return
     try:
-        run("mount", "--bind", "/run/udev", "/run/udev", check=False, capture=True)
-        console.print("[green]Bind-mounted /run/udev for bootctl sd-device PARTUUID resolution[/green]")
+        r = run("mount", "--bind", "/run/udev", "/run/udev", check=False, capture=True)
+        if r.returncode == 0:
+            _udev_mounted = True
+            console.print("[green]Bind-mounted /run/udev for bootctl sd-device PARTUUID resolution[/green]")
     except Exception:
         pass
 
@@ -313,9 +352,28 @@ def install_systemd_boot_uefi(primary_opts: str, fallback_opts: str):
         console.print("[cyan]Fresh install...[/cyan]")
         r = run("bootctl", "install", f"--esp-path={ESP_MNT}", "--variables=yes", "--efi-boot-option-description-with-device=yes", "--graceful", check=False)
         if r.returncode != 0:
-            console.print("[yellow]bootctl install non-zero (common in chroot), verifying...[/yellow]")
-            if run("bootctl", "is-installed", f"--esp-path={ESP_MNT}", check=False).returncode != 0:
-                console.print("[red]bootctl installation failed[/red]"); sys.exit(1)
+            console.print("[yellow]bootctl install non-zero, trying fallback without EFI variable updates...[/yellow]")
+            run("bootctl", "install", f"--esp-path={ESP_MNT}", "--variables=no", "--graceful", check=False)
+
+    # Ensure systemd-bootx64.efi is present in ESP
+    systemd_efi = ESP_MNT / "EFI" / "systemd" / "systemd-bootx64.efi"
+    if not systemd_efi.is_file():
+        systemd_src = Path("/usr/lib/systemd/boot/efi/systemd-bootx64.efi")
+        if systemd_src.is_file():
+            systemd_efi.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(systemd_src, systemd_efi)
+            console.print(f"[green]Copied {systemd_src} -> {systemd_efi}[/green]")
+
+    # Ensure removable media EFI fallback exists for strict/legacy laptop EFI firmware (InsydeH2O)
+    fallback_efi = ESP_MNT / "EFI" / "BOOT" / "BOOTX64.EFI"
+    if systemd_efi.is_file() and not fallback_efi.is_file():
+        fallback_efi.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(systemd_efi, fallback_efi)
+        console.print(f"[green]Copied removable fallback EFI: {fallback_efi}[/green]")
+
+    if not systemd_efi.is_file() and not fallback_efi.is_file():
+        console.print("[red]bootctl installation failed: No EFI binaries found or deployed![/red]")
+        sys.exit(1)
 
     # Post-bootctl NVRAM sanity check & fix:
     # If bootctl created an NVRAM entry with zeroed GPT GUID (common inside chroot without udev data),
@@ -325,7 +383,7 @@ def install_systemd_boot_uefi(primary_opts: str, fallback_opts: str):
         if r_efiv.returncode == 0 and r_efiv.stdout:
             zero_entries = []
             for line in r_efiv.stdout.splitlines():
-                if "00000000-0000-0000-0000-000000000000" in line:
+                if "00000000-0000-0000-0000-000000000000" in line and "\\EFI\\systemd\\systemd-boot" in line:
                     m = re.match(r"^Boot([0-9A-Fa-f]{4})", line)
                     if m:
                         zero_entries.append(m.group(1))
@@ -333,16 +391,19 @@ def install_systemd_boot_uefi(primary_opts: str, fallback_opts: str):
                 console.print(f"[yellow]Removing zeroed GUID NVRAM entry Boot{bnum}...[/yellow]")
                 run("efibootmgr", "-b", bnum, "-B", check=False)
 
+            esp_dev = run("findmnt", "-n", "-e", "-o", "SOURCE", str(ESP_MNT)).stdout.splitlines()[-1].strip()
+            esp_uuid = run("blkid", "-s", "PARTUUID", "-o", "value", esp_dev).stdout.strip().lower()
+            if not esp_uuid:
+                raise ValueError("Cannot identify the selected ESP partition UUID")
             has_valid_entry = False
             r_efiv2 = run("efibootmgr", "-v", check=False)
             for line in r_efiv2.stdout.splitlines():
-                if "Linux Boot Manager" in line and "00000000-0000" not in line and "HD(" in line:
+                if f"gpt,{esp_uuid}," in line.lower() and "\\efi\\systemd\\systemd-bootx64.efi" in line.lower():
                     has_valid_entry = True
                     break
 
             if not has_valid_entry:
                 console.print("[cyan]Registering valid NVRAM entry via efibootmgr...[/cyan]")
-                esp_dev = run("findmnt", "-n", "-e", "-o", "SOURCE", str(ESP_MNT), check=False).stdout.strip()
                 if esp_dev:
                     parent_disk = get_parent_disk(Path(esp_dev))
                     m_part = re.search(r"(\d+)$", esp_dev)
@@ -350,14 +411,6 @@ def install_systemd_boot_uefi(primary_opts: str, fallback_opts: str):
                     run("efibootmgr", "-c", "-d", str(parent_disk), "-p", part_num, "-L", "Linux Boot Manager", "-l", r"\EFI\systemd\systemd-bootx64.efi", check=False)
     except Exception as e:
         console.print(f"[yellow]NVRAM sanity check warning: {e}[/yellow]")
-
-    # Ensure removable media EFI fallback exists for strict/legacy laptop EFI firmware (InsydeH2O)
-    fallback_efi = ESP_MNT / "EFI" / "BOOT" / "BOOTX64.EFI"
-    systemd_efi = ESP_MNT / "EFI" / "systemd" / "systemd-bootx64.efi"
-    if systemd_efi.is_file() and not fallback_efi.is_file():
-        fallback_efi.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(systemd_efi, fallback_efi)
-        console.print(f"[green]Copied removable fallback EFI: {fallback_efi}[/green]")
 
     console.print("[green]systemd-boot deployed, random-seed auto-handled since systemd 257+[/green]")
 
@@ -405,6 +458,15 @@ def install_systemd_boot_uefi(primary_opts: str, fallback_opts: str):
             f"initrd  /initramfs-{pkgbase}-fallback.img\n"
             f"options {fallback_opts}\n"
         )
+
+    # Start the newly installed OS once; @saved remembers later user choices.
+    primary_pkg = next((pkg for _, pkg in kernels if pkg == "linux"), kernels[0][1])
+    first_entry = f"arch-{primary_pkg}.conf"
+    selection = run("bootctl", f"--esp-path={ESP_MNT}", "set-oneshot", first_entry, check=False)
+    if selection.returncode != 0:
+        # Firmware with read-only variables still needs a usable initial default.
+        LOADER_CONF.write_text(loader_conf_str.replace("default  @saved", f"default  {first_entry}"))
+        console.print("[yellow]EFI variables unavailable; using the installed kernel as the default.[/yellow]")
 
     run("systemctl", "enable", "systemd-boot-update.service", check=False)
     console.print(Panel(f"[bold green]UEFI Complete\nKernels: {', '.join([k[1] for k in kernels])}\nMicrocode: embedded via microcode hook (no initrd line)\nWindows: auto-windows\nrandom-seed: auto since systemd 257[/bold green]", box=box.ROUNDED))

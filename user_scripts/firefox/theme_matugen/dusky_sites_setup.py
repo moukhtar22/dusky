@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Dusky Sites Setup Script (Arch Linux / Python 3.12+ / Firefox 153+)
+Dusky Sites Setup Script (Arch Linux / Python 3.14.7+ / Firefox 157+)
 ======================================================================
 Provisions XDG configuration directories, installs native messaging host
 to ~/.local/share/dusky-sites/dusky_sites_host.py, parses profiles.ini,
@@ -14,6 +14,10 @@ import os
 import re
 import json
 import shutil
+import configparser
+import subprocess
+import tempfile
+import argparse
 from pathlib import Path
 
 # Terminal Styling
@@ -27,69 +31,84 @@ C_RESET = "\033[0m"
 HOST_INSTALL_NAME = "dusky_sites_host.py"
 MANIFEST_NAME = "dusky_sites.json"
 EXTENSION_ID = "dusky_sites@dusky.com"
+INTERNAL_DOCUMENT_RULE = '@-moz-document regexp("about:(?!blank(?:[?#]|$)|srcdoc(?:[?#]|$)).*"), url("chrome://global/content/print.html"), url("chrome://global/content/commonDialog.xhtml"), url("chrome://browser/content/places/places.xhtml"), url-prefix("chrome://devtools/content/")'
 
 def print_step(msg: str) -> None: print(f"{C_BLUE}==>{C_RESET} {msg}")
 def print_success(msg: str) -> None: print(f"{C_GREEN}✓{C_RESET} {msg}")
-def print_warn(msg: str) -> None: print(f"{C_YELLOW}[!] {msg}")
+def print_warn(msg: str) -> None: print(f"{C_YELLOW}[!] {msg}{C_RESET}")
 def print_error(msg: str) -> None: print(f"{C_RED}[!] Error:{C_RESET} {msg}"); sys.exit(1)
 
 PREFS_TO_SET = [
     ("toolkit.legacyUserProfileCustomizations.stylesheets", "true"),
     ("extensions.autoDisableScopes", "0"),
     ("extensions.enabledScopes", "15"),
+    # Firefox 157 otherwise skips newly copied XPIs after a profile's first run.
+    ("extensions.startupScanScopes", "1"),  # AddonManager.SCOPE_PROFILE
 ]
 
 def atomic_write_text(path: Path, text: str) -> None:
-    """Write text via tempfile + replace (same-directory atomic rename)."""
+    """Publish a complete file with a unique, same-directory temporary file."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(text, encoding="utf-8")
-    tmp.replace(path)
+    with tempfile.NamedTemporaryFile(dir=path.parent, prefix=f".{path.name}.",
+                                     mode="w", encoding="utf-8", delete=False) as file:
+        tmp = Path(file.name)
+        try:
+            file.write(text)
+            file.close()
+            tmp.chmod(path.stat().st_mode & 0o777 if path.exists() else 0o644)
+            tmp.replace(path)
+        finally:
+            tmp.unlink(missing_ok=True)
+
 
 def atomic_copy_file(src: Path, dst: Path) -> None:
-    """Copy file via tempfile + replace (same-directory atomic rename)."""
+    """Publish a complete copy without sharing a temporary name with other runs."""
     dst.parent.mkdir(parents=True, exist_ok=True)
-    tmp = dst.with_name(dst.name + ".tmp")
-    shutil.copy2(src, tmp)
-    tmp.replace(dst)
+    with tempfile.NamedTemporaryFile(dir=dst.parent, prefix=f".{dst.name}.", delete=False) as file:
+        tmp = Path(file.name)
+    try:
+        shutil.copy2(src, tmp)
+        tmp.replace(dst)
+    finally:
+        tmp.unlink(missing_ok=True)
+
 
 def ensure_css_import(path: Path, import_line: str) -> None:
-    """Ensure import_line exists at the top of path, respecting @charset if present."""
-    if not path.is_file():
-        atomic_write_text(path, f"{import_line}\n")
-        return
-    content = path.read_text(encoding="utf-8")
-    if import_line in content:
-        return
-    lines = content.splitlines(keepends=True)
-    if lines and lines[0].startswith('@charset'):
-        lines.insert(1, f"{import_line}\n")
-    else:
-        lines.insert(0, f"{import_line}\n")
-    atomic_write_text(path, "".join(lines))
+    """Keep our import before style rules; a late @import is ignored by Gecko."""
+    original = path.read_text(encoding="utf-8") if path.is_file() else ""
+    bom = "\ufeff" if original.startswith("\ufeff") else ""
+    content = original.removeprefix("\ufeff")
+    comments = list(re.finditer(r"/\*.*?\*/", content, re.DOTALL))
+    matches = [match for match in re.finditer(r"^[ \t]*" + re.escape(import_line) + r"(?:[ \t]*\r?\n)?", content, re.MULTILINE)
+               if not any(comment.start() <= match.start() < comment.end() for comment in comments)]
+    for match in reversed(matches):
+        content = content[:match.start()] + content[match.end():]
+    charset = re.match(r'^(?:\ufeff)?@charset\s+"[^"\n]+"\s*;', content)
+    offset = charset.end() if charset else 0
+    prefix = content[:offset]
+    if charset:
+        prefix += "\n"
+    new_content = bom + prefix + import_line + "\n" + content[offset:].lstrip("\r\n")
+    if new_content != original:
+        atomic_write_text(path, new_content)
+
 
 def ensure_symlink(link: Path, target: Path) -> None:
-    """Create or replace a symlink link -> target (absolute). No-op if already correct."""
-    target_abs = target.expanduser()
+    """Atomically publish an absolute palette link; report failures to the caller."""
+    target = target.expanduser().resolve()
+    if link.is_symlink() and link.resolve() == target:
+        return
+    if link.is_dir() and not link.is_symlink():
+        raise IsADirectoryError(f"Cannot replace palette link directory: {link}")
+    with tempfile.NamedTemporaryFile(dir=link.parent, prefix=f".{link.name}.", delete=False) as file:
+        tmp = Path(file.name)
     try:
-        target_abs = target_abs.resolve() if target_abs.exists() else target_abs.absolute()
-    except OSError:
-        target_abs = target_abs.absolute()
-    try:
-        if link.is_symlink():
-            try:
-                if link.resolve() == target_abs or os.readlink(link) == str(target_abs):
-                    return
-            except OSError:
-                pass
-            link.unlink()
-        elif link.is_file():
-            link.unlink()
-        elif link.exists():
-            return  # do not clobber directories
-        link.symlink_to(target_abs)
-    except OSError as e:
-        print_warn(f"Could not link {link} -> {target_abs}: {e}")
+        tmp.unlink()
+        tmp.symlink_to(target)
+        tmp.replace(link)
+    finally:
+        tmp.unlink(missing_ok=True)
+
 
 def remove_css_import(path: Path, import_line: str) -> None:
     """Remove import_line from path if present."""
@@ -105,515 +124,238 @@ def ensure_firefox_prefs(user_js: Path) -> bool:
     try:
         content = user_js.read_text(encoding="utf-8") if user_js.is_file() else ""
         for pref_name, pref_val in PREFS_TO_SET:
-            pref_re = re.compile(rf'user_pref\(\s*"{re.escape(pref_name)}"\s*,\s*[^)]+\s*\)\s*;')
+            pref_re = re.compile(
+                rf"^[ \t]*user_pref\(\s*['\"]{re.escape(pref_name)}['\"]\s*,\s*[^)]+\s*\)\s*;",
+                re.MULTILINE,
+            )
             pref_line = f'user_pref("{pref_name}", {pref_val});'
-            if pref_re.search(content):
-                content = pref_re.sub(pref_line, content)
+            comments = list(re.finditer(r"/\*.*?\*/|//[^\n]*", content, re.DOTALL))
+            matches = [match for match in pref_re.finditer(content)
+                       if not any(comment.start() <= match.start() < comment.end() for comment in comments)]
+            if matches:
+                for match in reversed(matches):
+                    content = content[:match.start()] + pref_line + content[match.end():]
             else:
                 content = content.rstrip() + f"\n{pref_line}\n"
         if not content.endswith("\n"):
             content += "\n"
         atomic_write_text(user_js, content)
         return True
-    except OSError as e:
+    except (OSError, UnicodeError) as e:
         print_warn(f"Could not write {user_js}: {e}")
         return False
 
 def iter_firefox_profiles(base_dir: Path):
-    """Yield profile directories from profiles.ini; fallback to prefs.js heuristic."""
+    """Read only Profile sections; honor relative and external profile paths."""
     ini = base_dir / "profiles.ini"
     if ini.is_file():
-        current: dict[str, str] = {}
+        parser = configparser.ConfigParser(interpolation=None)
         try:
-            text = ini.read_text(encoding="utf-8", errors="replace")
+            parser.read_string(ini.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, configparser.Error) as error:
+            print_warn(f"Could not read {ini}: {error}")
+            return
+        candidates = []
+        for section in parser.sections():
+            if not section.startswith("Profile") or not parser.has_option(section, "Path"):
+                continue
+            profile = Path(parser[section]["Path"])
+            if parser[section].get("IsRelative", "1") != "0":
+                profile = base_dir / profile
+            elif not profile.is_absolute():
+                print_warn(f"Ignoring non-absolute profile path in {ini}: {profile}")
+                continue
+            candidates.append(profile)
+    else:
+        try:
+            candidates = [p for p in base_dir.iterdir() if (p / "prefs.js").is_file()]
         except OSError:
-            text = ""
-
-        profiles: list[Path] = []
-        def consider(cur: dict[str, str]) -> None:
-            rel = cur.get("path")
-            if not rel:
-                return
-            p = Path(rel)
-            is_relative = cur.get("isrelative", "1") != "0"
-            if is_relative:
-                profile = base_dir / p
-            else:
-                profile = p if p.is_absolute() else (base_dir / p)
-            try:
-                if profile.is_dir():
-                    profiles.append(profile.resolve())
-            except OSError:
-                if profile.is_dir():
-                    profiles.append(profile)
-
-        for line in text.splitlines():
-            line = line.strip()
-            if line.startswith("[") and line.endswith("]"):
-                consider(current)
-                current = {}
-            elif "=" in line:
-                k, v = line.split("=", 1)
-                current[k.strip().lower()] = v.strip()
-        consider(current)
-
-        seen: set[Path] = set()
-        for prof in profiles:
-            if prof not in seen:
-                seen.add(prof)
-                yield prof
-        return
-
-    try:
-        for profile in base_dir.iterdir():
-            if profile.is_dir() and (profile / "prefs.js").is_file():
+            return
+    seen = set()
+    for profile in candidates:
+        if profile.is_dir():
+            profile = profile.resolve()
+            if profile not in seen:
+                seen.add(profile)
                 yield profile
-    except OSError:
-        return
 
-MENU_CSS_CONTENT = """/* Auto-generated by Dusky Sites — Native Context Menu & Chrome UI */
-:root {
-    --zen-primary-color: var(--lwt-accent-color, #1c1b22) !important;
-    --zen-accent-primary: var(--lwt-accent-color, #1c1b22) !important;
-    --zen-background: var(--lwt-accent-color, #1c1b22) !important;
-    --zen-text: var(--lwt-text-color, #fbfbfe) !important;
 
-    --panel-item-hover-bgcolor: var(--toolbarbutton-background-color-hover, rgba(255, 255, 255, 0.1)) !important;
-    --panel-separator-color: var(--chrome-content-separator-color, rgba(255, 255, 255, 0.15)) !important;
+MENU_CSS_CONTENT = """/* Dusky Sites — Firefox 157+ browser chrome.
+ * LWT owns toolbar/tab/sidebar/urlbar colors. Override design tokens and
+ * native menu defaults only; retain Firefox layout, icons and popup parts.
+ * Sources: LightweightThemeConsumer, ThemeVariableMap, tokens-shared.css,
+ * popup.css, menu.css, findbar.css, global-shared.css.
+ */
+@-moz-document url("chrome://browser/content/browser.xhtml") {
+  :root[lwtheme] {
+    /* Resolve these on the root before popups override the public tokens. */
+    --dusky-popup-background: var(--panel-background-color);
+    --dusky-popup-text: var(--panel-text-color);
+    --dusky-popup-border: var(--panel-border-color);
+    --text-color: var(--toolbar-text-color) !important;
+    --text-color-deemphasized: color-mix(in srgb, var(--toolbar-text-color) 75%, transparent) !important;
+    --text-color-disabled: color-mix(in srgb, var(--toolbar-text-color) 40%, transparent) !important;
+    --background-color-canvas: var(--toolbar-background-color) !important;
+    --background-color-box: var(--toolbar-field-background-color) !important;
+    --border-color: var(--chrome-content-separator-color) !important;
+    --color-accent-primary: var(--toolbarbutton-icon-fill-attention) !important;
+    --focus-outline-color: var(--toolbar-field-border-color-focus) !important;
+    --button-background-color: var(--toolbar-field-background-color) !important;
+    --button-background-color-hover: var(--toolbarbutton-background-color-hover) !important;
+    --button-background-color-active: var(--toolbarbutton-background-color-active) !important;
+    --button-background-color-ghost-hover: var(--toolbarbutton-background-color-hover) !important;
+    --button-background-color-ghost-active: var(--toolbarbutton-background-color-active) !important;
+    --button-text-color: var(--toolbar-text-color) !important;
+    --button-background-color-primary: var(--toolbarbutton-icon-fill-attention) !important;
+    --button-text-color-primary: var(--lwt-accent-color) !important;
+    --input-text-background-color: var(--toolbar-field-background-color) !important;
+    --input-text-color: var(--toolbar-field-text-color) !important;
+    --input-border-color: var(--toolbar-field-border-color) !important;
+    --border-color-interactive-active: var(--toolbar-field-border-color-focus) !important;
+    scrollbar-color: var(--toolbarbutton-background-color-hover) var(--toolbar-background-color);
+  }
 
-    --message-bar-background-color: var(--toolbar-field-background-color, #2b2a33) !important;
-    --message-bar-text-color: var(--lwt-text-color, #fbfbfe) !important;
-    --message-bar-icon-color: var(--lwt-text-color, #fbfbfe) !important;
-}
-
-#navigator-toolbox,
-#zen-appcontent-wrapper {
-    background: var(--lwt-accent-color, #1c1b22) !important;
-}
-
-#sidebar-box,
-#sidebar-header,
-sidebarheader {
-    background-color: var(--sidebar-background-color, var(--lwt-accent-color, #1c1b22)) !important;
-    color: var(--sidebar-text-color, var(--lwt-text-color, #fbfbfe)) !important;
-}
-
-menupopup,
-panel:not(#autoscroller) {
-    appearance: none !important;
-    -moz-default-appearance: none !important;
-    background-color: transparent !important;
-    background: transparent !important;
-    --panel-background-color: var(--lwt-accent-color, #1c1b22) !important;
-    --panel-background: var(--lwt-accent-color, #1c1b22) !important;
-    --panel-text-color: var(--lwt-text-color, #fbfbfe) !important;
-    --panel-color: var(--lwt-text-color, #fbfbfe) !important;
-    --panel-border-color: var(--toolbar-field-background-color-focus, #42414d) !important;
-    --menu-background-color: var(--lwt-accent-color, #1c1b22) !important;
-    --menu-color: var(--lwt-text-color, #fbfbfe) !important;
-    --menu-border-color: var(--toolbar-field-background-color-focus, #42414d) !important;
+  :root[lwtheme] :is(menupopup, panel):not(.autoscroller) {
+    --panel-background-color: var(--dusky-popup-background) !important;
+    --panel-text-color: var(--dusky-popup-text) !important;
+    --panel-border-color: var(--dusky-popup-border) !important;
+    --panel-separator-color: var(--dusky-popup-border) !important;
+    --text-color: var(--dusky-popup-text) !important;
+    --text-color-disabled: color-mix(in srgb, var(--dusky-popup-text) 40%, transparent) !important;
+    --menuitem-border-radius: 6px !important;
     --panel-menuitem-border-radius: 6px !important;
-}
+    --menuitem-padding-block: 6px !important;
+    --menuitem-padding-inline: 12px !important;
+  }
 
-menupopup::part(content),
-panel::part(content),
-.popup-notification-body {
-    background-color: var(--lwt-accent-color, #1c1b22) !important;
-    color: var(--lwt-text-color, #fbfbfe) !important;
-    border: 1px solid var(--toolbar-field-background-color-focus, #42414d) !important;
-    border-radius: 8px !important;
-}
+  :root[lwtheme] menupopup :is(menu, menuitem):not([disabled]) {
+    color: var(--panel-text-color) !important;
+  }
+  :root[lwtheme] menupopup :is(menu, menuitem)[_moz-menuactive]:not([disabled]) {
+    background-color: var(--urlbarview-background-color-selected) !important;
+    color: var(--urlbarview-text-color-selected) !important;
+  }
+  :root[lwtheme] menuitem > .menu-icon {
+    accent-color: var(--toolbarbutton-icon-fill-attention);
+  }
+  :root[lwtheme] menubar > menu[open] {
+    border-bottom-color: var(--tab-loading-fill) !important;
+  }
 
-panelview,
-panelmultiview,
-#unified-extensions-panel,
-#unified-extensions-view,
-#unified-extensions-area,
-.unified-extensions-list,
-.panel-subview-body,
-.panel-subview-footer {
-    background-color: transparent !important;
-    background: transparent !important;
-    border: none !important;
-    box-shadow: none !important;
-    outline: none !important;
-    color: var(--lwt-text-color, #fbfbfe) !important;
-}
+  :root[lwtheme] findbar {
+    background-color: var(--toolbar-background-color) !important;
+    color: var(--toolbar-text-color) !important;
+    border-top-color: var(--chrome-content-separator-color) !important;
+  }
+  :root[lwtheme] .findbar-textbox:not(:focus, [status="notfound"], [flash="true"]) {
+    background-color: var(--toolbar-field-background-color) !important;
+    color: var(--toolbar-field-text-color) !important;
+    border-color: var(--toolbar-field-border-color) !important;
+  }
 
-/* Middle-Click Auto-Scroll Floating Disc (autoscroll.css) */
-#autoscroller,
-panel#autoscroller,
-.autoscroller {
-    appearance: none !important;
-    -moz-default-appearance: none !important;
-    --panel-background-color: var(--lwt-accent-color, #1c1b22) !important;
-    --panel-border-color: var(--toolbar-field-background-color-focus, #42414d) !important;
-    background-color: transparent !important;
-    background: transparent !important;
-    border: none !important;
-    border-radius: 0 !important;
-    background-image: none !important;
+  /* moz-button has its own shadow-root tokens; root overrides do not win there. */
+  :root[lwtheme] .searchmode-switcher {
+    --button-background-color-muted: var(--toolbar-field-background-color) !important;
+    --button-background-color-muted-hover: var(--toolbarbutton-background-color-hover) !important;
+    --button-background-color-muted-active: var(--toolbarbutton-background-color-active) !important;
+    --button-background-color-muted-selected: var(--toolbarbutton-background-color-active) !important;
+    --button-text-color-muted: var(--toolbar-field-text-color) !important;
+    --button-text-color-muted-hover: var(--toolbar-field-text-color) !important;
+    --button-text-color-muted-active: var(--toolbar-field-text-color) !important;
+    --button-text-color-muted-selected: var(--toolbar-field-text-color) !important;
+    --focus-outline-color: var(--toolbar-field-border-color-focus) !important;
+  }
+
+  /* Host custom properties cross the message bar's shadow boundary.
+   * Preserve warning/error/success icons and their status backgrounds. */
+  :root[lwtheme] :is(moz-message-bar, notification-message) {
+    --message-bar-text-color: var(--toolbar-text-color) !important;
+    --message-bar-border-color: var(--chrome-content-separator-color) !important;
+  }
+  :root[lwtheme] :is(moz-message-bar, notification-message):not([type="warning"], [type="error"], [type="critical"], [type="success"]) {
+    --message-bar-background-color: var(--toolbar-field-background-color) !important;
+    --message-bar-icon-color: var(--toolbarbutton-icon-fill-attention) !important;
+    --message-bar-icon-background-color: transparent !important;
+  }
+
+  :root[lwtheme] .pointerlockfswarning,
+  :root[lwtheme] tooltip {
+    background-color: var(--dusky-popup-background) !important;
+    color: var(--dusky-popup-text) !important;
+    border: 1px solid var(--dusky-popup-border) !important;
+    border-radius: 6px !important;
+  }
+
+  /* Native SVGs hardcode black. Mask an overlay to color them without
+   * losing the direction-specific shape or Firefox's circular geometry. */
+  :root[lwtheme] .autoscroller {
+    --panel-background-color: var(--dusky-popup-background) !important;
+    --panel-border-color: var(--dusky-popup-border) !important;
     position: relative !important;
-    box-shadow: none !important;
-}
-
-.autoscroller::after,
-#autoscroller::after {
+  }
+  :root[lwtheme] .autoscroller::after {
     content: "" !important;
-    display: block !important;
     position: absolute !important;
     inset: 0 !important;
-    background-color: var(--toolbarbutton-icon-fill, var(--lwt-text-color, #fbfbfe)) !important;
-    mask-image: var(--autoscroll-background-image) !important;
-    mask-repeat: no-repeat !important;
-    mask-position: center !important;
-    mask-size: auto !important;
-}
-
-/* Native Scrollbars, Thumb, Corner & Window Resizer (scrollbars.css) */
-scrollbar,
-thumb,
-scrollbarbutton,
-scrollcorner,
-resizer {
-    appearance: none !important;
-    -moz-default-appearance: none !important;
-}
-
-scrollbar {
-    background-color: var(--lwt-accent-color, #1c1b22) !important;
-    border: none !important;
-}
-
-scrollbar[vertical] {
-    background-color: var(--lwt-accent-color, #1c1b22) !important;
-}
-
-thumb {
-    background-color: var(--toolbarbutton-background-color-hover, rgba(255, 255, 255, 0.2)) !important;
-    border-radius: 6px !important;
-    border: 2px solid var(--lwt-accent-color, #1c1b22) !important;
-}
-
-thumb:hover,
-thumb[active] {
-    background-color: var(--toolbarbutton-icon-fill, var(--lwt-text-color, #fbfbfe)) !important;
-}
-
-scrollbarbutton {
-    display: none !important;
-}
-
-scrollcorner {
-    background-color: var(--lwt-accent-color, #1c1b22) !important;
-}
-
-resizer {
-    background-color: transparent !important;
-    -moz-context-properties: fill, stroke !important;
-    fill: var(--toolbarbutton-icon-fill, var(--lwt-text-color, #fbfbfe)) !important;
-}
-
-menu,
-menuitem {
-    appearance: none !important;
-    -moz-default-appearance: none !important;
-    border-radius: 6px !important;
-    padding: 6px 12px !important;
-    background-color: transparent !important;
-    color: var(--lwt-text-color) !important;
-    transition: background-color 120ms ease, color 120ms ease;
-}
-
-menu:is(:hover, [_moz-menuactive="true"]):not([disabled]),
-menuitem:is(:hover, [_moz-menuactive="true"]):not([disabled]) {
-    background-color: var(--toolbarbutton-background-color-hover, rgba(255,255,255,0.1)) !important;
-    color: var(--toolbarbutton-icon-fill, var(--lwt-text-color)) !important;
-}
-
-/* Subview Hover (Hamburger menu text color) */
-panelview .toolbarbutton-1:not([disabled]):is(:hover, :active),
-.subviewbutton:not([disabled]):not(#appMenu-zoomReduce-button2, #appMenu-zoomReset-button2, #appMenu-zoomEnlarge-button2, #appMenu-fullscreen-button2):is(:hover, :active) {
-    color: var(--toolbarbutton-icon-fill, var(--lwt-text-color)) !important;
-}
-
-/* Menubar */
-menubar > menu[open] {
-    border-bottom: 2px solid var(--tab-loading-fill, #00ddff) !important;
-}
-
-/* Separator */
-menuseparator::before {
-    border-top: 1px solid var(--chrome-content-separator-color, #42414d) !important;
-}
-
-/* Checkbox & Radio Items in Menus */
-menuitem[type="checkbox"] > .menu-icon,
-menuitem[type="radio"] > .menu-icon {
-    appearance: none !important;
-    -moz-default-appearance: none !important;
-    width: 14px !important;
-    height: 14px !important;
-    display: inline-block !important;
-    box-sizing: border-box !important;
-    content: "" !important;
-    list-style-image: none !important;
-    border: 1px solid transparent !important;
-    outline: none !important;
-    box-shadow: none !important;
-    background-color: var(--toolbar-field-background-color, rgba(255,255,255,0.1)) !important;
-    border-radius: 50%;
-    transition: all 120ms ease;
-}
-
-menuitem[type="checkbox"] > .menu-icon {
-    border-radius: 4px;
-}
-
-menuitem[type="checkbox"][checked] > .menu-icon,
-menuitem[type="radio"][checked] > .menu-icon {
-    background-color: var(--toolbarbutton-icon-fill, var(--lwt-text-color)) !important;
-}
-
-menuitem:is(:hover, [_moz-menuactive="true"]) > .menu-icon {
-    border-color: var(--toolbarbutton-icon-fill, var(--lwt-text-color)) !important;
-}
-
-findbar {
-    background-color: var(--lwt-accent-color) !important;
-    color: var(--lwt-text-color) !important;
-    border-top: 1px solid var(--chrome-content-separator-color, #42414d) !important;
-}
-
-.findbar-textbox {
-    background-color: var(--toolbar-field-background-color, rgba(255,255,255,0.1)) !important;
-    color: var(--lwt-text-color) !important;
-}
-
-/* Popup Notifications, Fullscreen & Pointerlock Warnings */
-moz-message-bar,
-notification-message,
-notification,
-notification-bar,
-message-bar,
-notification-message-bar,
-.notificationbox-stack,
-.container.infobar,
-infobar,
-.notification-bar,
-.notification-box,
-[value="popup-blocked"],
-.notificationbox-stack message-bar,
-#fullscreen-warning,
-#pointerlock-warning {
-    --message-bar-background-color: var(--toolbar-field-background-color, #2b2a33) !important;
-    --message-bar-text-color: var(--lwt-text-color, #fbfbfe) !important;
-    --message-bar-icon-color: var(--toolbarbutton-icon-fill, var(--lwt-text-color, #fbfbfe)) !important;
-    background-color: var(--toolbar-field-background-color, #2b2a33) !important;
-    color: var(--lwt-text-color, #fbfbfe) !important;
-    border: 1px solid var(--toolbar-field-background-color-focus, #42414d) !important;
-    border-radius: 6px !important;
-}
-
-moz-message-bar .container,
-notification-message .container {
-    background-color: transparent !important;
-}
-
-moz-message-bar .icon,
-notification-message .icon {
-    fill: var(--toolbarbutton-icon-fill, var(--lwt-text-color)) !important;
-    color: var(--toolbarbutton-icon-fill, var(--lwt-text-color)) !important;
-}
-
-notification-bar button,
-notification button,
-message-bar button,
-infobar button,
-.notification-button,
-.notification-box button,
-moz-message-bar moz-button.close,
-notification-message moz-button.close {
-    background-color: transparent !important;
-    color: var(--lwt-text-color) !important;
-    fill: var(--lwt-text-color) !important;
-    border: 1px solid var(--toolbar-field-background-color-focus, #42414d) !important;
-    border-radius: 4px !important;
-}
-
-notification-bar button:hover,
-notification button:hover,
-message-bar button:hover,
-infobar button:hover,
-.notification-button:hover,
-.notification-box button:hover,
-moz-message-bar moz-button.close:hover,
-notification-message moz-button.close:hover {
-    background-color: var(--toolbarbutton-background-color-hover, rgba(255, 255, 255, 0.1)) !important;
-    color: var(--toolbarbutton-icon-fill, var(--lwt-text-color)) !important;
-    fill: var(--toolbarbutton-icon-fill, var(--lwt-text-color)) !important;
-}
-
-/* Exit Full Screen & Pointerlock Buttons */
-#fullscreen-exit-button,
-#pointerlock-exit-button {
-    appearance: none !important;
-    -moz-default-appearance: none !important;
-    background-color: transparent !important;
-    color: var(--lwt-text-color, #fbfbfe) !important;
-    border: 1px solid var(--toolbar-field-background-color-focus, #42414d) !important;
-    border-radius: 6px !important;
-    padding: 6px 12px !important;
-    margin-left: 12px !important;
-    transition: all 120ms ease;
-}
-
-#fullscreen-exit-button:hover,
-#pointerlock-exit-button:hover {
-    background-color: var(--toolbarbutton-background-color-hover, rgba(255, 255, 255, 0.1)) !important;
-    border-color: var(--toolbarbutton-icon-fill, var(--lwt-text-color)) !important;
-    color: var(--toolbarbutton-icon-fill, var(--lwt-text-color)) !important;
-}
-
-tooltip {
-    appearance: none !important;
-    background-color: var(--lwt-accent-color) !important;
-    color: var(--lwt-text-color) !important;
-    border: 1px solid var(--toolbar-field-background-color-focus, #42414d) !important;
-    border-radius: 6px !important;
-}
-
-/* AI Sidebar Container (aiWindowSidebar.css) */
-#sidebar-box[sidebarcommand*="ai"],
-.ai-sidebar-container,
-#ai-window-sidebar {
-    background-color: var(--sidebar-background-color, var(--lwt-accent-color, #1c1b22)) !important;
-    color: var(--sidebar-text-color, var(--lwt-text-color, #fbfbfe)) !important;
-}
-
-/* WebRTC Active Camera/Mic Sharing Indicators (webRTC-indicator.css) */
-#webRTC-sharing-icon,
-#webRTC-sharing-container,
-.webrtc-indicator,
-.webrtc-indicator-icon {
-    background-color: var(--toolbar-field-background-color, #2b2a33) !important;
-    color: var(--toolbarbutton-icon-fill, var(--lwt-text-color)) !important;
-    border: 1px solid var(--toolbar-field-background-color-focus, #42414d) !important;
-    border-radius: 6px !important;
-}
-
-/* Federated Identity Credential Notifications (identity-credential-notification.css) */
-identity-credential-notification,
-.identity-credential-panel {
-    background-color: var(--toolbar-field-background-color, #2b2a33) !important;
-    color: var(--lwt-text-color, #fbfbfe) !important;
-    border: 1px solid var(--toolbar-field-background-color-focus, #42414d) !important;
-    border-radius: 6px !important;
-}
-
-/* Clear Browsing Data Dialog (sanitizeDialog_v2.css) */
-#sanitizeDialog,
-.sanitize-dialog-container {
-    background-color: var(--lwt-accent-color, #1c1b22) !important;
-    color: var(--lwt-text-color, #fbfbfe) !important;
-}
-
-/* Vertical Tab Groups & Tab Tree (tab-list-tree.css & smartwindowGroupTabs.css) */
-.tab-group-header,
-.tab-group-container,
-.tab-list-tree-item,
-tab-item[selected],
-tab-item:hover {
-    background-color: var(--toolbarbutton-background-color-hover, rgba(255, 255, 255, 0.1)) !important;
-    color: var(--lwt-text-color) !important;
-}
-
-/* Address Bar & Autocomplete Popups (urlbar-searchbar.css & autocomplete.css) */
-#urlbar-results,
-.urlbarView,
-.autocomplete-history-popup {
-    background-color: var(--lwt-accent-color, #1c1b22) !important;
-    color: var(--lwt-text-color, #fbfbfe) !important;
-}
-
-.urlbarView-row:is([selected], :hover) {
-    background-color: var(--toolbarbutton-background-color-hover, rgba(255, 255, 255, 0.1)) !important;
-    color: var(--lwt-text-color) !important;
-}
-
-/* Form Autofill & Credit Card Popups (formautofill-notification.css) */
-formautofill-creditcard-popup,
-.formautofill-popup {
-    background-color: var(--toolbar-field-background-color, #2b2a33) !important;
-    color: var(--lwt-text-color, #fbfbfe) !important;
-    border: 1px solid var(--toolbar-field-background-color-focus, #42414d) !important;
-    border-radius: 6px !important;
-}
-
-/* Page Info Window (pageInfo.css) */
-#pageInfoWindow,
-.page-info-container {
-    background-color: var(--lwt-accent-color, #1c1b22) !important;
-    color: var(--lwt-text-color, #fbfbfe) !important;
+    background-color: var(--dusky-popup-text) !important;
+    mask: var(--autoscroll-background-image) center / auto no-repeat !important;
+  }
 }
 """
 
-def patch_extensions_json(profile: Path) -> None:
-    """Ensure extensions.json marks dusky_sites@dusky.com as active/enabled if present and invalidate addon cache."""
-    ext_json_path = profile / "extensions.json"
-    if ext_json_path.is_file():
-        try:
-            data = json.loads(ext_json_path.read_text(encoding="utf-8"))
-            addons = data.get("addons", [])
-            found = False
-            for addon in addons:
-                if addon.get("id") == EXTENSION_ID:
-                    addon["active"] = True
-                    addon["userDisabled"] = False
-                    addon["appDisabled"] = False
-                    addon["softDisabled"] = False
-                    addon["seen"] = True
-                    user_perms = addon.setdefault("userPermissions", {})
-                    if "origins" not in user_perms or "<all_urls>" not in (user_perms.get("origins") or []):
-                        user_perms["origins"] = ["<all_urls>"]
-                    addon["userPermissions"] = user_perms
-                    found = True
-                    break
-            if found:
-                atomic_write_text(ext_json_path, json.dumps(data, indent=2) + "\n")
-        except Exception as e:
-            print_warn(f"Could not patch extensions.json in {profile}: {e}")
+def about_css_content(template: str) -> str:
+    """The imported palette is URL-scoped by its Matugen source template."""
+    return (
+        "/* Live Matugen palette via dusky_palette.css symlink.\n"
+        " * Profile stylesheets load at browser start; restart after palette updates. */\n"
+        '@import url("dusky_palette.css");\n\n'
+        + template
+    )
 
-    startup_cache = profile / "addonStartup.json.lz4"
-    if startup_cache.is_file():
-        try:
-            startup_cache.unlink()
-        except OSError as e:
-            print_warn(f"Could not reset addonStartup cache in {profile}: {e}")
 
-def setup_user_chrome(home: Path, source_xpi: Path | None = None) -> None:
-    browser_dirs = [
-        home / ".mozilla" / "firefox",
-        home / ".config" / "mozilla" / "firefox",
-        home / ".librewolf",
-        home / ".config" / "librewolf",
-        home / ".zen",
-        home / ".config" / "zen",
-        home / ".waterfox",
-        home / ".floorp",
-        home / ".firedragon",
-        home / ".var" / "app" / "org.mozilla.firefox" / ".mozilla" / "firefox",
-        home / ".var" / "app" / "io.gitlab.librewolf-community" / ".librewolf",
-    ]
+def setup_user_chrome(home: Path, source_xpi: Path | None = None) -> bool:
+    browser_dirs = _profile_base_dirs(home)
+    config_file = home / ".config/dusky/settings/dusky_sites/config.json"
+    palette_path = home / ".config/matugen/generated/dusky_sites.css"
+    try:
+        config = json.loads(config_file.read_text(encoding="utf-8"))
+        if not isinstance(config, dict):
+            raise ValueError("Configuration must be a JSON object")
+        if isinstance(config.get("colorsPath"), str):
+            palette_path = Path(config["colorsPath"]).expanduser()
+            if not palette_path.is_absolute():
+                raise ValueError("colorsPath must be absolute or begin with ~")
+    except FileNotFoundError:
+        pass  # Fresh offline profile provisioning uses the default palette path.
+    except (OSError, ValueError) as error:
+        print_warn(f"Could not resolve palette from {config_file}: {error}")
+        return False
+
+    try:
+        if palette_path.is_file():
+            palette = re.sub(r"/\*.*?\*/", "", palette_path.read_text(encoding="utf-8"), flags=re.DOTALL)
+            if (not palette.lstrip().startswith(INTERNAL_DOCUMENT_RULE)
+                    or not {"--dusky-palette-background", "--dusky-palette-primary", "--dusky-palette-on_surface", "--dusky-palette-color-scheme"}
+                    <= set(re.findall(r"(--[\w-]+)\s*:", palette))):
+                raise ValueError("Regenerate the Matugen palette with the updated document-scoped template before running setup")
+    except (OSError, ValueError) as error:
+        print_warn(f"Cannot import {palette_path}: {error}")
+        return False
 
     installed_profiles = 0
     failed_prefs = 0
+    failed_profiles = 0
+    failed_xpis = 0
     installed_xpis = 0
+    seen_profiles: set[Path] = set()
 
     for base_dir in browser_dirs:
         if not base_dir.is_dir():
             continue
         for profile in iter_firefox_profiles(base_dir):
+            if profile in seen_profiles:
+                continue
+            seen_profiles.add(profile)
             if not ensure_firefox_prefs(profile / "user.js"):
                 failed_prefs += 1
 
@@ -623,9 +365,9 @@ def setup_user_chrome(home: Path, source_xpi: Path | None = None) -> None:
                     ext_dir.mkdir(parents=True, exist_ok=True)
                     target_xpi = ext_dir / f"{EXTENSION_ID}.xpi"
                     atomic_copy_file(source_xpi, target_xpi)
-                    patch_extensions_json(profile)
                     installed_xpis += 1
                 except OSError as e:
+                    failed_xpis += 1
                     print_warn(f"Could not copy XPI into {profile}: {e}")
 
             chrome_dir = profile / "chrome"
@@ -636,32 +378,28 @@ def setup_user_chrome(home: Path, source_xpi: Path | None = None) -> None:
                 atomic_write_text(menu_css, MENU_CSS_CONTENT)
                 ensure_css_import(chrome_dir / "userChrome.css", '@import url("dusky_menu.css");')
 
-                # about: documents -> userContent.css
-                # Palette must stay LIVE (symlink), not a setup-time snapshot.
-                # Chrome UI gets colors via browser.theme.update(); about: pages
-                # only re-read userContent on startup, so a symlink to matugen's
-                # generated file is enough — restart picks up new colors without
-                # re-running this setup script. (Same idea as chrome/colors.css.)
+                # Internal documents use both chrome and content docshells.
+                # Import the same URL-scoped stylesheet through both entry points;
+                # the main browser continues to receive live theme API colors.
                 about_css = chrome_dir / "dusky_about.css"
-                matugen_gen_css = home / ".config" / "matugen" / "generated" / "dusky_sites.css"
+                matugen_gen_css = palette_path
                 ensure_symlink(chrome_dir / "dusky_palette.css", matugen_gen_css)
 
                 template_about = home / ".config" / "dusky_sites" / "about.css"
-                base_about = template_about.read_text(encoding="utf-8") if template_about.is_file() else ""
+                if not template_about.is_file():
+                    raise FileNotFoundError(f"Internal-page template missing: {template_about}")
+                base_about = template_about.read_text(encoding="utf-8")
 
-                about_content = (
-                    "/* Live Matugen palette via dusky_palette.css symlink.\n"
-                    " * userContent is loaded at browser start — no setup re-run needed. */\n"
-                    '@import url("dusky_palette.css");\n\n'
-                    f"{base_about}"
-                )
+                about_content = about_css_content(base_about)
                 atomic_write_text(about_css, about_content)
 
+                ensure_css_import(chrome_dir / "userChrome.css", '@import url("dusky_about.css");')
                 user_content = chrome_dir / "userContent.css"
                 ensure_css_import(user_content, '@import url("dusky_about.css");')
 
                 installed_profiles += 1
-            except OSError as e:
+            except (OSError, UnicodeError) as e:
+                failed_profiles += 1
                 print_warn(f"Could not write chrome CSS in {profile}: {e}")
 
     if installed_profiles > 0:
@@ -669,15 +407,16 @@ def setup_user_chrome(home: Path, source_xpi: Path | None = None) -> None:
     else:
         print_warn("No profile directories found for context menu styling.")
     if installed_xpis > 0:
-        print_success(f"Signed XPI installed into {installed_xpis} browser profile(s).")
+        print_success(f"Signed XPI copied into {installed_xpis} browser profile(s).")
     if failed_prefs:
         print_warn(f"user.js pref write failed for {failed_prefs} profile(s); userChrome may be inert until fixed.")
+
+    return bool(installed_profiles) and not (failed_prefs or failed_profiles or failed_xpis)
 
 def resolve_source_host(script_dir: Path) -> Path:
     candidates = [
         Path.home() / ".config" / "firefox_extentions" / "dusky_sites" / "dusky_sites_host.py",
         script_dir / HOST_INSTALL_NAME,
-        script_dir / "dusky_sites_host.py",
     ]
     for c in candidates:
         if c.is_file():
@@ -685,25 +424,41 @@ def resolve_source_host(script_dir: Path) -> Path:
     return candidates[0]
 
 def resolve_source_xpi(script_dir: Path) -> Path | None:
-    """Return a signed XPI only if its manifest identifies EXTENSION_ID."""
+    """Find a signed package matching shipped source; Firefox validates signing."""
+    source_dir = Path.home() / ".config/firefox_extentions/dusky_sites/extension"
+    if not source_dir.is_dir():
+        source_dir = script_dir / "extension"
+    expected_manifest = None
+    expected_scripts = {}
+    if source_dir.is_dir():
+        expected_manifest = json.loads((source_dir / "manifest.json").read_text(encoding="utf-8"))
+        expected_scripts = {name: (source_dir / name).read_bytes()
+                            for name in ("background.js", "content.js", "defaults.js")}
+    stale_packages = []
+
     def _xpi_has_expected_id(xpi: Path) -> bool:
-        import json
         import zipfile
         try:
             with zipfile.ZipFile(xpi) as zf:
+                if not {"META-INF/mozilla.rsa", "META-INF/mozilla.sf"} <= set(zf.namelist()):
+                    return False
                 with zf.open("manifest.json") as fh:
                     data = json.load(fh)
+                root = data.get("browser_specific_settings") if isinstance(data, dict) else None
+                gecko = root.get("gecko") if isinstance(root, dict) else None
+                if not isinstance(gecko, dict) or gecko.get("id") != EXTENSION_ID:
+                    return False
+                if expected_manifest is not None:
+                    mismatched = [name for name, content in expected_scripts.items()
+                                  if name not in zf.namelist() or zf.read(name) != content]
+                    if data != expected_manifest:
+                        mismatched.append("manifest.json")
+                    if mismatched:
+                        stale_packages.append(f"{xpi}: {', '.join(mismatched)}")
+                        return False
         except (OSError, zipfile.BadZipFile, json.JSONDecodeError, KeyError):
             return False
-        if not isinstance(data, dict):
-            return False
-        for key in ("browser_specific_settings", "applications"):
-            root = data.get(key)
-            if isinstance(root, dict):
-                gecko = root.get("gecko")
-                if isinstance(gecko, dict) and gecko.get("id") == EXTENSION_ID:
-                    return True
-        return False
+        return True
 
     candidates = [
         Path.home() / ".config" / "firefox_extentions" / "dusky_sites" / "xpi" / f"{EXTENSION_ID}.xpi",
@@ -711,7 +466,9 @@ def resolve_source_xpi(script_dir: Path) -> Path | None:
         script_dir / "xpi" / f"{EXTENSION_ID}.xpi",
         script_dir / f"{EXTENSION_ID}.xpi",
     ]
+    seen = set()
     for c in candidates:
+        seen.add(c)
         if c.is_file() and _xpi_has_expected_id(c):
             return c
 
@@ -724,56 +481,72 @@ def resolve_source_xpi(script_dir: Path) -> Path | None:
     for d in search_dirs:
         if d.is_dir():
             for xpi in sorted(d.glob("*.xpi")):
+                if xpi in seen:
+                    continue
+                seen.add(xpi)
                 if xpi.is_file() and _xpi_has_expected_id(xpi):
                     return xpi
+    if stale_packages:
+        raise ValueError("Signed XPI does not match the shipped extension source. "
+                         "Update the signed package before running setup.\n  "
+                         + "\n  ".join(stale_packages))
     return None
 
 # ─────────────────────────────────────────────────────────────
 # Uninstall
 # ─────────────────────────────────────────────────────────────
 def _browser_data_dirs(home: Path) -> list[Path]:
-    """Firefox-family base directories that receive NMH manifests / global XPIs."""
-    return [
-        home / ".mozilla",
-        home / ".config" / "mozilla",
-        home / ".librewolf",
-        home / ".config" / "librewolf",
-        home / ".zen",
-        home / ".config" / "zen",
-        home / ".waterfox",
-        home / ".floorp",
-        home / ".firedragon",
-        home / ".var" / "app" / "org.mozilla.firefox" / ".mozilla",
-        home / ".var" / "app" / "io.gitlab.librewolf-community" / ".librewolf",
-    ]
+    """Native Firefox data roots (traditional and current XDG layout)."""
+    config_home = Path(os.environ.get("XDG_CONFIG_HOME") or home / ".config")
+    if not config_home.is_absolute():
+        config_home = home / ".config"
+    return [home / ".mozilla", config_home / "mozilla"]
+
 
 def _profile_base_dirs(home: Path) -> list[Path]:
-    """Directories whose children are profiles (mirrors setup_user_chrome)."""
-    return [
-        home / ".mozilla" / "firefox",
-        home / ".config" / "mozilla" / "firefox",
-        home / ".librewolf",
-        home / ".config" / "librewolf",
-        home / ".zen",
-        home / ".config" / "zen",
-        home / ".waterfox",
-        home / ".floorp",
-        home / ".firedragon",
-        home / ".var" / "app" / "org.mozilla.firefox" / ".mozilla" / "firefox",
-        home / ".var" / "app" / "io.gitlab.librewolf-community" / ".librewolf",
-    ]
+    return [root / "firefox" for root in _browser_data_dirs(home)]
+
+def ensure_firefox_profiles(home: Path, firefox: str) -> None:
+    """Let Firefox select and register its default before installing profile files."""
+    bases = _profile_base_dirs(home)
+    if any(any(iter_firefox_profiles(base)) for base in bases if base.is_dir()):
+        return
+    if any((base / "profiles.ini").exists() for base in bases):
+        print_error("Firefox has a profile registry but no usable profile directories. Repair the registry before running setup.")
+
+    # Old global copies must not be discovered and disabled before user.js sets
+    # extensions.autoDisableScopes=0 in the new profile.
+    uninstall_global_xpis(home)
+    print_step("Creating Firefox's default profile without opening a browser window...")
+    # --CreateProfile does not assign the installation's dedicated default.
+    # Screenshot mode uses normal profile selection and exits on about:blank.
+    with tempfile.TemporaryDirectory(prefix="dusky-firefox-") as tmp:
+        screenshot = Path(tmp) / "blank.png"
+        try:
+            result = subprocess.run(
+                [firefox, "--headless", "--new-instance", "--screenshot", str(screenshot), "about:blank"],
+                capture_output=True, text=True, timeout=60,
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            print_error(f"Could not initialize Firefox's default profile: {error}")
+        if result.returncode or not screenshot.is_file():
+            print_error(f"Firefox profile initialization failed: {result.stderr.strip() or result.stdout.strip()}")
+    if not any(any(iter_firefox_profiles(base)) for base in bases if base.is_dir()):
+        print_error("Firefox did not register a usable default profile.")
+    print_success("Firefox's default profile is ready for provisioning.")
+
 
 def _browser_processes_running() -> list[str]:
-    """Return names of detected running Firefox-family browsers."""
+    """Return names of detected running Firefox browsers."""
     try:
         import subprocess
-        out = subprocess.run(["pgrep", "-x", "-a", "firefox|librewolf|zen|waterfox|floorp|firedragon"],
+        out = subprocess.run(["pgrep", "-x", "-a", "firefox"],
                              capture_output=True, text=True).stdout
     except OSError:
         return []
     names: set[str] = set()
     for line in out.splitlines():
-        for b in ("firefox", "librewolf", "zen", "waterfox", "floorp", "firedragon"):
+        for b in ("firefox",):
             # pgrep -x matches full process name; token at start or after whitespace
             if re.search(rf"(^|\s){re.escape(b)}(\s|$)", line):
                 names.add(b)
@@ -796,28 +569,6 @@ def _remove_tree(path: Path) -> bool:
     except OSError as e:
         print_warn(f"Could not remove directory {path}: {e}")
     return False
-
-def unpatch_extensions_json(profile: Path) -> None:
-    """Remove dusky_sites@dusky.com entries from extensions.json and invalidate addon cache."""
-    ext_json_path = profile / "extensions.json"
-    if ext_json_path.is_file():
-        try:
-            data = json.loads(ext_json_path.read_text(encoding="utf-8"))
-            addons = data.get("addons", [])
-            kept = [a for a in addons if a.get("id") != EXTENSION_ID]
-            if len(kept) != len(addons):
-                data["addons"] = kept
-                atomic_write_text(ext_json_path, json.dumps(data, indent=2) + "\n")
-                print_success(f"Removed {EXTENSION_ID} from {ext_json_path}")
-        except Exception as e:
-            print_warn(f"Could not patch extensions.json in {profile}: {e}")
-
-    startup_cache = profile / "addonStartup.json.lz4"
-    if startup_cache.is_file():
-        try:
-            startup_cache.unlink()
-        except OSError as e:
-            print_warn(f"Could not reset addonStartup cache in {profile}: {e}")
 
 def restore_profile_prefs(profile: Path) -> int:
     """Remove the prefs the installer wrote, only if they still match our values."""
@@ -860,7 +611,7 @@ def restore_user_chrome(profile: Path) -> None:
     remove_css_import(chrome_dir / "userChrome.css", '@import url("dusky_menu.css");')
 
 def restore_user_content(profile: Path) -> None:
-    """Remove dusky_about.css, palette symlink, and @import from userContent.css."""
+    """Remove internal-document CSS, palette link, and both entry-point imports."""
     chrome_dir = profile / "chrome"
     if not chrome_dir.is_dir():
         return
@@ -870,6 +621,7 @@ def restore_user_content(profile: Path) -> None:
     palette_link = chrome_dir / "dusky_palette.css"
     if _remove_file(palette_link):
         print_success(f"Removed {palette_link}")
+    remove_css_import(chrome_dir / "userChrome.css", '@import url("dusky_about.css");')
     remove_css_import(chrome_dir / "userContent.css", '@import url("dusky_about.css");')
 
 def uninstall_manifests(home: Path) -> int:
@@ -894,14 +646,8 @@ def uninstall_manifests(home: Path) -> int:
 
 def uninstall_global_xpis(home: Path) -> int:
     """Remove the XPI from global extension paths."""
-    global_ext_dirs = [
-        home / ".mozilla" / "extensions" / "{ec8030f7-c20a-464f-9b0e-13a3a9e97384}",
-        home / ".config" / "mozilla" / "extensions" / "{ec8030f7-c20a-464f-9b0e-13a3a9e97384}",
-        home / ".librewolf" / "extensions",
-        home / ".zen" / "extensions",
-        home / ".waterfox" / "extensions",
-        home / ".floorp" / "extensions",
-    ]
+    global_ext_dirs = [root / "extensions" / "{ec8030f7-c20a-464f-9b0e-13a3a9e97384}"
+                       for root in _browser_data_dirs(home)]
     removed = 0
     for g_dir in global_ext_dirs:
         xpi = g_dir / f"{EXTENSION_ID}.xpi"
@@ -911,7 +657,7 @@ def uninstall_global_xpis(home: Path) -> int:
     return removed
 
 def uninstall_profile_artifacts(home: Path) -> int:
-    """Per profile: remove XPI, extensions.json entry, storage data, chrome CSS, and prefs."""
+    """Per profile: remove our XPI, storage data, chrome CSS, and prefs."""
     profiles = 0
     for base_dir in _profile_base_dirs(home):
         if not base_dir.is_dir():
@@ -924,7 +670,6 @@ def uninstall_profile_artifacts(home: Path) -> int:
             data_dir = profile / "browser-extension-data" / EXTENSION_ID
             if _remove_tree(data_dir):
                 print_success(f"Removed {data_dir}")
-            unpatch_extensions_json(profile)
             restore_user_chrome(profile)
             restore_user_content(profile)
             restore_profile_prefs(profile)
@@ -1003,16 +748,13 @@ def run_uninstall(home: Path) -> None:
     print("------------------------------------------------------------------\n")
 
 def main() -> None:
-    args = [a for a in sys.argv[1:]]
-    if "--uninstall" in args or "--purge" in args or "--help" in args or "-h" in args:
-        if "--help" in args or "-h" in args:
-            print(__doc__)
-            print("Options:")
-            print("  --uninstall   Completely remove installed extension, host, manifests, chrome CSS & config.json.")
-            print("  --yes         Skip the confirmation prompt.")
-            return
-
-        auto_yes = "--yes" in args
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--uninstall", "--purge", action="store_true", help="Remove installed extension, host, manifests, stylesheets and settings")
+    parser.add_argument("--yes", action="store_true", help="Skip the uninstall confirmation")
+    parser.add_argument("--update-installed", action="store_true", help="Update an existing installation; skip if its native host is absent")
+    args = parser.parse_args()
+    if args.uninstall:
+        auto_yes = args.yes
         label = "Dusky Sites (extension, host, manifests & user config.json)"
         if not auto_yes:
             resp = input(f"Are you sure you want to uninstall {label}? [y/N] ").strip().lower()
@@ -1023,13 +765,40 @@ def main() -> None:
         run_uninstall(home)
         return
 
-    print(f"\n{C_CYAN}Dusky Sites Setup Script (Arch Linux / Python 3.12+){C_RESET}\n")
+    home = Path.home()
+    xdg_data_home_raw = os.environ.get("XDG_DATA_HOME", "").strip()
+    data_home = Path(xdg_data_home_raw).expanduser() if xdg_data_home_raw else home / ".local" / "share"
+    if not data_home.is_absolute():
+        data_home = home / ".local" / "share"
+    install_dir = data_home / "dusky-sites"
+    installed_host = install_dir / HOST_INSTALL_NAME
+    if args.update_installed and not installed_host.is_file():
+        print("Dusky Sites is not installed; skipping automatic update.")
+        return
+
+    print(f"\n{C_CYAN}Dusky Sites Setup Script (Arch Linux / Python 3.14.7+){C_RESET}\n")
 
     script_dir = Path(__file__).parent.resolve()
     source_host = resolve_source_host(script_dir)
-    source_xpi = resolve_source_xpi(script_dir)
+    try:
+        source_xpi = resolve_source_xpi(script_dir)
+    except (OSError, ValueError) as error:
+        print_error(str(error))
 
     print_step("Performing pre-flight checks...")
+    if sys.version_info < (3, 14, 7):
+        print_error("Python 3.14.7 or newer is required.")
+    firefox = shutil.which("firefox")
+    if firefox is None:
+        print_error("Firefox was not found in PATH.")
+    try:
+        result = subprocess.run([firefox, "--version"], capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        print_error(f"Could not query Firefox version: {error}")
+    version = re.search(r"Firefox (\d+)", result.stdout)
+    if result.returncode or version is None or int(version[1]) < 157:
+        print_error("Firefox 157 or newer is required.")
+    print_success(result.stdout.strip())
     if not source_host.is_file():
         print_error(f"Host script not found. Place {HOST_INSTALL_NAME} next to this setup script.\n  looked for: {source_host}")
     print_success(f"Found host source at {source_host}")
@@ -1037,19 +806,10 @@ def main() -> None:
     if source_xpi and source_xpi.is_file():
         print_success(f"Found signed WebExtension package at {source_xpi}")
     else:
-        print_warn("Signed XPI package not found; fallback to manual add-on load.")
+        print_error("Signed XPI package not found. Supply the signed extension package before running setup.")
 
-    home = Path.home()
-    xdg_data_home_raw = os.environ.get("XDG_DATA_HOME", "").strip()
-    if xdg_data_home_raw:
-        data_home = Path(xdg_data_home_raw).expanduser()
-        if not data_home.is_absolute():
-            data_home = home / ".local" / "share"
-    else:
-        data_home = home / ".local" / "share"
-    install_dir = data_home / "dusky-sites"
+    ensure_firefox_profiles(home, firefox)
     install_dir.mkdir(parents=True, exist_ok=True)
-    installed_host = install_dir / HOST_INSTALL_NAME
 
     print_step("Installing host to stable XDG path...")
     try:
@@ -1090,29 +850,16 @@ def main() -> None:
     matugen_gen_dir.mkdir(parents=True, exist_ok=True)
     print_success(f"Ensured Matugen output directory exists at {matugen_gen_dir}")
 
-    print_step("Detecting supported Firefox-based browsers...")
+    print_step("Detecting native Firefox data directories...")
     targets: list[tuple[str, Path]] = []
-    candidates = [
-        ("Firefox", home / ".mozilla"),
-        ("Firefox (XDG)", home / ".config" / "mozilla"),
-        ("LibreWolf", home / ".librewolf"),
-        ("LibreWolf (XDG)", home / ".config" / "librewolf"),
-        ("Zen", home / ".zen"),
-        ("Zen (XDG)", home / ".config" / "zen"),
-        ("Waterfox", home / ".waterfox"),
-        ("Floorp", home / ".floorp"),
-        ("FireDragon", home / ".firedragon"),
-        ("Firefox (Flatpak)", home / ".var" / "app" / "org.mozilla.firefox" / ".mozilla"),
-        ("LibreWolf (Flatpak)", home / ".var" / "app" / "io.gitlab.librewolf-community" / ".librewolf"),
-    ]
+    candidates = [("Firefox", root) for root in _browser_data_dirs(home)]
 
     for name, path in candidates:
         nmh_dir = path / "native-messaging-hosts"
-        if path.is_dir() or nmh_dir.is_dir():
+        # Firefox 157's XREUserNativeManifests remains ~/.mozilla even when
+        # its profile registry is under ~/.config/mozilla/firefox.
+        if path == home / ".mozilla" or path.is_dir() or nmh_dir.is_dir():
             targets.append((name, nmh_dir))
-
-    if not targets:
-        targets.append(("Firefox (Default)", home / ".mozilla" / "native-messaging-hosts"))
 
     print_step("Installing native messaging manifests...")
     manifest_payload = {
@@ -1136,19 +883,18 @@ def main() -> None:
             print_warn(f"Failed to install manifest in {target_dir}: {e}")
 
     if installed_count == 0:
-        print_warn("No native messaging manifests were installed.")
+        print_error("No native messaging manifests were installed.")
+
+    print_step("Provisioning native context menu, userChrome & profile XPI extensions...")
+    if installed_count != len(targets):
+        print_error("Native messaging registration was incomplete.")
+    if not setup_user_chrome(home, source_xpi):
+        print_error("Profile provisioning was incomplete; see the errors above.")
 
     if source_xpi and source_xpi.is_file():
         print_step("Installing signed WebExtension into global extension paths...")
-        FIREFOX_APP_ID = home / ".mozilla" / "extensions" / "{ec8030f7-c20a-464f-9b0e-13a3a9e97384}"
-        global_ext_dirs = [
-            FIREFOX_APP_ID,
-            home / ".config" / "mozilla" / "extensions" / "{ec8030f7-c20a-464f-9b0e-13a3a9e97384}",
-            home / ".librewolf" / "extensions",
-            home / ".zen" / "extensions",
-            home / ".waterfox" / "extensions",
-            home / ".floorp" / "extensions",
-        ]
+        global_ext_dirs = [root / "extensions" / "{ec8030f7-c20a-464f-9b0e-13a3a9e97384}"
+                           for root in _browser_data_dirs(home)]
         g_count = 0
         for g_dir in global_ext_dirs:
             try:
@@ -1158,12 +904,9 @@ def main() -> None:
             except OSError as e:
                 print_warn(f"Could not copy XPI to {g_dir}: {e}")
         if g_count > 0:
-            print_success(f"Signed XPI installed into {g_count} global extension path(s).")
+            print_success(f"Signed XPI copied into {g_count} global extension path(s).")
 
-    print_step("Provisioning native context menu, userChrome & profile XPI extensions...")
-    setup_user_chrome(home, source_xpi)
-
-    print(f"\n{C_GREEN}[+] Setup Complete! Dusky Sites host and signed WebExtension provisioned cleanly.{C_RESET}")
+    print(f"\n{C_GREEN}[+] Setup finished. Restart Firefox to load profile stylesheets and discover copied extensions.{C_RESET}")
     print("------------------------------------------------------------------")
     print(f"{C_CYAN}Host path:{C_RESET} {installed_host}")
     print(f"{C_CYAN}Manifest name:{C_RESET} {MANIFEST_NAME} (native app name: dusky_sites)")

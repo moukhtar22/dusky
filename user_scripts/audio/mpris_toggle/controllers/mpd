@@ -1,37 +1,29 @@
-#!/bin/sh
-action="$1"
-case "$action" in
+#!/usr/bin/env bash
+# Uses the configured mpc connection (MPD_HOST / MPD_PORT).
+# now: title US artist US position US duration US status (one line).
+set -euo pipefail
+readonly SEP=$'\x1f'
+case ${1:-} in
     now)
-        if command -v mpc >/dev/null 2>&1; then
-            current=$(mpc current 2>/dev/null)
-            status_line=$(mpc status 2>/dev/null | tail -n2 | head -n1)
-            if [ -n "$current" ]; then
-                title="${current##* - }"
-                artist="${current%% - *}"
-                [ "$title" = "$artist" ] && artist=""
-                
-                if echo "$status_line" | grep -q 'playing'; then
-                    status="Playing"
-                elif echo "$status_line" | grep -q 'paused'; then
-                    status="Paused"
-                else
-                    status="Stopped"
+        current=$(mpc --format "[%title%]${SEP}[%artist%]${SEP}[%file%]" current) || exit $?
+        info=$(LC_ALL=C mpc status) || exit $?
+        current=${current//[$'\r\n']/ }
+        IFS=$SEP read -r title artist file <<< "$current"
+        title=${title:-${file##*/}}
+        status=Stopped pos='' dur=''
+        state_pattern='^\[(playing|paused)\]'
+        time_pattern='([0-9]+:[0-9:]+)/([0-9]+:[0-9:]+)'
+        while IFS= read -r line; do
+            if [[ $line =~ $state_pattern ]]; then
+                case ${BASH_REMATCH[1]} in playing) status=Playing ;; paused) status=Paused ;; esac
+                if [[ $line =~ $time_pattern ]]; then
+                    pos=${BASH_REMATCH[1]}; dur=${BASH_REMATCH[2]}
                 fi
-                
-                pos_fmt="0:00"
-                dur_fmt="0:00"
-                if echo "$status_line" | grep -q '/'; then
-                    pos_fmt=$(echo "$status_line" | awk '{print $3}' | cut -d/ -f1)
-                    dur_fmt=$(echo "$status_line" | awk '{print $3}' | cut -d/ -f2 | cut -d' ' -f1)
-                fi
-                printf "%s|%s|%s|%s|%s\n" "$title" "$artist" "$pos_fmt" "$dur_fmt" "$status"
-                exit 0
+                break
             fi
-        fi
-        printf "||||\n"
+        done <<< "$info"
+        printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\n' "$title" "$artist" "$pos" "$dur" "$status"
         ;;
-    toggle) mpc toggle 2>/dev/null || true ;;
-    next)   mpc next 2>/dev/null || true ;;
-    prev)   mpc prev 2>/dev/null || true ;;
-    stop)   mpc stop 2>/dev/null || true ;;
+    toggle|next|prev|stop) exec mpc --quiet "$1" ;;
+    *) printf 'Usage: %s {now|toggle|next|prev|stop}\n' "${0##*/}" >&2; exit 1 ;;
 esac

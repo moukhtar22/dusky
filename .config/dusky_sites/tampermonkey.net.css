@@ -1,0 +1,8 @@
+@-moz-document domain("tampermonkey.net") {
+    /* >>> dusky:picks - managed by the Visual Picker, one rule per line */
+    div { background: transparent !important; box-shadow: none !important; } /* dusky key=sel%1Fdiv%1Fbg | bg: transparent */
+    html { background-color: var(--surface) !important; color: var(--on_surface) !important; border-color: var(--outline_variant) !important; } /* dusky key=sel%1Fhtml%1Fbg | bg: surface */
+    body.index { background-color: var(--surface) !important; color: var(--on_surface) !important; border-color: var(--outline_variant) !important; } /* dusky key=sel%1Fbody.index%1Fbg | bg: surface */
+    body { background-color: var(--surface) !important; color: var(--on_surface) !important; border-color: var(--outline_variant) !important; } /* dusky key=sel%1Fbody%1Fbg | bg: surface */
+    /* <<< dusky:picks */
+}

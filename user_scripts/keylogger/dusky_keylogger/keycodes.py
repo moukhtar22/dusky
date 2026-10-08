@@ -379,6 +379,12 @@ KEYPAD_KEYS = KEYPAD_NAV_KEYS | frozenset(
 )
 
 
+def is_button(key_code: int) -> bool:
+    """BTN_* ranges in Linux input-event-codes.h, including combo devices."""
+    return (0x100 <= key_code < 0x160 or 0x220 <= key_code < 0x224
+            or 0x2C0 <= key_code <= KEY_MAX)
+
+
 def is_backspace(key_code: int) -> bool:
     return key_code in BACKSPACE_KEYS
 

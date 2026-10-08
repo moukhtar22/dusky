@@ -8,16 +8,19 @@ Engine: Fontconfig XML Serializer
 ===============================================================================
 Note: Picker options are discovered dynamically at import time via `fc-list`
 so the schema always reflects the fonts actually installed on the machine
-(no hardcoded family lists; a curated pool is only a last-resort fallback
-when fontconfig tooling is unavailable).
+(fontconfig tooling is required).
 ===============================================================================
 """
 
 import sys
+import os
+import shlex
+import re
 from pathlib import Path
 
 # Inject Dusky TUI root into Python path for standalone execution
-_DUSKY_TUI_ROOT = Path.home() / "user_scripts" / "dusky_tui"
+_USER_SCRIPTS = Path(os.environ.get("USER_SCRIPTS", str(Path(__file__).resolve().parents[1]))).expanduser().resolve()
+_DUSKY_TUI_ROOT = _USER_SCRIPTS / "dusky_tui"
 if str(_DUSKY_TUI_ROOT) not in sys.path:
     sys.path.insert(0, str(_DUSKY_TUI_ROOT))
 
@@ -27,14 +30,17 @@ from python.frontend.core_types import ConfigItem
 # 1. CORE APPLICATION ROUTING
 # =============================================================================
 ENGINE_TYPE = "fontconfig"
-TARGET_FILE = "~/.config/fontconfig/conf.d/99-dusky-fonts.conf"
+_CONFIG_HOME = Path(os.environ.get("XDG_CONFIG_HOME", ""))
+if not _CONFIG_HOME.is_absolute():
+    _CONFIG_HOME = Path.home() / ".config"
+TARGET_FILE = str(_CONFIG_HOME / "fontconfig/conf.d/99-dusky-fonts.conf")
 APP_TITLE = "Dusky Fonts"
 
 # =============================================================================
 # 2. UI & ENVIRONMENT BEHAVIOR
 # =============================================================================
 
-THEME_FILE = "~/.config/matugen/generated/dusky_tui.json"
+THEME_FILE = str(_CONFIG_HOME / "matugen/generated/dusky_tui.json")
 DEFAULT_MODE = "auto"
 ENABLE_USER_PRESETS = True
 USER_PRESETS_TAB = "Profiles"
@@ -44,8 +50,8 @@ REQUIRE_ROOT = False
 # 2b. TAB NOTICES (banners shown above each tab)
 # -------------------------------------------------------------------------
 TAB_NOTICES = {
-    0: {"level": "info", "message": "New font files dropped into the archive dir appear here after a TUI restart. Applying any change auto-refreshes the font cache AND syncs GTK/Qt/dconf; no manual step needed."},
-    2: {"level": "info", "message": "Applies auto-refresh the font cache and sync GTK + Qt (qt5ct/qt6ct) fonts. The manual actions below are only for re-running after manual edits or outside-TUI changes."},
+    0: {"level": "info", "message": "New font files dropped into the archive dir appear here after a TUI restart. Applying changes syncs GTK/Qt/dconf; changing the archive directory also updates the cache. Restart apps to pick up new settings."},
+    2: {"level": "info", "message": "Applies sync GTK + Qt (qt5ct/qt6ct) fonts. The manual actions below are only for re-running after manual edits or outside-TUI changes."},
 }
 
 # =============================================================================
@@ -61,23 +67,8 @@ TABS = [
 # =============================================================================
 # 4. INSTALLED-FAMILY DISCOVERY (runtime, not hardcoded)
 # -----------------------------------------------------------------------------
-# Options are scanned from the live system with `fc-list` so the pickers
-# always reflect exactly what is installed. If fontconfig tooling is missing,
-# the curated pools below act as a last-resort fallback (they were verified
-# present on the authoring machine).
-# =============================================================================
+# Families are discovered from fontconfig and the configured archive.
 import subprocess
-
-_CURATED_FALLBACK = {
-    "sans": ["Atkinson Hyperlegible", "Liberation Sans", "Adwaita Sans", "FreeSans"],
-    "serif": ["Liberation Serif", "FreeSerif"],
-    "mono": [
-        "JetBrainsMono Nerd Font Mono", "AtkynsonMono Nerd Font Mono",
-        "JetBrainsMono Nerd Font", "FreeMono", "Liberation Mono",
-        "Adwaita Mono", "Symbols Nerd Font Mono",
-    ],
-    "emoji": ["Noto Color Emoji"],
-}
 
 _FAMILY_HINTS = {
     "Atkinson Hyperlegible": "High legibility",
@@ -113,16 +104,14 @@ _FAMILY_HINTS = {
 #     before the engine has written any config.
 # =============================================================================
 
-FONT_ARCHIVE_DIR = "~/user_scripts/fonts/archive"
-
-_ARCHIVE_EXTENSIONS = (".ttf", ".otf", ".ttc", ".otc", ".woff", ".woff2")
+FONT_ARCHIVE_DIR = str(_USER_SCRIPTS / "fonts/archive")
 
 
 def _scan_families() -> dict[str, str]:
     """Discover installed families and their fontconfig spacing metadata.
 
     Returns {family: spacing} where spacing is the fontconfig spacing
-    property ("100"=monospace, "90"=dual-width, "" otherwise, ASCII to keep
+    property ("100"=monospace, "90"=dual-width, "110"=character-cell, "" otherwise, ASCII to keep
     fc-scan/fc-list calls uniform). Queries fc-list for installed fonts and
     fc-scan for raw files under the archive dir (fc-list only sees dirs the
     config already knows about).
@@ -133,30 +122,35 @@ def _scan_families() -> dict[str, str]:
         for line in stdout.splitlines():
             family, _, spacing = line.strip().partition("\t")
             if family:
-                meta[family] = spacing.strip()
+                value = spacing.strip()
+                if family not in meta or value in ("90", "100", "110"):
+                    meta[family] = value
 
     try:
         proc = subprocess.run(
             ["fc-list", "--format=%{family[0]}\t%{spacing}\n", ":"],
             capture_output=True, text=True, timeout=20,
         )
+        proc.check_returncode()
         ingest(proc.stdout)
-    except Exception:
-        pass
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError(f"Cannot discover installed fonts: {exc}") from exc
 
+    import xml.etree.ElementTree as ET
     root = Path(FONT_ARCHIVE_DIR).expanduser()
+    config = Path(TARGET_FILE)
+    if config.is_file() and config.stat().st_size:
+        configured = ET.parse(config).getroot().findtext("dir")
+        if configured:
+            root = Path(configured).expanduser()
     if root.is_dir():
-        files = sorted(
-            f for f in root.rglob("*") if f.suffix.lower() in _ARCHIVE_EXTENSIONS)
-        if files:
-            try:
-                proc = subprocess.run(
-                    ["fc-scan", "--format=%{family[0]}\t%{spacing}\n", *[str(f) for f in files]],
-                    capture_output=True, text=True, timeout=30,
-                )
-                ingest(proc.stdout)
-            except Exception:
-                pass
+        proc = subprocess.run(
+            ["fc-scan", "--format=%{family[0]}\t%{spacing}\n", str(root)],
+            capture_output=True, text=True, timeout=30,
+        )
+        # fc-scan returns nonzero for an empty directory; fonts it did scan
+        # remain usable. Scanning the directory avoids ARG_MAX on large archives.
+        ingest(proc.stdout)
 
     return meta
 
@@ -165,7 +159,7 @@ def _classify_families(meta: dict[str, str]) -> dict[str, list[str]]:
     """Classify families into picker buckets using metadata we can trust.
 
     Order matters:
-      * emoji/symbol-ish names come first: icon fonts must never leak into
+      * emoji/symbol-ish names come first: icons are excluded and must never leak into
         mono even when their spacing says monospace (e.g. "Symbols Nerd
         Font Mono").
       * monospace is decided by the fontconfig spacing property, the same
@@ -180,11 +174,13 @@ def _classify_families(meta: dict[str, str]) -> dict[str, list[str]]:
     buckets: dict[str, list[str]] = {"sans": [], "serif": [], "mono": [], "emoji": []}
     for fam in sorted(meta):
         low = fam.lower()
-        if any(e in low for e in ("emoji", "symbols", "awesome", "icon")):
+        if "moji" in low:
             buckets["emoji"].append(fam)
-        elif meta[fam] in ("100", "90"):
+        elif re.search(r"\b(symbols?|icons?|awesome)\b", low):
+            continue
+        elif meta[fam] in ("100", "90", "110"):
             buckets["mono"].append(fam)
-        elif any(s in low for s in ("serif", "times", "georgia")):
+        elif "sans" not in low and any(s in low for s in ("serif", "times", "georgia")):
             buckets["serif"].append(fam)
         else:
             buckets["sans"].append(fam)
@@ -194,12 +190,9 @@ def _classify_families(meta: dict[str, str]) -> dict[str, list[str]]:
 def _scan_installed_families() -> dict[str, list[str]]:
     """Discover installed families on the live system and bucket them.
 
-    Returns {bucket: [family,...]}; falls back to the curated pools if
-    fc-list/fc-scan are unavailable or yield nothing.
+    Returns {bucket: [family,...]}; requires working fontconfig tools.
     """
     buckets = _classify_families(_scan_families())
-    if not any(buckets.values()):
-        buckets = {k: list(v) for k, v in _CURATED_FALLBACK.items()}
     return buckets
 
 
@@ -208,9 +201,15 @@ _INSTALLED = _scan_installed_families()
 # Options + positionally-aligned hint lists per picker.
 def _picker_options(bucket_key: str, default: str) -> tuple[list[str], list[str]]:
     fams = list(_INSTALLED[bucket_key])
+    if bucket_key in ("sans", "serif"):
+        # Names cannot reliably identify serif genres. Keep every text family
+        # selectable, with the suggested genre first.
+        fams += sorted({f for key in ("sans", "serif", "mono")
+                        for f in _INSTALLED[key]} - set(fams))
+    available = set(fams)
     if default not in fams:
         fams.insert(0, default)
-    return fams, [_FAMILY_HINTS.get(f, "Installed family") for f in fams]
+    return fams, [(_FAMILY_HINTS.get(f, "Available family") if f in available else "Missing: install this font before applying") for f in fams]
 
 
 _SANS_OPTIONS, _SANS_HINTS = _picker_options("sans", "Atkinson Hyperlegible")
@@ -234,7 +233,7 @@ SCHEMA = {
             default="Atkinson Hyperlegible",
             options=_SANS_OPTIONS,
             hints=_SANS_HINTS,
-            extended_help="Sets the primary Sans-Serif font used across the desktop environment (e.g., Waybar, Hyprland, GTK apps). Options are scanned live from fc-list, so only installed families appear."
+            extended_help="Sets the primary Sans-Serif font used across the desktop environment (GTK apps and applications requesting sans-serif; explicit application fonts remain independent). Options are scanned from fontconfig and the configured archive, so available families appear; missing defaults are labeled."
         ),
         ConfigItem(
             label="System Serif Font",
@@ -244,7 +243,7 @@ SCHEMA = {
             default="Liberation Serif",
             options=_SERIF_OPTIONS,
             hints=_SERIF_HINTS,
-            extended_help="Sets the primary Serif font. Options are scanned live from fc-list, so only installed families appear."
+            extended_help="Sets the primary Serif font. Options are scanned from fontconfig and the configured archive, so available families appear; missing defaults are labeled."
         ),
         ConfigItem(
             label="System Monospace Font",
@@ -257,22 +256,22 @@ SCHEMA = {
             extended_help="Sets the primary fixed-width font. Terminal/editor fonts: options are scanned live from fc-list; patched Nerd Fonts are required for icon rendering in terminals."
         ),
         ConfigItem(
-            label="System Emoji/Icons Font",
+            label="System Emoji Font",
             key="emoji",
             scope="DEFAULT",
             type_="picker",
             default="Noto Color Emoji",
             options=_EMOJI_OPTIONS,
             hints=_EMOJI_HINTS,
-            extended_help="Forces the system-wide fallback for emoji rendering. Options are scanned live from fc-list; only installed families appear."
+            extended_help="Sets the emoji generic family and named emoji aliases; glyph coverage and app-specific fallback still govern rendering. Options are scanned from fontconfig and the configured archive; available families appear; missing defaults are labeled."
         ),
         ConfigItem(
             label="Font Archive Directory",
             key="font_dir",
             scope="DEFAULT",
             type_="string",
-            default="~/user_scripts/fonts/archive",
-            extended_help="Directory containing downloadable fonts (TTF/OTF/TTC/OTF variable weight, WOFF supported; WOFF2 scan-only). Drop new font files here, then use the System & Cache 'Force Verbose Cache Rebuild' action. The engine writes a <dir> entry into 99-dusky-fonts.conf so fontconfig indexes it natively, and Typeface pickers auto-scan it for families."
+            default=FONT_ARCHIVE_DIR,
+            extended_help="Directory containing downloadable fonts (TTF/OTF/TTC/OTF variable weight, formats supported by the installed FreeType build). Drop new font files here, then use the Cache & Tools 'Force Verbose Cache Rebuild' action. The engine writes a <dir> entry into 99-dusky-fonts.conf so fontconfig indexes it natively, and Typeface pickers auto-scan it for families."
         ),
     ],
     
@@ -322,13 +321,13 @@ SCHEMA = {
             key="rgba",
             scope="DEFAULT",
             type_="picker",
-            default="rgb",
+            default="none",
             options=["none", "rgb", "bgr", "vrgb", "vbgr"],
             hints=[
                 "Grayscale smoothing", "Standard horizontal (Most common)", 
                 "Reversed horizontal", "Standard vertical", "Reversed vertical"
             ],
-            extended_help="Configures subpixel rendering for LCD displays. 'rgb' is correct for 99% of modern desktop monitors."
+            extended_help="Configures subpixel rendering for LCD displays. Use grayscale (none) for mixed monitors, unknown pixel layouts, and rotated displays. Select a subpixel layout only when it matches your panel."
         ),
         ConfigItem(
             label="LCD Filter",
@@ -349,7 +348,7 @@ SCHEMA = {
             scope="DEFAULT",
             type_="bool",
             default=True,
-            extended_help="Controls whether fonts with embedded bitmap glyphs display bitmaps at small sizes. Must be enabled for color emoji fonts (e.g. Noto Color Emoji) which are bitmap-only (CBDT/CBLC) and have no scalable outlines to fall back to — disabling this breaks emoji rendering entirely."
+            extended_help="Controls embedded bitmap strikes in outline fonts. Color fonts retain their bitmap glyphs even when this is off, so bitmap emoji remain available."
         )
     ],
 
@@ -366,7 +365,7 @@ SCHEMA = {
             options=["trigger"],
             force_interactive=True,
             confirm_message="Are you sure you want to manually rebuild the font cache? This may take several seconds.",
-            extended_help="Executes `fc-cache -fv` to force an immediate, verbose rebuild of the system font cache, bypassing the background refresh."
+            extended_help="Executes `fc-cache -fv` to force an immediate, verbose rebuild of the system font cache, including newly added font files."
         ),
         ConfigItem(
             label="Verify Sans-Serif Resolution (fc-match)",
@@ -399,21 +398,11 @@ SCHEMA = {
             extended_help="Executes a test match to verify which exact font file the system currently falls back to when 'Arial' is requested."
         ),
         ConfigItem(
-            label="Sync Xft Rendering to X11 (legacy)",
-            key="trigger_sync_xresources",
-            scope="DEFAULT",
-            type_="action",
-            default="mkdir -p ~/.config/dusky && printf 'Xft.antialias: 1\\nXft.hinting: 1\\nXft.hintstyle: hintslight\\nXft.rgba: rgba\\nXft.lcdfilter: lcddefault\\n' > ~/.config/dusky/xresources && xrdb -merge ~/.config/dusky/xresources 2>/dev/null || true",
-            options=["trigger"],
-            popup_message="Synced Xft rendering properties to ~/.config/dusky/xresources and merged with xrdb.",
-            extended_help="Legacy X11 syncing: writes Xft rendering properties into a dedicated ~/.config/dusky/xresources file and merges it with xrdb. Does not truncate any existing ~/.Xresources."
-        ),
-        ConfigItem(
             label="Sync GTK & Qt Fonts (settings.ini + qt5ct/qt6ct)",
             key="trigger_sync_gtk",
             scope="DEFAULT",
             type_="action",
-            default="python3 ~/user_scripts/dusky_tui/python/engines/fontconfig.py",
+            default=f"{shlex.quote(sys.executable)} {shlex.quote(str(_DUSKY_TUI_ROOT / 'python/engines/fontconfig.py'))}",
             options=["trigger"],
             popup_message="Synced GTK font-name and Qt general/fixed to the configured families.",
             extended_help="Writes gtk-font-name (family + current size) into ~/.config/gtk-3.0/settings.ini and gtk-4.0/settings.ini, mirrors org.gnome.desktop.interface font-name/document-font-name via gsettings, and rewrites the [Fonts] general/fixed entries in qt5ct.conf and qt6ct.conf (sans-serif -> general, monospace -> fixed), preserving existing sizes/weights. This runs automatically on every apply; use the action to re-sync after manual edits."
@@ -438,12 +427,13 @@ SCHEMA = {
                 "emoji": "Noto Color Emoji",
                 "antialias": True,
                 "hinting": True,
+                "autohint": False,
                 "hintstyle": "hintslight",
                 "rgba": "rgb",
                 "lcdfilter": "lcddefault",
                 "embeddedbitmap": True
             },
-            extended_help="**Modern Sharp UI**\n\nApplies highly modern, crisp fonts with standard RGB subpixel rendering and slight hinting. Ideal for high-resolution standard monitors."
+            extended_help="**Modern Sharp UI**\n\nApplies RGB subpixel rendering and slight hinting. Use this profile only for horizontal RGB panels; use grayscale profiles for unknown or mixed display layouts."
         ),
         ConfigItem(
             label="Apply Accessibility & Legibility Profile",
@@ -459,7 +449,10 @@ SCHEMA = {
                 "emoji": "Noto Color Emoji",
                 "antialias": True,
                 "hinting": True,
+                "autohint": False,
                 "hintstyle": "hintslight",
+                "rgba": "none",
+                "lcdfilter": "lcddefault",
                 "embeddedbitmap": True
             },
             extended_help="**Accessibility Focus**\n\nPrioritizes character distinction using Atkinson Hyperlegible (Braille Institute) to prevent visual confusion between similar characters like '1', 'l', and 'I'."
@@ -478,6 +471,7 @@ SCHEMA = {
                 "emoji": "Noto Color Emoji",
                 "antialias": True,
                 "hinting": True,
+                "autohint": False,
                 "hintstyle": "hintnone",
                 "rgba": "none",
                 "lcdfilter": "lcdnone",
@@ -486,8 +480,8 @@ SCHEMA = {
             extended_help="**High-DPI / 4K Clean Profile**\n\nOptimized for 4K and Retina-class displays. Disables subpixel LCD geometry (`rgba=none`) and pixel grid alignment (`hintstyle=hintnone`) for ultra-clean pure vector outline rendering."
         ),
         ConfigItem(
-            label="Apply Legacy Linux Defaults",
-            key="preset_legacy_linux",
+            label="Apply Full Hinting Profile",
+            key="preset_full_hinting",
             scope="DEFAULT",
             type_="preset",
             default=None,
@@ -495,14 +489,17 @@ SCHEMA = {
             preset_payload={
                 "sans-serif": "Liberation Sans",
                 "serif": "Liberation Serif",
-                "monospace": "FreeMono",
+                "monospace": "Liberation Mono",
                 "emoji": "Noto Color Emoji",
                 "antialias": True,
                 "hinting": True,
+                "autohint": False,
                 "hintstyle": "hintfull",
+                "rgba": "none",
+                "lcdfilter": "lcddefault",
                 "embeddedbitmap": True
             },
-            extended_help="**Legacy Linux Config**\n\nRestores the classic open-source desktop appearance using metric-compatible Liberation/Free fonts alongside strict/full hinting pixel alignment."
+            extended_help="**Full Hinting Profile**\n\nRestores the classic open-source desktop appearance using metric-compatible Liberation fonts alongside strict/full hinting pixel alignment."
         ),
     ]
 }
@@ -516,7 +513,7 @@ if __name__ == "__main__":
 
     script_path = Path(__file__).resolve()
     # Route execution to the main Dusky TUI router
-    main_router = Path.home() / "user_scripts" / "dusky_tui" / "python" / "main" / "main.py"
+    main_router = _DUSKY_TUI_ROOT / "python/main/main.py"
 
     if main_router.exists():
         sys.exit(subprocess.run([sys.executable, str(main_router), str(script_path)] + sys.argv[1:]).returncode)

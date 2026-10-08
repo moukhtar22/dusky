@@ -1,0 +1,26 @@
+[Unit]
+Description=Dusky Powertop Auto-Tune (battery saver one-shot)
+Documentation=man:powertop(8)
+After=multi-user.target tlp.service
+ConditionPathExists=/usr/bin/powertop
+
+[Service]
+Type=oneshot
+RemainAfterExit=no
+TimeoutStartSec=60s
+ExecStart=/usr/bin/powertop --auto-tune
+Nice=19
+IOSchedulingClass=idle
+CPUSchedulingPolicy=idle
+LockPersonality=yes
+KeyringMode=private
+MemoryDenyWriteExecute=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHome=yes
+ProtectHostname=yes
+ProtectSystem=full
+ProtectKernelLogs=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes

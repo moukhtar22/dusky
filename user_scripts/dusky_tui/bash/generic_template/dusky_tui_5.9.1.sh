@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
 # -----------------------------------------------------------------------------
 # Dusky TUI Engine - Generic Configuration Template v5.9.1
-# Target: Generic Linux Configs (/etc, .conf, .ini, host files)
+# Target: Linux flat or sectioned key/value configuration files
 # 
-# CHANGELOG:
-#   - FIX: Eradicated shorthand arithmetic bounds `(( x < 0 )) && x=0` which 
-#     trigger fatal aborts under Bash strict mode (`set -e`).
-#   - FIX: Fortified `handle_mouse` with null checks for `start`/`end` values
-#     preventing fatal syntax errors if zone boundaries evaluate as empty strings.
-#   - FIX: Strictly isolated `local zone` as a string to prevent math evaluation.
+# AUDIT UPDATE (2026-10-01):
+#   Literal-safe config writes, fresh-cache no-ops, single-stage atomic saves,
+#   conflict detection, cancellable input, bounded escape/mouse parsing,
+#   event-driven redraws, and regression tests in tests/test_template.py.
+# Config grammar: global / [section], key=value or key value, whole-line # / ;
+# comments, optional outer quotes, no inline-comment or escape interpretation.
+# Atomic replacement preserves owner/group/mode; hard links, ACLs and xattrs
+# require an application-specific writer. No power-loss durability guarantee.
 # -----------------------------------------------------------------------------
 
 set -Eeuo pipefail
@@ -38,6 +40,12 @@ declare -ra TABS=("General" "Network" "Display" "System")
 register_items() {
     # Generic Config Layout: register tab_idx "Label" 'key|type|scope|min|max|step' "default"
     # Note: 'scope' corresponds to [Section] in INI files, leave blank for global scope.
+    # Omit the default argument to make Reset remove a setting; "" is an empty value.
+    # int: decimal integers up to 18 digits, step defaults to 1.
+    # float: finite decimal/exponent values, step defaults to 0.1.
+    # cycle: comma-separated options in the min field; bool: true/false/yes/no/on/off/1/0.
+    # action: define action_KEY(); menu: register before its register_child() entries.
+    # Menus have one level. Reset All applies to the current tab or submenu only.
     register 0 "Enable Service"   'service_enabled|bool||||'              "true"
     register 0 "Timeout (ms)"     'timeout|int||0|1000|50'                "100"
     register 0 "Log Prefix"       'log_prefix|string||||'                 "myapp_"
@@ -61,7 +69,7 @@ register_items() {
 
 action_hostname() {
     local user_input=""
-    prompt_line_input "Enter new hostname:" user_input
+    prompt_line_input "Enter new hostname:" user_input || return 0
     if [[ -n $user_input ]]; then
         set_status "Hostname set to: $user_input"
     else
@@ -71,7 +79,7 @@ action_hostname() {
 
 action_demo_text() {
     local user_input=""
-    prompt_line_input "Enter a custom file path:" user_input
+    prompt_line_input "Enter a custom file path:" user_input || return 0
     if [[ -n $user_input ]]; then
         set_status "You typed: $user_input"
     else
@@ -87,8 +95,9 @@ action_demo_picker() {
     PICKER_SELECTED=0
     PICKER_SCROLL=0
 
-    PARENT_ROW=$SELECTED_ROW
-    PARENT_SCROLL=$SCROLL_OFFSET
+    PICKER_PARENT_VIEW=$CURRENT_VIEW
+    PICKER_PARENT_ROW=$SELECTED_ROW
+    PICKER_PARENT_SCROLL=$SCROLL_OFFSET
     CURRENT_VIEW=2
     clear_status
 }
@@ -99,18 +108,14 @@ picker_cb_demo_theme() {
 }
 
 action_demo_sudo() {
-    if ! sudo -n true 2>/dev/null; then
-        acquire_sudo || return 0
-    fi
+    acquire_sudo || return 0
     set_status "Sudo acquired. Service restart simulated."
 }
 
 post_write_action() {
-    # Triggered automatically after successful file writes
-    if command -v systemctl >/dev/null 2>&1; then
-        # systemctl reload my-daemon.service >/dev/null 2>&1 || :
-        :
-    fi
+    # Called after changed saves, once after Reset All. Report hook failures here.
+    # systemctl reload my-daemon.service >/dev/null 2>&1 || set_status "Reload failed."
+    :
 }
 
 # =============================================================================
@@ -140,11 +145,14 @@ declare -r CURSOR_HIDE=$'\033[?25l'
 declare -r CURSOR_SHOW=$'\033[?25h'
 declare -r ALT_SCREEN_ON=$'\033[?1049h'
 declare -r ALT_SCREEN_OFF=$'\033[?1049l'
-declare -r MOUSE_ON=$'\033[?1000h\033[?1002h\033[?1006h'
-declare -r MOUSE_OFF=$'\033[?1000l\033[?1002l\033[?1006l'
+# Basic clicks first, then button-motion only (1002), never all-motion (1003).
+# Unsupported 1002 leaves basic clicks working; SGR motion code 32 means left held.
+declare -r MOUSE_ON=$'\033[?1000h\033[?1002h\033[?1006h\033[?2004h'
+declare -r MOUSE_OFF=$'\033[?1000l\033[?1002l\033[?1006l\033[?2004l'
 
 declare -r ESC_READ_TIMEOUT=0.08
 declare -r READ_LOOP_TIMEOUT=0.25
+declare -ri MAX_ESCAPE_BYTES=64
 declare -r UNSET_MARKER='«unset»'
 
 declare -i SELECTED_ROW=0 CURRENT_TAB=0 SCROLL_OFFSET=0
@@ -165,7 +173,11 @@ unset _ti
 declare -i CURRENT_VIEW=0
 declare CURRENT_MENU_ID=""
 declare -i PARENT_ROW=0 PARENT_SCROLL=0
-declare -gi RESIZE_PENDING=0
+declare -i PICKER_PARENT_VIEW=0 PICKER_PARENT_ROW=0 PICKER_PARENT_SCROLL=0
+declare -gi RESIZE_PENDING=0 PASTE_ACTIVE=0
+declare -gi MOUSE_CLICK_PENDING=0 MOUSE_PRESS_X=0 MOUSE_PRESS_Y=0
+declare MOUSE_PRESS_CONTEXT=""
+declare PASTE_TAIL=""
 
 declare PICKER_TITLE=""
 declare -a PICKER_ITEMS=()
@@ -191,8 +203,8 @@ declare RIGHT_ARROW_ZONE=""
 declare -A ITEM_MAP=()
 declare -A VALUE_CACHE=()
 declare -A CONFIG_CACHE=()
+declare CONFIG_SIGNATURE=""
 declare -A DEFAULTS=()
-declare -a CONFIG_SOURCE_FILES=()
 
 for (( _ti = 0; _ti < TAB_COUNT; _ti++ )); do
     declare -ga "TAB_ITEMS_${_ti}=()"
@@ -207,7 +219,7 @@ log_err() {
     printf '%s[ERROR]%s %s\n' "$C_RED" "$C_RESET" "$1" >&2 || true
 }
 
-set_status() { declare -g STATUS_MESSAGE=$1; }
+set_status() { declare -g STATUS_MESSAGE=${1//[[:cntrl:]]/?}; }
 clear_status() { declare -g STATUS_MESSAGE=""; }
 
 register_temp() {
@@ -217,10 +229,10 @@ register_temp() {
 
 forget_temp() {
     local path=$1 kept=() item
-    for item in "${_TEMP_PATHS[@]:-}"; do
+    for item in "${_TEMP_PATHS[@]}"; do
         [[ $item == "$path" ]] || kept+=("$item")
     done
-    _TEMP_PATHS=("${kept[@]:-}")
+    _TEMP_PATHS=("${kept[@]}")
 }
 
 remove_temp() {
@@ -243,7 +255,7 @@ cleanup() {
         stty "$ORIGINAL_STTY" < /dev/tty 2>/dev/null || :
     fi
 
-    for path in "${_TEMP_PATHS[@]:-}"; do
+    for path in "${_TEMP_PATHS[@]}"; do
         [[ -n $path && -e $path ]] && rm -f -- "$path" 2>/dev/null || :
     done
     
@@ -271,18 +283,6 @@ path_dirname() {
     fi
 }
 
-path_basename() {
-    local path=$1
-    REPLY=${path##*/}
-    [[ -n $REPLY ]] || REPLY="file"
-}
-
-read_error_excerpt() {
-    local file=$1
-    REPLY=$(LC_ALL=C head -c 4096 -- "$file" 2>/dev/null || true)
-    [[ -n $REPLY ]] || REPLY="unknown error"
-}
-
 file_signature() {
     local path=$1
     LC_ALL=C stat -Lc '%d:%i:%s:%y:%z:%a:%u:%g' -- "$path"
@@ -296,44 +296,26 @@ release_lock_fd() {
     fi
 }
 
-remove_many_temps() {
-    local path
-    for path in "$@"; do
-        remove_temp "$path"
-    done
-}
-
 resolve_write_target() {
+    [[ -n $CONFIG_FILE ]] || { log_err "Config path is empty."; return 1; }
     path_dirname "$CONFIG_FILE"
-    mkdir -p "$REPLY" 2>/dev/null || :
-    touch "$CONFIG_FILE" 2>/dev/null || :
-    WRITE_TARGET=$(realpath -e -- "$CONFIG_FILE" 2>/dev/null || echo "$CONFIG_FILE")
-    
-    # Route the lock file to /tmp to prevent polluting user directories
-    local lock_dir="${XDG_RUNTIME_DIR:-/tmp}/dusky_tui_locks_${USER:-$UID}"
-    mkdir -p "$lock_dir" 2>/dev/null || :
-    # Convert the full path to a safe filename string
-    local safe_name="${WRITE_TARGET//\//_}"
-    LOCK_TARGET="${lock_dir}/${safe_name}.lock"
-}
-
-create_temp_near() {
-    local target=$1 purpose=${2:-tmp} target_dir target_base
-    path_dirname "$target"; target_dir=$REPLY
-    path_basename "$target"; target_base=$REPLY
-
-    if ! REPLY=$(mktemp --tmpdir="$target_dir" ".${target_base}.${purpose}.XXXXXXXXXX" 2>/dev/null); then
-        if ! REPLY=$(mktemp -t "dusky.${target_base}.${purpose}.XXXXXXXXXX" 2>/dev/null); then
-            REPLY=""
-            return 1
-        fi
+    mkdir -p -- "$REPLY" || return 1
+    # Opening an existing config must not change its timestamp.
+    if [[ ! -e $CONFIG_FILE ]]; then
+        ( set -o noclobber; : > "$CONFIG_FILE" ) || return 1
     fi
-    register_temp "$REPLY"
-    return 0
+    WRITE_TARGET=$(realpath -e -- "$CONFIG_FILE") || return 1
+    [[ -f $WRITE_TARGET && -r $WRITE_TARGET ]] || {
+        log_err "Config must be a readable regular file."; return 1;
+    }
+    local lock_dir="${XDG_RUNTIME_DIR:-/tmp}/dusky_tui_locks_${UID}" digest
+    mkdir -p -- "$lock_dir" || return 1
+    digest=$(printf '%s' "$WRITE_TARGET" | sha256sum) || return 1
+    LOCK_TARGET="${lock_dir}/${digest%% *}.lock"
 }
 
 create_tmpfile_for_target() {
-    local target=$1 target_dir target_base
+    local target=$1 target_dir
     if [[ -n ${_TMPFILE:-} ]]; then
         remove_temp "$_TMPFILE"
     fi
@@ -341,9 +323,8 @@ create_tmpfile_for_target() {
     _TMPMODE=""
 
     path_dirname "$target"; target_dir=$REPLY
-    path_basename "$target"; target_base=$REPLY
 
-    if ! _TMPFILE=$(mktemp --tmpdir="$target_dir" ".${target_base}.tmp.XXXXXXXXXX" 2>/dev/null); then
+    if ! _TMPFILE=$(mktemp --tmpdir="$target_dir" ".dusky.tmp.XXXXXXXXXX" 2>/dev/null); then
         _TMPFILE=""
         _TMPMODE=""
         return 1
@@ -358,14 +339,26 @@ commit_tmpfile_to_target() {
     [[ -n ${_TMPFILE:-} && -f $_TMPFILE && ${_TMPMODE:-} == atomic ]] || return 1
     [[ -e $target && -f $target ]] || return 1
 
-    chown --reference="$target" -- "$_TMPFILE" 2>/dev/null || :
+    chown --reference="$target" -- "$_TMPFILE" 2>/dev/null || return 1
     chmod --reference="$target" -- "$_TMPFILE" 2>/dev/null || return 1
-    mv -fT -- "$_TMPFILE" "$target" || return 1
+    mv -fT --no-copy -- "$_TMPFILE" "$target" || return 1
 
     forget_temp "$_TMPFILE"
     _TMPFILE=""
     _TMPMODE=""
     return 0
+}
+
+suspend_ui() {
+    MOUSE_CLICK_PENDING=0
+    printf '%s%s%s%s' "$MOUSE_OFF" "$CURSOR_SHOW" "$C_RESET" "$ALT_SCREEN_OFF"
+    stty "$ORIGINAL_STTY" < /dev/tty || exit 1
+    TUI_STARTED=0
+    kill -s STOP "$$"
+    stty -icanon -echo -ixon min 1 time 0 < /dev/tty || exit 1
+    TUI_STARTED=1
+    printf '%s%s%s%s%s' "$ALT_SCREEN_ON" "$MOUSE_ON" "$CURSOR_HIDE" "$CLR_SCREEN" "$CURSOR_HOME"
+    RESIZE_PENDING=1
 }
 
 update_terminal_size() {
@@ -414,15 +407,6 @@ trim_spaces() {
     REPLY=$v
 }
 
-join_scope_key() {
-    local scope=$1 key=$2
-    if [[ -n $scope ]]; then
-        REPLY="${key}|${scope}"
-    else
-        REPLY="${key}|"
-    fi
-}
-
 normalize_target() {
     local key=$1 scope=$2
     TARGET_KEY=$key
@@ -434,27 +418,37 @@ normalize_target() {
 # =============================================================================
 
 is_int_literal() {
-    [[ $1 =~ ^-?[0-9]+$ ]]
+    [[ $1 =~ ^-?[0-9]{1,18}$ ]]
 }
 
 is_float_literal() {
-    [[ $1 =~ ^-?([0-9]+([.][0-9]*)?|[.][0-9]+)([eE][+-]?[0-9]+)?$ ]]
+    [[ $1 =~ ^-?([0-9]+([.][0-9]*)?|[.][0-9]+)([eE][+-]?[0-9]+)?$ ]] || return 1
+    LC_ALL=C awk -v v="$1" 'BEGIN { exit (sprintf("%g", v + 0) ~ /inf|nan/) }'
 }
 
 number_le() {
     local left=$1 right=$2
-    awk -v l="$left" -v r="$right" 'BEGIN { exit (l <= r ? 0 : 1) }'
+    # AWK floating-point comparisons lose adjacent large integers.
+    if is_int_literal "$left" && is_int_literal "$right"; then
+        local l=$(( 10#${left#-} )) r=$(( 10#${right#-} ))
+        [[ $left == -* ]] && l=$(( -l ))
+        [[ $right == -* ]] && r=$(( -r ))
+        (( l <= r ))
+        return
+    fi
+    LC_ALL=C awk -v l="$left" -v r="$right" 'BEGIN { exit (l <= r ? 0 : 1) }'
 }
 
 validate_cycle_options() {
     local label=$1 options=$2 opt
     local -a opts=()
     IFS=',' read -r -a opts <<< "$options"
-    if (( ${#opts[@]} == 0 )); then
+    if (( ${#opts[@]} == 0 )) || [[ $options == *, ]]; then
         log_err "Register Error: Cycle '$label' has no options."
         exit 1
     fi
-    for opt in "${opts[@]:-}"; do
+    for opt in "${opts[@]}"; do
+        trim_spaces "$opt"; opt=$REPLY
         if [[ -z $opt || $opt == *$'\n'* || $opt == *'|'* || $opt == *,* ]]; then
             log_err "Register Error: Cycle '$label' contains unsafe option: '$opt'"
             exit 1
@@ -468,7 +462,7 @@ validate_item_config() {
         log_err "Register Error: Invalid label."
         exit 1
     fi
-    if [[ -z $key || $key == *$'\n'* || $key == *'|'* || $key == */* ]]; then
+    if [[ -z $key || $key == *$'\n'* || $key == *[[:space:]=\|]* || $key == */* || $key == [\#\;\[]* ]]; then
         log_err "Register Error: Invalid key for '$label'."
         exit 1
     fi
@@ -477,10 +471,12 @@ validate_item_config() {
         *) log_err "Invalid type for '$label': $type"; exit 1 ;;
     esac
     
-    # Safe robust regex for blocks: accounts for spaces, quotes, and tildes.
-    local re='^[a-zA-Z0-9_.: =/"~'\''-]+(/[a-zA-Z0-9_.: =/"~'\''-]+)*$'
-    if [[ -n $block && ! $block =~ $re ]]; then
-        log_err "Register Error: Invalid block path for '$label': $block"
+    trim_spaces "$block"
+    if [[ $block != "$REPLY" ]]; then
+        log_err "Register Error: Scope must not have outer whitespace for '$label'."; exit 1
+    fi
+    if [[ $block == *[$'\n\r'\[\]\|]* ]]; then
+        log_err "Register Error: Invalid section for '$label': $block"
         exit 1
     fi
     
@@ -489,7 +485,7 @@ validate_item_config() {
             if [[ -n $min ]] && ! is_int_literal "$min"; then log_err "Register Error: Invalid int min for '$label'."; exit 1; fi
             if [[ -n $max ]] && ! is_int_literal "$max"; then log_err "Register Error: Invalid int max for '$label'."; exit 1; fi
             if [[ -n $step ]]; then
-                if ! is_int_literal "$step" || [[ $step == -* || $step == 0 ]]; then
+                if ! is_int_literal "$step" || [[ $step == -* || ! $step =~ [1-9] ]]; then
                     log_err "Register Error: Invalid int step for '$label'."
                     exit 1
                 fi
@@ -503,7 +499,7 @@ validate_item_config() {
             if [[ -n $min ]] && ! is_float_literal "$min"; then log_err "Register Error: Invalid float min for '$label'."; exit 1; fi
             if [[ -n $max ]] && ! is_float_literal "$max"; then log_err "Register Error: Invalid float max for '$label'."; exit 1; fi
             if [[ -n $step ]]; then
-                if ! is_float_literal "$step" || [[ $step == -* || ! $step =~ [1-9] ]]; then
+                if ! is_float_literal "$step" || ! LC_ALL=C awk -v v="$step" 'BEGIN { exit !(v + 0 > 0) }'; then
                     log_err "Register Error: Invalid float step for '$label'."
                     exit 1
                 fi
@@ -523,6 +519,37 @@ validate_item_config() {
     fi
 }
 
+validate_item_default() {
+    local label=$1 type=$2 min=$3 max=$4 value=$5 option valid=0
+    local -a default_options=()
+    if [[ $value == *$'\n'* || $value == *$'\r'* ]]; then
+        log_err "Register Error: Multiline default for '$label'."; exit 1
+    fi
+    case $type in
+        int|float)
+            if [[ $type == int ]]; then is_int_literal "$value" && valid=1
+            else is_float_literal "$value" && valid=1; fi
+            if (( valid )) && [[ -n $min ]] && ! number_le "$min" "$value"; then valid=0; fi
+            if (( valid )) && [[ -n $max ]] && ! number_le "$value" "$max"; then valid=0; fi
+            ;;
+        bool)
+            case ${value,,} in true|false|yes|no|on|off|1|0) valid=1 ;; esac
+            ;;
+        cycle)
+            cycle_display_value "$value" "$min"; value=$REPLY
+            IFS=',' read -r -a default_options <<< "$min"
+            for option in "${default_options[@]}"; do
+                trim_spaces "$option"
+                if [[ $value == "$REPLY" ]]; then valid=1; break; fi
+            done
+            ;;
+        *) valid=1 ;;
+    esac
+    if (( !valid )); then
+        log_err "Register Error: Invalid or out-of-range default for '$label'."; exit 1
+    fi
+}
+
 register() {
     local -i tab_idx=$1
     local label=$2 config=$3 default_val=${4:-}
@@ -534,6 +561,9 @@ register() {
         exit 1
     fi
     validate_item_config "$label" "$key" "$type" "$block" "$min" "$max" "$step"
+    if (( $# >= 4 )) && [[ $type != menu && $type != action ]]; then
+        validate_item_default "$label" "$type" "$min" "$max" "$default_val"
+    fi
 
     if [[ -n ${ITEM_MAP["${tab_idx}::${label}"]+_} ]]; then
         log_err "Register Error: Duplicate label in tab $tab_idx: $label"
@@ -545,12 +575,17 @@ register() {
     fi
 
     ITEM_MAP["${tab_idx}::${label}"]=$config
-    [[ -n $default_val ]] && DEFAULTS["${tab_idx}::${label}"]=$default_val
+    if (( $# >= 4 )) && [[ $type != menu && $type != action ]]; then
+        DEFAULTS["${tab_idx}::${label}"]=$default_val
+    fi
 
     local -n _reg_tab_ref="TAB_ITEMS_${tab_idx}"
     _reg_tab_ref+=("$label")
 
     if [[ $type == menu ]]; then
+        if declare -p "SUBMENU_ITEMS_${key}" >/dev/null 2>&1; then
+            log_err "Register Error: Duplicate menu ID: $key"; exit 1
+        fi
         declare -ga "SUBMENU_ITEMS_${key}=()"
     fi
 }
@@ -569,6 +604,9 @@ register_child() {
         exit 1
     fi
     validate_item_config "$label" "$key" "$type" "$block" "$min" "$max" "$step"
+    if (( $# >= 4 )) && [[ $type != action && $type != menu ]]; then
+        validate_item_default "$label" "$type" "$min" "$max" "$default_val"
+    fi
     if [[ $type == menu ]]; then
         log_err "Register Error: Nested menus are not supported for '$label'."
         exit 1
@@ -579,7 +617,9 @@ register_child() {
     fi
 
     ITEM_MAP["${parent_id}::${label}"]=$config
-    [[ -n $default_val ]] && DEFAULTS["${parent_id}::${label}"]=$default_val
+    if (( $# >= 4 )) && [[ $type != action ]]; then
+        DEFAULTS["${parent_id}::${label}"]=$default_val
+    fi
 
     local -n _child_ref="SUBMENU_ITEMS_${parent_id}"
     _child_ref+=("$label")
@@ -591,13 +631,16 @@ register_child() {
 
 populate_config_cache() {
     local target_path=${WRITE_TARGET:-}
-    local current_scope="" k v line
-    CONFIG_CACHE=()
+    local current_scope="" k v line before after
+    local -A parsed_cache=()
+    CONFIG_SIGNATURE=""
 
     if [[ -z $target_path || ! -f $target_path || ! -r $target_path ]]; then
-        return 0
+        set_status "Config is missing or unreadable."
+        return 1
     fi
 
+    before=$(file_signature "$target_path") || { set_status "Unable to inspect config."; return 1; }
     while IFS= read -r line || [[ -n $line ]]; do
         trim_spaces "$line"; line=$REPLY
         [[ -z $line || $line == \#* || $line == \;* ]] && continue
@@ -605,7 +648,7 @@ populate_config_cache() {
         if [[ $line =~ ^\[(.*)\]$ ]]; then
             current_scope="${BASH_REMATCH[1]}"
             trim_spaces "$current_scope"; current_scope=$REPLY
-        elif [[ $line =~ ^([^=[:space:]]+)[=[:space:]]+(.*)$ ]]; then
+        elif [[ $line =~ ^([^=[:space:]]+)[[:space:]]*=[[:space:]]*(.*)$ ]]; then
             k="${BASH_REMATCH[1]}"
             v="${BASH_REMATCH[2]}"
             trim_spaces "$k"; k=$REPLY
@@ -613,11 +656,22 @@ populate_config_cache() {
             if [[ $v == \"*\" || $v == \'*\' ]]; then
                 v="${v:1:-1}"
             fi
-            CONFIG_CACHE["${k}|${current_scope}"]=$v
+            parsed_cache["${k}|${current_scope}"]=$v
+        elif [[ $line =~ ^([^=[:space:]]+)[[:space:]]+(.*)$ ]]; then
+            k=${BASH_REMATCH[1]}; v=${BASH_REMATCH[2]}
+            trim_spaces "$v"; v=$REPLY
+            if [[ $v == \"*\" || $v == \'*\' ]]; then v="${v:1:-1}"; fi
+            parsed_cache["${k}|${current_scope}"]=$v
         fi
-    done < "$target_path"
-
-    CONFIG_SOURCE_FILES=("$target_path")
+    done < "$target_path" || { set_status "Unable to read config."; return 1; }
+    if ! after=$(file_signature "$target_path") || [[ $before != "$after" ]]; then
+        set_status "Config changed while being read; retry."
+        return 1
+    fi
+    # Publish only a complete, stable read. Failed reloads retain every view.
+    CONFIG_CACHE=()
+    for k in "${!parsed_cache[@]}"; do CONFIG_CACHE[$k]=${parsed_cache[$k]}; done
+    CONFIG_SIGNATURE=$after
     return 0
 }
 
@@ -626,170 +680,129 @@ populate_config_cache() {
 # =============================================================================
 
 write_value_to_file() {
-    local requested_key=$1 new_val=$2 requested_scope=${3:-}
-    local target_key target_scope cache_key current_val
-    local lock_fd="" scratch="" src=""
-
+    local target_key=$1 new_val=$2 target_scope=${3:-} operation=${4:-set}
+    local cache_key lock_fd="" before after encoded
     LAST_WRITE_CHANGED=0
-
-    if [[ -z ${WRITE_TARGET:-} ]]; then
-        set_status "Config path is not initialized."
+    trim_spaces "$target_scope"; target_scope=$REPLY
+    cache_key="${target_key}|${target_scope}"
+    if [[ $target_scope == *[$'\n\r'\[\]\|]* || $target_key == [\#\;\[]* ]]; then
+        set_status "Invalid scope or key."; return 1
+    fi
+    if [[ $operation != set && $operation != delete ]] ||
+       [[ $target_key == *[[:space:]=\|]* || -z $target_key ||
+          $new_val == *$'\n'* || $new_val == *$'\r'* ]]; then
+        set_status "Invalid key, operation, or multiline value."
         return 1
     fi
-    if [[ -z ${LOCK_TARGET:-} ]]; then
-        set_status "Config lock path is not initialized."
-        return 1
+    if [[ -z $WRITE_TARGET || -z $LOCK_TARGET ]]; then
+        set_status "Config path is not initialized."; return 1
     fi
-
     if ! exec {lock_fd}>>"$LOCK_TARGET"; then
-        set_status "Unable to open config lock."
-        return 1
+        set_status "Unable to open config lock."; return 1
     fi
     if ! flock -x -n "$lock_fd"; then
         release_lock_fd "$lock_fd"
-        set_status "Config file is locked by another process."
-        return 1
+        set_status "Config file is locked by another process."; return 1
     fi
-
-    if [[ -f $WRITE_TARGET && ! -r $WRITE_TARGET ]]; then
+    # Validate the cache under the lock. Reload only after an external change;
+    # unchanged large files need one streaming AWK mutation, no Bash reparse.
+    if ! before=$(file_signature "$WRITE_TARGET"); then
         release_lock_fd "$lock_fd"
-        set_status "Config file exists but is unreadable."
-        return 1
+        set_status "Config is missing or unreadable."; return 1
     fi
-
-    normalize_target "$requested_key" "$requested_scope"
-    target_key=$TARGET_KEY
-    target_scope=$TARGET_SCOPE
-    cache_key="${target_key}|${target_scope}"
-    current_val=${CONFIG_CACHE[$cache_key]:-}
-
-    # Optimize out no-op deletes
-    if [[ -z ${CONFIG_CACHE[$cache_key]+_} && "$new_val" == "__DELETE__" ]]; then
+    if [[ $before != "$CONFIG_SIGNATURE" ]]; then
+        if ! populate_config_cache; then release_lock_fd "$lock_fd"; return 1; fi
+        before=$CONFIG_SIGNATURE
+    fi
+    # Optional compare-and-swap protects relative edits, including stale no-ops.
+    # Arguments 5/6 are the expected presence (0/1) and raw cached value.
+    if (( $# >= 5 )); then
+        local actual_present=0
+        [[ ${CONFIG_CACHE[$cache_key]+present} ]] && actual_present=1
+        if [[ $actual_present != "$5" || ${CONFIG_CACHE[$cache_key]-} != "${6-}" ]]; then
+            release_lock_fd "$lock_fd"
+            set_status "Setting changed externally; refreshed. Retry the adjustment."
+            return 1
+        fi
+    fi
+    if { [[ $operation == delete && ! ${CONFIG_CACHE[$cache_key]+present} ]]; } ||
+       { [[ $operation == set && ${CONFIG_CACHE[$cache_key]+present} &&
+            ${CONFIG_CACHE[$cache_key]} == "$new_val" ]]; }; then
+        release_lock_fd "$lock_fd"; return 0
+    fi
+    if [[ ! -w $WRITE_TARGET ]] || ! create_tmpfile_for_target "$WRITE_TARGET"; then
         release_lock_fd "$lock_fd"
-        return 0
+        set_status "Atomic save unavailable; check file and directory permissions."; return 1
     fi
-
-    if [[ -n ${CONFIG_CACHE[$cache_key]+_} && $current_val == "$new_val" ]]; then
-        release_lock_fd "$lock_fd"
-        return 0
-    fi
-
-    src=${CONFIG_SOURCE_FILES[0]:-$WRITE_TARGET}
-    if [[ ! -f $src ]]; then
-        touch "$src" 2>/dev/null || { release_lock_fd "$lock_fd"; set_status "Cannot create file."; return 1; }
-    fi
-    
-    if ! create_temp_near "$src" "mut"; then
-        release_lock_fd "$lock_fd"
-        return 1
-    fi
-    scratch=$REPLY
-
-    # AWK Parser: If val == "__DELETE__", lines matching the key are dropped entirely
-    if ! awk -v scope="$target_scope" -v key="$target_key" -v val="$new_val" '
+    encoded=$new_val
+    # Preserve whitespace and literal outer quotes in the documented grammar.
+    if [[ $new_val == [[:space:]]* || $new_val == *[[:space:]] ||
+          $new_val == \"*\" || $new_val == \'*\' ]]; then encoded="\"${new_val}\""; fi
+    # ENVIRON preserves literal backslashes, unlike awk -v string assignments.
+    if ! DUSKY_SCOPE="$target_scope" DUSKY_KEY="$target_key" DUSKY_VALUE="$encoded" \
+         DUSKY_OPERATION="$operation" awk '
         BEGIN {
-            in_scope = (scope == "" ? 1 : 0)
-            found = 0
-            k_len = length(key)
+            scope = ENVIRON["DUSKY_SCOPE"]; key = ENVIRON["DUSKY_KEY"]
+            val = ENVIRON["DUSKY_VALUE"]; deleting = ENVIRON["DUSKY_OPERATION"] == "delete"
+            in_scope = (scope == ""); seen_scope = in_scope; found = 0
         }
         {
-            line_trim = $0
-            sub(/^[[:space:]]+/, "", line_trim)
-            sub(/[[:space:]]+$/, "", line_trim)
+            if (NR == 1) eol = ($0 ~ /\r$/ ? "\r" : "")
+            line = $0; sub(/^[[:space:]]+/, "", line); sub(/[[:space:]]+$/, "", line)
         }
-        line_trim ~ /^\[.*\]$/ {
-            if (in_scope && !found && val != "__DELETE__") {
-                print key "=" val
-                found = 1
-            }
-            sec = line_trim
-            sub(/^\[/, "", sec)
-            sub(/\]$/, "", sec)
-            sub(/^[[:space:]]+/, "", sec)
-            sub(/[[:space:]]+$/, "", sec)
-            in_scope = (sec == scope)
-            print $0
-            next
+        line ~ /^\[.*\]$/ {
+            if (in_scope && !found && !deleting) { print key "=" val eol; found = 1 }
+            sec = substr(line, 2, length(line) - 2)
+            sub(/^[[:space:]]+/, "", sec); sub(/[[:space:]]+$/, "", sec)
+            in_scope = (sec == scope); if (in_scope) seen_scope = 1
+            print; next
         }
         {
-            if (in_scope) {
-                indent = ""
-                if (match($0, /^[[:space:]]+/)) {
-                    indent = substr($0, RSTART, RLENGTH)
-                }
-                rest = substr($0, length(indent) + 1)
-                if (substr(rest, 1, k_len) == key) {
-                    rem = substr(rest, k_len + 1)
-                    if (rem ~ /^[[:space:]]*=/ || rem ~ /^[[:space:]]+/) {
-                        if (!found && val != "__DELETE__") {
-                            sep = "="
-                            if (rem ~ /^[[:space:]]+[^=]/) sep = " "
-                            print indent key sep val
-                            found = 1
-                        }
-                        next
+            if (in_scope && line !~ /^[#;]/) {
+                k = line; sub(/[=[:space:]].*$/, "", k)
+                if (k == key && line ~ /[=[:space:]]/) {
+                    if (!found && !deleting) {
+                        indent = $0; sub(/[^[:space:]].*$/, "", indent)
+                        rest = substr($0, length(indent) + length(key) + 1)
+                        sub(/\r$/, "", rest)
+                        # Keep the existing assignment operator and its spacing.
+                        if (match(rest, /^[[:space:]]*=[[:space:]]*/)) sep = substr(rest, 1, RLENGTH)
+                        else if (match(rest, /^[[:space:]]+/)) sep = substr(rest, 1, RLENGTH)
+                        else sep = "="
+                        print indent key sep val eol; found = 1
                     }
+                    next
                 }
             }
-            print $0
+            print
         }
         END {
-            if (!found && val != "__DELETE__") {
-                if (scope != "" && !in_scope) print "\n[" scope "]"
-                print key "=" val
+            if (!found && !deleting) {
+                if (!seen_scope) print eol "\n[" scope "]" eol
+                print key "=" val eol
             }
         }
-    ' "$src" > "$scratch"; then
-        remove_temp "$scratch"
-        release_lock_fd "$lock_fd"
-        set_status "Failed to modify configuration."
-        return 1
+    ' "$WRITE_TARGET" > "$_TMPFILE"; then
+        remove_temp "$_TMPFILE"; release_lock_fd "$lock_fd"
+        set_status "Failed to modify configuration."; return 1
     fi
-
-    if ! stat -c '%s' -- "$scratch" >/dev/null 2>&1; then
-        remove_temp "$scratch"
-        release_lock_fd "$lock_fd"
-        set_status "Failed to stat staged write."
-        return 1
+    # Catch non-cooperating writers during staging; flock coordinates this engine.
+    if ! after=$(file_signature "$WRITE_TARGET") || [[ $before != "$after" ]]; then
+        remove_temp "$_TMPFILE"; release_lock_fd "$lock_fd"
+        populate_config_cache || :
+        set_status "Config changed during save; retry the edit."; return 1
     fi
-
-    if [[ ! -w $src ]]; then
-        remove_temp "$scratch"
-        release_lock_fd "$lock_fd"
-        set_status "Config source is not writable."
-        return 1
+    if ! commit_tmpfile_to_target "$WRITE_TARGET"; then
+        remove_temp "$_TMPFILE"; release_lock_fd "$lock_fd"
+        set_status "Atomic save failed."; return 1
     fi
-
-    if ! create_tmpfile_for_target "$src"; then
-        remove_temp "$scratch"
-        release_lock_fd "$lock_fd"
-        set_status "Atomic save unavailable."
-        return 1
-    fi
-
-    if ! cat -- "$scratch" > "$_TMPFILE"; then
-        remove_temp "$scratch"
-        remove_temp "$_TMPFILE"
-        release_lock_fd "$lock_fd"
-        set_status "Failed to stage atomic write."
-        return 1
-    fi
-    remove_temp "$scratch"
-
-    if ! commit_tmpfile_to_target "$src"; then
-        remove_temp "$_TMPFILE"
-        release_lock_fd "$lock_fd"
-        set_status "Atomic save failed."
-        return 1
-    fi
-
-    release_lock_fd "$lock_fd"
-
-    if [[ "$new_val" == "__DELETE__" ]]; then
-        unset "CONFIG_CACHE[$cache_key]"
+    if [[ $operation == delete ]]; then
+        unset 'CONFIG_CACHE[$cache_key]'
     else
-        CONFIG_CACHE["$cache_key"]=$new_val
+        CONFIG_CACHE[$cache_key]=$new_val
     fi
+    CONFIG_SIGNATURE=$(file_signature "$WRITE_TARGET") || CONFIG_SIGNATURE=""
+    release_lock_fd "$lock_fd"
     LAST_WRITE_CHANGED=1
     return 0
 }
@@ -803,18 +816,19 @@ cycle_display_value() {
     local -a raw_opts=() opts=()
     REPLY=$value
     IFS=',' read -r -a raw_opts <<< "$options"
-    for opt in "${raw_opts[@]:-}"; do
+    for opt in "${raw_opts[@]}"; do
         trim_spaces "$opt"
         opts+=("$REPLY")
     done
-    for opt in "${opts[@]:-}"; do
+    REPLY=$value
+    for opt in "${opts[@]}"; do
         if [[ $opt == "$value" ]]; then
             REPLY=$opt
             return 0
         fi
     done
     if [[ $value =~ ^[0-9]+$ ]]; then
-        for opt in "${opts[@]:-}"; do
+        for opt in "${opts[@]}"; do
             if [[ $opt =~ ^0[xX]([0-9a-fA-F]+)$ ]]; then
                 opt_dec=$(( 16#${BASH_REMATCH[1]} ))
                 if [[ $value == "$opt_dec" ]]; then
@@ -832,7 +846,8 @@ load_active_values() {
     get_active_context
     local -n _lav_items_ref="$REPLY_REF"
 
-    for item in "${_lav_items_ref[@]:-}"; do
+    for item in "${_lav_items_ref[@]}"; do
+        local dummy_max dummy_step
         IFS='|' read -r key type block min dummy_max dummy_step <<< "${ITEM_MAP["${REPLY_CTX}::${item}"]}"
         normalize_target "$key" "$block"
         norm_key=$TARGET_KEY
@@ -846,19 +861,23 @@ load_active_values() {
             fi
             VALUE_CACHE["${REPLY_CTX}::${item}"]=$value
         else
-            VALUE_CACHE["${REPLY_CTX}::${item}"]=$UNSET_MARKER
+            unset 'VALUE_CACHE[${REPLY_CTX}::${item}]'
         fi
     done
 }
 
 calc_float() {
     local current=$1 direction=$2 step=$3 min=$4 max=$5
-    awk -v c="$current" -v dir="$direction" -v step="$step" -v min="$min" -v max="$max" 'BEGIN {
+    LC_ALL=C awk -v c="$current" -v dir="$direction" -v step="$step" -v min="$min" -v max="$max" 'BEGIN {
         v = c + dir * step
         if (min != "" && v < min) v = min
         if (max != "" && v > max) v = max
-        printf "%.6f\n", v
-    }' | sed 's/0\+$//;s/\.$//'
+        if (sprintf("%g", v) ~ /inf|nan/) exit 1
+        # Fifteen significant digits avoid binary rounding noise without
+        # discarding small steps or emitting huge fixed-point strings.
+        if (v == 0) v = 0
+        printf "%.15g\n", v
+    }'
 }
 
 modify_value() {
@@ -868,9 +887,13 @@ modify_value() {
     get_active_context
     local -n _items_ref="$REPLY_REF"
     IFS='|' read -r key type block min max step <<< "${ITEM_MAP["${REPLY_CTX}::${label}"]}"
+    local cache_key="${key}|${block}" expected_present=0 expected_value
+    [[ ${CONFIG_CACHE[$cache_key]+present} ]] && expected_present=1
+    expected_value=${CONFIG_CACHE[$cache_key]-}
+    load_active_values
     current=${VALUE_CACHE["${REPLY_CTX}::${label}"]:-}
 
-    if [[ $current == "$UNSET_MARKER" || -z $current ]]; then
+    if [[ ! ${VALUE_CACHE["${REPLY_CTX}::${label}"]+present} || -z $current ]]; then
         current=${DEFAULTS["${REPLY_CTX}::${label}"]:-}
         [[ -z $current ]] && current=${min:-0}
     fi
@@ -887,7 +910,7 @@ modify_value() {
             fi
             int_val=$(( 10#${unsigned:-0} ))
             [[ $current == -* ]] && int_val=$(( -int_val ))
-            int_step=${step:-1}
+            int_step=$(( 10#${step:-1} ))
             if [[ ! $int_step =~ ^[0-9]+$ || ${#int_step} -gt 18 || $int_step == 0 ]]; then int_step=1; fi
             int_val=$(( int_val + direction * int_step ))
             if [[ -n $min ]]; then
@@ -904,21 +927,28 @@ modify_value() {
                     if (( int_val > max_i )); then int_val=$max_i; fi
                 fi
             fi
+            if ! is_int_literal "$int_val"; then
+                set_status "Integer adjustment exceeds the supported 18-digit range."
+                return 0
+            fi
             new_val=$int_val
             ;;
         float)
             [[ $current =~ ^-?([0-9]+([.][0-9]*)?|[.][0-9]+)([eE][+-]?[0-9]+)?$ ]] || current=${min:-0.0}
-            new_val=$(calc_float "$current" "$direction" "${step:-0.1}" "$min" "$max")
+            if ! new_val=$(calc_float "$current" "$direction" "${step:-0.1}" "$min" "$max"); then
+                set_status "Float adjustment exceeds the finite numeric range."
+                return 0
+            fi
             ;;
         bool)
-            [[ $current == true ]] && new_val=false || new_val=true
+            case ${current,,} in true|yes|on|1) new_val=false ;; *) new_val=true ;; esac
             ;;
         cycle)
             local -a raw_opts=() opts=()
             local -i count idx=0 i
             local opt
             IFS=',' read -r -a raw_opts <<< "$min"
-            for opt in "${raw_opts[@]:-}"; do
+            for opt in "${raw_opts[@]}"; do
                 trim_spaces "$opt"
                 opts+=("$REPLY")
             done
@@ -934,10 +964,12 @@ modify_value() {
         *) return 0 ;;
     esac
 
-    if write_value_to_file "$key" "$new_val" "$block"; then
-        VALUE_CACHE["${REPLY_CTX}::${label}"]=$new_val
+    if write_value_to_file "$key" "$new_val" "$block" set "$expected_present" "$expected_value"; then
+        load_active_values
         clear_status
         if (( LAST_WRITE_CHANGED )); then post_write_action; fi
+    else
+        load_active_values
     fi
     return 0
 }
@@ -948,6 +980,8 @@ reset_current_item() {
     local -n _items_ref="$REPLY_REF"
     if (( ${#_items_ref[@]} == 0 )); then return 0; fi
     label=${_items_ref[SELECTED_ROW]}
+    local dummy_min dummy_max dummy_step
+    # shellcheck disable=SC2034
     IFS='|' read -r key type block dummy_min dummy_max dummy_step <<< "${ITEM_MAP["${REPLY_CTX}::${label}"]:-}"
     
     if [[ $type == action || $type == menu ]]; then return 0; fi
@@ -955,19 +989,19 @@ reset_current_item() {
     # Grab the explicitly registered default value, if any
     def_val=${DEFAULTS["${REPLY_CTX}::${label}"]:-}
     
-    if [[ -n $def_val ]]; then
+    if [[ ${DEFAULTS["${REPLY_CTX}::${label}"]+present} ]]; then
         if write_value_to_file "$key" "$def_val" "$block"; then
             load_active_values
-            if (( LAST_WRITE_CHANGED )); then post_write_action; fi
             set_status "Reset '$label' to default ($def_val)."
+            if (( LAST_WRITE_CHANGED )); then post_write_action; fi
         else
             set_status "Failed to reset '$label'."
         fi
     else
-        if write_value_to_file "$key" "__DELETE__" "$block"; then
+        if write_value_to_file "$key" "" "$block" delete; then
             load_active_values
-            if (( LAST_WRITE_CHANGED )); then post_write_action; fi
             set_status "Reset '$label' to default (UNSET)."
+            if (( LAST_WRITE_CHANGED )); then post_write_action; fi
         else
             set_status "Failed to reset '$label'."
         fi
@@ -976,38 +1010,43 @@ reset_current_item() {
 }
 
 set_absolute_value() {
-    local label=$1 new_val=$2
+    local label=$1 new_val=$2 operation=${3:-set}
     local REPLY_REF REPLY_CTX key type block
     get_active_context
+    local dummy_min dummy_max dummy_step
+    # shellcheck disable=SC2034
     IFS='|' read -r key type block dummy_min dummy_max dummy_step <<< "${ITEM_MAP["${REPLY_CTX}::${label}"]}"
-    if write_value_to_file "$key" "$new_val" "$block"; then
-        VALUE_CACHE["${REPLY_CTX}::${label}"]=$new_val
+    if write_value_to_file "$key" "$new_val" "$block" "$operation"; then
+        load_active_values
         return 0
     fi
     return 1
 }
 
 reset_defaults() {
-    local REPLY_REF REPLY_CTX item def_val type
+    local REPLY_REF REPLY_CTX item def_val type operation
     local -i any_written=0 any_failed=0
     get_active_context
     local -n _rd_items_ref="$REPLY_REF"
 
-    for item in "${_rd_items_ref[@]:-}"; do
+    for item in "${_rd_items_ref[@]}"; do
+        local dummy_key dummy_block dummy_min dummy_max dummy_step
+        # shellcheck disable=SC2034
         IFS='|' read -r dummy_key type dummy_block dummy_min dummy_max dummy_step <<< "${ITEM_MAP["${REPLY_CTX}::${item}"]}"
         case $type in menu|action) continue ;; esac
         def_val=${DEFAULTS["${REPLY_CTX}::${item}"]:-}
-        if [[ -n $def_val ]]; then
-            if set_absolute_value "$item" "$def_val"; then
-                if (( LAST_WRITE_CHANGED )); then any_written=1; fi
-            else
-                any_failed=1
-            fi
+        operation="set"
+        if [[ ! ${DEFAULTS["${REPLY_CTX}::${item}"]+present} ]]; then operation=delete; fi
+        if set_absolute_value "$item" "$def_val" "$operation"; then
+            if (( LAST_WRITE_CHANGED )); then any_written=1; fi
+        else
+            any_failed=1
         fi
     done
 
+    if (( !any_failed )); then clear_status; fi
     if (( any_written )); then post_write_action; fi
-    if (( any_failed )); then set_status "Some defaults were not written."; else clear_status; fi
+    if (( any_failed )); then set_status "Some defaults were not written.${STATUS_MESSAGE:+ $STATUS_MESSAGE}"; fi
     return 0
 }
 
@@ -1016,6 +1055,10 @@ reset_defaults() {
 # =============================================================================
 
 acquire_sudo() {
+    if ! command -v sudo >/dev/null 2>&1; then
+        set_status "This action requires sudo, which is not installed."
+        return 1
+    fi
     if sudo -n true 2>/dev/null; then
         return 0
     fi
@@ -1043,7 +1086,7 @@ acquire_sudo() {
 }
 
 prompt_line_input() {
-    local prompt_text=$1 __result_var=$2 __raw_input="" prompt_row
+    local prompt_text=$1 __result_var=$2 __raw_input="" prompt_row input_ok=0
     [[ $__result_var =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]] || return 1
     printf '%s%s' "$MOUSE_OFF" "$CURSOR_SHOW" || true
     stty "$ORIGINAL_STTY" < /dev/tty 2>/dev/null || :
@@ -1053,11 +1096,12 @@ prompt_line_input() {
     printf '\033[%d;1H%s' "$prompt_row" "$CLR_EOS" || true
     printf '%s%s%s ' "$C_YELLOW" "$prompt_text" "$C_RESET" || true
 
-    IFS= read -r __raw_input < /dev/tty || __raw_input=""
+    IFS= read -r -e __raw_input < /dev/tty && input_ok=1
 
     stty -icanon -echo -ixon min 1 time 0 < /dev/tty 2>/dev/null || :
     printf '%s%s%s%s' "$CURSOR_HIDE" "$MOUSE_ON" "$CLR_SCREEN" "$CURSOR_HOME" || true
 
+    if (( !input_ok )); then set_status "Input cancelled."; return 1; fi
     trim_spaces "$__raw_input"
     printf -v "$__result_var" '%s' "$REPLY"
 }
@@ -1077,6 +1121,7 @@ compute_scroll_window() {
     if (( SELECTED_ROW >= SCROLL_OFFSET + MAX_DISPLAY_ROWS )); then SCROLL_OFFSET=$(( SELECTED_ROW - MAX_DISPLAY_ROWS + 1 )); fi
     local -i max_scroll=$(( count - MAX_DISPLAY_ROWS ))
     if (( max_scroll < 0 )); then max_scroll=0; fi
+    if (( SCROLL_OFFSET < 0 )); then SCROLL_OFFSET=0; fi
     if (( SCROLL_OFFSET > max_scroll )); then SCROLL_OFFSET=$max_scroll; fi
     _vis_start=$SCROLL_OFFSET
     _vis_end=$(( SCROLL_OFFSET + MAX_DISPLAY_ROWS ))
@@ -1109,14 +1154,20 @@ render_item_list() {
 
     for (( ri = vs; ri < ve; ri++ )); do
         item=${_items[ri]}
-        val=${VALUE_CACHE["${ctx}::${item}"]:-$UNSET_MARKER}
+        val=${VALUE_CACHE["${ctx}::${item}"]-$UNSET_MARKER}
+        val=${val//[[:cntrl:]]/?}
         config=${ITEM_MAP["${ctx}::${item}"]}
+        local dummy_key dummy_block dummy_min dummy_max dummy_step
+        # shellcheck disable=SC2034
         IFS='|' read -r dummy_key type dummy_block dummy_min dummy_max dummy_step <<< "$config"
         
         def_val=${DEFAULTS["${ctx}::${item}"]:-}
+        if [[ $type == cycle && ${DEFAULTS["${ctx}::${item}"]+present} ]]; then
+            cycle_display_value "$def_val" "$dummy_min"; def_val=$REPLY
+        fi
         def_marker="  "
-        if [[ -n $def_val ]]; then
-            if [[ $val != "$UNSET_MARKER" && $val != "$def_val" ]]; then
+        if [[ ${DEFAULTS["${ctx}::${item}"]+present} ]]; then
+            if [[ ${VALUE_CACHE["${ctx}::${item}"]+present} && $val != "$def_val" ]]; then
                 def_marker="${C_RED}● ${C_RESET}"
             else
                 def_marker="${C_YELLOW}● ${C_RESET}"
@@ -1127,7 +1178,7 @@ render_item_list() {
             menu) display="${C_YELLOW}[+] Open Menu ...${C_RESET}" ;;
             action) display="${C_GREEN}▶ press Enter${C_RESET}" ;;
             string)
-                if [[ $val == "$UNSET_MARKER" ]]; then
+                if [[ ! ${VALUE_CACHE["${ctx}::${item}"]+present} ]]; then
                     display="${C_GREEN}[✎ Edit]${C_RESET} ${C_YELLOW}⚠ UNSET${C_RESET}"
                 else
                     local -i max_v=$(( BOX_INNER_WIDTH - ITEM_PADDING - 12 ))
@@ -1139,27 +1190,30 @@ render_item_list() {
                 fi
                 ;;
             *)
-                case $val in
-                    true|yes|1) display="${C_GREEN}ON${C_RESET}" ;;
-                    false|no|0) display="${C_RED}OFF${C_RESET}" ;;
-                    "$UNSET_MARKER") display="${C_YELLOW}⚠ UNSET${C_RESET}" ;;
-                    *)
-                        local -i max_v=$(( BOX_INNER_WIDTH - ITEM_PADDING - 8 ))
-                        if (( max_v < 1 )); then max_v=1; fi
-                        if (( ${#val} > max_v )); then
-                            display="${C_WHITE}${val:0:max_v}…${C_RESET}"
-                        else
-                            display="${C_WHITE}${val}${C_RESET}"
-                        fi
-                        ;;
-                esac
+                if [[ ! ${VALUE_CACHE["${ctx}::${item}"]+present} ]]; then
+                    display="${C_YELLOW}⚠ UNSET${C_RESET}"
+                elif [[ $type == bool ]]; then
+                    case ${val,,} in
+                        true|yes|on|1) display="${C_GREEN}ON${C_RESET}" ;;
+                        false|no|off|0) display="${C_RED}OFF${C_RESET}" ;;
+                        *) display="${C_YELLOW}${val:0:32}${C_RESET}" ;;
+                    esac
+                else
+                    local -i max_v=$(( BOX_INNER_WIDTH - ITEM_PADDING - 8 ))
+                    if (( max_v < 1 )); then max_v=1; fi
+                    if (( ${#val} > max_v )); then
+                        display="${C_WHITE}${val:0:max_v}…${C_RESET}"
+                    else
+                        display="${C_WHITE}${val}${C_RESET}"
+                    fi
+                fi
                 ;;
         esac
         max_len=$(( ITEM_PADDING - 1 ))
         if (( ${#item} > ITEM_PADDING )); then
-            printf -v padded_item "%-${max_len}s…" "${item:0:max_len}"
+            printf -v padded_item "%-${max_len}ls…" "${item:0:max_len}"
         else
-            printf -v padded_item "%-${ITEM_PADDING}s" "$item"
+            printf -v padded_item "%-${ITEM_PADDING}ls" "$item"
         fi
         if (( ri == SELECTED_ROW )); then
             _buf+="${C_CYAN} ➤ ${C_INVERSE}${padded_item}${C_RESET} ${def_marker}: ${display}${CLR_EOL}"$'\n'
@@ -1170,6 +1224,15 @@ render_item_list() {
 
     local -i rows_rendered=$(( ve - vs ))
     for (( ri = rows_rendered; ri < MAX_DISPLAY_ROWS; ri++ )); do _buf+="${CLR_EOL}"$'\n'; done
+}
+
+render_footer() {
+    local -n _footer_buf=$1
+    local fallback=$2 text=" Status: $STATUS_MESSAGE"
+    if [[ -z $STATUS_MESSAGE ]]; then text=$fallback; fi
+    text=${text//[[:cntrl:]]/?}
+    if (( ${#text} > TERM_COLS - 1 )); then text="${text:0:TERM_COLS-2}…"; fi
+    _footer_buf+="${C_CYAN}${text}${C_RESET}${CLR_EOL}${CLR_EOS}"
 }
 
 draw_main_view() {
@@ -1194,6 +1257,13 @@ draw_main_view() {
     if (( TAB_SCROLL_START > CURRENT_TAB )); then TAB_SCROLL_START=$CURRENT_TAB; fi
     if (( TAB_SCROLL_START < 0 )); then TAB_SCROLL_START=0; fi
     local -i max_tab_width=$(( BOX_INNER_WIDTH - 6 ))
+    local -i total_tab_width=0
+    for name in "${TABS[@]}"; do total_tab_width=$(( total_tab_width + ${#name} + 4 )); done
+    total_tab_width=$(( total_tab_width - 2 ))
+    if (( total_tab_width <= BOX_INNER_WIDTH - 2 )); then
+        TAB_SCROLL_START=0
+        max_tab_width=$BOX_INNER_WIDTH
+    fi
     LEFT_ARROW_ZONE=""; RIGHT_ARROW_ZONE=""
 
     while true; do
@@ -1277,6 +1347,19 @@ draw_main_view() {
             TAB_ZONES+=("${zone_start}:$(( zone_start + tab_name_len + 1 ))")
             used_len=$(( used_len + chunk_len )); current_col=$(( current_col + chunk_len ))
         done
+        # Center the complete tab group; overflowing groups keep arrow navigation.
+        if (( TAB_SCROLL_START == 0 )) && [[ -z $RIGHT_ARROW_ZONE ]]; then
+            local -i tab_content_width=$(( used_len - 2 )) tab_shift
+            left_pad=$(( (BOX_INNER_WIDTH - tab_content_width) / 2 ))
+            tab_shift=$(( left_pad - 3 ))
+            local tab_prefix="${C_MAGENTA}│   "
+            printf -v pad_buf '%*s' "$left_pad" ''
+            tab_line="${C_MAGENTA}│${pad_buf}${tab_line:${#tab_prefix}}"
+            for (( i=0; i<${#TAB_ZONES[@]}; i++ )); do
+                TAB_ZONES[i]="$(( ${TAB_ZONES[i]%%:*} + tab_shift )):$(( ${TAB_ZONES[i]##*:} + tab_shift ))"
+            done
+            used_len=$(( left_pad + tab_content_width - 1 ))
+        fi
         local -i pad=$(( BOX_INNER_WIDTH - used_len - 1 ))
         if (( pad > 0 )); then printf -v pad_buf '%*s' "$pad" ''; tab_line+="$pad_buf"; fi
         tab_line+="${C_MAGENTA}│${C_RESET}"
@@ -1295,8 +1378,8 @@ draw_main_view() {
     render_scroll_indicator buf below "$count" "$_vis_end"
 
     buf+=$'\n'"${C_CYAN} [Tab] Category   [r] Reset Item   [R] Reset All   [←/→ h/l] Adjust${C_RESET}${CLR_EOL}"$'\n'
-    buf+="${C_CYAN} [Enter] Action   [q] Quit   ${C_YELLOW}●${C_CYAN} Default  ${C_RED}●${C_CYAN} Modified${C_RESET}${CLR_EOL}"$'\n'
-    if [[ -n $STATUS_MESSAGE ]]; then buf+="${C_CYAN} Status: ${C_RED}${STATUS_MESSAGE}${C_RESET}${CLR_EOL}${CLR_EOS}"; else buf+="${C_CYAN} File: ${C_WHITE}${WRITE_TARGET}${C_RESET}${CLR_EOL}${CLR_EOS}"; fi
+    buf+="${C_CYAN} [Enter] Action   [F5] Reload   [q] Quit   ${C_YELLOW}●${C_CYAN} Default  ${C_RED}●${C_CYAN} Modified${C_RESET}${CLR_EOL}"$'\n'
+    render_footer buf " File: $WRITE_TARGET"
     printf '%s' "$buf" || true
 }
 
@@ -1338,8 +1421,8 @@ draw_detail_view() {
     render_scroll_indicator buf below "$count" "$_vis_end"
     
     buf+=$'\n'"${C_CYAN} [Esc/Sh+Tab] Back   [r] Reset Item   [R] Reset All   [←/→ h/l] Adjust${C_RESET}${CLR_EOL}"$'\n'
-    buf+="${C_CYAN} [Enter] Toggle/Action   [q] Quit   ${C_YELLOW}●${C_CYAN} Default  ${C_RED}●${C_CYAN} Modified${C_RESET}${CLR_EOL}"$'\n'
-    if [[ -n $STATUS_MESSAGE ]]; then buf+="${C_CYAN} Status: ${C_RED}${STATUS_MESSAGE}${C_RESET}${CLR_EOL}${CLR_EOS}"; else buf+="${C_CYAN} Submenu: ${C_WHITE}${CURRENT_MENU_ID}${C_RESET}${CLR_EOL}${CLR_EOS}"; fi
+    buf+="${C_CYAN} [Enter] Action   [F5] Reload   [q] Quit   ${C_YELLOW}●${C_CYAN} Default  ${C_RED}●${C_CYAN} Modified${C_RESET}${CLR_EOL}"$'\n'
+    render_footer buf " Submenu: $CURRENT_MENU_ID"
     printf '%s' "$buf" || true
 }
 
@@ -1382,6 +1465,7 @@ draw_picker_view() {
         if (( PICKER_SELECTED >= PICKER_SCROLL + MAX_DISPLAY_ROWS )); then PICKER_SCROLL=$(( PICKER_SELECTED - MAX_DISPLAY_ROWS + 1 )); fi
         local -i max_scroll=$(( count - MAX_DISPLAY_ROWS ))
         if (( max_scroll < 0 )); then max_scroll=0; fi
+        if (( PICKER_SCROLL < 0 )); then PICKER_SCROLL=0; fi
         if (( PICKER_SCROLL > max_scroll )); then PICKER_SCROLL=$max_scroll; fi
     fi
     vstart=$PICKER_SCROLL
@@ -1393,7 +1477,7 @@ draw_picker_view() {
     max_len=$(( ITEM_PADDING - 1 ))
     for (( i = vstart; i < vend; i++ )); do
         item=${PICKER_ITEMS[i]}; hint=${PICKER_HINTS[i]:-}
-        if (( ${#item} > ITEM_PADDING )); then printf -v padded "%-${max_len}s…" "${item:0:max_len}"; else printf -v padded "%-${ITEM_PADDING}s" "$item"; fi
+        if (( ${#item} > ITEM_PADDING )); then printf -v padded "%-${max_len}ls…" "${item:0:max_len}"; else printf -v padded "%-${ITEM_PADDING}ls" "$item"; fi
         hint_trim=$hint
         if (( ${#hint_trim} > 32 )); then hint_trim="${hint_trim:0:31}…"; fi
         if (( i == PICKER_SELECTED )); then 
@@ -1417,12 +1501,11 @@ draw_picker_view() {
     
     buf+=$'\n'"${C_CYAN} [↑/↓ j/k] Navigate   [Enter] Select${C_RESET}${CLR_EOL}"$'\n'
     buf+="${C_CYAN} [Esc] Cancel   [q] Quit${C_RESET}${CLR_EOL}"$'\n'
-    if [[ -n $STATUS_MESSAGE ]]; then buf+="${C_CYAN} Status: ${C_RED}${STATUS_MESSAGE}${C_RESET}${CLR_EOL}${CLR_EOS}"; elif (( count == 0 )); then buf+="${C_CYAN} ${C_YELLOW}(no items - press Esc to go back)${C_RESET}${CLR_EOL}${CLR_EOS}"; else buf+="${C_CYAN} ${count} item(s)${C_RESET}${CLR_EOL}${CLR_EOS}"; fi
+    render_footer buf " ${count} item(s) — Esc to go back"
     printf '%s' "$buf" || true
 }
 
 draw_ui() {
-    update_terminal_size
     if ! terminal_size_ok; then draw_small_terminal_notice; return; fi
     case $CURRENT_VIEW in
         0) draw_main_view ;;
@@ -1436,17 +1519,17 @@ draw_ui() {
 # =============================================================================
 
 exit_picker() {
-    CURRENT_VIEW=0
-    SELECTED_ROW=$PARENT_ROW
-    SCROLL_OFFSET=$PARENT_SCROLL
+    CURRENT_VIEW=$PICKER_PARENT_VIEW
+    SELECTED_ROW=$PICKER_PARENT_ROW
+    SCROLL_OFFSET=$PICKER_PARENT_SCROLL
     PICKER_ITEMS=(); PICKER_HINTS=(); PICKER_TITLE=""; PICKER_CALLBACK=""
     load_active_values
 }
 
 picker_navigate() {
     local -i dir=$1 count=${#PICKER_ITEMS[@]}
-    if (( count == 0 )); then return 0; fi
-    PICKER_SELECTED=$(( (PICKER_SELECTED + dir + count) % count ))
+    if (( count == 0 )); then PICKER_SELECTED=0; return 0; fi
+    PICKER_SELECTED=$(( ((PICKER_SELECTED + dir) % count + count) % count ))
 }
 
 picker_confirm() {
@@ -1455,6 +1538,7 @@ picker_confirm() {
     local chosen=${PICKER_ITEMS[PICKER_SELECTED]} cb=$PICKER_CALLBACK
     exit_picker
     if [[ -n $cb && $(type -t "$cb") == function ]]; then "$cb" "$chosen"; fi
+    return 0
 }
 
 navigate() {
@@ -1499,6 +1583,8 @@ adjust() {
     local -n _items_ref="$REPLY_REF"
     if (( ${#_items_ref[@]} == 0 )); then return 0; fi
     label=${_items_ref[SELECTED_ROW]}
+    local dummy_key dummy_block dummy_min dummy_max dummy_step
+    # shellcheck disable=SC2034
     IFS='|' read -r dummy_key type dummy_block dummy_min dummy_max dummy_step <<< "${ITEM_MAP["${REPLY_CTX}::${label}"]}"
     if [[ $type == action || $type == string ]]; then return 0; fi
     modify_value "$label" "$dir"
@@ -1535,6 +1621,8 @@ activate_item() {
     if (( ${#_act_ref[@]} == 0 )); then return 1; fi
     item=${_act_ref[SELECTED_ROW]}
     config=${ITEM_MAP["${REPLY_CTX}::${item}"]}
+    local dummy_min dummy_max dummy_step
+    # shellcheck disable=SC2034
     IFS='|' read -r key type block dummy_min dummy_max dummy_step <<< "$config"
     case $type in
         menu)
@@ -1555,7 +1643,6 @@ activate_item() {
         string)
             local user_input="" current_val p_text
             current_val=${VALUE_CACHE["${REPLY_CTX}::${item}"]:-}
-            if [[ $current_val == "$UNSET_MARKER" ]]; then current_val=""; fi
             
             p_text="New $item"
             if [[ -n $current_val ]]; then
@@ -1563,9 +1650,9 @@ activate_item() {
             fi
             p_text+=" (blank to UNSET):"
             
-            prompt_line_input "$p_text" user_input
+            prompt_line_input "$p_text" user_input || return 0
             if [[ -z $user_input ]]; then
-                write_value_to_file "$key" "__DELETE__" "$block"
+                write_value_to_file "$key" "" "$block" delete
             else
                 write_value_to_file "$key" "$user_input" "$block"
             fi
@@ -1586,6 +1673,38 @@ go_back() {
     clear_status
 }
 
+# Return a selection-only event for left press/motion, and a click only when
+# release matches a press with no intervening motion or view change. Basic
+# click-only terminals with SGR still provide pairs; no mode ACK is needed.
+# SGR preserves the released button: left release is 0m. The generic release
+# code 3 belongs to legacy mouse encodings, not the SGR format parsed here.
+classify_mouse_event() {
+    local code=$1 x=$2 y=$3 terminator=$4
+    local context="${CURRENT_VIEW}:${CURRENT_TAB}:${CURRENT_MENU_ID}"
+    REPLY=$code
+    if [[ $terminator == m ]]; then
+        local pending=$MOUSE_CLICK_PENDING
+        MOUSE_CLICK_PENDING=0
+        if (( code == 0 && pending && x == MOUSE_PRESS_X && y == MOUSE_PRESS_Y )) &&
+           [[ $context == "$MOUSE_PRESS_CONTEXT" ]]; then
+            REPLY=0
+            return 0
+        fi
+        return 1
+    fi
+    case $code in
+        0)
+            MOUSE_CLICK_PENDING=1; MOUSE_PRESS_X=$x; MOUSE_PRESS_Y=$y
+            MOUSE_PRESS_CONTEXT=$context
+            REPLY=32
+            ;;
+        32) MOUSE_CLICK_PENDING=0 ;;
+        2|64|65) MOUSE_CLICK_PENDING=0 ;;
+        *) MOUSE_CLICK_PENDING=0; return 1 ;;
+    esac
+    return 0
+}
+
 handle_mouse() {
     local input="$1"
     local -i button x y i start end
@@ -1604,14 +1723,17 @@ handle_mouse() {
     if [[ ! "$field2" =~ ^[0-9]+$ ]]; then return 0; fi
     if [[ ! "$field3" =~ ^[0-9]+$ ]]; then return 0; fi
 
-    button=$field1
-    x=$field2
-    y=$field3
+    if (( ${#field1} > 3 || ${#field2} > 6 || ${#field3} > 6 )); then return 0; fi
+    button=$((10#$field1)); x=$((10#$field2)); y=$((10#$field3))
 
+    if (( x < 1 || x > MIN_TERM_COLS || y < 1 || y > TERM_ROWS )); then
+        MOUSE_CLICK_PENDING=0; return 0
+    fi
+    classify_mouse_event "$button" "$x" "$y" "$terminator" || return 0
+    button=$REPLY
     if (( button == 64 )); then navigate -1; return 0; fi
     if (( button == 65 )); then navigate 1; return 0; fi
-
-    if [[ "$terminator" != "M" ]]; then return 0; fi
+    if (( button != 0 && button != 2 && button != 32 )); then return 0; fi
 
     if (( y == TAB_ROW )); then
         if (( CURRENT_VIEW == 0 )); then
@@ -1667,13 +1789,11 @@ handle_mouse() {
 
         if (( clicked_idx >= 0 && clicked_idx < count )); then
             SELECTED_ROW=$clicked_idx
+            # Motion shares click hit-testing, but can never reach an action.
+            if (( button == 32 )); then return 0; fi
             if (( x > ADJUST_THRESHOLD )); then
                 if (( button == 0 )); then
-                    if (( CURRENT_VIEW == 0 )); then
-                        activate_item || adjust 1
-                    else
-                        activate_item || adjust 1
-                    fi
+                    activate_item || adjust 1
                 elif (( button == 2 )); then
                     adjust -1
                 fi
@@ -1699,12 +1819,17 @@ handle_mouse_picker() {
     if [[ ! "$field1" =~ ^[0-9]+$ ]]; then return 0; fi
     if [[ ! "$field2" =~ ^[0-9]+$ ]]; then return 0; fi
     if [[ ! "$field3" =~ ^[0-9]+$ ]]; then return 0; fi
-    button=$field1; x=$field2; y=$field3
+    if (( ${#field1} > 3 || ${#field2} > 6 || ${#field3} > 6 )); then return 0; fi
+    button=$((10#$field1)); x=$((10#$field2)); y=$((10#$field3))
 
+    if (( x < 1 || x > MIN_TERM_COLS || y < 1 || y > TERM_ROWS )); then
+        MOUSE_CLICK_PENDING=0; return 0
+    fi
+    classify_mouse_event "$button" "$x" "$y" "$terminator" || return 0
+    button=$REPLY
     if (( button == 64 )); then picker_navigate -1; return 0; fi
     if (( button == 65 )); then picker_navigate 1; return 0; fi
-
-    if [[ "$terminator" != "M" ]]; then return 0; fi
+    if (( button != 0 && button != 2 && button != 32 )); then return 0; fi
 
     local -i effective_start=$(( ITEM_START_ROW + 1 ))
     if (( y >= effective_start && y < effective_start + MAX_DISPLAY_ROWS )); then
@@ -1712,6 +1837,7 @@ handle_mouse_picker() {
         local -i count=${#PICKER_ITEMS[@]}
         if (( clicked_idx >= 0 && clicked_idx < count )); then
             PICKER_SELECTED=$clicked_idx
+            if (( button == 32 )); then return 0; fi
             if (( button == 0 )); then
                 picker_confirm
             fi
@@ -1727,9 +1853,9 @@ read_escape_seq() {
     if ! IFS= read -rsn1 -t "$ESC_READ_TIMEOUT" char < /dev/tty; then return 1; fi
     _esc_out+=$char
     if [[ $char == '[' || $char == 'O' ]]; then
-        while IFS= read -rsn1 -t "$ESC_READ_TIMEOUT" char < /dev/tty; do
+        while (( ${#_esc_out} < MAX_ESCAPE_BYTES )) && IFS= read -rsn1 -t "$ESC_READ_TIMEOUT" char < /dev/tty; do
             _esc_out+=$char
-            [[ $char =~ [a-zA-Z~] ]] && break
+            [[ $char == [@-~] ]] && break
         done
     fi
     return 0
@@ -1823,8 +1949,26 @@ handle_key_picker() {
     esac
 }
 
+consume_paste_byte() {
+    PASTE_TAIL="${PASTE_TAIL}${1}"
+    if (( ${#PASTE_TAIL} > 6 )); then PASTE_TAIL=${PASTE_TAIL: -6}; fi
+    if [[ $PASTE_TAIL == $'\e[201~' ]]; then PASTE_ACTIVE=0; PASTE_TAIL=""; fi
+    return 0
+}
+
+discard_bracketed_paste() {
+    local char
+    PASTE_ACTIVE=1; PASTE_TAIL=""
+    # Retain state across timeouts: a slow paste must never become shortcuts.
+    while (( PASTE_ACTIVE )) && IFS= read -rsn1 -t "$READ_LOOP_TIMEOUT" char < /dev/tty; do
+        consume_paste_byte "$char"
+    done
+    return 0
+}
+
 handle_input_router() {
     local key=$1 escape_seq=""
+    if (( PASTE_ACTIVE )); then consume_paste_byte "$key"; return 0; fi
     if [[ $key == $'\x1b' ]]; then
         if read_escape_seq escape_seq; then
             key=$escape_seq
@@ -1833,8 +1977,19 @@ handle_input_router() {
             key=ESC
         fi
     fi
+    if [[ $key == '[200~' ]]; then discard_bracketed_paste; return 0; fi
     if ! terminal_size_ok; then
+        MOUSE_CLICK_PENDING=0
         case $key in q|Q|$'\x03') exit 0 ;; esac
+        return 0
+    fi
+    if [[ $key == '[15~' ]]; then
+        # Reload on demand without polling or disturbing navigation state.
+        # Keep displayed values if the read fails; the next save revalidates.
+        if populate_config_cache; then
+            if (( CURRENT_VIEW != 2 )); then load_active_values; fi
+            set_status "Configuration refreshed."
+        fi
         return 0
     fi
     case $CURRENT_VIEW in
@@ -1855,6 +2010,10 @@ parse_args() {
                 shift
                 if [[ $# -gt 0 ]]; then CONFIG_FILE=$1; else log_err "--config requires a path"; exit 2; fi
                 ;;
+            --config=*)
+                CONFIG_FILE=${1#--config=}
+                [[ -n $CONFIG_FILE ]] || { log_err "--config requires a path"; exit 2; }
+                ;;
             --help|-h)
                 printf 'Usage: %s [--config /path/to/settings.conf]\n' "${0##*/}"
                 exit 0
@@ -1871,17 +2030,20 @@ parse_args() {
 main() {
     parse_args "$@"
 
-    if (( BASH_VERSINFO[0] < 5 )); then log_err "Bash 5.0+ required"; exit 1; fi
+    if (( TAB_COUNT == 0 || MAX_DISPLAY_ROWS < 1 )); then
+        log_err "Configure at least one tab and one display row."; exit 1
+    fi
+    if (( BASH_VERSINFO[0] < 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] < 3) )); then log_err "Bash 5.3+ required"; exit 1; fi
     if [[ ! -t 0 || ! -t 1 ]]; then log_err "Interactive TTY stdin/stdout required"; exit 1; fi
 
     local dep
-    for dep in realpath mktemp timeout flock sync stat head cat chmod chown mv rm stty sudo awk sed; do
+    for dep in realpath mktemp flock stat chmod chown mv rm stty awk mkdir sha256sum; do
         if ! command -v "$dep" >/dev/null 2>&1; then log_err "Missing dependency: $dep"; exit 1; fi
     done
 
-    resolve_write_target
+    resolve_write_target || exit 1
     register_items
-    populate_config_cache || exit 1
+    populate_config_cache || { log_err "$STATUS_MESSAGE"; exit 1; }
 
     ORIGINAL_STTY=$(stty -g < /dev/tty 2>/dev/null) || ORIGINAL_STTY=""
     if [[ -z $ORIGINAL_STTY ]]; then log_err "Failed to read terminal settings. A controlling TTY is required."; exit 1; fi
@@ -1890,27 +2052,36 @@ main() {
     TUI_STARTED=1
     printf '%s%s%s%s%s' "$ALT_SCREEN_ON" "$MOUSE_ON" "$CURSOR_HIDE" "$CLR_SCREEN" "$CURSOR_HOME"
     
-    # -------------------------------------------------------------------------
-    # UI Loop Armor
-    # We explicitly drop strict mode before the interactive UI begins to prevent
-    # read timeouts and terminal resize signals from causing ghost-crashes.
-    # -------------------------------------------------------------------------
-    set +Eeu
+    # Keep nounset and pipefail; expected read/write failures are handled explicitly.
+    # UI callbacks report errors instead of relying on errexit (which is context-sensitive).
+    set +e
+    load_active_values
+    trap 'RESIZE_PENDING=1' WINCH CONT
+    trap suspend_ui TSTP
 
-    load_active_values || true
-    trap 'RESIZE_PENDING=1' WINCH
-
-    local key
+    local key read_status
+    local -i redraw=1
+    update_terminal_size
     while true; do
-        draw_ui || true
-        
+        if (( RESIZE_PENDING )); then
+            RESIZE_PENDING=0
+            MOUSE_CLICK_PENDING=0
+            update_terminal_size
+            redraw=1
+        fi
+        if (( redraw )); then draw_ui; redraw=0; fi
         if IFS= read -rsn1 -t "$READ_LOOP_TIMEOUT" key < /dev/tty; then
-            if (( RESIZE_PENDING )); then RESIZE_PENDING=0; fi
+            # Refresh geometry before applying input after a resize.
+            if (( RESIZE_PENDING )); then
+                RESIZE_PENDING=0; MOUSE_CLICK_PENDING=0; update_terminal_size
+            fi
             handle_input_router "$key"
+            redraw=1
         else
-            if (( RESIZE_PENDING )); then RESIZE_PENDING=0; fi
+            read_status=$?
+            if (( read_status == 1 )); then exit 0; fi
         fi
     done
 }
 
-main "$@"
+if [[ ${BASH_SOURCE[0]} == "$0" ]]; then main "$@"; fi

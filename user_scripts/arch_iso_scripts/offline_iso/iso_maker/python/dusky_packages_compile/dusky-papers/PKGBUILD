@@ -1,0 +1,55 @@
+pkgname=dusky-papers
+pkgver=1.1.0
+pkgrel=2
+pkgdesc='Dusky Papers wallpaper browser for Hyprland'
+arch=('x86_64')
+license=('custom')
+depends=('glibc' 'gcc-libs' 'wayland' 'libxkbcommon' 'vulkan-icd-loader' 'mesa' 'libglvnd')
+makedepends=('cargo' 'python')
+source=()
+
+build() {
+  cp -a -- "$DUSKY_PACKAGE_SOURCE" "$srcdir/project"
+  cd "$srcdir/project"
+  # Never inherit builder CPU/features; encoded flags take precedence in Cargo.
+  unset CARGO_ENCODED_RUSTFLAGS
+  export RUSTFLAGS='-C target-cpu=x86-64'
+  export CFLAGS='-march=x86-64 -mtune=generic -O2'
+  export CXXFLAGS="$CFLAGS"
+  export CPPFLAGS=''
+  cargo build --release --locked --target x86_64-unknown-linux-gnu
+}
+
+package() {
+  local target_dir="${CARGO_TARGET_DIR:-$srcdir/project/target}"
+  install -Dm755 "$target_dir/x86_64-unknown-linux-gnu/release/dusky-papers" \
+    "$pkgdir/usr/bin/dusky-papers"
+  install -d "$pkgdir/usr/share/dusky-papers"
+  python - "$srcdir/project" > "$pkgdir/usr/share/dusky-papers/source.sha256" <<'PY'
+import hashlib
+import sys
+from pathlib import Path
+
+project = Path(sys.argv[1])
+files = [project / "Cargo.toml", project / "Cargo.lock"]
+for relative in (
+    "build.rs", "rust-toolchain", "rust-toolchain.toml",
+    ".cargo/config", ".cargo/config.toml",
+):
+    path = project / relative
+    if path.is_file():
+        files.append(path)
+src = project / "src"
+if src.is_dir():
+    files.extend(sorted(path for path in src.rglob("*") if path.is_file()))
+
+# Keep these inputs in sync with source_digest() in 151_dusky_papers_setup.py.
+digest = hashlib.sha256()
+digest.update(b"native-v3-frozen-sparse\0")
+for path in files:
+    digest.update(str(path.relative_to(project)).encode())
+    digest.update(b"\0")
+    digest.update(hashlib.sha256(path.read_bytes()).digest())
+print(digest.hexdigest())
+PY
+}

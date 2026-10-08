@@ -1,0 +1,32 @@
+@-moz-document domain("helpx.adobe.com") {
+    /* >>> dusky:picks - managed by the Visual Picker, one rule per line */
+    body { background-color: var(--background) !important; color: var(--on_background) !important; border-color: var(--outline_variant) !important; } /* dusky key=sel%1Fbody%1Fbg | bg: background */
+    div { background-color: var(--background) !important; color: var(--on_background) !important; border-color: var(--outline_variant) !important; } /* dusky key=sel%1Fdiv%1Fbg | bg: background */
+    #title-bar > h1.page-title { color: var(--on_surface) !important; } /* dusky key=sel%1F%23title-bar%20%3E%20h1.page-title%1Ftext | text: on_surface */
+    p { color: var(--on_secondary_container) !important; } /* dusky key=sel%1Fp%1Ftext | text: on_secondary_container */
+    h2 { color: var(--on_surface) !important; } /* dusky key=sel%1Fh2%1Ftext | text: on_surface */
+    div.cmp-text > p > a { color: var(--primary) !important; } /* dusky key=sel%1Fdiv.cmp-text%20%3E%20p%20%3E%20a%1Ftext | text: primary */
+    button.feds-navLink.feds-navLink--hoverCaret { color: var(--on_surface) !important; } /* dusky key=sel%1Fbutton.feds-navLink.feds-navLink--hoverCaret%1Ftext | text: on_surface */
+    path { fill: var(--primary) !important; color: var(--primary) !important; } /* dusky key=sel%1Fpath%1Ffill | fill: primary */
+    span { color: var(--on_surface) !important; } /* dusky key=sel%1Fspan%1Ftext | text: on_surface */
+    a { color: var(--on_surface) !important; } /* dusky key=sel%1Fa%1Ftext | text: on_surface */
+    button { color: var(--on_surface_variant) !important; } /* dusky key=sel%1Fbutton%1Ftext | text: on_surface_variant */
+    footer.global-footer { background-color: var(--background) !important; color: var(--on_background) !important; border-color: var(--outline_variant) !important; } /* dusky key=sel%1Ffooter.global-footer%1Fbg | bg: background */
+    button { background-color: var(--background) !important; color: var(--on_background) !important; border-color: var(--outline_variant) !important; } /* dusky key=sel%1Fbutton%1Fbg | bg: background */
+    div.position { background-color: var(--background) !important; color: var(--on_background) !important; border-color: var(--outline_variant) !important; } /* dusky key=sel%1Fdiv.position%1Fbg | bg: background */
+    h3 { color: var(--on_primary_container) !important; } /* dusky key=sel%1Fh3%1Ftext | text: on_primary_container */
+    img.icon-link-out { background-color: var(--primary_fixed_dim) !important; } /* dusky key=sel%1Fimg.icon-link-out%1Fbg | bg: primary_fixed_dim */
+    div.fade-overlay { display: none !important; } /* dusky key=sel%1Fdiv.fade-overlay%1Fdisplay | hidden */
+    div.feds-navItem.feds-navItem--centered > div.feds-cta-wrapper > a.feds-cta.feds-cta--primary.helpx-action-visible { background-color: var(--surface_variant) !important; color: var(--on_surface) !important; border-color: var(--outline_variant) !important; } /* dusky key=sel%1Fdiv.feds-navItem.feds-navItem--centered%20%3E%20div.feds-cta-wrapper%20%3E%20a.feds-cta.feds-cta--primary.helpx-action-visible%1Fbg | bg: surface_variant */
+    li { color: var(--on_surface) !important; } /* dusky key=sel%1Fli%1Ftext | text: on_surface */
+    h4 { color: var(--on_surface) !important; } /* dusky key=sel%1Fh4%1Ftext | text: on_surface */
+    div.globalnavheader.globalNavHeader-V2.globalNavHeader { background-color: var(--background) !important; color: var(--on_background) !important; border-color: var(--outline_variant) !important; } /* dusky key=sel%1Fdiv.globalnavheader.globalNavHeader-V2.globalNavHeader%1Fbg | bg: background */
+    a.feds-navLink { background-color: var(--background) !important; color: var(--on_background) !important; border-color: var(--outline_variant) !important; } /* dusky key=sel%1Fa.feds-navLink%1Fbg | bg: background */
+    a.feds-cta.feds-cta--primary { background-color: var(--surface_variant) !important; color: var(--on_surface) !important; border-color: var(--outline_variant) !important; } /* dusky key=sel%1Fa.feds-cta.feds-cta--primary%1Fbg | bg: surface_variant */
+    div.feds-navLink-image > picture > img { background-color: var(--primary) !important; color: var(--on_primary) !important; border-color: var(--outline_variant) !important; } /* dusky key=sel%1Fdiv.feds-navLink-image%20%3E%20picture%20%3E%20img%1Fbg | bg: primary */
+    a.spectrum-Button.spectrum-Button--cta.dexter-Button--sizeS { background-color: var(--inverse_on_surface) !important; } /* dusky key=sel%1Fa.spectrum-Button.spectrum-Button--cta.dexter-Button--sizeS%1Fbg | bg: inverse_on_surface */
+    .column-ua03l03 { background-color: var(--surface) !important; color: var(--on_surface) !important; border-color: var(--outline_variant) !important; } /* dusky key=sel%1F.column-ua03l03%1Fbg | bg: surface */
+    .column-jc13lag { background-color: var(--surface) !important; color: var(--on_surface) !important; border-color: var(--outline_variant) !important; } /* dusky key=sel%1F.column-jc13lag%1Fbg | bg: surface */
+    .column-mx23lpn { background-color: var(--surface) !important; color: var(--on_surface) !important; border-color: var(--outline_variant) !important; } /* dusky key=sel%1F.column-mx23lpn%1Fbg | bg: surface */
+    /* <<< dusky:picks */
+}

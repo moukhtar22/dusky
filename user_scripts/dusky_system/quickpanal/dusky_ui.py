@@ -5,22 +5,19 @@ Target Specification: Arch Linux (Kernel 7.1+ / August 2026 Spec), Python 3.14.6
 Pure bleeding-edge implementation with zero legacy shims or backwards compatibility shims.
 """
 from __future__ import annotations
-from datetime import datetime
 import json
 import math
-import os
 import re
 import shlex
 import time
 from concurrent.futures import Future, CancelledError
-from pathlib import Path
 from typing import Any, Callable, Final
 import gi
 gi.require_version('Gtk', '3.0')
 gi.require_version('Gdk', '3.0')
 gi.require_version('Pango', '1.0')
-from gi.repository import Gdk, Gio, GLib, Gtk, Pango
-from dusky_backend import HOME, LOG, execute_cmd, run_command, snap_to_step, fetch_notifications, NotificationData, RefreshPool, NOTIF_CACHE_FILE, MAKO_BLACKLIST_FILE, atomic_write_json, is_dusky_notif_time_service_enabled
+from gi.repository import Gdk, GLib, Gtk, Pango
+from dusky_backend import LOG, execute_cmd, run_command, start_thread, snap_to_step, fetch_notifications, NotificationData, RefreshPool, NOTIF_CACHE_FILE, MAKO_BLACKLIST_FILE, is_dusky_notif_time_service_enabled
 
 def _add_css_class(widget: Gtk.Widget, cls: str) -> None:
     widget.get_style_context().add_class(cls)
@@ -54,20 +51,23 @@ class QuickIconToggle(Gtk.Overlay):
         self.badge_lbl.set_no_show_all(True)
         self.add_overlay(self.badge_lbl)
         self.btn_box.connect('button-press-event', self._on_clicked)
+        self.btn_box.connect('clicked', lambda _button: self._execute(1))
         self.cmds: dict[int, str] = {1: on_left, 2: on_middle, 3: on_right}
         self.show_all()
         self.badge_lbl.hide()
 
     def _on_clicked(self, widget: Gtk.Widget, event: Gdk.EventButton) -> bool:
-        if (cmd := self.cmds.get(event.button)):
-            if callable(self.on_execute):
-                try:
-                    self.on_execute(cmd, event.button)
-                except TypeError:
-                    self.on_execute(cmd)
-            else:
-                execute_cmd(cmd)
+        if event.button not in (2, 3):
+            return False
+        self._execute(event.button)
         return True
+
+    def _execute(self, button: int) -> None:
+        if (cmd := self.cmds.get(button)):
+            if callable(self.on_execute):
+                self.on_execute(cmd, button)
+            else:
+                execute_cmd(cmd, detached=True)
 
     def update_state(self, icon: str | None=None, css_class: str | None=None, tooltip: str | None=None, badge: str='') -> None:
         if icon:
@@ -120,7 +120,9 @@ class MetricPill(Gtk.EventBox):
         self.add(self._box)
         self.show_all()
 
-    def _on_clicked(self, *args: Any) -> bool:
+    def _on_clicked(self, _widget: Gtk.Widget, event: Gdk.EventButton) -> bool:
+        if event.button != 1:
+            return False
         if self._on_click_cmd:
             if callable(self.on_execute):
                 self.on_execute(self._on_click_cmd)
@@ -140,6 +142,8 @@ class MetricPill(Gtk.EventBox):
                 self._val_lbl.set_markup(text)
             except Exception:
                 self._val_lbl.set_text(text)
+        if data and data.get('tooltip'):
+            self.set_tooltip_text(str(data['tooltip']))
 
 class CompactSliderRow(Gtk.Box):
 
@@ -148,6 +152,7 @@ class CompactSliderRow(Gtk.Box):
         self._fetch_cb = fetch_cb
         self._submit_cb = submit_cb
         self._refresh_pool = refresh_pool
+        self._suspended = True
         self._refresh_future: Future[float | None] | None = None
         self._refresh_token = 0
         self._user_revision = 0
@@ -185,6 +190,8 @@ class CompactSliderRow(Gtk.Box):
         return False
 
     def refresh_async(self) -> None:
+        if self._suspended:
+            return
         if self._pending_local_value is not None and time.monotonic() < self._pending_local_deadline:
             return
         if self._refresh_future is not None and (not self._refresh_future.done()):
@@ -199,28 +206,27 @@ class CompactSliderRow(Gtk.Box):
         future.add_done_callback(lambda f: self._refresh_done(f, token, user_rev))
 
     def _refresh_done(self, future: Future[float | None], token: int, user_revision: int) -> None:
+        GLib.idle_add(self._finish_refresh, future, token, user_revision)
+
+    def _finish_refresh(self, future: Future[float | None], token: int, user_revision: int) -> bool:
+        if self._refresh_future is future:
+            self._refresh_future = None
         try:
             value = future.result()
         except CancelledError:
-            return
+            return GLib.SOURCE_REMOVE
         except Exception:
             value = None
-        GLib.idle_add(self._apply_refresh_result, token, user_revision, value)
+        return self._apply_refresh_result(token, user_revision, value)
 
     def _apply_refresh_result(self, token: int, user_revision: int, value: float | None) -> bool:
-        if token == self._refresh_token:
-            self._refresh_future = None
-        if token != self._refresh_token or user_revision != self._user_revision:
+        if self._suspended or token != self._refresh_token or user_revision != self._user_revision:
             return GLib.SOURCE_REMOVE
         if value is None:
-            self.set_no_show_all(True)
-            self.set_visible(False)
-            self.hide()
+            self._set_available(False)
             self._pending_local_value = None
             return GLib.SOURCE_REMOVE
-        self.set_no_show_all(False)
-        self.set_visible(True)
-        self.show_all()
+        self._set_available(True)
         clamped = snap_to_step(value, self.adjustment.get_lower(), self.adjustment.get_upper(), self.adjustment.get_step_increment())
         if self._pending_local_value is not None:
             if math.isclose(clamped, self._pending_local_value, rel_tol=0.0, abs_tol=max(self.adjustment.get_step_increment() * 0.5, 1e-09)):
@@ -239,15 +245,35 @@ class CompactSliderRow(Gtk.Box):
             self._suppress_apply = False
         return GLib.SOURCE_REMOVE
 
+    def _set_available(self, available: bool) -> None:
+        self.set_no_show_all(not available)
+        if self.get_visible() == available:
+            return
+        if available:
+            self.show_all()
+        else:
+            self.hide()
+        win = self.get_toplevel()
+        if hasattr(win, '_update_content_height'):
+            win._update_content_height()
+
+    def suspend(self) -> None:
+        self._suspended = True
+        self._refresh_token += 1
+
+    def resume(self) -> None:
+        self._suspended = False
+
     def _on_value_changed(self, scale: Gtk.Scale) -> None:
         value = scale.get_value()
         snapped = snap_to_step(value, self.adjustment.get_lower(), self.adjustment.get_upper(), self.adjustment.get_step_increment())
         if not math.isclose(snapped, value, rel_tol=0.0, abs_tol=1e-09):
+            was_suppressed = self._suppress_apply
             self._suppress_apply = True
             try:
                 self.adjustment.set_value(snapped)
             finally:
-                self._suppress_apply = False
+                self._suppress_apply = was_suppressed
         self.value_label.set_label(str(int(round(snapped))))
         if self._suppress_apply:
             return
@@ -388,7 +414,11 @@ class NotificationsPanel(Gtk.Box):
     def __init__(self, pool: RefreshPool) -> None:
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         self._pool = pool
+        self._suspended = True
+        self._clearing = False
+        self._dnd_state: bool | None = None
         self._refresh_token = 0
+        self._refresh_future: Future | None = None
         self.expanded_apps: set[str] = set()
         self.notif_times: dict[str, str] = {}
         self._last_notifs: tuple[NotificationData, ...] | None = None
@@ -421,22 +451,13 @@ class NotificationsPanel(Gtk.Box):
         _add_css_class(self.listbox, 'notif-list')
         self.listbox.connect('row-activated', self._on_row_activated)
         self.pack_start(self.listbox, True, True, 0)
-        initial_notifs: list[NotificationData] = []
-        try:
-            initial_notifs = fetch_notifications()
-        except Exception as e:
-            LOG.error('Failed executing initial notification collection: %s', e)
-        if not initial_notifs:
-            self._last_notifs = ()
-            self.set_no_show_all(True)
-            self.hide()
-        else:
-            self._last_notifs = tuple(initial_notifs)
-            self.set_no_show_all(False)
-            self._render_notifs_list(initial_notifs)
+        self.set_no_show_all(True)
+        self.hide()
 
-    def _render_notifs_list(self, notifs: list[NotificationData]) -> None:
-        self.notif_times = {}
+    @staticmethod
+    def _fetch_snapshot() -> tuple[list[NotificationData], dict[str, str]]:
+        notifs = fetch_notifications()
+        times = {}
         if is_dusky_notif_time_service_enabled():
             cache_file = NOTIF_CACHE_FILE
             if cache_file.is_file():
@@ -444,25 +465,13 @@ class NotificationsPanel(Gtk.Box):
                     with open(cache_file, 'r', encoding='utf-8') as f:
                         cached = json.load(f)
                         if isinstance(cached, dict):
-                            self.notif_times = {str(k): str(v) for k, v in cached.items()}
+                            times = {str(n.id): str(cached[str(n.id)]) for n in notifs[:50]
+                                     if str(n.id) in cached}
                 except Exception:
                     pass
-        if is_dusky_notif_time_service_enabled():
-            now_str = datetime.now().strftime('%I:%M %p').lstrip('0')
-            changed = False
-            for n in notifs:
-                str_id = str(n.id)
-                if str_id not in self.notif_times:
-                    self.notif_times[str_id] = now_str
-                    changed = True
-            if len(self.notif_times) > 1000:
-                excess = len(self.notif_times) - 1000
-                keys_to_remove = list(self.notif_times.keys())[:excess]
-                for k in keys_to_remove:
-                    del self.notif_times[k]
-                changed = True
-            if changed:
-                atomic_write_json(NOTIF_CACHE_FILE, self.notif_times)
+        return notifs, times
+
+    def _render_notifs_list(self, notifs: list[NotificationData]) -> None:
         groups: dict[str, list[NotificationData]] = {}
         for n in notifs[:50]:
             app = n.app_name if n.app_name else 'Unknown'
@@ -496,17 +505,12 @@ class NotificationsPanel(Gtk.Box):
             child.destroy()
 
     def _request_layout_update(self) -> None:
-        self.listbox.invalidate_headers()
+        # GTK negotiates the natural size, including the outer scrolling cap.
+        # A content change does not necessarily change the window's size.
         self.listbox.queue_resize()
         win = self.get_toplevel()
-        if win and isinstance(win, Gtk.Window):
-            def _idle_resize_reposition() -> bool:
-                if win.get_visible():
-                    win.resize(320, 1)
-                    if hasattr(win, 'request_reposition'):
-                        win.request_reposition()
-                return GLib.SOURCE_REMOVE
-            GLib.idle_add(_idle_resize_reposition)
+        if hasattr(win, '_update_content_height'):
+            win._update_content_height()
 
     def _on_stack_toggled(self, app_name: str, expanded: bool) -> None:
         if expanded:
@@ -526,55 +530,81 @@ class NotificationsPanel(Gtk.Box):
         self._request_layout_update()
 
     def refresh_async(self) -> None:
+        if self._suspended or self._clearing:
+            return
+        if self._refresh_future is not None and not self._refresh_future.done():
+            return
         self._refresh_token += 1
         token = self._refresh_token
-        f = self._pool.submit(fetch_notifications)
+        f = self._pool.submit(self._fetch_snapshot)
+        self._refresh_future = f
         if f:
             f.add_done_callback(lambda fut: self._on_refresh_done(fut, token))
         self._pool.submit(self._fetch_dnd_state)
 
     def _fetch_dnd_state(self) -> None:
         r = run_command(['makoctl', 'mode'], timeout=0.5, capture_stdout=True)
-        is_dnd = r is not None and r.returncode == 0 and ('do-not-disturb' in r.stdout)
+        if r is None or r.returncode != 0:
+            return
+        is_dnd = 'do-not-disturb' in r.stdout.splitlines()
         GLib.idle_add(self._apply_dnd_state, is_dnd)
 
     def _apply_dnd_state(self, is_dnd: bool) -> None:
+        if self._suspended:
+            return
+        if is_dnd == self._dnd_state:
+            return
+        self._dnd_state = is_dnd
         if is_dnd:
             self.btn_dnd.set_image(Gtk.Image.new_from_icon_name('notifications-disabled-symbolic', Gtk.IconSize.BUTTON))
             _add_css_class(self.btn_dnd, 'dnd-active-btn')
         else:
             self.btn_dnd.set_image(Gtk.Image.new_from_icon_name('notification-symbolic', Gtk.IconSize.BUTTON))
             _remove_css_class(self.btn_dnd, 'dnd-active-btn')
+        self._update_visibility()
 
-    def _on_refresh_done(self, fut: Future[list[NotificationData]], token: int) -> None:
+    def _update_visibility(self) -> None:
+        visible = bool(self._last_notifs) or bool(self._dnd_state)
+        self.set_no_show_all(not visible)
+        if visible:
+            self.show_all()
+        else:
+            self.hide()
+
+    def _on_refresh_done(self, fut: Future, token: int) -> None:
+        GLib.idle_add(self._finish_refresh, fut, token)
+
+    def _finish_refresh(self, fut: Future, token: int) -> bool:
+        if self._refresh_future is fut:
+            self._refresh_future = None
         try:
-            notifs = fut.result()
+            notifs, times = fut.result()
         except CancelledError:
-            return
+            return GLib.SOURCE_REMOVE
         except Exception as e:
             LOG.error('Failed fetching active notification buffer: %s', e)
-            notifs = []
-        GLib.idle_add(self._apply_notifs, notifs, token)
+            return GLib.SOURCE_REMOVE
+        return self._apply_notifs(notifs, times, token)
 
-    def _apply_notifs(self, notifs: list[NotificationData], token: int) -> bool:
-        if token != self._refresh_token:
+    def _apply_notifs(self, notifs: list[NotificationData], times: dict[str, str], token: int) -> bool:
+        if self._suspended or self._clearing or token != self._refresh_token:
             return GLib.SOURCE_REMOVE
+        notifs = notifs[:50]
         notifs_tuple = tuple(notifs)
-        if notifs_tuple == self._last_notifs:
+        if notifs_tuple == self._last_notifs and times == self.notif_times:
             return GLib.SOURCE_REMOVE
+        self.notif_times = times
         self._last_notifs = notifs_tuple
+        self.expanded_apps.intersection_update(n.app_name or 'Unknown' for n in notifs)
         self._clear_listbox_safely()
-        if not notifs:
-            self.set_no_show_all(True)
-            self.hide()
-        else:
-            self.set_no_show_all(False)
+        if notifs:
             self._render_notifs_list(notifs)
-            self.show_all()
+        self._update_visibility()
         self._request_layout_update()
         return GLib.SOURCE_REMOVE
 
     def _on_row_closed(self, row: NotificationRow) -> None:
+        self._refresh_token += 1
         n = row.notif
         bl_path = MAKO_BLACKLIST_FILE
         try:
@@ -587,13 +617,13 @@ class NotificationsPanel(Gtk.Box):
         row.destroy()
         self._last_notifs = None
         if not self.listbox.get_children():
-            self.set_no_show_all(True)
-            self.hide()
+            self._update_visibility()
         else:
             self.refresh_async()
         self._request_layout_update()
 
     def _on_stack_closed(self, app_name: str) -> None:
+        self._refresh_token += 1
         bl_path = MAKO_BLACKLIST_FILE
         for child in self.listbox.get_children():
             if isinstance(child, NotificationRow):
@@ -614,8 +644,7 @@ class NotificationsPanel(Gtk.Box):
         self.expanded_apps.discard(app_name)
         self._last_notifs = None
         if not self.listbox.get_children():
-            self.set_no_show_all(True)
-            self.hide()
+            self._update_visibility()
         else:
             self.refresh_async()
         self._request_layout_update()
@@ -623,11 +652,11 @@ class NotificationsPanel(Gtk.Box):
     def _on_row_activated(self, listbox: Gtk.ListBox, row: Gtk.ListBoxRow) -> None:
         if isinstance(row, NotificationStackHeader):
             row.toggle()
-            self._request_layout_update()
             return
         if not isinstance(row, NotificationRow):
             return
         n = row.notif
+        self._refresh_token += 1
         bl_path = MAKO_BLACKLIST_FILE
         try:
             with open(bl_path, 'a', encoding='utf-8') as f:
@@ -635,41 +664,63 @@ class NotificationsPanel(Gtk.Box):
         except Exception:
             pass
         if n.source == 'active':
-            execute_cmd(f'makoctl invoke -n {n.id} default')
+            execute_cmd(f'makoctl invoke -n {n.id} default; makoctl dismiss -n {n.id}')
         else:
             app = n.desktop_entry or n.app_name
             if app and app not in ('notify-send', 'mako'):
-                execute_cmd(f'gtk-launch {shlex.quote(app)} || {shlex.quote(app)}')
-        execute_cmd(f'makoctl dismiss -n {n.id}')
+                execute_cmd(f'gtk-launch {shlex.quote(app)} || {shlex.quote(app)}', detached=True)
         self.listbox.remove(row)
         row.destroy()
         self._last_notifs = None
         if not self.listbox.get_children():
-            self.set_no_show_all(True)
-            self.hide()
+            self._update_visibility()
         else:
             self.refresh_async()
         self._request_layout_update()
 
     def _on_dnd_toggle(self, _btn: Gtk.Button) -> None:
-        execute_cmd("makoctl mode | grep -qw 'do-not-disturb' && makoctl mode -r do-not-disturb || makoctl mode -a do-not-disturb")
+        execute_cmd('makoctl mode -t do-not-disturb')
         GLib.timeout_add(150, lambda: (self.refresh_async(), GLib.SOURCE_REMOVE)[1])
 
     def _on_clear_all(self, _btn: Gtk.Button) -> None:
-        bl_path = MAKO_BLACKLIST_FILE
-        try:
-            bl_path.unlink(missing_ok=True)
-        except OSError:
-            pass
-        cmd = 'if systemctl --user is-active --quiet mako.service; then systemctl --user restart mako.service; else pkill -x mako && dusky-run -- mako & fi'
-        execute_cmd(cmd)
+        if self._clearing:
+            return
+        self._clearing = True
+        self._refresh_token += 1
+        start_thread('clear-notifications', self._clear_notifications)
         self.expanded_apps.clear()
         self._last_notifs = ()
         self._clear_listbox_safely()
-        self.set_no_show_all(True)
-        self.hide()
-        self.refresh_async()
+        self._update_visibility()
         self._request_layout_update()
+
+    def _clear_notifications(self) -> None:
+        # Mako has no history deletion command. Hide its existing history and
+        # dismiss active notifications without restarting the notification daemon.
+        try:
+            notifs = fetch_notifications()
+            with MAKO_BLACKLIST_FILE.open('a', encoding='utf-8') as handle:
+                handle.writelines(f'{n.id}\n' for n in notifs)
+            run_command(['makoctl', 'dismiss', '--all', '--no-history'])
+        except Exception as exc:
+            LOG.warning('Failed clearing notifications: %s', exc)
+        finally:
+            GLib.idle_add(self._clear_finished)
+
+    def _clear_finished(self) -> None:
+        self._clearing = False
+        self._refresh_token += 1
+        self.refresh_async()
+
+    def suspend(self) -> None:
+        self._suspended = True
+        self._refresh_token += 1
+        # Keep the bounded widget cache and its visibility while the parent is
+        # hidden. Reopening unchanged content should not rebuild or shrink it.
+
+    def resume(self) -> None:
+        self._suspended = False
+        self._update_visibility()
 CSS: Final[str] = """
 window.panel-window {
     background-color: alpha(@theme_bg_color, 0.95);
@@ -711,10 +762,32 @@ button { transition: background-color 200ms ease, opacity 200ms ease, box-shadow
 box.weather-pill { padding: 4px 4px; }
 .weather-text { font-size: 12px; font-weight: 700; color: alpha(@theme_fg_color, 0.9); }
 
-button.power-header-btn {
-    min-width: 36px; min-height: 36px; border-radius: 18px; background-color: alpha(#ff453a, 0.6); color: white; border: 1px solid rgba(255, 255, 255, 0.05);
+button.power-header-btn,
+button.power-header-btn:hover,
+button.power-header-btn:active,
+button.power-header-btn:checked,
+button.power-header-btn:focus,
+button.power-header-btn:backdrop {
+    min-width: 36px;
+    min-height: 36px;
+    padding: 0;
+    margin: 0;
+    border-radius: 9999px;
+    -gtk-outline-radius: 9999px;
+    background-image: none;
+    box-shadow: none;
+    -gtk-icon-effect: none;
+    outline: none;
 }
-button.power-header-btn:hover { background-color: #ff453a; color: white; }
+button.power-header-btn {
+    background-color: alpha(#ff453a, 0.6);
+    color: white;
+    border: 1px solid rgba(255, 255, 255, 0.05);
+}
+button.power-header-btn:hover {
+    background-color: #ff453a;
+    color: white;
+}
 
 flowbox, flowboxchild, flowbox:focus, flowboxchild:focus {
     background: transparent;
@@ -724,10 +797,28 @@ flowbox, flowboxchild, flowbox:focus, flowboxchild:focus {
     box-shadow: none;
 }
 
+button.quick-icon-toggle,
+button.quick-icon-toggle:hover,
+button.quick-icon-toggle:active,
+button.quick-icon-toggle:checked,
+button.quick-icon-toggle:focus,
+button.quick-icon-toggle:backdrop {
+    min-width: 44px;
+    min-height: 44px;
+    padding: 0;
+    margin: 0;
+    border-radius: 9999px;
+    -gtk-outline-radius: 9999px;
+    background-image: none;
+    box-shadow: none;
+    -gtk-icon-effect: none;
+    outline: none;
+}
 button.quick-icon-toggle {
-    min-width: 44px; min-height: 44px; border-radius: 22px;
-    background-color: rgba(255, 255, 255, 0.06); background-image: none; border: 1px solid rgba(255, 255, 255, 0.05); padding: 0; box-shadow: none;
-    transition: all 0.2s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+    background-color: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.05);
+    transition: background-color 0.2s cubic-bezier(0.25, 0.46, 0.45, 0.94),
+                border-color 0.2s cubic-bezier(0.25, 0.46, 0.45, 0.94);
 }
 button.quick-icon-toggle:hover { background-color: rgba(255, 255, 255, 0.12); }
 button.quick-icon-toggle.active { background-color: alpha(@theme_selected_bg_color, 0.3); border: 1px solid alpha(@theme_selected_bg_color, 0.5); }
@@ -752,7 +843,29 @@ eventbox.clickable-pill:hover box.metric-pill { background-color: rgba(255, 255,
 .power-label { font-size: 14px; font-weight: 600; color: @theme_fg_color; }
 .accent-icon { color: @theme_selected_bg_color; }
 
-button.power-ring-btn { border: 2px solid transparent; border-radius: 999px; min-width: 30px; min-height: 30px; padding: 0; margin: 0; background-color: transparent; color: alpha(@theme_fg_color, 0.7); }
+button.power-ring-btn,
+button.radio.power-ring-btn,
+button.power-ring-btn:hover,
+button.power-ring-btn:active,
+button.power-ring-btn:checked,
+button.power-ring-btn:not(:checked),
+button.power-ring-btn:focus,
+button.power-ring-btn:backdrop {
+    min-width: 30px;
+    min-height: 30px;
+    padding: 0;
+    margin: 0;
+    border-radius: 9999px;
+    -gtk-outline-radius: 9999px;
+    background-image: none;
+    -gtk-icon-effect: none;
+    outline: none;
+}
+button.power-ring-btn {
+    border: 2px solid transparent;
+    background-color: transparent;
+    color: alpha(@theme_fg_color, 0.7);
+}
 button.power-ring-btn:hover { background-color: rgba(255, 255, 255, 0.08); }
 button.power-ring-btn:checked { background-color: alpha(@theme_selected_bg_color, 0.15); border-color: @theme_selected_bg_color; color: @theme_selected_bg_color; box-shadow: 0 0 8px alpha(@theme_selected_bg_color, 0.25); }
 button.power-ring-btn.power-saver:checked { background-color: alpha(#a6e3a1, 0.15); border-color: #a6e3a1; color: #a6e3a1; box-shadow: 0 0 8px alpha(#a6e3a1, 0.25); }
@@ -840,9 +953,10 @@ switch.compact-switch:checked {
     color: transparent;
 }
 switch.compact-switch slider {
+    opacity: 1;
     min-width: 18px;
     min-height: 18px;
-    border-radius: 50%;
+    border-radius: 9999px;
     background-color: #ffffff;
     border: none;
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);

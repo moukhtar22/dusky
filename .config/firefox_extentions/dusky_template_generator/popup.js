@@ -1,129 +1,200 @@
 /*
- * Dusky Template Generator — popup.js
+ * Dusky Template Generator — popup.js (ES module, Gecko 156+)
  *
- * The popup is a view over exactly one file, ~/.config/dusky_sites/<domain>.css:
- *   open       → read the file from disk (disk is the only source of truth)
- *   Auto-map   → scan the page, splice the result into the file's "auto" region
- *   Pick       → start the in-page picker (it saves every pick itself) and close
- *   Save       → write the textarea verbatim (Ctrl+S); empty text removes the file
- *   Copy       → clipboard;  Delete → two-step, removes the file
- * Unsaved textarea edits are flushed before Auto-map / Pick, so nothing is ever lost.
+ * A view over exactly one file: $XDG_CONFIG_HOME/dusky_sites/<domain>.css
+ *   open      → read from disk (disk is the only source of truth)
+ *   Auto-map  → scan the page, splice into the "auto" region
+ *   Pick      → start the in-page picker (it owns the "picks" region) and close
+ *   Save      → write the textarea verbatim (Ctrl+S); empty text removes the file
+ *   Reload    → discard local edits, re-read disk
+ *   Copy / Delete
+ *
+ * Every mutating call carries base_rev, so a write can never silently overwrite
+ * a change made by the picker (or by your editor) since this popup last read.
+ * Every mutating call also carries an opaque `origin` nonce which the broker
+ * echoes in "dusky:changed", so this view can tell its own writes from foreign
+ * ones without the (ambiguous) rev comparison v3 used.
  */
 "use strict";
 
 const $ = (id) => document.getElementById(id);
 const ui = {
   domain: $("domain"), css: $("css"), path: $("path"), status: $("status"),
-  auto: $("auto"), pick: $("pick"), save: $("save"), copy: $("copy"), del: $("delete")
+  auto: $("auto"), pick: $("pick"), save: $("save"),
+  copy: $("copy"), reload: $("reload"), del: $("delete"),
 };
-const ALL_BUTTONS = [ui.auto, ui.pick, ui.save, ui.copy, ui.del];
-const view = { tab: null, domain: "", saved: "", exists: false, path: "", pickerOn: false, armedAt: 0, timer: 0 };
+const BUTTONS = [ui.auto, ui.pick, ui.save, ui.copy, ui.reload, ui.del];
+const ORIGIN = crypto.randomUUID();
+
+const view = {
+  tab: null, domain: "", saved: "", exists: false, path: "", rev: 0,
+  pickerOn: false, delArm: 0, autoArm: 0, force: false, timer: 0, ready: false,
+};
 
 function domainOf(url) {
-  try {
-    const u = new URL(url);
-    return /^https?:$/.test(u.protocol) ? u.hostname.replace(/^www\./, "") : "";
-  } catch (_) {
-    return "";
-  }
+  const u = URL.parse(url ?? "");
+  if (!u || (u.protocol !== "https:" && u.protocol !== "http:")) return "";
+  return u.hostname.replace(/^www\./, "");
 }
-const fileName = () => view.domain + ".css";
-const shortPath = (p) => p.replace(/^\/home\/[^/]+(?=\/)/, "~");
+const fileName = () => `${view.domain}.css`;
+const shortPath = (p) => String(p ?? "").replace(/^\/home\/[^/]+(?=\/)/, "~");
+const dirty = () => ui.css.value !== view.saved;
 
-function say(text, kind) {
+function label(btn, title, sub) {
+  btn.querySelector(".t").textContent = title;
+  if (sub !== undefined) btn.querySelector(".s").textContent = sub;
+}
+
+function say(text, kind = "") {
   clearTimeout(view.timer);
   ui.status.textContent = text;
-  ui.status.className = "status " + kind;
-  if (kind === "ok") view.timer = setTimeout(() => { ui.status.textContent = ""; ui.status.className = "status"; }, 4000);
+  ui.status.className = `status ${kind}`;
+  if (kind === "ok") {
+    view.timer = setTimeout(() => { ui.status.textContent = ""; ui.status.className = "status"; }, 4000);
+  }
 }
 
-async function bg(msg) {
-  const reply = await browser.runtime.sendMessage(msg);
-  if (!reply || !reply.ok) throw new Error((reply && reply.error) || "No reply from the background script");
+/* Background broker. Conflicts are a normal reply, not an exception. */
+async function bg(msg, tolerateConflict = false) {
+  const reply = await browser.runtime.sendMessage({ ...msg, origin: ORIGIN });
+  if (!reply || typeof reply !== "object") throw new Error("No reply from the background script");
+  if (!reply.ok && !(tolerateConflict && reply.conflict)) throw new Error(reply.error ?? "Unknown error");
   return reply;
 }
+/* Page traffic always goes through the broker so it can inject on demand. */
 const pg = (msg) => bg({ type: "page", tabId: view.tab.id, msg });
 
-function setDoc(css, exists, path) {
-  view.saved = css || "";
-  view.exists = !!exists;
-  if (path) view.path = path;
-  if (ui.css.value !== view.saved) ui.css.value = view.saved;
-  ui.path.textContent = shortPath(view.path) + (view.exists ? "" : "  · not created yet");
+function setDoc(reply, keepDirty = false) {
+  const wasDirty = dirty();
+  view.saved = reply.css ?? "";
+  view.exists = !!reply.exists;
+  view.rev = reply.rev ?? 0;
+  view.force = false;
+  if (reply.path) view.path = reply.path;
+  if (!(keepDirty && wasDirty)) ui.css.value = view.saved;
   refresh();
 }
 
 function refresh() {
-  const text = ui.css.value;
-  const dirty = text !== view.saved;
-  ui.save.disabled = !dirty;
-  ui.save.classList.toggle("attention", dirty);
-  ui.save.textContent = dirty ? "💾 Save changes" : "💾 Saved";
-  ui.copy.disabled = !text.trim();
+  const d = dirty();
+  ui.path.textContent = shortPath(view.path) + (view.exists ? "" : "  · not created yet");
+  if (d) {
+    const b = document.createElement("b");
+    b.textContent = "  · unsaved changes";
+    ui.path.append(b);
+  }
+  ui.save.disabled = !d && !view.force;
+  ui.save.classList.toggle("attention", d || view.force);
+  label(ui.save,
+    view.force ? "💾 Overwrite disk" : d ? "💾 Save changes" : "💾 Saved",
+    view.force ? "the file changed underneath — this replaces it"
+      : d ? "write the textarea to disk (Ctrl+S)" : "no unsaved changes");
+  ui.copy.disabled = !ui.css.value.trim();
   ui.del.disabled = !view.exists;
   ui.pick.classList.toggle("on", view.pickerOn);
-  ui.pick.querySelector("b").textContent = view.pickerOn ? "■ Stop picking" : "🎯 Pick elements";
-  ui.pick.querySelector("small").textContent = view.pickerOn
-    ? "picker is running on this page"
-    : "click things on the page, assign a role";
+  label(ui.pick,
+    view.pickerOn ? "■ Stop picking" : "🎯 Pick elements",
+    view.pickerOn ? "picker is running on this page" : "click things on the page, assign a role");
 }
 
 function busy(on) {
-  for (const b of ALL_BUTTONS) b.disabled = on;
+  for (const b of BUTTONS) b.disabled = on;
   if (!on) refresh();
 }
 
 async function run(task) {
   busy(true);
-  try {
-    await task();
-  } catch (err) {
-    say(err.message || String(err), "err");
-  } finally {
-    busy(false);
-  }
+  try { await task(); }
+  catch (err) { say(err.message ?? String(err), "err"); }
+  finally { busy(false); }
 }
 
 async function save() {
-  const reply = await bg({ type: "write", domain: view.domain, css: ui.css.value });
-  setDoc(reply.css, reply.exists, reply.path);
-  say(reply.exists ? "Saved " + fileName() : "Template was empty — file removed", "ok");
-}
-async function flushEdits() {
-  if (ui.css.value !== view.saved) await save();
-}
-async function reload() {
-  const reply = await bg({ type: "read", domain: view.domain });
-  setDoc(reply.css, reply.exists, reply.path);
+  const req = { type: "write", domain: view.domain, css: ui.css.value, tabId: view.tab.id };
+  if (!view.force) req.base_rev = view.rev;
+  const reply = await bg(req, true);
+  if (reply.conflict) {
+    view.rev = reply.rev ?? view.rev;
+    view.force = true;
+    refresh();
+    say("The file changed on disk (picker, or another editor). Click Overwrite to replace it, or ↻ Reload to see it.", "warn");
+    return false;
+  }
+  setDoc(reply);
+  say(reply.exists ? `Saved ${fileName()}` : "Template was empty — file removed", "ok");
+  return true;
 }
 
+async function flushEdits() {
+  if (!dirty() && !view.force) return true;
+  return save();
+}
+
+const readDisk = () => bg({ type: "read", domain: view.domain });
+
+async function spliceRegion(region, body) {
+  let reply = await bg({
+    type: "splice", domain: view.domain, region, body, base_rev: view.rev, tabId: view.tab.id,
+  }, true);
+  if (reply.conflict) {                          /* refresh the base and retry once */
+    view.rev = reply.rev ?? 0;
+    reply = await bg({
+      type: "splice", domain: view.domain, region, body, base_rev: view.rev, tabId: view.tab.id,
+    }, true);
+    if (reply.conflict) throw new Error("The file keeps changing on disk — press ↻ Reload and try again.");
+  }
+  setDoc(reply);
+  return reply;
+}
+
+/* ── Auto-map ─────────────────────────────────────────────────────────── */
 ui.auto.addEventListener("click", () => run(async () => {
-  await flushEdits();
-  say("Scanning the page's colour variables…", "busy");
+  if (!await flushEdits()) return;
+  say("Scanning the page's colour tokens…", "busy");
   const scan = await pg({ type: "scan" });
+  if (!scan.ok) throw new Error(scan.error ?? "Scan failed");
   if (!scan.mapped) {
-    say("Found " + scan.found + " colour variable(s) but none matched a palette role — use Pick elements instead.", "warn");
+    say(`Found ${scan.found} colour variable(s), none matched a palette role — use Pick elements.`, "warn");
     return;
   }
-  const reply = await bg({ type: "splice", domain: view.domain, region: "auto", body: scan.body });
-  setDoc(reply.css, reply.exists, reply.path);
-  say("Mapped " + scan.mapped + " of " + scan.found + " variables → saved " + fileName(), "ok");
+  if (scan.kind === "structural" && Date.now() - view.autoArm > 6000) {
+    view.autoArm = Date.now();
+    label(ui.auto, "⚡ Confirm Auto-map", "applies the broad structural theme");
+    setTimeout(() => {
+      view.autoArm = 0;
+      label(ui.auto, "⚡ Auto-map", "scan this site's colour tokens");
+    }, 6000);
+    say(`${view.domain} exposes no usable colour tokens (${scan.found} found). Auto-map would install a broad ` +
+      "structural theme that repaints nearly every element. Click again within 6 s to apply it.", "warn");
+    return;
+  }
+  view.autoArm = 0;
+  label(ui.auto, "⚡ Auto-map", "scan this site's colour tokens");
+  await spliceRegion("auto", scan.body);
+  const how = scan.kind === "structural" ? "structural theme" : `${scan.mapped} of ${scan.found} tokens`;
+  say(`Mapped ${how} → saved ${fileName()}${scan.palette ? "" : "  (palette variables not visible on this page)"}`, "ok");
 }));
 
+/* ── Picker ───────────────────────────────────────────────────────────── */
 ui.pick.addEventListener("click", () => run(async () => {
   if (view.pickerOn) {
     await pg({ type: "picker", enable: false });
     view.pickerOn = false;
-    await reload();
+    setDoc(await readDisk(), true);
     say("Picker stopped", "ok");
     return;
   }
-  await flushEdits();
+  if (!await flushEdits()) return;
   await pg({ type: "picker", enable: true });
   window.close();
 }));
 
 ui.save.addEventListener("click", () => run(save));
+
+ui.reload.addEventListener("click", () => run(async () => {
+  setDoc(await readDisk());
+  say("Reloaded from disk", "ok");
+}));
 
 ui.copy.addEventListener("click", () => run(async () => {
   await navigator.clipboard.writeText(ui.css.value);
@@ -131,52 +202,75 @@ ui.copy.addEventListener("click", () => run(async () => {
 }));
 
 ui.del.addEventListener("click", () => run(async () => {
-  if (Date.now() - view.armedAt > 3000) {
-    view.armedAt = Date.now();
-    ui.del.textContent = "🗑 Confirm";
-    say("Click again within 3 s to delete " + fileName() + " from disk.", "warn");
-    setTimeout(() => { view.armedAt = 0; ui.del.textContent = "🗑 Delete"; }, 3000);
+  if (Date.now() - view.delArm > 3000) {
+    view.delArm = Date.now();
+    label(ui.del, "🗑 Confirm delete", "click again to remove the file");
+    say(`Click again within 3 s to delete ${fileName()} from disk.`, "warn");
+    setTimeout(() => {
+      view.delArm = 0;
+      label(ui.del, "🗑 Delete", "remove this file from disk");
+    }, 3000);
     return;
   }
-  view.armedAt = 0;
-  ui.del.textContent = "🗑 Delete";
-  const reply = await bg({ type: "delete", domain: view.domain });
-  ui.css.value = "";
-  setDoc("", false, reply.path);
-  browser.tabs.sendMessage(view.tab.id, { type: "reset" }).catch(() => {});
-  say("Deleted " + fileName(), "ok");
+  view.delArm = 0;
+  label(ui.del, "🗑 Delete", "remove this file from disk");
+  setDoc(await bg({ type: "delete", domain: view.domain, base_rev: view.rev, tabId: view.tab.id }, true));
+  say(`Deleted ${fileName()}`, "ok");
 }));
 
 ui.css.addEventListener("input", refresh);
 document.addEventListener("keydown", (e) => {
-  if ((e.ctrlKey || e.metaKey) && e.key === "s") {
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
     e.preventDefault();
     if (!ui.save.disabled) ui.save.click();
   }
 });
 
+/* ── Live sync: the background announces every successful mutation ────── */
+browser.runtime.onMessage.addListener((msg) => {
+  if (msg?.type !== "dusky:changed" || msg.domain !== view.domain || !view.ready) return;
+  if (msg.origin === ORIGIN) return;                       /* our own write */
+  readDisk().then((reply) => {
+    const wasDirty = dirty();
+    setDoc(reply, true);
+    if (wasDirty) say("The file changed on disk. Your unsaved edits are kept — Save overwrites, ↻ Reload discards.", "warn");
+    else say("Updated from disk", "ok");
+  }).catch(() => {});
+});
+
+/* ── Init ─────────────────────────────────────────────────────────────── */
 (async function init() {
   const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
   view.tab = tab;
-  view.domain = domainOf(tab && tab.url);
+  view.domain = domainOf(tab?.url);
   if (!view.domain) {
     ui.domain.textContent = "not a website";
-    ui.css.placeholder = "Open a normal http(s) website to theme it.\nFirefox keeps extensions out of about:, file: and add-on pages.";
-    for (const b of ALL_BUTTONS) b.disabled = true;
+    ui.css.placeholder =
+      "Open a normal http(s) website to theme it.\nFirefox keeps extensions out of about:, file: and add-on pages.";
+    for (const b of BUTTONS) b.disabled = true;
+    say("Nothing to theme here. The extension is fine — this page type is off limits to every add-on.", "warn");
     return;
   }
   ui.domain.textContent = view.domain;
-  ui.css.placeholder = "No template for " + view.domain + " yet.\n\n⚡ Auto-map fills this from the site's colour variables,\n🎯 Pick elements lets you click parts of the page,\nor paste CSS here and Save.";
+  ui.css.placeholder =
+    `No template for ${view.domain} yet.\n\n` +
+    "⚡ Auto-map fills this from the site's colour tokens,\n" +
+    "🎯 Pick elements lets you click parts of the page,\n" +
+    "or paste CSS here and Save.";
   try {
-    const reply = await bg({ type: "read", domain: view.domain });
-    view.domain = reply.domain;
-    ui.domain.textContent = reply.domain;
-    setDoc(reply.css, reply.exists, reply.path);
+    const reply = await readDisk();
+    view.domain = reply.domain || view.domain;
+    ui.domain.textContent = view.domain;
+    setDoc(reply);
+    for (const w of reply.warnings ?? []) say(w, "warn");
   } catch (err) {
     say(err.message, "err");
     refresh();
   }
-  const state = await browser.tabs.sendMessage(tab.id, { type: "ping" }).catch(() => null);
-  view.pickerOn = !!(state && state.active);
+  view.ready = true;
+  /* Ping through the broker: it injects the content script if needed, so the
+   * picker state is correct even on a freshly loaded tab. */
+  const state = await pg({ type: "ping" }).catch(() => null);
+  view.pickerOn = !!state?.active;
   refresh();
 })();

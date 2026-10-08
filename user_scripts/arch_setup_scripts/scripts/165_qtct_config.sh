@@ -31,29 +31,40 @@ trap cleanup EXIT ERR
 # ------------------------------------------------------------------------------
 # 4. Core Logic
 # ------------------------------------------------------------------------------
-HOME="${HOME:-$(getent passwd "$(id -un)" | cut -d: -f6)}"
+readonly CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
 
 update_qt_config() {
     local app_name="$1"       # e.g., qt5ct
     local conf_file="$2"      # Full path to config
     local dialog_val="$3"     # default or xdgdesktopportal
-    local colors_file="$4"    # filename of the colors conf
 
     log_info "Processing configuration for ${BOLD}${app_name}${RESET}..."
 
     # Ensure config and colors directories exist
-    local config_dir="$HOME/.config/$app_name"
+    local config_dir="$CONFIG_HOME/$app_name"
     local colors_dir="$config_dir/colors"
     mkdir -p "$config_dir" "$colors_dir"
 
-    # Pre-link matugen colors if generated colors already exist
-    local gen_colors="$HOME/.config/matugen/generated/$colors_file"
-    if [[ -f "$gen_colors" ]]; then
-        ln -nfs "$gen_colors" "$colors_dir/matugen.conf"
+    # Publish a complete palette; do not point apps at Matugen's in-place writes.
+    # Bootstrap can use the shipped seed before initial generation, and adds
+    # Qt6's Accent role to complete 21-role installation palettes. It still
+    # rejects malformed input before enabling custom_palette.
+    python3 "$HOME/user_scripts/theme_matugen/global/qt_colors.py" "$app_name" --bootstrap
+
+    # Retain an existing widget style; a color setup must not replace its layout.
+    local widget_style=Fusion configured_style
+    if [[ -f "$conf_file" ]]; then
+        configured_style=$(awk '
+            /^[[:space:]]*\[/ { appearance = ($0 ~ /^[[:space:]]*\[Appearance\][[:space:]]*$/) }
+            appearance && /^[[:space:]]*style[[:space:]]*=/ {
+                sub(/^[^=]*=[[:space:]]*/, ""); print; exit
+            }
+        ' "$conf_file")
+        [[ -z "$configured_style" ]] || widget_style="$configured_style"
     fi
 
-    # Create a temporary file for atomic writing
-    TEMP_FILE=$(mktemp)
+    # Keep the temporary file on the destination filesystem for atomic rename.
+    TEMP_FILE=$(mktemp "$config_dir/.qtct-config.XXXXXXXX")
 
     # --------------------------------------------------------------------------
     # STEP A: Generate the enforced header
@@ -62,11 +73,11 @@ update_qt_config() {
     # --------------------------------------------------------------------------
     {
         printf "[Appearance]\n"
-        printf "color_scheme_path=%s/.config/%s/colors/matugen.conf\n" "$HOME" "$app_name"
+        printf "color_scheme_path=%s/colors/matugen.conf\n" "$config_dir"
         printf "custom_palette=true\n"
         printf "icon_theme=Papirus-Dark\n"
         printf "standard_dialogs=%s\n" "$dialog_val"
-        printf "style=Fusion\n\n"
+        printf "style=%s\n\n" "$widget_style"
     } > "$TEMP_FILE"
 
     # --------------------------------------------------------------------------
@@ -85,20 +96,30 @@ update_qt_config() {
                 keys["color_scheme_path"]=1
             }
 
-            # Skip the specific [Appearance] section header
-            /^\[Appearance\]/ { next }
-
-            # Check if line matches "key=value" format
-            /=/ {
-                split($0, map, "=")
-                key = map[1]
-                # If this key is one we are managing, skip it (we wrote it at the top)
-                if (key in keys) { next }
+            # Collect unmanaged Appearance entries into the new header first.
+            NR == FNR {
+                if ($0 ~ /^[[:space:]]*\[/) {
+                    appearance = ($0 ~ /^[[:space:]]*\[Appearance\][[:space:]]*$/)
+                    next
+                }
+                if (appearance && $0 !~ /^[[:space:]]*$/) {
+                    split($0, map, "=")
+                    key = map[1]
+                    gsub(/^[[:space:]]+|[[:space:]]+$/, "", key)
+                    if (!(key in keys)) extra[++count] = $0
+                }
+                next
             }
-
-            # Print everything else (Fonts, Interface, other Appearance keys)
-            { print }
-        ' "$conf_file" >> "$TEMP_FILE"
+            FNR == 1 {
+                for (i = 1; i <= count; i++) print extra[i]
+                print ""
+                appearance = 0
+            }
+            /^[[:space:]]*\[/ {
+                appearance = ($0 ~ /^[[:space:]]*\[Appearance\][[:space:]]*$/)
+            }
+            !appearance { print }
+        ' "$conf_file" "$conf_file" >> "$TEMP_FILE"
     else
         log_info "File $conf_file did not exist. Populating with initial defaults."
         if [[ "$app_name" == "qt5ct" ]]; then
@@ -159,6 +180,7 @@ EOF
     # Move temp file to actual file. No backup files (.bak) created.
     # --------------------------------------------------------------------------
     mv "$TEMP_FILE" "$conf_file"
+    TEMP_FILE=""
     log_success "Updated $conf_file"
 }
 
@@ -167,15 +189,15 @@ EOF
 # ------------------------------------------------------------------------------
 
 # Define paths
-QT5_CONF="$HOME/.config/qt5ct/qt5ct.conf"
-QT6_CONF="$HOME/.config/qt6ct/qt6ct.conf"
+QT5_CONF="$CONFIG_HOME/qt5ct/qt5ct.conf"
+QT6_CONF="$CONFIG_HOME/qt6ct/qt6ct.conf"
 
 # Update Qt5 Config
 # Requirements: standard_dialogs=default, qt5ct-colors.conf
-update_qt_config "qt5ct" "$QT5_CONF" "default" "qt5ct-colors.conf"
+update_qt_config "qt5ct" "$QT5_CONF" "default"
 
 # Update Qt6 Config
 # Requirements: standard_dialogs=xdgdesktopportal, qt6ct-colors.conf
-update_qt_config "qt6ct" "$QT6_CONF" "xdgdesktopportal" "qt6ct-colors.conf"
+update_qt_config "qt6ct" "$QT6_CONF" "xdgdesktopportal"
 
 log_success "Qt configuration sync complete."

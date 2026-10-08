@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Modern USB Sound Notification (Arch Linux / Systemd 260+)
+# Dispatch USB sounds to the active local Wayland session (systemd 262+).
 set -euo pipefail
 
 export PATH="/usr/local/bin:/usr/bin:/bin"
@@ -14,7 +14,7 @@ readonly SOUND_DISCONNECT_FALLBACK="/usr/share/sounds/freedesktop/stereo/dialog-
 resolve_sound() {
     local file
     for file in "$@"; do
-        if [[ -f "$file" ]]; then
+        if [[ -f "$file" && -r "$file" ]]; then
             printf '%s' "$file"
             return 0
         fi
@@ -22,40 +22,41 @@ resolve_sound() {
     return 1
 }
 
-log_info()  { logger -t "$LOG_TAG" -- "$*"; }
 log_error() { logger -t "$LOG_TAG" -p user.err -- "ERROR: $*"; }
 
 get_active_user() {
-    local sid state user_name
-    while read -r sid; do
-        state=$(loginctl show-session "$sid" -p State --value 2>/dev/null || true)
-        if [[ "$state" == "active" ]]; then
-            user_name=$(loginctl show-session "$sid" -p Name --value 2>/dev/null || true)
-            if [[ -n "$user_name" ]]; then
-                printf '%s' "$user_name"
-                return 0
-            fi
-        fi
-    done < <(loginctl list-sessions --no-legend | awk '{print $1}')
-    return 1
+    # udev/logind use seat0 when the device has no explicit seat assignment.
+    local seat="${ID_SEAT:-seat0}" sid properties key value
+    local active='' remote='' type='' class='' session_seat='' user_name=''
+
+    sid=$(loginctl show-seat "$seat" --property=ActiveSession --value) || return 1
+    [[ -n "$sid" ]] || return 1
+    properties=$(loginctl show-session "$sid" \
+        --property=Active --property=Remote --property=Type \
+        --property=Class --property=Seat --property=Name) || return 1
+
+    while IFS='=' read -r key value; do
+        case "$key" in
+            Active) active=$value ;;
+            Remote) remote=$value ;;
+            Type) type=$value ;;
+            Class) class=$value ;;
+            Seat) session_seat=$value ;;
+            Name) user_name=$value ;;
+        esac
+    done <<< "$properties"
+
+    [[ "$active" == yes && "$remote" == no && "$type" == wayland &&
+       "$class" == user && "$session_seat" == "$seat" && -n "$user_name" ]] || return 1
+    printf '%s' "$user_name"
 }
 
 main() {
     local action="${1:-}"
-    local target_user sound_file
+    local target_user sound_file passwd_entry user_home
 
     case "$action" in
-        connect)
-            sound_file=$(resolve_sound "$SOUND_CONNECT_PRIMARY" "$SOUND_CONNECT_FALLBACK") || {
-                log_error "No valid connection sound files found."
-                exit 1
-            }
-            ;;
-        disconnect)
-            sound_file=$(resolve_sound "$SOUND_DISCONNECT_PRIMARY" "$SOUND_DISCONNECT_FALLBACK") || {
-                log_error "No valid disconnection sound files found."
-                exit 1
-            }
+        connect|disconnect)
             ;;
         -h|--help)
             echo "Usage: ${0##*/} <connect|disconnect>"
@@ -68,29 +69,50 @@ main() {
             ;;
     esac
 
+    if (( $# != 1 )); then
+        printf 'Usage: %s <connect|disconnect>\n' "${0##*/}" >&2
+        return 1
+    fi
+
     if ! target_user=$(get_active_user); then
-        log_info "No active user session found. Exiting quietly."
-        exit 0
+        return 0
     fi
 
-    user_home=$(getent passwd "$target_user" 2>/dev/null | cut -d: -f6) || true
-    if [[ -n "$user_home" && ! -f "${user_home}/.config/dusky/settings/usb_udev_toggle" ]]; then
-        log_info "USB sounds toggled off for $target_user, exiting."
-        exit 0
+    if ! passwd_entry=$(getent passwd "$target_user"); then
+        log_error "Cannot resolve home directory for $target_user."
+        return 1
+    fi
+    IFS=: read -r _ _ _ _ _ user_home _ <<< "$passwd_entry"
+    if [[ "$user_home" != /* ]]; then
+        log_error "Invalid home directory for $target_user."
+        return 1
+    fi
+    [[ -f "${user_home}/.config/dusky/settings/usb_udev_toggle" ]] || return 0
+
+    case "$action" in
+        connect) sound_file=$(resolve_sound "$SOUND_CONNECT_PRIMARY" "$SOUND_CONNECT_FALLBACK") ;;
+        disconnect) sound_file=$(resolve_sound "$SOUND_DISCONNECT_PRIMARY" "$SOUND_DISCONNECT_FALLBACK") ;;
+    esac || {
+        log_error "No readable $action sound files found."
+        return 1
+    }
+
+    if [[ ! -x /usr/bin/pw-play ]]; then
+        log_error "/usr/bin/pw-play is not installed or executable."
+        return 1
     fi
 
-    if ! command -v pw-play >/dev/null 2>&1; then
-        log_error "pw-play is not installed."
-        exit 1
-    fi
-
-    log_info "Dispatching $action sound to $target_user via pw-play"
-
-    systemd-run -M "${target_user}@.host" --user --quiet --collect \
+    # Playback belongs to the user manager; udev must not wait for the sound.
+    if ! systemd-run --machine="${target_user}@.host" --user --quiet --collect \
+        --no-block --no-ask-password --expand-environment=no --service-type=exec \
+        --property=RuntimeMaxSec=15s \
         --description="USB Audio ${action}" \
-        pw-play "$sound_file" 2>/dev/null || true
+        /usr/bin/pw-play --media-role=Notification "$sound_file"; then
+        log_error "Failed to dispatch $action sound to $target_user."
+        return 1
+    fi
 
-    exit 0
+    return 0
 }
 
 main "$@"

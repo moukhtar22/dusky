@@ -363,6 +363,20 @@ def resolve_vm(specified_vm: str = None) -> str:
                 sys.exit(1)
 
 
+def resolve_shm_path() -> str:
+    """Prefer state-recorded shm_path from pipeline state, fallback to canonical /dev/shm/looking-glass."""
+    state_file = Path("/var/lib/arsonix/state.json")
+    try:
+        data = json.loads(state_file.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            cand = data.get("shm_path")
+            if isinstance(cand, str) and cand.startswith("/dev/shm/"):
+                return cand
+    except Exception:
+        pass
+    return "/dev/shm/looking-glass"
+
+
 def get_spice_port(vm_name: str) -> int:
     """Parse the VM XML to extract the active SPICE port (handling autoport)."""
     try:
@@ -557,8 +571,13 @@ def main():
         if state != "running":
             print_warn(f"VM '{vm_name}' is currently {state}. Connection might fail.")
             
-        print_info(f"Launching Looking Glass Client (escape key: {active_key})...")
-        subprocess.run(["looking-glass-client", "-f", "/dev/shm/looking-glass", "-m", active_key])
+        shm_file = resolve_shm_path()
+        spice_port = get_spice_port(vm_name)
+        print_info(f"Launching Looking Glass Client (escape key: {active_key}, SPICE port: {spice_port})...")
+        cmd = ["looking-glass-client", "-f", shm_file, "-m", active_key]
+        if spice_port > 0:
+            cmd.extend(["-p", str(spice_port)])
+        subprocess.run(cmd)
 
     elif action in ("launch", "play"):
         if not shutil.which("looking-glass-client"):
@@ -579,18 +598,23 @@ def main():
         else:
             print_info(f"VM '{vm_name}' is already running.")
 
+        shm_file = resolve_shm_path()
         spice_port = get_spice_port(vm_name)
         print_info(f"Waiting for SPICE graphics pipe on port {spice_port}...")
         
+        cmd = ["looking-glass-client", "-f", shm_file, "-m", active_key]
+        if spice_port > 0:
+            cmd.extend(["-p", str(spice_port)])
+
         if wait_for_spice_port(spice_port, timeout=20):
             # A tiny sleep gives the virtual display driver (VDD) in the guest 
             # time to complete its handshakes after SPICE wakes up
             time.sleep(1.0)
-            print_success(f"Graphics server online. Launching Looking Glass Client (escape key: {active_key})...")
-            subprocess.run(["looking-glass-client", "-f", "/dev/shm/looking-glass", "-m", active_key])
+            print_success(f"Graphics server online. Launching Looking Glass Client (escape key: {active_key}, SPICE port: {spice_port})...")
+            subprocess.run(cmd)
         else:
             print_err(f"Timed out waiting for graphics server. Launching fallback (escape key: {active_key})...")
-            subprocess.run(["looking-glass-client", "-f", "/dev/shm/looking-glass", "-m", active_key])
+            subprocess.run(cmd)
 
     elif action in ("rdp", "connect"):
         rdp_script = Path(__file__).parent / "55_rdp.py"

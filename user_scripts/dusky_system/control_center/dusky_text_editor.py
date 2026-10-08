@@ -7,13 +7,14 @@ Executes via os.execvp to replace the process cleanly with dusky-run.
 
 import os
 import re
+import shlex
 import sys
 from pathlib import Path
 
 CONF_VARS = Path.home() / ".config/hypr/edit_here/source/default_apps.lua"
 DEFAULT_EDITOR = "mousepad"
 DEFAULT_TERMINAL = "kitty"
-TERMINAL_EDITORS = {"nvim", "nano", "helix", "micro", "vi", "vim"}
+TERMINAL_EDITORS = {"nvim", "nano", "hx", "helix", "micro", "vi", "vim"}
 
 def parse_config() -> tuple[str, str]:
     """Parses textEditor and terminal values from default_apps.lua."""
@@ -49,30 +50,40 @@ def parse_config() -> tuple[str, str]:
 def main():
     editor, terminal = parse_config()
     args = sys.argv[1:]
+    try:
+        editor_args = shlex.split(editor)
+        terminal_args = shlex.split(terminal)
+    except ValueError as error:
+        sys.exit(f"dusky-text-editor: invalid editor/terminal command: {error}")
+    if not editor_args or not terminal_args:
+        sys.exit("dusky-text-editor: editor and terminal commands must not be empty")
+    editor_name = Path(editor_args[0]).name.lower()
     
     # Check if the chosen editor requires a terminal window
-    is_term_editor = editor.lower() in TERMINAL_EDITORS
+    is_term_editor = editor_name in TERMINAL_EDITORS
     
     # Base dusky-run command
     cmd_args = ["dusky-run"]
     
     if is_term_editor:
         # Launch terminal editor inside terminal wrapper
-        term_lower = terminal.lower()
-        if "kitty" in term_lower:
-            cmd_args.extend([terminal, "--class", editor, editor])
-        elif "foot" in term_lower:
-            cmd_args.extend([terminal, "--app-id", editor, editor])
-        elif "alacritty" in term_lower:
-            cmd_args.extend([terminal, "--class", editor, "-e", editor])
-        elif "wezterm" in term_lower:
-            cmd_args.extend([terminal, "start", "--class", editor, "--", editor])
+        term_lower = Path(terminal_args[0]).name.lower()
+        cmd_args.extend(terminal_args)
+        if term_lower == "kitty":
+            cmd_args.extend(["--class", editor_name])
+        elif term_lower in {"foot", "footclient"}:
+            cmd_args.extend(["--app-id", editor_name])
+        elif term_lower == "alacritty":
+            cmd_args.extend(["--class", editor_name, "-e"])
+        elif term_lower == "wezterm":
+            cmd_args.extend(["start", "--class", editor_name, "--"])
         else:
             # Fallback for generic terminal wrappers
-            cmd_args.extend([terminal, "-e", editor])
+            cmd_args.append("-e")
+        cmd_args.extend(editor_args)
     else:
         # Launch GUI editor directly
-        cmd_args.append(editor)
+        cmd_args.extend(editor_args)
         
     # Append the target file paths
     cmd_args.extend(args)

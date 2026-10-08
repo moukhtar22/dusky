@@ -17,21 +17,24 @@ if [[ -z "$REAL_USER" ]]; then
 fi
 
 REAL_HOME=$(getent passwd "$REAL_USER" | cut -d: -f6)
+ROOT_HOME=$(getent passwd 0 | cut -d: -f6)
 echo "================================================================="
-echo "Syncing universal desktop themes from: $REAL_HOME ($REAL_USER) -> /root"
+echo "Syncing universal desktop themes from: $REAL_HOME ($REAL_USER) -> $ROOT_HOME"
 echo "================================================================="
 
-# 3. Prepare Target Directories in /root
-mkdir -p /root/.config
-mkdir -p /root/.local/share
+# 3. Prepare Target Directories in root's home
+mkdir -p "$ROOT_HOME/.config"
+mkdir -p "$ROOT_HOME/.local/share"
 
-# 4. Helper function to create clean atomic symlinks
+# 4. Helper function to replace targets with symlinks
 link_item() {
     local src="$1"
     local dst="$2"
     local desc="$3"
 
-    if [[ -e "$src" || -L "$src" ]]; then
+    # Themes can be generated after setup. Keep that directory linked even
+    # before the first Matugen run, so root can resolve the GTK3 theme wrappers.
+    if [[ -e "$src" || -L "$src" || "${4:-}" == deferred ]]; then
         rm -rf "$dst"
         ln -sfnT "$src" "$dst"
         echo -e " \e[32m✔\e[0m Linked $desc ($src -> $dst)"
@@ -56,7 +59,7 @@ CONFIG_ITEMS=(
 )
 
 for item in "${CONFIG_ITEMS[@]}"; do
-    link_item "$REAL_HOME/.config/$item" "/root/.config/$item" "$item"
+    link_item "$REAL_HOME/.config/$item" "$ROOT_HOME/.config/$item" "$item"
 done
 
 # 6. Sync .local/share Components (Icons, Color Schemes, GtkSourceView, Themes)
@@ -71,14 +74,18 @@ DATA_ITEMS=(
 )
 
 for item in "${DATA_ITEMS[@]}"; do
-    link_item "$REAL_HOME/.local/share/$item" "/root/.local/share/$item" "local/share/$item"
+    if [[ "$item" == themes ]]; then
+        link_item "$REAL_HOME/.local/share/$item" "$ROOT_HOME/.local/share/$item" "local/share/$item" deferred
+    else
+        link_item "$REAL_HOME/.local/share/$item" "$ROOT_HOME/.local/share/$item" "local/share/$item"
+    fi
 done
 
 # 7. Sync Root-Level Legacy Paths
 echo -e "\n\e[1m3. Processing Root-Level Legacy Paths:\e[0m"
-link_item "$REAL_HOME/.icons" "/root/.icons" "~/.icons"
-link_item "$REAL_HOME/.themes" "/root/.themes" "~/.themes"
-link_item "$REAL_HOME/.gtkrc-2.0" "/root/.gtkrc-2.0" "~/.gtkrc-2.0"
+link_item "$REAL_HOME/.icons" "$ROOT_HOME/.icons" "~/.icons"
+link_item "$REAL_HOME/.themes" "$ROOT_HOME/.themes" "~/.themes"
+link_item "$REAL_HOME/.gtkrc-2.0" "$ROOT_HOME/.gtkrc-2.0" "~/.gtkrc-2.0"
 
 echo -e "\n\e[32m=================================================================\e[0m"
 echo -e "\e[32m✔ Success. Root GUI application theming is completely synchronized.\e[0m"

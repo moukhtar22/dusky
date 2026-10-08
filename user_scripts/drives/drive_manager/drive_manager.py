@@ -1,1164 +1,1213 @@
 #!/usr/bin/env python3
-
 """
 ==============================================================================
- UNIVERSAL DRIVE MANAGER (PLATINUM HYBRID EDITION - BLEEDING-EDGE ARCH)
+ UNIVERSAL DRIVE MANAGER — PLATINUM HYBRID EDITION (2026.09 / ARCH BLEEDING-EDGE)
  ------------------------------------------------------------------------------
- Architecture updated to strict, cutting-edge standards based on the latest 
- util-linux (2.42+), Linux Kernel (7.1+), and cryptsetup (2.8+) specifications.
- 
- Features:
-  - Native UUID= tagging for cryptsetup and mount mechanisms
-  - Atomic directory creation via mount --mkdir
-  - Dynamic LUKS/BitLocker auto-detection via isolated `lsblk -d` probing
-  - Intelligent Dynamic NTFS/FAT32 Auto-Permission Configurator (uid/gid injection)
-  - Upfront Multi-Target Password Collection with Parallel Decryption Dispatch
-  - Parallel Multi-Drive Lock & Unlock Operations via ThreadPoolExecutor
-  - Zero-dependency TOML parsing (Python 3.11+ tomllib)
-  - Arch Linux Auto-Bootstrapper for required UI/Sec dependencies
-  - Robust Lockfile Mechanics with User-Isolated Runtime Directing
-  - Pre-emptive `sudo -v` credential priming to prevent stdin pipe collision
-  - Interactive Busy Process Resolver (High-Performance Memory Parsing via lsof)
-  - Quad-Tier Teardown (udisksctl -> cryptsetup close -> deferred async closure)
-  - System-Wide Divergent Mount Auto-Remediation & Migration
-  - Dynamic Multi-Symlink Self-Healing (data-driven via drives.toml)
-  - Non-Rotational SSD Auto-Detection for Background TRIM Dispatcher
-  - Smart Password Retry Loop with Right-Aligned Memory History
-  - Secure XDG_RUNTIME_DIR Session Persistence with Atomic Writes
-  - Portable Path Normalization (~, $HOME, and user migration remapping)
-  - HARDENED: Strict OS exit code propagation for safe shell chaining (&&)
+ Target stack : Arch Linux, Linux 7.3+, Python 3.14+, util-linux 2.42+,
+                cryptsetup 2.8+, systemd 258+, lsof 4.99+
+ Runtime deps : python-keyring python-secretstorage python-rich
+                util-linux cryptsetup lsof sudo systemd (systemd-run, systemctl)
+
+ Design:
+  - Kernel-native truth sources: /proc/self/mountinfo (mount table, parent_id hierarchy,
+    maj:min match, btrfs anon-dev aware), /sys/class/block/*/holders + dm/uuid (crypt mapping
+    discovery, ghost-mapper detection), /sys/.../queue/rotational (TRIM policy).
+    -> zero JSON schema drift, zero child pollution, fast sysfs checks.
+  - sudo boundary: 'sudo -v' primed once on the main thread, kept alive by a
+    daemon thread (sudo -n -v / 60 s), every privileged call is 'sudo -n ...'
+    so a password prompt can never collide with a cryptsetup stdin pipe.
+  - Interactive prompts (passphrase, busy-process resolver) run ONLY on the
+    main thread. Workers return Outcome.NEEDS_PASSPHRASE and the main thread
+    finishes them sequentially.
+  - cryptsetup 2.8: open --type luks|bitlk --tries 1 --key-file - ;
+    --allow-discards + --perf-no_{read,write}_workqueue only on non-rotational
+    media; close -> 5x retry -> close --deferred (reported as failure until gone).
+  - mount 2.42: mount -i --mkdir -t <fs> -o <opts> --source UUID=... --target ...;
+    NTFS uses the 7.1+ in-kernel 'ntfs' driver (mount -i -t ntfs); 'ntfs3' is retired.
+  - TRIM: fstrim dispatched as a transient systemd unit (systemd-run --collect
+    --no-block, idle IO class); cancelled safely during teardown.
+  - CPU Accelerator: On hybrid architectures (e.g. Intel Alder Lake i7-12700H),
+    temporarily onlines performance cores during crypto KDF execution.
+  - Lifecycle Hooks: Configurable pre_lock, post_lock, and post_unlock commands.
+  - Strict exit codes: 0 ok, 1 operational failure, 130 user cancel.
 ==============================================================================
 """
 
-import os
-import sys
-import time
-import fcntl
-import json
-import atexit
-import getpass
 import argparse
-import tomllib
+import atexit
+import enum
+import fcntl
+import getpass
+import json
+import os
+import re
+import signal
+import stat
 import subprocess
-import shutil
+import sys
 import threading
-from pathlib import Path
-from typing import Any
-from dataclasses import dataclass
+import time
+import tomllib
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Final, NamedTuple
 
-# ------------------------------------------------------------------------------
-#  ARCH LINUX AUTO-BOOTSTRAPPER
-# ------------------------------------------------------------------------------
 try:
     import keyring
+    import keyring.errors
     import secretstorage
+    from rich.align import Align
     from rich.console import Console
-    from rich.table import Table
+    from rich.markup import escape
     from rich.panel import Panel
     from rich.prompt import Prompt
-    from rich.align import Align
-    from rich.markup import escape
-except ImportError:
-    print("\n[INFO] Missing required Python libraries: 'keyring', 'secretstorage', and/or 'rich'.")
-    print("[INFO] Attempting to auto-install via pacman...")
-    try:
-        subprocess.run(
-            ["sudo", "pacman", "-S", "--needed", "--noconfirm", "python-keyring", "python-secretstorage", "python-rich"],
-            check=True
-        )
-        print("[SUCCESS] Dependencies installed. Seamlessly restarting script...\n")
-        os.execv(sys.executable, [sys.executable] + sys.argv)
-    except subprocess.CalledProcessError:
-        print("\n[ERROR] Failed to install dependencies automatically.")
-        sys.exit(1)
-    except FileNotFoundError:
-        print("\n[ERROR] 'pacman' command not found. Are you on Arch Linux?")
-        sys.exit(1)
+    from rich.table import Table
+except ImportError as exc:
+    sys.stderr.write(
+        f"[ERROR] Missing Python library: {exc.name}\n"
+        "        Install once: sudo pacman -S --needed python-keyring python-secretstorage python-rich\n"
+    )
+    sys.exit(1)
 
 # ------------------------------------------------------------------------------
-#  CONSTANTS & GLOBALS
+#  CONSTANTS
 # ------------------------------------------------------------------------------
-FILESYSTEM_TIMEOUT = 15
-LOCK_RETRY_DELAY = 1
-LOCK_MAX_RETRIES = 5
-KEYRING_SERVICE = "drive_manager"
+VERSION: Final = "2026.09.2"
+FILESYSTEM_TIMEOUT: Final = 15          # by-uuid poll per UUID (seconds, single deadline)
+CRYPTSETUP_TIMEOUT: Final = 180         # argon2id on a throttled laptop can take >30 s
+LOCK_MAX_RETRIES: Final = 5
+LOCK_RETRY_DELAY: Final = 1.0
+UMOUNT_MAX_ATTEMPTS: Final = 5
+SIGTERM_GRACE: Final = 5.0
+KEYRING_SERVICE: Final = "drive_manager"
+KEYRING_GET_TIMEOUT: Final = 10
+KEYRING_SET_TIMEOUT: Final = 60
+SUDO_KEEPALIVE_INTERVAL: Final = 60
+MAX_PARALLEL: Final = 8
+MAX_PARALLEL_KDF: Final = 2             # concurrent Argon2 opens (RAM pressure)
+ATTEMPT_HISTORY_CAP: Final = 50
+ATTEMPT_HISTORY_SHOW: Final = 6
+HOOK_TIMEOUT: Final = 30.0
+
+EXIT_OK: Final = 0
+EXIT_FAIL: Final = 1
+EXIT_CANCEL: Final = 130
+
+NON_POSIX_FSTYPES: Final = frozenset({"ntfs", "vfat", "exfat", "msdos"})
+TRIM_FSTYPES: Final = frozenset({"ext4", "xfs", "f2fs", "vfat", "exfat", "ntfs", "btrfs"})
+FSTYPE_ALIASES: Final = {"fat32": "vfat", "fat": "vfat"}
+PRUNE_ROOTS: Final = (Path("/mnt"), Path("/media"), Path("/run/media"), Path("/home"))
+SYSFS_CPU: Final = Path("/sys/devices/system/cpu")
 
 console = Console()
 err_console = Console(stderr=True)
-lock_fd = None
-print_lock = threading.Lock()
+print_lock = threading.RLock()
+KDF_SLOTS = threading.Semaphore(MAX_PARALLEL_KDF)
+_lock_fd: int | None = None
+
+
+def kernel_ntfs_driver() -> str:
+    """The NTFS mount type: always 'ntfs' (the 7.1+ in-kernel implementation)."""
+    try:
+        fs_list = Path("/proc/filesystems").read_text().split()
+        if "ntfs" not in fs_list:
+            res = run(["modprobe", "-n", "ntfs"], new_session=False)
+            if not res.ok:
+                warn("Kernel module 'ntfs' not found; NTFS mounts may fail unless built into kernel.")
+    except OSError:
+        pass
+    return "ntfs"
+
+
+def is_ntfs_fstype(fstype: str | None) -> bool:
+    return (fstype or "").lower() == "ntfs"
+
 
 # ------------------------------------------------------------------------------
 #  DATA STRUCTURES
 # ------------------------------------------------------------------------------
-@dataclass
+class DriveType(enum.StrEnum):
+    PROTECTED = "PROTECTED"
+    SIMPLE = "SIMPLE"
+
+
+class Outcome(enum.Enum):
+    OK = enum.auto()
+    FAILED = enum.auto()
+    NEEDS_PASSPHRASE = enum.auto()   # worker could not finish without an interactive prompt
+
+
+@dataclass(slots=True, frozen=True)
 class Drive:
     name: str
-    type: str  # "PROTECTED" | "SIMPLE"
+    type: DriveType
     mountpoint: Path
     outer_uuid: str
-    inner_uuid: str | None = None
-    hint: str | None = None
-    fstype: str | None = None
-    mount_options: list[str] | None = None
-    symlinks: list[Path] | None = None
+    inner_uuid: str | None
+    hint: str | None
+    fstype: str | None
+    mount_options: tuple[str, ...]
+    symlinks: tuple[Path, ...]
+    post_unlock: tuple[str, ...] = ()
+    pre_lock: tuple[str, ...] = ()
+    post_lock: tuple[str, ...] = ()
+
+    @property
+    def fs_uuid(self) -> str:
+        """UUID of the mountable filesystem (inner for PROTECTED, outer for SIMPLE)."""
+        return self.inner_uuid if self.type is DriveType.PROTECTED and self.inner_uuid else self.outer_uuid
+
+    @property
+    def mapper_name(self) -> str:
+        """Deterministic dm name, identical to the systemd/udisks convention."""
+        return f"luks-{self.outer_uuid}"
+
+    @property
+    def mapper_path(self) -> Path:
+        return Path("/dev/mapper") / self.mapper_name
+
+
+class MountEntry(NamedTuple):
+    mount_id: int
+    parent_id: int
+    majmin: str
+    root: str
+    target: Path
+    fstype: str
+    source: str
+    options: str
+    super_options: str
+
+
+class CryptMapping(NamedTuple):
+    name: str
+    dm_node: Path      # /dev/dm-N
+    dm_uuid: str       # CRYPT-LUKS2-<hex>-<name> / CRYPT-BITLK-...
+
+
+class Cmd(NamedTuple):
+    rc: int
+    out: str
+    errtxt: str
+
+    @property
+    def ok(self) -> bool:
+        return self.rc == 0
+
 
 # ------------------------------------------------------------------------------
-#  LOGGING & UI (THREAD-SAFE)
+#  LOGGING (THREAD-SAFE)
 # ------------------------------------------------------------------------------
-def log(msg: str):
+def log(msg: str) -> None:
     with print_lock:
         console.print(f"[bold blue]\\[DRIVE][/] {msg}")
 
-def success(msg: str):
+
+def success(msg: str) -> None:
     with print_lock:
         console.print(f"[bold green]\\[SUCCESS][/] {msg}")
 
-def err(msg: str):
+
+def warn(msg: str) -> None:
+    with print_lock:
+        console.print(f"[bold magenta]\\[WARN][/] {msg}")
+
+
+def err(msg: str) -> None:
     with print_lock:
         err_console.print(f"[bold red]\\[ERROR][/] {msg}")
 
-def hint_msg(msg: str):
+
+def hint_msg(msg: str) -> None:
     with print_lock:
         console.print(f"[bold yellow]\\[HINT][/] {msg}")
 
-# ------------------------------------------------------------------------------
-#  SECURITY & SYSTEM ISOLATION
-# ------------------------------------------------------------------------------
-def prevent_root_execution():
-    """Ensures the script is run as a normal user to keep Keyring D-Bus access valid."""
-    if os.geteuid() == 0:
-        err("Do NOT run this script with `sudo`!")
-        console.print("Running as root breaks access to your user's desktop keyring.")
-        console.print("The script will securely request sudo permissions internally when needed.")
-        sys.exit(1)
 
-def get_runtime_dir() -> Path:
-    """Returns a rigorously verified user-owned directory for temporary IPC and lockfiles."""
-    uid = os.getuid()
-    runtime_env = os.environ.get("XDG_RUNTIME_DIR", "").strip()
-    
-    if runtime_env:
-        path = Path(runtime_env) / "drive_manager"
-    else:
-        path = Path(f"/tmp/.drive_manager_{uid}")
+def cancel_exit() -> None:
+    with print_lock:
+        console.print()
+        err("Cancelled by user.")
+    sys.exit(EXIT_CANCEL)
 
-    if not path.exists():
+
+# ------------------------------------------------------------------------------
+#  SUBPROCESS PRIMITIVES
+# ------------------------------------------------------------------------------
+def _terminate_child(proc: subprocess.Popen[bytes], *, use_pg: bool) -> None:
+    """Stop and reap a timed-out command, including same-process-group children."""
+    if use_pg:
         try:
-            path.mkdir(mode=0o700, parents=True)
-        except FileExistsError:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
             pass
-
+    else:
+        try:
+            proc.terminate()
+        except ProcessLookupError:
+            pass
     try:
-        st = path.lstat()
-    except FileNotFoundError:
-        err(f"Security hazard: Directory {path} disappeared during creation.")
-        sys.exit(1)
-
-    if path.is_symlink():
-        err(f"Security hazard: Directory {path} is a symlink. Possible hijack attempt.")
-        sys.exit(1)
-
-    if st.st_uid != uid or (st.st_mode & 0o077) != 0:
-        err(f"Security hazard: Directory {path} is improperly permissioned or hijacked.")
-        sys.exit(1)
-
-    return path
-
-def prime_sudo():
-    """Primes the sudo credential cache cleanly before stdin operations."""
+        proc.communicate(timeout=2)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    if use_pg:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+    if proc.poll() is None:
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+    for stream in (proc.stdin, proc.stdout, proc.stderr):
+        if stream is not None:
+            try:
+                stream.close()
+            except OSError:
+                pass
     try:
-        subprocess.run(["sudo", "-v"], check=True)
-    except subprocess.CalledProcessError:
-        err("Sudo authentication failed. Cannot proceed.")
-        sys.exit(1)
+        proc.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        err(f"Timed-out child PID {proc.pid} is uninterruptible; inspect it before retrying.")
 
-def acquire_lock():
-    """Acquires a kernel-level exclusive file lock atomically within the user's isolated dir."""
-    global lock_fd
-    lock_path = get_runtime_dir() / "drive_manager.lock"
+
+def run(argv: list[str], *, stdin: bytes | None = None, timeout: float | None = None,
+        new_session: bool = True, env: dict[str, str] | None = None) -> Cmd:
+    """Run argv (shell=False), always capturing output. Never raises.
+
+    new_session=True isolates the child in its own process group so a timeout
+    can reap the whole group. sudo callers MUST pass False: the sudo ticket
+    is bound to our terminal session, and a setsid child never matches it.
+    """
     try:
-        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
-        lock_fd = os.fdopen(fd, "r+")
-        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        
-        lock_fd.seek(0)
-        lock_fd.truncate()
-        lock_fd.write(str(os.getpid()))
-        lock_fd.flush()
-    except BlockingIOError:
-        err("Another instance of drive_manager is currently running.")
-        sys.exit(1)
-    except Exception as e:
-        err(f"Could not open lock file: {e}")
-        sys.exit(1)
+        proc = subprocess.Popen(
+            argv,
+            stdin=subprocess.PIPE if stdin is not None else subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=new_session,
+            env=env,
+        )
+    except OSError as e:
+        return Cmd(-1, "", f"{argv[0]}: {e.strerror}")
+    try:
+        out, errtxt = proc.communicate(stdin, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _terminate_child(proc, use_pg=new_session)
+        return Cmd(-1, "", f"timed out after {timeout}s: {' '.join(argv)}")
+    except BaseException:
+        _terminate_child(proc, use_pg=new_session)
+        raise
+    return Cmd(proc.returncode, out.decode(errors="replace"), errtxt.decode(errors="replace"))
 
-def check_dependencies():
-    """Ensures necessary OS binaries exist."""
-    deps = ["mount", "umount", "findmnt", "lsblk", "udevadm", "sudo", "cryptsetup", "lsof", "blockdev"]
-    missing = [cmd for cmd in deps if shutil.which(cmd) is None]
+
+class Sudo:
+    """sudo timestamp lifecycle. prime() is the ONLY interactive sudo call."""
+    _stop = threading.Event()
+    _started = False
+
+    @staticmethod
+    def prime() -> None:
+        with print_lock:
+            rc = subprocess.run(["sudo", "-v"]).returncode
+        if rc != 0:
+            err("sudo authentication failed. Cannot proceed.")
+            sys.exit(EXIT_FAIL)
+
+    @classmethod
+    def ensure(cls) -> None:
+        if run(["sudo", "-n", "-v"], new_session=False).ok:
+            return
+        log("sudo timestamp expired; re-authenticating...")
+        cls.prime()
+
+    @classmethod
+    def start_keepalive(cls) -> None:
+        if cls._started:
+            return
+        cls._started = True
+
+        def loop() -> None:
+            while not cls._stop.wait(SUDO_KEEPALIVE_INTERVAL):
+                run(["sudo", "-n", "-v"], new_session=False)
+
+        threading.Thread(target=loop, daemon=True, name="sudo-keepalive").start()
+
+
+def sudo(argv: list[str], *, stdin: bytes | None = None, timeout: float | None = None, report: bool = True) -> Cmd:
+    """Privileged call. 'sudo -n' guarantees no password prompt can ever touch stdin."""
+    res = run(["sudo", "-n", *argv], stdin=stdin, timeout=timeout, new_session=False)
+    if res.rc == 1 and "password is required" in res.errtxt:
+        if threading.current_thread() is threading.main_thread():
+            Sudo.ensure()
+            res = run(["sudo", "-n", *argv], stdin=stdin, timeout=timeout, new_session=False)
+        else:
+            err("sudo timestamp expired during worker execution.")
+    if not res.ok and report and res.errtxt.strip():
+        err(f"{escape(argv[0])} failed (rc={res.rc}): {escape(res.errtxt.strip())}")
+    return res
+
+
+# ------------------------------------------------------------------------------
+#  SECURITY & ISOLATION
+# ------------------------------------------------------------------------------
+def prevent_root_execution() -> None:
+    if os.geteuid() == 0:
+        err("Do NOT run this script with sudo.")
+        console.print("Running as root breaks access to your user's Secret Service keyring.")
+        console.print("Privileges are requested internally, per command, via 'sudo -n'.")
+        sys.exit(EXIT_FAIL)
+
+
+def check_dependencies() -> None:
+    import shutil
+    deps = ["sudo", "mount", "umount", "lsblk", "cryptsetup", "lsof", "blockdev", "fstrim", "systemd-run", "systemctl"]
+    missing = [d for d in deps if shutil.which(d) is None]
     if missing:
         err(f"Missing required commands: {', '.join(missing)}")
-        sys.exit(1)
+        hint_msg("sudo pacman -S --needed util-linux cryptsetup lsof systemd")
+        sys.exit(EXIT_FAIL)
 
-# ------------------------------------------------------------------------------
-#  KERNEL INTERFACES & PROBING
-# ------------------------------------------------------------------------------
-def resolve_device(uuid: str | None) -> Path | None:
-    """Returns the fully resolved Path to a block device, resolving any symlinks."""
-    if not uuid:
-        return None
-    dev_path = Path(f"/dev/disk/by-uuid/{uuid}")
-    if dev_path.exists():
-        return dev_path.resolve()
-    return None
 
-def is_device_readable(dev_path: Path) -> bool:
-    """Verifies a block device is responsive by attempting to read its first block."""
+def get_runtime_dir() -> Path:
+    """$XDG_RUNTIME_DIR/drive_manager (tmpfs, per-user, wiped at logout). Verified via O_NOFOLLOW|O_DIRECTORY fstat."""
+    env = os.environ.get("XDG_RUNTIME_DIR", "").strip()
+    if not env:
+        err("XDG_RUNTIME_DIR is not set. Run from a systemd-logind session (TTY, SSH or desktop).")
+        sys.exit(EXIT_FAIL)
+    path = Path(env) / "drive_manager"
     try:
-        res = subprocess.run(
-            ["sudo", "dd", f"if={dev_path}", "bs=4096", "count=1", "of=/dev/null", "status=none"],
-            capture_output=True, timeout=10
-        )
-        return res.returncode == 0
-    except subprocess.TimeoutExpired:
-        return False
-    except Exception:
-        return False
-
-def wait_for_device(uuid: str | None, timeout: int) -> bool:
-    """Waits strictly and safely for udev to populate the /dev/disk/by-uuid tree."""
-    if not uuid:
-        return False
-    start = time.time()
-    subprocess.run(["udevadm", "settle", f"--timeout={timeout}"], capture_output=True)
-    
-    while (time.time() - start) < timeout:
-        if resolve_device(uuid):
-            return True
-        time.sleep(0.5)
-        
-    return resolve_device(uuid) is not None
-
-def get_fstype(uuid: str | None) -> str | None:
-    """Uses lsblk -d to dynamically probe the filesystem or crypto type of a single UUID without child pollution."""
-    if not uuid or not resolve_device(uuid):
-        return None
-    cmd = ["lsblk", "-d", f"/dev/disk/by-uuid/{uuid}", "--json", "-o", "FSTYPE"]
-    res = subprocess.run(cmd, capture_output=True, text=True)
-    if res.returncode == 0:
-        try:
-            data = json.loads(res.stdout)
-            devices = data.get("blockdevices", [])
-            if devices and devices[0].get("fstype"):
-                return devices[0].get("fstype")
-        except json.JSONDecodeError:
-            pass
-    return None
-
-def is_rotational(dev_path: Path | str) -> bool:
-    """Checks if a block device is a mechanical rotational HDD (1) or non-rotational SSD/NVMe (0)."""
-    try:
-        res = subprocess.run(["lsblk", "-d", "-n", "-o", "ROTA", str(dev_path)], capture_output=True, text=True)
-        if res.returncode == 0:
-            return res.stdout.strip() == "1"
-    except Exception:
+        path.mkdir(mode=0o700)
+    except FileExistsError:
         pass
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError as e:
+        err(f"Security hazard: cannot open {path} safely ({e.strerror}). Symlink hijack?")
+        sys.exit(EXIT_FAIL)
+    try:
+        st = os.fstat(fd)
+    finally:
+        os.close(fd)
+    if st.st_uid != os.getuid() or (st.st_mode & 0o077):
+        err(f"Security hazard: {path} is not owned by uid {os.getuid()} with mode 0700.")
+        sys.exit(EXIT_FAIL)
+    return path
+
+
+def acquire_lock() -> None:
+    """Exclusive kernel flock in the runtime dir; PID stamped for diagnostics."""
+    global _lock_fd
+    lock_path = get_runtime_dir() / "drive_manager.lock"
+    try:
+        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    except OSError as e:
+        err(f"Could not open lock file {lock_path}: {e.strerror}")
+        sys.exit(EXIT_FAIL)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        holder = ""
+        try:
+            holder = os.read(fd, 32).decode(errors="replace").strip()
+        except OSError:
+            pass
+        os.close(fd)
+        err(f"Another drive_manager instance is running{f' (PID {holder})' if holder else ''}.")
+        sys.exit(EXIT_FAIL)
+    os.ftruncate(fd, 0)
+    os.write(fd, str(os.getpid()).encode())
+    _lock_fd = fd  # intentionally never closed: released by the kernel at exit
+
+
+# ------------------------------------------------------------------------------
+#  KERNEL TRUTH SOURCES: /proc/self/mountinfo, /sys/class/block, /dev/disk/by-uuid
+# ------------------------------------------------------------------------------
+_OCTAL_ESC = re.compile(r"\\([0-7]{3})")
+
+
+def _unescape(s: str) -> str:
+    return _OCTAL_ESC.sub(lambda m: chr(int(m.group(1), 8)), s)
+
+
+def read_mountinfo(entries: list[str] | None = None) -> list[MountEntry]:
+    if entries is None:
+        entries = Path("/proc/self/mountinfo").read_text().splitlines()
+    out: list[MountEntry] = []
+    for line in entries:
+        pre, sep, post = line.partition(" - ")
+        if not sep:
+            continue
+        pf = pre.split(" ")
+        po = post.split(" ")
+        if len(pf) < 6 or len(po) < 3:
+            continue
+        try:
+            out.append(MountEntry(int(pf[0]), int(pf[1]), pf[2], _unescape(pf[3]),
+                                  Path(_unescape(pf[4])), po[0], _unescape(po[1]), pf[5], po[2]))
+        except (ValueError, IndexError):
+            continue
+    return out
+
+
+def device_majmin(dev: Path | None) -> str | None:
+    if dev is None:
+        return None
+    try:
+        st = os.stat(dev)
+    except OSError:
+        return None
+    if not stat.S_ISBLK(st.st_mode):
+        return None
+    return f"{os.major(st.st_rdev)}:{os.minor(st.st_rdev)}"
+
+
+def mounts_for_device(dev: Path | None, snapshot: list[MountEntry] | None = None) -> list[Path]:
+    """Every mountpoint backed by dev. Matches maj:min, and source path for btrfs (anonymous superblock dev)."""
+    mm = device_majmin(dev)
+    if not mm:
+        return []
+    if snapshot is None:
+        snapshot = read_mountinfo()
+    hits: set[Path] = set()
+    for e in snapshot:
+        if e.majmin == mm or (e.source.startswith("/dev/") and device_majmin(Path(e.source)) == mm):
+            hits.add(e.target)
+    return sorted(hits)
+
+
+def mount_entry_for(target: Path, snapshot: list[MountEntry] | None = None) -> MountEntry | None:
+    """Topmost mount at target, resolved by mountinfo parent IDs (not line order)."""
+    t = target.resolve()
+    if snapshot is None:
+        snapshot = read_mountinfo()
+    stack = [e for e in snapshot if e.target == t]
+    if not stack:
+        return None
+    parents = {e.parent_id for e in stack}
+    top = [e for e in stack if e.mount_id not in parents]
+    if len(top) == 1:
+        return top[0]
+    # Degenerate stack: fall back to the last line rather than refusing outright.
+    return stack[-1]
+
+
+def entry_matches(entry: MountEntry, dev: Path | None, fstype: str | None) -> bool:
+    """True when entry is backed by dev with the expected fstype.
+
+    A FUSE mount (e.g. ntfs-3g 'fuseblk') is never a managed kernel mount.
+    """
+    mm = device_majmin(dev)
+    if not mm:
+        return False
+    if entry.majmin != mm and not (
+        entry.source.startswith("/dev/") and device_majmin(Path(entry.source)) == mm
+    ):
+        return False
+    if entry.fstype.startswith("fuse"):
+        return False
+    if fstype is None:
+        return True
+    return entry.fstype.lower() == fstype.lower()
+
+
+def resolve_device(uuid: str | None) -> Path | None:
+    if not uuid:
+        return None
+    p = Path("/dev/disk/by-uuid") / uuid
+    try:
+        return p.resolve(strict=True)
+    except OSError:
+        return None
+
+
+def sysfs_block(dev: Path) -> Path | None:
+    node = Path("/sys/class/block") / dev.resolve().name
+    return node if node.exists() else None
+
+
+def is_rotational(dev: Path | None) -> bool:
+    """queue/rotational of the device, its parent disk, or (dm) any of its slaves."""
+    if dev is None:
+        return False
+    node = sysfs_block(dev)
+    if node is None:
+        return False
+    real = node.resolve()
+    for cand in (real / "queue" / "rotational", real.parent / "queue" / "rotational"):
+        if cand.is_file():
+            return cand.read_text().strip() == "1"
+    slaves = real / "slaves"
+    if slaves.is_dir():
+        return any(is_rotational(Path("/dev") / s.name) for s in slaves.iterdir())
     return False
 
-def get_mount_info(target_dir: Path) -> dict[str, Any] | None:
-    """Uses findmnt JSON output to safely detect if a directory is mounted."""
-    cmd = ["findmnt", "--json", "-v", "--mountpoint", str(target_dir)]
-    res = subprocess.run(cmd, capture_output=True, text=True)
-    
-    if res.returncode == 0:
-        try:
-            data = json.loads(res.stdout)
-            if "filesystems" in data and data["filesystems"]:
-                return data["filesystems"][0]
-        except json.JSONDecodeError:
-            pass
-    return None
 
-def get_crypt_mapper_name(outer_uuid: str) -> str | None:
-    """Uses lsblk to find the /dev/mapper/ NAME attached to the physical encrypted drive."""
-    if not outer_uuid:
+def probe_fstype(dev: Path | None) -> str | None:
+    """libblkid superblock type: udev database first (no subprocess), lsblk fallback."""
+    if dev is None:
         return None
-    cmd = ["lsblk", f"/dev/disk/by-uuid/{outer_uuid}", "--json", "--tree", "-o", "NAME,TYPE"]
-    res = subprocess.run(cmd, capture_output=True, text=True)
-    
-    if res.returncode == 0:
+    mm = device_majmin(dev)
+    if mm is not None:
         try:
-            data = json.loads(res.stdout)
-            def find_crypt(nodes: list[dict]) -> str | None:
-                for node in nodes:
-                    if node.get("type") == "crypt":
-                        return node.get("name")
-                    if "children" in node:
-                        found = find_crypt(node["children"])
-                        if found:
-                            return found
-                return None
-            return find_crypt(data.get("blockdevices", []))
-        except json.JSONDecodeError:
+            with open(f"/run/udev/data/b{mm}", encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    if line.startswith("E:ID_FS_TYPE="):
+                        return normalize_fstype(line[13:].strip())
+        except OSError:
             pass
-    return None
+    res = run(["lsblk", "--noheadings", "--nodeps", "-o", "FSTYPE", str(dev)])
+    if not res.ok:
+        return None
+    return normalize_fstype(res.out.strip() or None)
 
-def get_all_mountpoints_for_device(drive: Drive) -> list[Path]:
-    """Finds all active mountpoints for a drive across the entire system using findmnt and lsblk."""
-    mounts: set[Path] = set()
-    target_uuid = drive.inner_uuid if drive.type == "PROTECTED" else drive.outer_uuid
-    
-    # 1. Query by UUID via findmnt
-    if target_uuid:
-        cmd = ["findmnt", "--json", "-v", "-S", f"UUID={target_uuid}"]
-        res = subprocess.run(cmd, capture_output=True, text=True)
-        if res.returncode == 0:
+
+def _crypt_mapping_from_dm(dm_dir: Path) -> CryptMapping | None:
+    name_f, uuid_f = dm_dir / "dm" / "name", dm_dir / "dm" / "uuid"
+    if not name_f.is_file():
+        return None
+    uuid = uuid_f.read_text().strip() if uuid_f.is_file() else ""
+    if not uuid.startswith("CRYPT-"):
+        return None
+    return CryptMapping(name_f.read_text().strip(), Path("/dev") / dm_dir.resolve().name, uuid)
+
+
+def find_crypt_mapping(drive: Drive, outer_dev: Path | None) -> CryptMapping | None:
+    """Live holder of the outer partition; falls back to a dm-uuid scan (covers ghost mappers after unplug)."""
+    if outer_dev is not None:
+        node = sysfs_block(outer_dev)
+        holders = node / "holders" if node else None
+        if holders and holders.is_dir():
+            for h in sorted(holders.iterdir()):
+                m = _crypt_mapping_from_dm(h)
+                if m:
+                    return m
+    hexuuid = drive.outer_uuid.replace("-", "").lower()
+    for dm_dir in sorted(Path("/sys/class/block").glob("dm-*")):
+        m = _crypt_mapping_from_dm(dm_dir)
+        if not m or not (m.name == drive.mapper_name or hexuuid in m.dm_uuid.lower()):
+            continue
+        # A same-named mapper backed by a different device is not ours (ghost/clone).
+        if outer_dev is not None:
             try:
-                data = json.loads(res.stdout)
-                for fs in data.get("filesystems", []):
-                    if "target" in fs and fs["target"]:
-                        mounts.add(Path(fs["target"]).resolve())
-            except Exception:
-                pass
-                
-    # 2. Query by mapper name if protected
-    if drive.type == "PROTECTED":
-        existing_mapper = get_crypt_mapper_name(drive.outer_uuid)
-        mappers_to_check = [existing_mapper] if existing_mapper else [f"luks-{drive.outer_uuid}"]
-        for m_name in mappers_to_check:
-            if not m_name:
+                if outer_dev.resolve().name not in {s.name for s in (dm_dir / "slaves").iterdir()}:
+                    continue
+            except OSError:
                 continue
-            m_path = f"/dev/mapper/{m_name}"
-            cmd = ["findmnt", "--json", "-v", "-S", m_path]
-            res = subprocess.run(cmd, capture_output=True, text=True)
-            if res.returncode == 0:
-                try:
-                    data = json.loads(res.stdout)
-                    for fs in data.get("filesystems", []):
-                        if "target" in fs and fs["target"]:
-                            mounts.add(Path(fs["target"]).resolve())
-                except Exception:
-                    pass
+        return m
+    return None
 
-    # 3. Query by direct block device path
-    if target_uuid:
-        dev_path = resolve_device(target_uuid)
-        if dev_path:
-            cmd = ["findmnt", "--json", "-v", "-S", str(dev_path)]
-            res = subprocess.run(cmd, capture_output=True, text=True)
-            if res.returncode == 0:
-                try:
-                    data = json.loads(res.stdout)
-                    for fs in data.get("filesystems", []):
-                        if "target" in fs and fs["target"]:
-                            mounts.add(Path(fs["target"]).resolve())
-                except Exception:
-                    pass
 
-    return sorted(list(mounts))
+def mapping_is_live(mapping: CryptMapping, outer_dev: Path | None = None) -> bool:
+    """suspended==0 with slaves present (and the expected backing device when known).
 
-def cleanup_empty_stale_dir(path: Path):
-    """Safely cleans up empty ancestor directories created by stale mounts (e.g. /home/dusk)."""
-    try:
-        p = path.resolve()
-        if p.exists() and p.is_dir() and not any(p.iterdir()):
-            run_sudo_cmd(["sudo", "rmdir", str(p)])
-            
-        parent = p.parent
-        if parent.exists() and parent.is_dir() and not any(parent.iterdir()):
-            if parent.parent in [Path("/home"), Path("/mnt")]:
-                run_sudo_cmd(["sudo", "rmdir", str(parent)])
-                
-        grandparent = parent.parent
-        if grandparent.parent == Path("/home") and grandparent != Path.home() and grandparent.exists() and not any(grandparent.iterdir()):
-            run_sudo_cmd(["sudo", "rmdir", str(grandparent)])
-    except Exception:
-        pass
-
-def reconcile_drive_integrations(drive: Drive):
-    """Ensures permissions on user-space mounts and reconciles configured symlinks dynamically."""
-    home = Path.home()
-    uid = os.getuid()
-    gid = os.getgid()
-    
-    # 1. If mountpoint is inside the user's home directory, ensure the active user owns it
-    if drive.mountpoint.resolve().is_relative_to(home):
-        try:
-            st = drive.mountpoint.stat()
-            if st.st_uid != uid or st.st_gid != gid:
-                log(f"Adjusting user ownership on mounted volume '{drive.name}'...")
-                run_sudo_cmd(["sudo", "chown", f"{uid}:{gid}", str(drive.mountpoint)])
-        except Exception:
-            pass
-
-    # 2. Reconcile any configured symlinks pointing to this mountpoint
-    if drive.symlinks:
-        for symlink_path in drive.symlinks:
-            target_mount = drive.mountpoint.resolve()
-            if symlink_path.exists() or symlink_path.is_symlink():
-                if symlink_path.is_symlink():
-                    try:
-                        current_target = os.readlink(symlink_path)
-                        if Path(current_target).resolve() != target_mount:
-                            log(f"Fixing outdated symlink ({symlink_path} -> {target_mount})...")
-                            symlink_path.unlink(missing_ok=True)
-                            symlink_path.symlink_to(target_mount)
-                            try:
-                                os.lchown(symlink_path, uid, gid)
-                            except Exception:
-                                pass
-                    except Exception:
-                        pass
-                else:
-                    log(f"Detected local directory at {symlink_path}. Replacing with symlink to {target_mount}...")
-                    try:
-                        if symlink_path.is_dir():
-                            shutil.rmtree(symlink_path)
-                        else:
-                            symlink_path.unlink()
-                    except Exception as e:
-                        log(f"Note: Could not replace local directory {symlink_path}: {e}")
-                        
-                    if not symlink_path.exists():
-                        symlink_path.symlink_to(target_mount)
-                        try:
-                            os.lchown(symlink_path, uid, gid)
-                        except Exception:
-                            pass
-                        success(f"Created symlink: {symlink_path} -> {target_mount}")
-            else:
-                try:
-                    symlink_path.parent.mkdir(parents=True, exist_ok=True)
-                    symlink_path.symlink_to(target_mount)
-                    os.lchown(symlink_path, uid, gid)
-                    success(f"Created symlink: {symlink_path} -> {target_mount}")
-                except Exception as e:
-                    err(f"Failed to create symlink {symlink_path} -> {target_mount}: {e}")
-
-# ------------------------------------------------------------------------------
-#  KEYRING & CREDENTIAL MANAGEMENT
-# ------------------------------------------------------------------------------
-def is_gui_available() -> bool:
-    """Checks if a graphical display environment (X11 or Wayland) is active for GUI prompts."""
-    return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
-
-def is_keyring_unlocked() -> bool:
-    """Checks if the default keyring collection is unlocked (takes 0.00s and never hangs)."""
-    try:
-        backend_name = type(keyring.get_keyring()).__name__.lower()
-        if "secretservice" not in backend_name and "libsecret" not in backend_name and "chainer" not in backend_name:
-            return True
-            
-        connection = secretstorage.dbus_init()
-        collection = secretstorage.get_default_collection(connection)
-        return not collection.is_locked()
-    except Exception:
-        return True
-
-def unlock_keyring_if_locked() -> bool:
-    """Checks if the default keyring collection is locked, and if so, requests system unlock."""
-    try:
-        backend_name = type(keyring.get_keyring()).__name__.lower()
-        if "secretservice" not in backend_name and "libsecret" not in backend_name and "chainer" not in backend_name:
-            return True
-            
-        connection = secretstorage.dbus_init()
-        collection = secretstorage.get_default_collection(connection)
-        
-        if collection.is_locked():
-            if not is_gui_available():
-                log("Keyring is locked and no GUI display session detected (TTY/Headless mode).")
-                log("Falling back directly to manual terminal prompt...")
-                return False
-
-            log("Keyring is locked. Prompting to unlock system keyring...")
-            try:
-                dismissed = collection.unlock()
-                if dismissed or collection.is_locked():
-                    log("Keyring unlock prompt was dismissed or cancelled.")
-                    return False
-                else:
-                    success("Keyring successfully unlocked.")
-                    return True
-            except Exception as e:
-                log(f"Keyring unlock prompt unavailable ({e}). Falling back to terminal prompt.")
-                return False
-        return True
-    except Exception as e:
-        log(f"Keyring status check non-critical warning: {e}")
-        return True
-
-def get_keyring_password_with_timeout(service: str, name: str, timeout: int = 60) -> str | None:
-    """Attempts keyring lookup with a daemon thread timeout to prevent hanging on exit."""
-    if not unlock_keyring_if_locked():
-        log("Keyring is locked or unlock was cancelled. Falling back to manual password prompt.")
-        return None
-
-    result = [None]
-    
-    def fetch():
-        try:
-            result[0] = keyring.get_password(service, name)
-        except Exception:
-            pass
-
-    t = threading.Thread(target=fetch, daemon=True)
-    t.start()
-    t.join(timeout)
-
-    if t.is_alive():
-        log("Keyring lookup timed out. Falling through to manual password prompt.")
-        return None
-
-    return result[0]
-
-def set_keyring_password_with_timeout(service: str, name: str, password: str, timeout: int = 60) -> bool:
-    """Saves password to keyring with a daemon thread timeout to prevent hanging on locked keyring."""
-    if not unlock_keyring_if_locked():
-        err("Keyring is locked or unlock was cancelled. Password not saved to keyring.")
+    Pure sysfs: no speculative O_DIRECT reads (no disk I/O, no false negatives
+    on slow USB, no extra privileged spawns per check).
+    """
+    node = Path("/sys/class/block") / mapping.dm_node.name
+    if not node.exists():
         return False
-
-    success_flag = [False]
-
-    def store():
-        try:
-            keyring.set_password(service, name, password)
-            success_flag[0] = True
-        except keyring.errors.KeyringLocked:
-            err("Keyring is locked. Password not saved to keyring.")
-        except Exception as e:
-            err(f"Unexpected keyring error: {e}")
-
-    t = threading.Thread(target=store, daemon=True)
-    t.start()
-    t.join(timeout)
-
-    if t.is_alive():
-        err("Keyring is locked or unreachable. Password not saved to keyring.")
+    susp = node / "dm" / "suspended"
+    try:
+        if susp.is_file() and susp.read_text().strip() != "0":
+            return False
+    except OSError:
         return False
+    try:
+        slaves = [s.name for s in (node / "slaves").iterdir()]
+    except OSError:
+        return False
+    if not slaves:
+        return False
+    if outer_dev is not None:
+        try:
+            return outer_dev.resolve().name in slaves
+        except OSError:
+            return False
+    return True
 
-    return success_flag[0]
+
+def wait_for_device(uuid: str, timeout: int = FILESYSTEM_TIMEOUT) -> Path | None:
+    """Poll only this UUID to a single deadline (no global udevadm settle)."""
+    deadline = time.monotonic() + timeout
+    while True:
+        dev = resolve_device(uuid)
+        if dev or time.monotonic() >= deadline:
+            return dev
+        time.sleep(0.25)
+
 
 # ------------------------------------------------------------------------------
-#  PERSISTENT FAILED PASSWORD STORAGE
+#  FAILED-ATTEMPT HISTORY (tmpfs, 0600, atomic, wiped at logout)
 # ------------------------------------------------------------------------------
-def get_temp_attempts_path(drive_name: str) -> Path:
-    return get_runtime_dir() / f"attempts_{drive_name}.json"
+def _attempts_path(name: str) -> Path:
+    return get_runtime_dir() / f"attempts_{name}.json"
 
-def load_temp_attempts(drive_name: str) -> list[str]:
-    path = get_temp_attempts_path(drive_name)
-    if not path.exists():
+
+def load_attempts(name: str) -> list[str]:
+    path = _attempts_path(name)
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except FileNotFoundError:
+        return []
+    except OSError:
         return []
     try:
-        stat_info = path.stat()
-        if stat_info.st_uid != os.getuid() or (stat_info.st_mode & 0o077) != 0:
+        st = os.fstat(fd)
+        if st.st_uid != os.getuid() or (st.st_mode & 0o077) or not stat.S_ISREG(st.st_mode):
+            os.close(fd)
             path.unlink(missing_ok=True)
             return []
-            
-        with open(path, "r") as f:
+        with os.fdopen(fd, "r") as f:
             data = json.load(f)
-            return data if isinstance(data, list) else []
-    except Exception:
+    except (OSError, json.JSONDecodeError):
         return []
+    return [x for x in data if isinstance(x, str)] if isinstance(data, list) else []
 
-def save_temp_attempts(drive_name: str, attempts: list[str]):
-    path = get_temp_attempts_path(drive_name)
-    if len(attempts) > 50:
-        attempts = attempts[-50:]
-        
-    temp_path = path.with_suffix(".tmp")
+
+def save_attempts(name: str, attempts: list[str]) -> None:
+    path = _attempts_path(name)
+    tmp = path.with_suffix(".tmp")
     try:
-        fd = os.open(temp_path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+        fd = os.open(tmp, os.O_CREAT | os.O_WRONLY | os.O_TRUNC | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
         with os.fdopen(fd, "w") as f:
-            json.dump(attempts, f)
-        temp_path.rename(path)
-    except Exception:
-        pass
+            json.dump(attempts[-ATTEMPT_HISTORY_CAP:], f)
+        os.replace(tmp, path)
+    except OSError as e:
+        warn(f"Could not persist attempt history: {e.strerror}")
 
-def clear_temp_attempts(drive_name: str):
-    path = get_temp_attempts_path(drive_name)
-    try:
-        path.unlink(missing_ok=True)
-    except Exception:
-        pass
+
+def record_failed_attempt(name: str, secret: str) -> None:
+    attempts = load_attempts(name)
+    if secret not in attempts:
+        attempts.append(secret)
+        save_attempts(name, attempts)
+
+
+def clear_attempts(name: str) -> None:
+    _attempts_path(name).unlink(missing_ok=True)
+
 
 # ------------------------------------------------------------------------------
-#  EXECUTION & SUBPROCESS HELPERS
+#  KEYRING (SECRET SERVICE) — every D-Bus wait is bounded
 # ------------------------------------------------------------------------------
-def run_sudo_cmd(cmd: list[str], stdin_data: str | None = None) -> bool:
-    """Helper to run a sudo command securely. Dynamically applies capture_output to prevent hanging on sudo prompts."""
+def is_gui_available() -> bool:
+    return bool(os.environ.get("WAYLAND_DISPLAY"))
+
+
+def _secret_service_collection():
+    """Default collection when keyring resolves to a Secret Service backend; None for other backends."""
+    module = type(keyring.get_keyring()).__module__.lower()
+    if not any(tag in module for tag in ("secretservice", "libsecret", "chainer")):
+        return None
+    conn = secretstorage.dbus_init()
+    return secretstorage.get_default_collection(conn)
+
+
+def _call_with_timeout(fn, timeout: float):
+    box: dict[str, object] = {}
+
+    def worker() -> None:
+        try:
+            box["value"] = fn()
+        except BaseException as e:  # noqa: BLE001 - re-raised on the caller thread
+            box["error"] = e
+
+    t = threading.Thread(target=worker, daemon=True, name="keyring-io")
+    t.start()
+    t.join(timeout)
+    if t.is_alive():
+        raise TimeoutError(f"Secret Service did not answer within {timeout}s")
+    if "error" in box:
+        raise box["error"]  # type: ignore[misc]
+    return box.get("value")
+
+
+def ensure_keyring_unlocked() -> bool:
     try:
-        if stdin_data is not None:
-            res = subprocess.run(cmd, input=stdin_data, text=True, capture_output=True)
-            if res.returncode != 0:
-                if res.stderr:
-                    err(f"Subprocess kernel error: {res.stderr.strip()}")
-                return False
-            return True
-        else:
-            res = subprocess.run(cmd, capture_output=True, text=True)
-            return res.returncode == 0
-    except Exception as e:
-        err(f"Command execution failed: {e}")
+        coll = _call_with_timeout(_secret_service_collection, KEYRING_GET_TIMEOUT)
+    except Exception as e:  # SecretServiceNotAvailableException, TimeoutError, ...
+        log(f"Secret Service unavailable ({escape(type(e).__name__)}); using terminal prompt.")
         return False
-
-def run_cryptsetup_unlock(cmd: list[str], passphrase: str, timeout: int = 180) -> bool:
-    """Runs a cryptsetup open command with a passphrase piped via stdin."""
-    try:
-        res = subprocess.run(
-            cmd, input=passphrase, text=True,
-            capture_output=True, timeout=timeout
-        )
-        if res.returncode != 0:
-            if res.stderr:
-                err(f"Subprocess kernel error: {res.stderr.strip()}")
-            return False
+    if coll is None or not coll.is_locked():
         return True
-    except subprocess.TimeoutExpired:
-        err(f"Cryptsetup timed out after {timeout} seconds. The system may be under heavy load.")
+    if not is_gui_available():
+        log("Keyring is locked and no WAYLAND_DISPLAY is set (TTY/headless). Using terminal prompt.")
+        return False
+    log("Keyring is locked. Requesting unlock through the desktop Secret Service prompt...")
+    try:
+        dismissed = coll.unlock()
+    except Exception as e:
+        log(f"Keyring unlock prompt unavailable ({escape(str(e))}). Using terminal prompt.")
+        return False
+    if dismissed or coll.is_locked():
+        log("Keyring unlock was dismissed.")
+        return False
+    success("Keyring unlocked.")
+    return True
+
+
+def keyring_get(name: str, timeout: float = KEYRING_GET_TIMEOUT) -> str | None:
+    if not ensure_keyring_unlocked():
+        return None
+    try:
+        value = _call_with_timeout(lambda: keyring.get_password(KEYRING_SERVICE, name), timeout)
+    except TimeoutError:
+        log("Keyring lookup timed out. Falling through to terminal prompt.")
+        return None
+    except Exception as e:
+        log(f"Keyring lookup error ({escape(type(e).__name__)}). Falling through to terminal prompt.")
+        return None
+    return value if isinstance(value, str) and value else None
+
+
+def keyring_set(name: str, secret: str, timeout: float = KEYRING_SET_TIMEOUT) -> bool:
+    if not ensure_keyring_unlocked():
+        err("Keyring locked or unavailable; passphrase NOT saved.")
+        return False
+    try:
+        _call_with_timeout(lambda: keyring.set_password(KEYRING_SERVICE, name, secret), timeout)
+    except TimeoutError:
+        err(f"Keyring store timed out after {timeout}s; passphrase NOT saved.")
+        return False
+    except keyring.errors.KeyringLocked:
+        err("Keyring is locked; passphrase NOT saved.")
         return False
     except Exception as e:
-        err(f"Command execution failed: {e}")
+        err(f"Keyring store error: {escape(str(e))}")
         return False
+    return True
 
-def is_process_alive(pid: str) -> bool:
-    """Checks if a process is still alive by sending signal 0 via the kernel."""
+
+# ------------------------------------------------------------------------------
+#  PASSPHRASE PROMPT (WITH PREVIOUS ATTEMPTS PREVIEW)
+# ------------------------------------------------------------------------------
+def prompt_passphrase(drive: Drive) -> str:
+    """MAIN THREAD ONLY. Shows hint + history panel, returns non-empty passphrase. Raises KeyboardInterrupt/EOFError."""
+    while True:
+        with print_lock:
+            if drive.hint:
+                hint_msg(f"Hint: {escape(drive.hint)}")
+            attempts = load_attempts(drive.name)
+            if attempts:
+                shown = attempts[-ATTEMPT_HISTORY_SHOW:]
+                hidden = len(attempts) - len(shown)
+                lines: list[str] = []
+                if hidden:
+                    lines.append(f"[dim]... {hidden} older attempt{'s' if hidden > 1 else ''} hidden ...[/]")
+                lines.extend(f"[red]✗[/] {escape(a)}" for a in shown)
+                console.print(Align.right(Panel("\n".join(lines), title="[yellow]Previously Tried[/]",
+                                                border_style="yellow", expand=False)))
+            secret = Prompt.ask(
+                f"Enter passphrase for [bold]{escape(drive.name)}[/] (/dev/disk/by-uuid/[bold cyan]{drive.outer_uuid}[/])",
+                password=True,
+            )
+        secret = secret.rstrip("\r\n")
+        if secret:
+            return secret
+
+
+# ------------------------------------------------------------------------------
+#  CPU ACCELERATOR (hybrid topologies with user-offlined P-cores)
+# ------------------------------------------------------------------------------
+def parse_cpulist(text: str) -> list[int]:
+    cpus: list[int] = []
+    for part in text.strip().split(","):
+        if not part:
+            continue
+        lo, _, hi = part.partition("-")
+        cpus.extend(range(int(lo), int(hi or lo) + 1))
+    return cpus
+
+
+class CPUAccelerator:
+    """Temporarily onlines offline performance cores; restores on exit, exception, SIGTERM/SIGHUP (not SIGKILL)."""
+
+    def __init__(self) -> None:
+        self.enabled: list[int] = []
+        atexit.register(self.restore)
+
+    @staticmethod
+    def performance_cores() -> list[int]:
+        override = os.environ.get("DRIVE_MANAGER_PCORES", "").strip()
+        if override:
+            return parse_cpulist(override)
+        intel = Path("/sys/devices/cpu_core/cpus")          # Intel hybrid PMU cpumask
+        if intel.is_file():
+            return parse_cpulist(intel.read_text())
+        perf: dict[int, int] = {}                             # AMD/other: ACPI CPPC highest_perf spread
+        for node in SYSFS_CPU.glob("cpu[0-9]*"):
+            f = node / "acpi_cppc" / "highest_perf"
+            if f.is_file():
+                txt = f.read_text().strip()
+                if txt.isdigit():
+                    perf[int(node.name[3:])] = int(txt)
+        if len(set(perf.values())) < 2:
+            return []
+        lo, hi = min(perf.values()), max(perf.values())
+        if (hi - lo) / hi <= 0.15:
+            return []
+        mid = (lo + hi) / 2
+        return sorted(c for c, v in perf.items() if v >= mid)
+
+    def __enter__(self) -> "CPUAccelerator":
+        offline = []
+        for cpu in self.performance_cores():
+            f = SYSFS_CPU / f"cpu{cpu}" / "online"
+            try:
+                if f.is_file() and f.read_text().strip() == "0":
+                    offline.append(cpu)
+            except OSError:
+                pass
+        if offline:
+            log(f"Offline performance cores {offline}: enabling for the duration of this run...")
+            for cpu in offline:
+                if sudo(["tee", str(SYSFS_CPU / f"cpu{cpu}" / "online")], stdin=b"1", report=False).ok:
+                    self.enabled.append(cpu)
+                else:
+                    warn(f"Could not online cpu{cpu} (CONFIG_HOTPLUG_CPU disabled or cpu locked).")
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.restore()
+
+    def restore(self) -> None:
+        if not self.enabled:
+            return
+        log("Restoring CPU power-saving state (offlining performance cores)...")
+        for cpu in list(self.enabled):
+            path = SYSFS_CPU / f"cpu{cpu}" / "online"
+            for _ in range(5):
+                if sudo(["tee", str(path)], stdin=b"0", report=False).ok:
+                    break
+                time.sleep(0.05)
+        self.enabled.clear()
+
+
+# ------------------------------------------------------------------------------
+#  LIFECYCLE HOOKS (post_unlock, pre_lock, post_lock)
+# ------------------------------------------------------------------------------
+def run_hooks(drive: Drive, stage: str, commands: tuple[str, ...]) -> bool:
+    """Execute configured lifecycle commands unprivileged as the invoking user."""
+    if not commands:
+        return True
+    all_ok = True
+    log(f"Running {stage} hooks for '{drive.name}' ({len(commands)} command{'s' if len(commands) > 1 else ''})...")
+    env = os.environ.copy()
+    env["DRIVE_NAME"] = drive.name
+    env["DRIVE_MOUNTPOINT"] = str(drive.mountpoint)
+    env["DRIVE_TYPE"] = drive.type.value
+    env["DRIVE_FSTYPE"] = drive.fstype or ""
+    for cmd_str in commands:
+        log(f"\\[{escape(drive.name)}] {stage}: {escape(cmd_str)}")
+        try:
+            res = run(["/bin/sh", "-c", cmd_str], timeout=HOOK_TIMEOUT, new_session=True, env=env)
+            if res.ok:
+                if res.out.strip():
+                    for line in res.out.strip().splitlines():
+                        console.print(f"  [dim]│[/] {escape(line)}")
+            else:
+                all_ok = False
+                err_text = res.errtxt.strip() or res.out.strip() or f"rc={res.rc}"
+                err(f"\\[{escape(drive.name)}] {stage} hook failed: {escape(err_text)}")
+        except Exception as e:
+            all_ok = False
+            err(f"\\[{escape(drive.name)}] {stage} hook execution error: {escape(repr(e))}")
+    return all_ok
+
+
+# ------------------------------------------------------------------------------
+#  CRYPT CONTAINER OPERATIONS
+# ------------------------------------------------------------------------------
+def container_type(outer_dev: Path) -> tuple[str | None, str | None]:
+    probe = probe_fstype(outer_dev)
+    match (probe or "").lower():
+        case "crypto_luks":
+            return "luks", probe
+        case "bitlocker":
+            return "bitlk", probe
+        case _:
+            return None, probe
+
+
+def open_container(drive: Drive, outer_dev: Path, secret: str) -> bool:
+    ctype, probe = container_type(outer_dev)
+    if ctype is None:
+        err(f"'{drive.name}': no LUKS/BitLocker superblock on {outer_dev} (blkid TYPE={probe or 'none'}).")
+        hint_msg(f"Verify with: lsblk -d -o NAME,FSTYPE,UUID {outer_dev}")
+        return False
+    argv = ["cryptsetup", "open", "--type", ctype, "--tries", "1", "--key-file", "-"]
+    if not is_rotational(outer_dev):
+        argv.append("--allow-discards")
+        if ctype == "luks":
+            argv += ["--perf-no_read_workqueue", "--perf-no_write_workqueue"]
+    argv += [str(outer_dev), drive.mapper_name]
+    with KDF_SLOTS:  # cap concurrent Argon2 memory demand; filesystem work stays parallel
+        res = sudo(argv, stdin=secret.encode(), timeout=CRYPTSETUP_TIMEOUT, report=False)
+    if res.ok:
+        return True
+    if res.rc == -1:
+        err(f"cryptsetup timed out for '{drive.name}': {escape(res.errtxt)}")
+    elif res.rc == 2:
+        err(f"Decryption failed for '{drive.name}': passphrase rejected.")
+    else:
+        err(f"cryptsetup open failed for '{drive.name}' (rc={res.rc}): {escape(res.errtxt.strip())}")
+    return False
+
+
+def close_container(name: str, *, deferred: bool = False, report: bool = False) -> bool:
+    argv = ["cryptsetup", "close"] + (["--deferred"] if deferred else []) + [name]
+    return sudo(argv, report=report).ok
+
+
+def crypt_forensics(mapping: CryptMapping) -> None:
+    log(f"Forensics for /dev/mapper/{mapping.name} ({mapping.dm_node})...")
+    res = sudo(["lsof", "-w", str(mapping.dm_node), f"/dev/mapper/{mapping.name}"], report=False)
+    if res.out.strip():
+        with print_lock:
+            console.print(Panel(escape(res.out.strip()), title="Processes holding the crypt node", border_style="red"))
+    holders = Path("/sys/class/block") / mapping.dm_node.name / "holders"
+    kernel_holders = sorted(h.name for h in holders.iterdir()) if holders.is_dir() else []
+    if kernel_holders:
+        hint_msg(f"Kernel block holders (LVM/RAID/another dm layer): {', '.join(kernel_holders)}")
+    status = sudo(["cryptsetup", "status", mapping.name], report=False)
+    if status.out.strip():
+        with print_lock:
+            console.print(Panel(escape(status.out.strip()), title="cryptsetup status", border_style="yellow"))
+    hint_msg("Next: 'sudo dmesg | tail -n 30' ; 'findmnt --json -v' ; "
+             f"'sudo cryptsetup close --deferred {mapping.name}' once the holder is gone.")
+
+
+# ------------------------------------------------------------------------------
+#  UNMOUNT / BUSY-PROCESS RESOLVER (MAIN THREAD FOR PROMPTS)
+# ------------------------------------------------------------------------------
+def process_alive(pid: int) -> bool:
     try:
-        res = subprocess.run(["sudo", "kill", "-0", pid], capture_output=True, text=True)
-        return res.returncode == 0
-    except Exception:
+        os.kill(pid, 0)
+    except ProcessLookupError:
         return False
+    except PermissionError:
+        return True
+    return True
 
-def resolve_busy_processes(mountpoint: Path) -> bool:
-    """Finds processes keeping the drive busy parsing lsof directly (sudo bypasses hidepid natively)."""
-    res = subprocess.run(["sudo", "lsof", "-F", "pcu", "+f", "--", str(mountpoint)], capture_output=True, text=True)
-    if res.returncode != 0 or not res.stdout.strip():
-        return False
 
-    processes = []
-    current_p = {}
-    for line in res.stdout.strip().split("\n"):
+def parse_lsof(out: str) -> list[dict[str, str]]:
+    procs: list[dict[str, str]] = []
+    cur: dict[str, str] | None = None
+    for line in out.splitlines():
         if not line:
             continue
-        prefix = line[0]
-        val = line[1:]
-        if prefix == 'p':
-            if current_p and 'pid' in current_p:
-                processes.append(current_p)
-            current_p = {'pid': val, 'cmd': 'Unknown', 'user': 'Unknown'}
-        elif prefix == 'c' and current_p:
-            current_p['cmd'] = val
-        elif prefix == 'u' and current_p:
-            current_p['user'] = val
+        tag, val = line[0], line[1:]
+        if tag == "p":
+            cur = {"pid": val, "cmd": "unknown", "user": "unknown"}
+            procs.append(cur)
+        elif cur is not None and tag == "c":
+            cur["cmd"] = val
+        elif cur is not None and tag == "u":
+            cur["user"] = val
+    seen: set[str] = set()
+    unique = []
+    for p in procs:
+        if p["pid"] not in seen and p["pid"].isdigit():
+            seen.add(p["pid"])
+            unique.append(p)
+    return unique
 
-    if current_p and 'pid' in current_p:
-        processes.append(current_p)
 
-    unique_processes = []
-    seen_pids = set()
-    for p in processes:
-        if p['pid'] not in seen_pids:
-            seen_pids.add(p['pid'])
-            unique_processes.append(p)
-
-    processes = unique_processes
-
-    if not processes:
+def resolve_busy_processes(mountpoint: Path, *, interactive: bool) -> bool:
+    """lsof via sudo (defeats hidepid=2). Returns True when at least one holder was terminated."""
+    res = sudo(["lsof", "-w", "-F", "pcu", "+f", "--", str(mountpoint)], report=False)
+    procs = parse_lsof(res.out)
+    if not procs:
         return False
-
     with print_lock:
         console.print(Panel(
-            "[bold red]⚠️  WARNING: FILESYSTEM IS BUSY ⚠️[/]\n\n"
-            f"The following processes are currently locking [bold white]{mountpoint}[/]\n"
-            "Attempting a graceful termination allows applications to save their data.",
-            title="Filesystem Locked", border_style="red"
-        ))
-
+            "[bold red]FILESYSTEM IS BUSY[/]\n\n"
+            f"The following processes hold files under [bold white]{escape(str(mountpoint))}[/].",
+            title="Filesystem Locked", border_style="red"))
         table = Table(show_header=True, header_style="bold yellow", border_style="yellow")
         table.add_column("COMMAND", style="cyan")
         table.add_column("PID", justify="right", style="yellow")
         table.add_column("USER")
-
-        for p in processes:
-            table.add_row(p["cmd"], p["pid"], p["user"])
-
+        for p in procs:
+            table.add_row(escape(p["cmd"]), p["pid"], escape(p["user"]))
         console.print(table)
-        console.print()
-
-    action_taken = False
-    for p in processes:
-        if not is_process_alive(p["pid"]):
-            log(f"[INFO] {p['cmd']} (PID: {p['pid']}) has already exited gracefully.")
+    if not interactive:
+        hint_msg("Parallel mode: busy-process resolution is deferred to the main thread.")
+        return False
+    acted = False
+    for p in procs:
+        pid = int(p["pid"])
+        if not process_alive(pid):
             continue
-
         with print_lock:
-            ans = Prompt.ask(
-                f"Attempt graceful termination of [bold cyan]{escape(p['cmd'])}[/] (PID: [bold yellow]{p['pid']}[/])?", 
-                choices=["y", "n"], 
-                default="y"
-            )
-        if ans == "y":
-            log(f"Sending SIGTERM (15) to {escape(p['cmd'])} (PID: {p['pid']})...")
-            term_res = subprocess.run(["sudo", "kill", "-15", p['pid']], capture_output=True, text=True)
-            
-            if term_res.returncode == 0:
-                time.sleep(2)
-                if not is_process_alive(p['pid']):
-                    success(f"Successfully terminated {escape(p['cmd'])} gracefully.")
-                    action_taken = True
-                else:
-                    err(f"Process {p['pid']} refused to close gracefully. Engaging SIGKILL (9)...")
-                    kill_res = subprocess.run(["sudo", "kill", "-9", p['pid']], capture_output=True, text=True)
-                    if kill_res.returncode == 0:
-                        success(f"Forcefully killed {escape(p['cmd'])} (PID: {p['pid']}).")
-                        action_taken = True
-                    else:
-                        err(f"Failed to force kill PID {p['pid']}: {kill_res.stderr.strip()}")
-            else:
-                err(f"Failed to send SIGTERM to PID {p['pid']}: {term_res.stderr.strip()}")
-    
-    return action_taken
+            ans = Prompt.ask(f"Terminate [bold cyan]{escape(p['cmd'])}[/] (PID [bold yellow]{pid}[/])?",
+                             choices=["y", "n"], default="y")
+        if ans != "y":
+            continue
+        if not sudo(["kill", "-TERM", str(pid)], report=True).ok:
+            continue
+        deadline = time.monotonic() + SIGTERM_GRACE
+        while process_alive(pid) and time.monotonic() < deadline:
+            time.sleep(0.25)
+        if process_alive(pid):
+            warn(f"PID {pid} ignored SIGTERM; sending SIGKILL.")
+            sudo(["kill", "-KILL", str(pid)], report=True)
+            time.sleep(0.25)
+        if not process_alive(pid):
+            success(f"Terminated {escape(p['cmd'])} (PID {pid}).")
+            acted = True
+    return acted
 
-def unmount_path(mountpoint: Path, max_attempts: int = 5) -> bool:
-    """Unmounts a filesystem path cleanly, scanning and resolving locking processes if needed."""
-    if not get_mount_info(mountpoint):
+
+def unmount_path(mountpoint: Path, dev: Path | None = None, fstype: str | None = None,
+                 *, interactive: bool) -> bool:
+    if mount_entry_for(mountpoint) is None:
         return True
-
-    log(f"Unmounting {mountpoint}...")
-    for attempt in range(max_attempts):
-        if run_sudo_cmd(["sudo", "umount", str(mountpoint)]):
-            log(f"Successfully unmounted {mountpoint}.")
+    # Never unmount a foreign filesystem occupying our target: a different
+    # device or an unsupported type (e.g. FUSE) is a conflict, not our mount.
+    if dev is not None or fstype is not None:
+        occupant = mount_entry_for(mountpoint)
+        if occupant is not None and not entry_matches(occupant, dev, fstype):
+            err(f"Refusing to unmount unrelated {occupant.fstype} filesystem at {escape(str(mountpoint))}.")
+            return False
+    log(f"Unmounting {escape(str(mountpoint))}...")
+    for attempt in range(1, UMOUNT_MAX_ATTEMPTS + 1):
+        res = sudo(["umount", "-i", str(mountpoint)], report=False)
+        if res.ok or mount_entry_for(mountpoint) is None:
+            log(f"Unmounted {escape(str(mountpoint))}.")
             return True
+        busy = "busy" in res.errtxt.lower()
+        if busy:
+            log(f"{escape(str(mountpoint))} is busy (attempt {attempt}/{UMOUNT_MAX_ATTEMPTS}); scanning holders...")
+            if not resolve_busy_processes(mountpoint, interactive=interactive):
+                if not interactive:
+                    break
+                log("No userspace holder terminated; waiting for the kernel to settle...")
         else:
-            log(f"Filesystem at {mountpoint} is busy. Scanning for locking processes...")
-            if resolve_busy_processes(mountpoint):
-                log("Retrying unmount after resolving locking processes...")
-                time.sleep(1)
-            else:
-                log("No active userspace processes found. Waiting for kernel buffers to settle...")
-                time.sleep(1)
-
-    err(f"Failed to unmount {mountpoint} after {max_attempts} attempts.")
+            err(f"umount {escape(str(mountpoint))}: {escape(res.errtxt.strip())}")
+            break
+        time.sleep(1)
+    err(f"Failed to unmount {escape(str(mountpoint))}.")
+    hint_msg(f"Inspect with: sudo lsof +f -- {mountpoint} ; findmnt --json -v --mountpoint {mountpoint}")
     return False
 
-def run_cryptsetup_forensics(mapper_name: str):
-    """Diagnoses exactly what is preventing a cryptsetup closure."""
-    target = f"/dev/mapper/{mapper_name}"
-    log(f"Running forensic block-device scan on {target}...")
-    
-    res = subprocess.run(["sudo", "lsof", target], capture_output=True, text=True)
-    if res.stdout.strip():
-        with print_lock:
-            console.print(Panel(
-                res.stdout.strip(), 
-                title="Processes locking the underlying crypt node", 
-                border_style="red"
-            ))
-    else:
-        hint_msg("No userspace applications are holding the node. It is likely locked by a kernel subsystem (e.g., LVM, Btrfs async flusher) or udev daemon probing.")
-        hint_msg(f"To lock it asynchronously once the kernel is finished, run: `sudo cryptsetup close --deferred {mapper_name}`")
 
-class CPUAccelerator:
-    """Context manager to temporarily enable offline Performance cores on hybrid systems."""
-    def __init__(self):
-        self.enabled_cores = []
-        atexit.register(self.cleanup)
-
-    def cleanup(self):
-        if self.enabled_cores:
-            log("Restoring CPU power-saving state (disabling P-cores)...")
-            for cpu_id in list(self.enabled_cores):
-                cmd = ["sudo", "tee", f"/sys/devices/system/cpu/cpu{cpu_id}/online"]
-                for attempt in range(5):
-                    try:
-                        res = subprocess.run(cmd, input="0", text=True, capture_output=True)
-                        if res.returncode == 0:
-                            break
-                    except Exception:
-                        pass
-                    time.sleep(0.05)
-            self.enabled_cores.clear()
-
-    def __enter__(self):
+def prune_stale_dir(path: Path, keep: set[Path]) -> None:
+    """rmdir the (now empty) stale mountpoint, then climb while parents are empty and inside a prune root.
+    Never touches: $HOME itself, anything above the prune roots, configured mountpoints, non-empty or mounted dirs."""
+    home = Path.home()
+    p = path.resolve()
+    first = True
+    while True:
+        if p in keep or p == home or p == Path("/") or p in PRUNE_ROOTS:
+            return
+        if not any(p.is_relative_to(r) for r in PRUNE_ROOTS):
+            return
+        if not first and p.is_relative_to(home):
+            return  # never climb inside the active user's home
         try:
-            p_cores, _ = self.get_hybrid_topology()
-            if not p_cores:
-                return self
+            if p.is_symlink() or not p.is_dir() or mount_entry_for(p) or any(p.iterdir()):
+                return
+            try:
+                p.rmdir()  # unprivileged first: mountpoints we created are ours
+            except PermissionError:
+                if not sudo(["rmdir", str(p)], report=False).ok:
+                    return
+            except OSError:
+                return
+        except OSError:
+            return
+        log(f"Pruned empty stale directory {escape(str(p))}.")
+        first = False
+        p = p.parent
 
-            offline_p_cores = []
-            for cpu_id in p_cores:
-                online_file = Path(f"/sys/devices/system/cpu/cpu{cpu_id}/online")
-                if online_file.exists():
-                    try:
-                        if online_file.read_text().strip() == "0":
-                            offline_p_cores.append(cpu_id)
-                    except Exception:
-                        pass
 
-            if offline_p_cores:
-                log(f"Offline Performance cores detected (CPUs: {offline_p_cores}).")
-                log("Temporarily enabling Performance cores to accelerate operation...")
-                for cpu_id in offline_p_cores:
-                    cmd = ["sudo", "tee", f"/sys/devices/system/cpu/cpu{cpu_id}/online"]
-                    if run_sudo_cmd(cmd, stdin_data="1"):
-                        self.enabled_cores.append(cpu_id)
-        except Exception as e:
-            err(f"Failed to initiate CPU acceleration: {e}")
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.cleanup()
-
-    def get_hybrid_topology(self) -> tuple[list[int], list[int]]:
-        p_cores: list[int] = []
-        e_cores: list[int] = []
-        cpu_sysfs = Path("/sys/devices/system/cpu")
+# ------------------------------------------------------------------------------
+#  INTEGRATIONS: ownership + declarative symlinks (rename-not-delete)
+# ------------------------------------------------------------------------------
+def reconcile_integrations(drive: Drive) -> bool:
+    """Heal ownership + symlinks. Atomic symlink swap; True when healthy."""
+    uid, gid = os.getuid(), os.getgid()
+    home = Path.home()
+    target = drive.mountpoint.resolve()
+    healthy = True
+    if target.is_relative_to(home):
         try:
-            cpu_nodes = sorted([node for node in cpu_sysfs.glob("cpu[0-9]*") if node.is_dir()], key=lambda p: int(p.name[3:]))
-            cppc_perf = {}
-            for node in cpu_nodes:
-                cpu_id = int(node.name[3:])
-                perf_file = node / "acpi_cppc" / "highest_perf"
-                if perf_file.is_file():
-                    try:
-                        perf_str = perf_file.read_text().strip()
-                        if perf_str.isdigit():
-                            cppc_perf[cpu_id] = int(perf_str)
-                    except Exception:
-                        pass
-            if cppc_perf:
-                unique_perfs = sorted(list(set(cppc_perf.values())))
-                if len(unique_perfs) > 1:
-                    min_perf = unique_perfs[0]
-                    max_perf = unique_perfs[-1]
-                    
-                    if (max_perf - min_perf) / max_perf > 0.15:
-                        midpoint = (min_perf + max_perf) / 2
-                        
-                        first_e_core_id = None
-                        for cpu_id in sorted(cppc_perf.keys()):
-                            if cppc_perf[cpu_id] < midpoint:
-                                first_e_core_id = cpu_id
-                                break
-                                
-                        if first_e_core_id is not None:
-                            for node in cpu_nodes:
-                                cpu_id = int(node.name[3:])
-                                if cpu_id < first_e_core_id:
-                                    p_cores.append(cpu_id)
-                                else:
-                                    e_cores.append(cpu_id)
-                            return p_cores, e_cores
-                    else:
-                        for cpu_id in sorted(cppc_perf.keys()):
-                            if cppc_perf[cpu_id] > midpoint:
-                                p_cores.append(cpu_id)
-                            else:
-                                e_cores.append(cpu_id)
-        except Exception:
-            pass
-        return p_cores, e_cores
-
-# ------------------------------------------------------------------------------
-#  CONFIG PARSING & PATH NORMALIZATION
-# ------------------------------------------------------------------------------
-def resolve_configured_path(raw_path_str: str, resolve_symlinks: bool = True) -> Path:
-    """Intelligently expands ~, $VARS, and migrates legacy /home/<olduser>/... paths to the active user."""
-    expanded = os.path.expandvars(str(raw_path_str).strip())
-    if expanded.startswith("~"):
-        p = Path(expanded).expanduser()
-        return p.resolve() if resolve_symlinks else p.absolute()
-    
-    p = Path(expanded)
-    if p.is_absolute() and len(p.parts) > 2 and p.parts[1] == "home":
-        current_home = Path.home()
-        current_username = current_home.name
-        config_username = p.parts[2]
-        if config_username != current_username:
-            rel = Path(*p.parts[3:]) if len(p.parts) > 3 else Path()
-            rebased = current_home / rel
-            return rebased.resolve() if resolve_symlinks else rebased.absolute()
-            
-    return p.resolve() if resolve_symlinks else p.absolute()
-
-def load_config(override_path: Path | None = None) -> dict[str, Drive]:
-    """Loads and validates drives.toml into native dataclasses with path normalization."""
-    if override_path:
-        if not override_path.exists():
-            err(f"Explicit config file '{override_path}' not found.")
-            sys.exit(1)
-        target_config = override_path
-    else:
-        config_env = os.environ.get("XDG_CONFIG_HOME", "").strip()
-        xdg_config = Path(config_env) if config_env else Path.home() / ".config"
-        
-        config_paths = [
-            xdg_config / "drive_manager" / "drives.toml",
-            Path(__file__).parent / "drives.toml"
-        ]
-        target_config = next((p for p in config_paths if p.exists()), None)
-
-    if not target_config:
-        err("Configuration file 'drives.toml' not found.")
-        sys.exit(1)
-
-    try:
-        with open(target_config, "rb") as f:
-            raw_data = tomllib.load(f)
-    except tomllib.TOMLDecodeError as e:
-        err(f"Failed to parse TOML config: {e}")
-        sys.exit(1)
-
-    drives: dict[str, Drive] = {}
-    drive_entries = raw_data.get("drives", {})
-
-    for name, data in drive_entries.items():
+            st = target.stat()
+            if st.st_uid != uid or st.st_gid != gid:
+                log(f"Adjusting ownership of {escape(str(target))} to {uid}:{gid}...")
+                if not sudo(["chown", f"{uid}:{gid}", str(target)]).ok:
+                    healthy = False
+        except OSError as e:
+            warn(f"Could not stat {escape(str(target))}: {e.strerror}")
+            healthy = False
+    for link in drive.symlinks:
+        tmp = link.with_name(f".{link.name}.drive-manager-{os.getpid()}")
         try:
-            mountpoint_path = resolve_configured_path(data["mountpoint"], resolve_symlinks=True)
-            raw_symlinks = data.get("symlinks", [])
-            resolved_symlinks = [resolve_configured_path(s, resolve_symlinks=False) for s in raw_symlinks] if raw_symlinks else None
-            
-            drives[name] = Drive(
-                name=name,
-                type=data["type"].upper(),
-                mountpoint=mountpoint_path,
-                outer_uuid=data["outer_uuid"],
-                inner_uuid=data.get("inner_uuid"),
-                hint=data.get("hint"),
-                fstype=data.get("fstype"),
-                mount_options=data.get("mount_options"),
-                symlinks=resolved_symlinks
-            )
-            if drives[name].type not in ["PROTECTED", "SIMPLE"]:
-                raise ValueError(f"Invalid type '{drives[name].type}'")
-            if drives[name].type == "PROTECTED" and not drives[name].inner_uuid:
-                raise ValueError("PROTECTED drives require an inner_uuid")
-        except KeyError as e:
-            err(f"Config error in drive '{name}': Missing required key {e}")
-            sys.exit(1)
-        except ValueError as e:
-            err(f"Config error in drive '{name}': {e}")
-            sys.exit(1)
+            if link.is_symlink():
+                current = (link.parent / os.readlink(link)).resolve()
+                if current == target:
+                    continue
+                log(f"Re-pointing symlink {escape(str(link))} -> {escape(str(target))}")
+            elif link.exists():
+                backup = link.with_name(f"{link.name}.pre-drive-manager.{time.strftime('%Y%m%d-%H%M%S')}")
+                warn(f"{escape(str(link))} is a real path; moving it to {escape(str(backup))} (nothing is deleted).")
+                link.rename(backup)
+            else:
+                link.parent.mkdir(parents=True, exist_ok=True)
+            tmp.symlink_to(target)
+            os.replace(tmp, link)  # atomic: no window with a dangling link
+            os.lchown(link, uid, gid)
+            success(f"Symlink ready: {escape(str(link))} -> {escape(str(target))}")
+        except OSError as e:
+            healthy = False
+            err(f"Symlink reconcile failed for {escape(str(link))}: {e.strerror}")
+            hint_msg(f"Inspect with: ls -ld {link} ; findmnt --mountpoint {link}")
+        finally:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+    return healthy
 
-    return drives
 
 # ------------------------------------------------------------------------------
-#  CORE ENGINE
+#  MOUNT POLICY
 # ------------------------------------------------------------------------------
-def show_status(drives: dict[str, Drive]):
-    table = Table(show_header=True, header_style="bold white", border_style="bright_black")
-    table.add_column("DRIVE", width=14)
-    table.add_column("TYPE", width=10)
-    table.add_column("FS", width=10)
-    table.add_column("STATUS", width=12)
-    table.add_column("MOUNTPOINT")
+def normalize_fstype(fs: str | None) -> str | None:
+    if not fs:
+        return None
+    fs = fs.strip().lower()
+    return FSTYPE_ALIASES.get(fs, fs)
 
-    for name, drive in sorted(drives.items()):
-        target_uuid = drive.inner_uuid if drive.type == "PROTECTED" else drive.outer_uuid
-        target_mount = drive.mountpoint.resolve()
-        current_mounts = get_all_mountpoints_for_device(drive)
-        
-        fstype_str = get_fstype(target_uuid) or drive.fstype or "Unknown"
 
-        if target_mount in current_mounts:
-            table.add_row(f"[bold green]●[/] {name}", drive.type, fstype_str, "[bold green]Mounted[/]", str(drive.mountpoint))
-        elif current_mounts:
-            stale_str = ", ".join(str(m) for m in current_mounts)
-            table.add_row(f"[bold yellow]▲[/] {name}", drive.type, fstype_str, "[bold yellow]Divergent[/]", f"{stale_str} (expected {drive.mountpoint})")
-        else:
-            table.add_row(f"[bold red]○[/] {name}", drive.type, fstype_str, "[bold red]Unmounted[/]", str(drive.mountpoint))
+def audit_mount_options(drive: Drive, fstype: str | None, rotational: bool) -> None:
+    opts = set(drive.mount_options)
+    if "force" in opts:
+        warn(f"'{drive.name}': 'force' is set — this clears the Windows dirty bit and risks NTFS corruption.")
+    if "prealloc" in opts and is_ntfs_fstype(fstype):
+        warn(f"'{drive.name}': 'prealloc' is not an ntfs option (use 'preallocated_size='); mount would fail.")
+    if "discard" in opts and rotational:
+        warn(f"'{drive.name}': 'discard' on a rotational disk is a no-op; remove it.")
+    if "discard" in opts and fstype == "ext4":
+        hint_msg(f"'{drive.name}': ext4 synchronous 'discard' stalls unlink(); prefer the background fstrim this tool dispatches.")
+    if "autodefrag" in opts and not rotational:
+        warn(f"'{drive.name}': 'autodefrag' on an SSD multiplies write amplification; remove it.")
+    if fstype == "btrfs" and not rotational and not any(o.startswith("discard") for o in opts):
+        hint_msg(f"'{drive.name}': btrfs on SSD — add 'discard=async' for native non-blocking TRIM.")
+    if "flush" in opts:
+        warn(f"'{drive.name}': 'flush' destroys flash endurance; remove it.")
 
-    console.print()
-    console.print(table)
-    console.print()
 
-def do_unlock(drive: Drive, supplied_password: str | None = None) -> bool:
-    log(f"Starting unlock sequence for '{drive.name}'...")
-
-    target_uuid = drive.inner_uuid if drive.type == "PROTECTED" else drive.outer_uuid
-    target_mount = drive.mountpoint.resolve()
-    mapper_name = None
-
-    # Step 1: Detect all system-wide mount states and heal divergent/stale mounts
-    current_mounts = get_all_mountpoints_for_device(drive)
-    if target_mount in current_mounts:
-        for stale in [m for m in current_mounts if m != target_mount]:
-            log(f"Cleaning up redundant stale mount at {stale}...")
-            unmount_path(stale)
-            cleanup_empty_stale_dir(stale)
-            
-        reconcile_drive_integrations(drive)
-        success(f"'{drive.name}' is already successfully mounted at {drive.mountpoint}")
-        return True
-
-    if current_mounts:
-        for stale in current_mounts:
-            log(f"Drive '{drive.name}' is currently mounted at divergent path '{stale}'. Relocating...")
-            if not unmount_path(stale):
-                err(f"Failed to unmount divergent mountpoint {stale}. Cannot relocate safely.")
-                return False
-            cleanup_empty_stale_dir(stale)
-
-    # Step 2: If protected, unlock LUKS/BitLocker container if needed
-    if drive.type == "PROTECTED":
-        if not resolve_device(drive.outer_uuid):
-            err(f"Physical drive not found (Outer UUID: {drive.outer_uuid}). Is it plugged in?")
-            return False
-
-        existing_mapper = get_crypt_mapper_name(drive.outer_uuid)
-        mapper_name = existing_mapper if existing_mapper else f"luks-{drive.outer_uuid}"
-        mapper_path = Path(f"/dev/mapper/{mapper_name}")
-        
-        inner_dev = resolve_device(drive.inner_uuid)
-        
-        container_unlocked = False
-        if mapper_path.exists() and is_device_readable(mapper_path):
-            container_unlocked = True
-        elif inner_dev and is_device_readable(inner_dev):
-            container_unlocked = True
-
-        if container_unlocked:
-            log(f"Crypt container for '{drive.name}' is already unlocked.")
-        else:
-            if mapper_path.exists() or inner_dev:
-                err(f"Crypt device for '{drive.name}' is unresponsive. Closing stale mapping...")
-                if not run_sudo_cmd(["sudo", "cryptsetup", "close", mapper_name]):
-                    err(f"Failed to close stale mapping for {mapper_name}. Manual intervention required.")
-                    return False
-                time.sleep(1)
-
-            log(f"Unlocking encrypted container for '{drive.name}'...")
-            outer_dev_path = f"/dev/disk/by-uuid/{drive.outer_uuid}"
-            
-            outer_fstype = get_fstype(drive.outer_uuid)
-            crypto_type_args = []
-            
-            if outer_fstype:
-                fstype_lower = outer_fstype.lower()
-                if "bitlocker" in fstype_lower or "bitlk" in fstype_lower:
-                    crypto_type_args = ["--type", "bitlk"]
-                elif "luks" in fstype_lower:
-                    crypto_type_args = ["--type", "luks"]
-
-            base_cmd = ["sudo", "cryptsetup", "open", "--allow-discards"] + crypto_type_args + [outer_dev_path, mapper_name]
-            
-            pwd = supplied_password or get_keyring_password_with_timeout(KEYRING_SERVICE, drive.name, timeout=10)
-            pwd_valid = False
-            
-            if pwd:
-                log(f"Supplying password to cryptsetup for '{drive.name}'...")
-                cmd = base_cmd + ["--tries", "1", "--key-file", "-"]
-                if run_cryptsetup_unlock(cmd, pwd):
-                    pwd_valid = True
-                    clear_temp_attempts(drive.name)
-                    # If this was a supplied password not in keyring, save it
-                    if supplied_password and not get_keyring_password_with_timeout(KEYRING_SERVICE, drive.name, timeout=5):
-                        set_keyring_password_with_timeout(KEYRING_SERVICE, drive.name, supplied_password)
-                else:
-                    err(f"Decryption failed for '{drive.name}' with provided password.")
-                    tried_passwords = load_temp_attempts(drive.name)
-                    if pwd not in tried_passwords:
-                        tried_passwords.append(pwd)
-                        save_temp_attempts(drive.name, tried_passwords)
-
-            if not pwd_valid:
-                if drive.hint:
-                    hint_msg(drive.hint)
-                
-                tried_passwords = load_temp_attempts(drive.name)
-                
-                while True:
-                    if tried_passwords:
-                        max_display = 6
-                        display_items = tried_passwords[-max_display:]
-                        hidden_count = len(tried_passwords) - len(display_items)
-                        
-                        panel_lines = []
-                        if hidden_count > 0:
-                            panel_lines.append(f"[dim]... {hidden_count} older attempt{'s' if hidden_count > 1 else ''} hidden ...[/]")
-                        
-                        panel_lines.extend(f"[red]✗[/] {escape(p)}" for p in display_items)
-                        
-                        hist_panel = Panel(
-                            "\n".join(panel_lines),
-                            title="[yellow]Previously Tried[/]",
-                            border_style="yellow",
-                            expand=False
-                        )
-                        with print_lock:
-                            console.print(Align.right(hist_panel))
-                        
-                    try:
-                        with print_lock:
-                            pwd_attempt = Prompt.ask(
-                                f"Enter passphrase for {drive.name} (/dev/disk/by-uuid/[bold cyan]{drive.outer_uuid}[/])", 
-                                password=True
-                            )
-                    except (KeyboardInterrupt, EOFError):
-                        with print_lock:
-                            console.print()
-                            err("Cancelled by user.")
-                        sys.exit(130)
-                        
-                    if not pwd_attempt:
-                        continue
-                        
-                    pwd_attempt = pwd_attempt.rstrip('\r\n')
-                        
-                    try:
-                        subprocess.run(["sudo", "-n", "-v"], check=True, capture_output=True)
-                    except subprocess.CalledProcessError:
-                        log("Sudo credential expired during prompt. Refreshing...")
-                        prime_sudo()
-                        
-                    cmd = base_cmd + ["--tries", "1", "--key-file", "-"]
-                    
-                    if run_cryptsetup_unlock(cmd, pwd_attempt):
-                        clear_temp_attempts(drive.name)
-                        if set_keyring_password_with_timeout(KEYRING_SERVICE, drive.name, pwd_attempt):
-                            success(f"Password saved to keyring for '{drive.name}'.")
-                        break
-                    else:
-                        err("Decryption failed. Please try again.")
-                        if pwd_attempt not in tried_passwords:
-                            tried_passwords.append(pwd_attempt)
-                            save_temp_attempts(drive.name, tried_passwords)
-
-            log(f"Waiting for filesystem block device for '{drive.name}' to populate...")
-            if not wait_for_device(drive.inner_uuid, FILESYSTEM_TIMEOUT):
-                if mapper_path.exists():
-                    hint_msg(f"Inner filesystem UUID symlink for '{drive.name}' not created by udev. Proceeding with direct mapper path...")
-                else:
-                    err(f"Timeout waiting for inner filesystem for '{drive.name}' to appear.")
-                    return False
-
-    # Step 3: Mount filesystem to target mountpoint
-    log(f"Mounting '{drive.name}' to {drive.mountpoint}...")
-    
-    detected_fstype = get_fstype(target_uuid)
-    
-    mount_source = f"UUID={target_uuid}"
-    if drive.type == "PROTECTED" and not resolve_device(target_uuid):
-        if mapper_name:
-            fallback_mapper = Path(f"/dev/mapper/{mapper_name}")
-            if fallback_mapper.exists():
-                mount_source = str(fallback_mapper)
-
-    fstype_to_check = (drive.fstype or detected_fstype or "").lower()
-
-    mount_args = ["--mkdir"]
-    
-    if "ntfs" in fstype_to_check:
-        mount_args.extend(["-i", "-t", "ntfs"])
-    elif drive.fstype:
-        mount_args.extend(["-t", drive.fstype])
-        
-    options = []
-    uid = os.getuid()
-    gid = os.getgid()
-
+def build_mount_argv(drive: Drive, source: str, fstype: str | None) -> list[str]:
+    uid, gid = os.getuid(), os.getgid()
+    if is_ntfs_fstype(fstype):
+        fstype = kernel_ntfs_driver()
+    argv = ["mount", "-i", "--mkdir"]
+    if fstype:
+        argv += ["-t", fstype]
+    options: list[str] = []
     if drive.mount_options:
         for opt in drive.mount_options:
             if opt.startswith("uid="):
@@ -1167,350 +1216,669 @@ def do_unlock(drive: Drive, supplied_password: str | None = None) -> bool:
                 options.append(f"gid={gid}")
             else:
                 options.append(opt)
-    else:
-        if fstype_to_check in ["ntfs", "vfat", "fat32", "exfat", "msdos"]:
-            options.append(f"uid={uid},gid={gid},dmask=022,fmask=133")
-            log(f"Auto-configured kernel permissions for non-POSIX filesystem ({fstype_to_check.upper()}).")
-
+    elif fstype in NON_POSIX_FSTYPES:
+        options.append(f"uid={uid},gid={gid},dmask=022,fmask=133")
+        log(f"Auto-configured ownership for non-POSIX filesystem {fstype.upper()}.")
     if options:
-        mount_args.extend(["-o", ",".join(options)])
-    
-    cmd = [
-        "sudo", "mount", 
-        *mount_args,
-        "--source", mount_source, 
-        "--target", str(drive.mountpoint)
-    ]
-    
-    if run_sudo_cmd(cmd):
-        success(f"'{drive.name}' successfully mounted at {drive.mountpoint}.")
-        
-        # Dynamic integration hooks for permissions and configured symlinks
-        reconcile_drive_integrations(drive)
-        
-        # Dispatch background TRIM only if non-rotational SSD and filesystem supports it
-        resolved_src = resolve_device(target_uuid) or mount_source
-        if not is_rotational(resolved_src) and fstype_to_check not in ["btrfs", "zfs"]:
-            log(f"Dispatching background TRIM operation for '{drive.name}'...")
-            subprocess.Popen(
-                ["sudo", "fstrim", str(drive.mountpoint)],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                close_fds=True,
-                start_new_session=True
-            )
-        return True
-    else:
-        err(f"Failed to mount {mount_source} to {drive.mountpoint}.")
-        return False
+        argv += ["-o", ",".join(options)]
+    argv += ["--source", source, "--target", str(drive.mountpoint)]
+    return argv
 
-def do_lock(drive: Drive) -> bool:
-    log(f"Starting lock sequence for '{drive.name}'...")
 
-    # Step 1: Detect all mountpoints where this drive is currently mounted
-    mounts = set(get_all_mountpoints_for_device(drive))
-    if get_mount_info(drive.mountpoint):
-        mounts.add(drive.mountpoint.resolve())
+def trim_unit(drive: Drive) -> str:
+    """Stable unit name per drive so lock can cancel a queued TRIM before unmount."""
+    return f"drive-manager-trim-{re.sub(r'[^a-zA-Z0-9_.-]', '_', drive.name)}.service"
 
-    if mounts:
-        for mp in mounts:
-            if not unmount_path(mp):
-                err(f"Failed to unmount {mp}. Aborting lock sequence for '{drive.name}'.")
-                return False
-            cleanup_empty_stale_dir(mp)
-        log(f"All mountpoints for '{drive.name}' successfully unmounted.")
-    else:
-        log(f"'{drive.name}' is already unmounted.")
 
-    # Step 2: If protected, close and lock crypt mapping
-    if drive.type == "PROTECTED":
-        mapper_name = None
-        physical_present = resolve_device(drive.outer_uuid)
-        
-        if physical_present:
-            mapper_name = get_crypt_mapper_name(drive.outer_uuid)
-            if not mapper_name:
-                deterministic_name = f"luks-{drive.outer_uuid}"
-                if Path(f"/dev/mapper/{deterministic_name}").exists():
-                    mapper_name = deterministic_name
-        else:
-            deterministic_name = f"luks-{drive.outer_uuid}"
-            if Path(f"/dev/mapper/{deterministic_name}").exists():
-                hint_msg("Physical drive missing, but ghost mapper detected. Forcing cleanup.")
-                mapper_name = deterministic_name
-            elif resolve_device(drive.inner_uuid):
-                err(f"'{drive.name}' is active under an unknown mapper and physical drive is missing. Cannot securely lock.")
-                return False
-            else:
-                success(f"'{drive.name}' removed physically, container is no longer active.")
-                return True
-        
-        if mapper_name:
-            run_sudo_cmd(["sudo", "blockdev", "--flushbufs", f"/dev/mapper/{mapper_name}"])
+def stop_trim(drive: Drive) -> bool:
+    """Cancel a queued TRIM unit; a TRIM running after unmount could hit another fs.
 
-            log(f"Locking crypt node: {mapper_name}...")
-            
-            # Fast-path: Direct kernel-level cryptsetup close (instantaneous & parallel)
-            if run_sudo_cmd(["sudo", "cryptsetup", "close", mapper_name]):
-                success(f"Encrypted container '{drive.name}' successfully locked.")
-                return True
-            
-            cleartext_dev = f"/dev/mapper/{mapper_name}"
-            if shutil.which("udisksctl") and Path(cleartext_dev).exists():
-                res = subprocess.run(["udisksctl", "lock", "-b", cleartext_dev], capture_output=True, text=True)
-                if res.returncode == 0:
-                    success(f"Encrypted container '{drive.name}' successfully locked via udisks2.")
-                    return True
-            
-            for attempt in range(LOCK_MAX_RETRIES):
-                time.sleep(LOCK_RETRY_DELAY)
-                if run_sudo_cmd(["sudo", "cryptsetup", "close", mapper_name]):
-                    success(f"Encrypted container '{drive.name}' successfully locked.")
-                    return True
-                log(f"Lock attempt {attempt+1}/{LOCK_MAX_RETRIES} for '{drive.name}' failed. Retrying...")
-            
-            log(f"'{drive.name}' is held by a kernel subsystem. Engaging deferred asynchronous lock...")
-            if run_sudo_cmd(["sudo", "cryptsetup", "close", "--deferred", mapper_name]):
-                success(f"'{drive.name}' marked for deferred closure.")
-                return True
-
-            err(f"Failed to lock {mapper_name} after all strategies exhausted.")
-            run_cryptsetup_forensics(mapper_name)
-            return False
-        else:
-            success(f"Encrypted container for '{drive.name}' is already locked.")
-            return True
-    else:
-        success(f"Simple drive '{drive.name}' disconnected cleanly.")
-        return True
-
-def unlock_targets_pipeline(drives: dict[str, Drive], targets: list[str]) -> bool:
-    """Collects passwords upfront for all targets sequentially, then unlocks and mounts in parallel."""
-    passwords: dict[str, str | None] = {}
-    
-    # --------------------------------------------------------------------------
-    #  PHASE 1: UPFRONT CREDENTIAL COLLECTION (SEQUENTIAL ON MAIN THREAD)
-    # --------------------------------------------------------------------------
-    for target in targets:
-        drive = drives[target]
-        target_mount = drive.mountpoint.resolve()
-        current_mounts = get_all_mountpoints_for_device(drive)
-        
-        # If already mounted properly, no password needed
-        if target_mount in current_mounts:
-            passwords[target] = None
-            continue
-            
-        if drive.type == "PROTECTED":
-            existing_mapper = get_crypt_mapper_name(drive.outer_uuid)
-            mapper_name = existing_mapper if existing_mapper else f"luks-{drive.outer_uuid}"
-            mapper_path = Path(f"/dev/mapper/{mapper_name}")
-            inner_dev = resolve_device(drive.inner_uuid)
-            
-            # If container is already open in kernel, no password needed
-            if (mapper_path.exists() and is_device_readable(mapper_path)) or (inner_dev and is_device_readable(inner_dev)):
-                passwords[target] = None
-                continue
-                
-            # Attempt keyring lookup
-            pwd = get_keyring_password_with_timeout(KEYRING_SERVICE, drive.name, timeout=10)
-            if pwd:
-                passwords[target] = pwd
-            else:
-                # Keyring missing password: Prompt interactively upfront
-                log(f"Keyring password not found for '[bold cyan]{drive.name}[/]'.")
-                if drive.hint:
-                    hint_msg(drive.hint)
-                    
-                tried_passwords = load_temp_attempts(drive.name)
-                if tried_passwords:
-                    max_display = 6
-                    display_items = tried_passwords[-max_display:]
-                    hidden_count = len(tried_passwords) - len(display_items)
-                    panel_lines = []
-                    if hidden_count > 0:
-                        panel_lines.append(f"[dim]... {hidden_count} older attempt{'s' if hidden_count > 1 else ''} hidden ...[/]")
-                    panel_lines.extend(f"[red]✗[/] {escape(p)}" for p in display_items)
-                    hist_panel = Panel(
-                        "\n".join(panel_lines),
-                        title="[yellow]Previously Tried[/]",
-                        border_style="yellow",
-                        expand=False
-                    )
-                    with print_lock:
-                        console.print(Align.right(hist_panel))
-                    
-                try:
-                    with print_lock:
-                        pwd_attempt = Prompt.ask(
-                            f"Enter passphrase for {drive.name} (/dev/disk/by-uuid/[bold cyan]{drive.outer_uuid}[/])", 
-                            password=True
-                        )
-                except (KeyboardInterrupt, EOFError):
-                    with print_lock:
-                        console.print()
-                        err("Cancelled by user.")
-                    sys.exit(130)
-                    
-                if pwd_attempt:
-                    passwords[target] = pwd_attempt.rstrip('\r\n')
-                else:
-                    passwords[target] = None
-        else:
-            passwords[target] = None
-
-    # --------------------------------------------------------------------------
-    #  PHASE 2: PARALLEL UNLOCK & MOUNT DISPATCH
-    # --------------------------------------------------------------------------
-    if len(targets) == 1:
-        target = targets[0]
-        return do_unlock(drives[target], supplied_password=passwords.get(target))
-        
-    log(f"Dispatching parallel unlock sequence for {len(targets)} drives across available CPU cores...")
-    results: dict[str, bool] = {}
-    with ThreadPoolExecutor(max_workers=min(len(targets), 8)) as executor:
-        future_to_drive = {
-            executor.submit(do_unlock, drives[target], passwords.get(target)): target
-            for target in targets
-        }
-        for future in as_completed(future_to_drive):
-            target = future_to_drive[future]
-            try:
-                success_flag = future.result()
-                results[target] = success_flag
-            except Exception as e:
-                err(f"Exception unlocking '{target}': {e}")
-                results[target] = False
-                
-    return all(results.values())
-
-def lock_targets_pipeline(drives: dict[str, Drive], targets: list[str]) -> bool:
-    """Locks multiple drives concurrently with parallel unmounting and teardown."""
-    if len(targets) == 1:
-        return do_lock(drives[targets[0]])
-
-    log(f"Dispatching parallel lock sequence for {len(targets)} drives...")
-    results: dict[str, bool] = {}
-    with ThreadPoolExecutor(max_workers=min(len(targets), 8)) as executor:
-        future_to_drive = {
-            executor.submit(do_lock, drives[target]): target
-            for target in targets
-        }
-        for future in as_completed(future_to_drive):
-            target = future_to_drive[future]
-            try:
-                success_flag = future.result()
-                results[target] = success_flag
-            except Exception as e:
-                err(f"Exception locking '{target}': {e}")
-                results[target] = False
-                
-    return all(results.values())
-
-def set_keyring_password(drives: dict[str, Drive], target: str) -> bool:
-    if target not in drives:
-        err(f"Drive '{target}' not recognized in config.")
-        return False
-    
-    if drives[target].type != "PROTECTED":
-        err(f"Drive '{target}' is a SIMPLE drive and does not require a password.")
-        return False
-
-    console.print(Panel(
-        f"Setting secure keyring password for drive: [bold cyan]{escape(target)}[/]\n"
-        "This eliminates the need for manual entry during unlock sequences.",
-        title="Keyring Setup", border_style="cyan"
-    ))
-
+    Best-effort only: never blocks lock. A missing unit ('not-found') is success.
+    """
+    unit = trim_unit(drive)
     try:
-        pwd = getpass.getpass(f"Enter LUKS/BitLocker password for '{target}': ")
-        pwd_confirm = getpass.getpass("Confirm password: ")
-    except (KeyboardInterrupt, EOFError):
+        res = sudo(["systemctl", "stop", unit], report=False)
+        if res.ok:
+            return True
+        state = sudo(["systemctl", "show", "-p", "LoadState", "--value", unit], report=False)
+        if state.ok and state.out.strip() == "not-found":
+            return True  # --collect already unloaded the finished unit
+    except SystemExit:
+        pass
+    return True
+
+
+def dispatch_trim(drive: Drive, dev: Path | None, fstype: str | None, rotational: bool,
+                  entry: MountEntry | None = None) -> None:
+    if rotational or fstype not in TRIM_FSTYPES:
+        return
+    active = [o for o in drive.mount_options if o.startswith("discard")]
+    if entry is not None:
+        active += [o for o in (*entry.options.split(","), *entry.super_options.split(","))
+                   if o == "discard" or o.startswith("discard=")]
+    if active:
+        return  # discard / discard=async already handles it at the FS layer
+    unit = trim_unit(drive)
+    res = sudo(["systemd-run", "--quiet", "--collect", "--no-block", f"--unit={unit}",
+                "-p", "Nice=19", "-p", "IOSchedulingClass=idle",
+                "fstrim", "--quiet-unsupported", str(drive.mountpoint)], report=False)
+    if res.ok:
+        log(f"Background TRIM dispatched for '{drive.name}' (journalctl -u {unit}).")
+    else:
+        warn(f"Could not dispatch TRIM for '{drive.name}': {escape(res.errtxt.strip())}")
+
+
+# ------------------------------------------------------------------------------
+#  CORE ENGINE
+# ------------------------------------------------------------------------------
+def show_status(drives: dict[str, Drive]) -> None:
+    snapshot = read_mountinfo()  # one mount-table read for the whole fleet
+    table = Table(show_header=True, header_style="bold white", border_style="bright_black")
+    table.add_column("DRIVE", width=14)
+    table.add_column("TYPE", width=10)
+    table.add_column("FS", width=8)
+    table.add_column("CRYPT", width=8)
+    table.add_column("STATUS", width=11)
+    table.add_column("MOUNTPOINT")
+    for name, drive in sorted(drives.items()):
+        outer = resolve_device(drive.outer_uuid) if drive.type is DriveType.PROTECTED else None
+        mapping = find_crypt_mapping(drive, outer) if drive.type is DriveType.PROTECTED else None
+        fs_dev = resolve_device(drive.fs_uuid)
+        if fs_dev is None and mapping is not None:
+            fs_dev = mapping.dm_node
+        mounts = mounts_for_device(fs_dev, snapshot)
+        fstype = probe_fstype(fs_dev) or normalize_fstype(drive.fstype) or "?"
+        crypt = "—"
+        if drive.type is DriveType.PROTECTED:
+            if outer is None:
+                crypt = "[dim]absent[/]"
+            else:
+                crypt = "[green]open[/]" if mapping else "[red]closed[/]"
+        mp = drive.mountpoint
+        occupant = mount_entry_for(mp, snapshot)
+        if occupant is not None and not entry_matches(occupant, fs_dev, fstype if fstype != "?" else None):
+            table.add_row(f"[bold yellow]▲[/] {name}", drive.type, fstype, crypt, "[bold yellow]Conflict[/]",
+                          f"{mp} holds {occupant.fstype} (expected {fstype})")
+        elif mp in mounts:
+            table.add_row(f"[bold green]●[/] {name}", drive.type, fstype, crypt, "[bold green]Mounted[/]", str(mp))
+        elif mounts:
+            table.add_row(f"[bold yellow]▲[/] {name}", drive.type, fstype, crypt, "[bold yellow]Divergent[/]",
+                          f"{', '.join(map(str, mounts))} (expected {mp})")
+        else:
+            table.add_row(f"[bold red]○[/] {name}", drive.type, fstype, crypt, "[bold red]Unmounted[/]", str(mp))
+    with print_lock:
         console.print()
-        err("Cancelled by user.")
-        sys.exit(130)
+        console.print(table)
+        console.print()
 
-    if pwd != pwd_confirm:
-        err("Passwords do not match.")
+
+def do_unlock(drive: Drive, secret: str | None, *, interactive: bool, all_mountpoints: set[Path]) -> Outcome:
+    """interactive=True only on the main thread. Workers get interactive=False and may return NEEDS_PASSPHRASE."""
+    log(f"Unlock sequence for '{drive.name}' started.")
+    target = drive.mountpoint
+
+    # --- Step 1: mount-table reconciliation -------------------------------------------------
+    snapshot = read_mountinfo()
+    fs_dev = resolve_device(drive.fs_uuid)
+    mounts = mounts_for_device(fs_dev, snapshot)
+    expected = normalize_fstype(drive.fstype) or normalize_fstype(probe_fstype(fs_dev))
+    occupant = mount_entry_for(target, snapshot)
+    if occupant is not None and not entry_matches(occupant, fs_dev, expected):
+        err(f"'{drive.name}': target {escape(str(target))} holds an unrelated {occupant.fstype} mount; refusing to replace it.")
+        return Outcome.FAILED
+    if target in mounts:
+        for stale in (m for m in mounts if m != target):
+            log(f"Removing redundant stale mount at {escape(str(stale))}...")
+            if unmount_path(stale, fs_dev, expected, interactive=interactive):
+                prune_stale_dir(stale, all_mountpoints)
+            else:
+                return Outcome.FAILED
+        if not reconcile_integrations(drive):
+            return Outcome.FAILED
+        success(f"'{drive.name}' is already mounted at {escape(str(target))}.")
+        return Outcome.OK if run_hooks(drive, "post_unlock", drive.post_unlock) else Outcome.FAILED
+    for stale in mounts:
+        log(f"'{drive.name}' is mounted at divergent path {escape(str(stale))}; relocating to {escape(str(target))}...")
+        if not unmount_path(stale, fs_dev, expected, interactive=interactive):
+            err(f"Cannot relocate '{drive.name}': divergent mount {escape(str(stale))} is still busy.")
+            return Outcome.FAILED
+        prune_stale_dir(stale, all_mountpoints)
+
+    # --- Step 2: crypt container --------------------------------------------------------------
+    mapping: CryptMapping | None = None
+    opened_here = False
+    if drive.type is DriveType.PROTECTED:
+        outer_dev = resolve_device(drive.outer_uuid)
+        if outer_dev is None:
+            err(f"Physical device for '{drive.name}' not present (outer UUID {drive.outer_uuid}).")
+            hint_msg("Is it plugged in? Check: lsblk -o NAME,FSTYPE,UUID")
+            return Outcome.FAILED
+        mapping = find_crypt_mapping(drive, outer_dev)
+        if mapping and mapping_is_live(mapping, outer_dev):
+            log(f"Crypt container for '{drive.name}' is already open as /dev/mapper/{mapping.name}.")
+        else:
+            if mapping:
+                warn(f"Stale/unresponsive mapping /dev/mapper/{mapping.name}; closing before re-open...")
+                if not close_container(mapping.name, report=True):
+                    err(f"Cannot close stale mapping {mapping.name}.")
+                    crypt_forensics(mapping)
+                    return Outcome.FAILED
+                mapping = None
+            prompted_here = False
+            while True:
+                if secret is None:
+                    if not interactive:
+                        return Outcome.NEEDS_PASSPHRASE
+                    secret = prompt_passphrase(drive)
+                    prompted_here = True
+                log(f"Opening container for '{drive.name}'...")
+                if open_container(drive, outer_dev, secret):
+                    clear_attempts(drive.name)
+                    opened_here = True
+                    break
+                record_failed_attempt(drive.name, secret)
+                secret = None
+                if not interactive:
+                    return Outcome.NEEDS_PASSPHRASE
+            if prompted_here and secret is not None and keyring_set(drive.name, secret):
+                success(f"Passphrase for '{drive.name}' saved to the keyring.")
+            secret = None
+            fs_dev = wait_for_device(drive.inner_uuid or "")
+            mapping = find_crypt_mapping(drive, outer_dev)
+            if fs_dev is None:
+                if mapping is None:
+                    err(f"Container opened but no mapping found for '{drive.name}' — udev/dm inconsistency.")
+                    hint_msg(f"Check: lsblk --tree {outer_dev} ; sudo dmsetup ls --target crypt")
+                    return Outcome.FAILED
+                hint_msg(f"udev did not publish /dev/disk/by-uuid/{drive.inner_uuid}; mounting via /dev/mapper/{mapping.name}.")
+                if probe_fstype(mapping.dm_node) is None:
+                    err(f"Container opened but no filesystem detected on /dev/mapper/{mapping.name}.")
+                    hint_msg(f"Check inner_uuid in drives.toml: lsblk -f /dev/mapper/{mapping.name}")
+                    close_container(mapping.name, report=False)
+                    return Outcome.FAILED
+            elif mapping is not None and device_majmin(fs_dev) != device_majmin(mapping.dm_node):
+                err(f"'{drive.name}': inner UUID resolves to a different device than /dev/mapper/{mapping.name}; refusing.")
+                if opened_here:
+                    close_container(mapping.name, report=False)
+                return Outcome.FAILED
+
+    # --- Step 3: mount --------------------------------------------------------------------
+    if fs_dev is not None:
+        source, source_dev = f"UUID={drive.fs_uuid}", fs_dev
+    elif mapping is not None:
+        source, source_dev = f"/dev/mapper/{mapping.name}", mapping.dm_node
+    else:
+        err(f"Filesystem UUID {drive.fs_uuid} for '{drive.name}' not present.")
+        hint_msg("Check: ls -l /dev/disk/by-uuid/ ; lsblk -f")
+        return Outcome.FAILED
+    fstype = normalize_fstype(drive.fstype) or normalize_fstype(probe_fstype(source_dev))
+    rotational = is_rotational(source_dev)
+    audit_mount_options(drive, fstype, rotational)
+    argv = build_mount_argv(drive, source, fstype)
+    if mount_entry_for(target) is not None:
+        err(f"'{drive.name}': target became occupied before mount; refusing an overmount.")
+        if opened_here and mapping is not None:
+            close_container(mapping.name, report=False)
+        return Outcome.FAILED
+    log(f"Mounting '{drive.name}' ({fstype or 'auto'}, {'HDD' if rotational else 'SSD/NVMe'}) at {escape(str(target))}...")
+    res = sudo(argv, report=False)
+    if not res.ok:
+        err(f"mount failed for '{drive.name}' (rc={res.rc}): {escape(res.errtxt.strip())}")
+        if is_ntfs_fstype(fstype):
+            ntd = kernel_ntfs_driver()
+            hint_msg(f"Next: sudo dmesg | tail -n 20 ; lsblk -f {source_dev} ; driver used: {ntd} "
+                     f"(/proc/filesystems). Dirty/hibernated NTFS needs Windows chkdsk + full shutdown; never use 'force'.")
+        else:
+            hint_msg(f"Next: sudo dmesg | tail -n 20 ; lsblk -f {source_dev} ; check mount_options for {fstype or 'this fs'}")
+        if opened_here and mapping is not None:
+            close_container(mapping.name, report=False)
+        return Outcome.FAILED
+    mounted = mount_entry_for(target)
+    if mounted is None or not entry_matches(mounted, source_dev, fstype):
+        err(f"'{drive.name}': mount reported success but target verification failed; inspect manually.")
+        return Outcome.FAILED
+    success(f"'{drive.name}' mounted at {escape(str(target))}.")
+    if not reconcile_integrations(drive):
+        return Outcome.FAILED
+    dispatch_trim(drive, source_dev, fstype, rotational, mounted)
+    if not run_hooks(drive, "post_unlock", drive.post_unlock):
+        return Outcome.FAILED
+    return Outcome.OK
+
+
+def do_lock(drive: Drive, *, interactive: bool, all_mountpoints: set[Path]) -> Outcome:
+    log(f"Lock sequence for '{drive.name}' started.")
+    if not run_hooks(drive, "pre_lock", drive.pre_lock):
+        err(f"Aborting lock of '{drive.name}': pre_lock hook failed; filesystem remains mounted.")
+        return Outcome.FAILED
+    stop_trim(drive)  # best-effort: a queued TRIM must not run on a later fs at this path
+
+    # --- Step 1: unmount everywhere ----------------------------------------------------------
+    snapshot = read_mountinfo()
+    fs_dev = resolve_device(drive.fs_uuid)
+    mounts = set(mounts_for_device(fs_dev, snapshot))
+    expected = normalize_fstype(drive.fstype) or normalize_fstype(probe_fstype(fs_dev))
+    occupant = mount_entry_for(drive.mountpoint, snapshot)
+    if occupant is not None and not entry_matches(occupant, fs_dev, expected):
+        if not mounts:
+            err(f"'{drive.name}': target holds an unrelated {occupant.fstype} mount; refusing to unmount it.")
+            return Outcome.FAILED
+    elif occupant is not None:
+        mounts.add(drive.mountpoint.resolve())
+    if mounts:
+        for mp in sorted(mounts, reverse=True):   # deepest first
+            if not unmount_path(mp, fs_dev, expected, interactive=interactive):
+                err(f"Aborting lock of '{drive.name}': {escape(str(mp))} could not be unmounted.")
+                return Outcome.FAILED
+            prune_stale_dir(mp, all_mountpoints)
+        log(f"All mountpoints of '{drive.name}' unmounted.")
+    else:
+        log(f"'{drive.name}' is not mounted.")
+
+    if drive.type is DriveType.SIMPLE:
+        success(f"'{drive.name}' released.")
+        return Outcome.OK if run_hooks(drive, "post_lock", drive.post_lock) else Outcome.FAILED
+
+    # --- Step 2: close crypt container -------------------------------------------------------
+    outer_dev = resolve_device(drive.outer_uuid)
+    mapping = find_crypt_mapping(drive, outer_dev)
+    if mapping is None:
+        if outer_dev is None:
+            success(f"'{drive.name}' is physically absent and no mapping remains.")
+        else:
+            success(f"Container of '{drive.name}' is already locked.")
+        return Outcome.OK if run_hooks(drive, "post_lock", drive.post_lock) else Outcome.FAILED
+    if outer_dev is None:
+        warn(f"Physical device gone but ghost mapping /dev/mapper/{mapping.name} remains; forcing teardown.")
+
+    sudo(["blockdev", "--flushbufs", str(mapping.dm_node)], report=False)
+    log(f"Closing crypt node {mapping.name}...")
+    if close_container(mapping.name):
+        success(f"'{drive.name}' locked.")
+        return Outcome.OK if run_hooks(drive, "post_lock", drive.post_lock) else Outcome.FAILED
+    for attempt in range(1, LOCK_MAX_RETRIES + 1):
+        time.sleep(LOCK_RETRY_DELAY)
+        if close_container(mapping.name):
+            success(f"'{drive.name}' locked (attempt {attempt + 1}).")
+            return Outcome.OK if run_hooks(drive, "post_lock", drive.post_lock) else Outcome.FAILED
+        log(f"Close attempt {attempt}/{LOCK_MAX_RETRIES} for '{drive.name}' failed; retrying...")
+    log(f"'{drive.name}' is still held; requesting deferred close (kernel removes it when the last opener exits)...")
+    if close_container(mapping.name, deferred=True):
+        err(f"'{drive.name}' is only DEFERRED-closed (still visible until holders exit); returning failure. "
+            f"Verify later with: sudo cryptsetup status {mapping.name}")
+        return Outcome.FAILED
+    err(f"All close strategies failed for {mapping.name}.")
+    crypt_forensics(mapping)
+    return Outcome.FAILED
+
+
+# ------------------------------------------------------------------------------
+#  PIPELINES (prompts only on the main thread)
+# ------------------------------------------------------------------------------
+def _container_needs_secret(drive: Drive) -> bool:
+    if drive.type is not DriveType.PROTECTED:
         return False
+    if drive.mountpoint in mounts_for_device(resolve_device(drive.fs_uuid)):
+        return False
+    outer = resolve_device(drive.outer_uuid)
+    if outer is None:
+        return False   # do_unlock will report the missing device
+    mapping = find_crypt_mapping(drive, outer)
+    return not (mapping and mapping_is_live(mapping, outer))
 
-    if set_keyring_password_with_timeout(KEYRING_SERVICE, target, pwd):
-        success(f"Password stored securely in the system keyring for '{target}'.")
-        clear_temp_attempts(target)
+
+def unlock_pipeline(drives: dict[str, Drive], targets: list[str]) -> int:
+    all_mps = {d.mountpoint for d in drives.values()}
+    secrets: dict[str, str | None] = {}
+    prompted: set[str] = set()
+
+    # Phase 1 — sequential credential collection (main thread)
+    for name in targets:
+        drive = drives[name]
+        secrets[name] = None
+        if not _container_needs_secret(drive):
+            continue
+        secret = keyring_get(drive.name)
+        if secret is None:
+            log(f"No keyring entry for '[bold cyan]{escape(drive.name)}[/]'.")
+            secret = prompt_passphrase(drive)
+            prompted.add(name)
+        secrets[name] = secret
+
+    # Phase 2 — parallel unlock+mount (no prompts inside workers)
+    outcomes: dict[str, Outcome] = {}
+    if len(targets) == 1:
+        name = targets[0]
+        outcomes[name] = do_unlock(drives[name], secrets[name], interactive=True, all_mountpoints=all_mps)
+    else:
+        log(f"Dispatching parallel unlock for {len(targets)} drives...")
+        with ThreadPoolExecutor(max_workers=min(len(targets), MAX_PARALLEL), thread_name_prefix="unlock") as pool:
+            futs = {pool.submit(do_unlock, drives[n], secrets[n], interactive=False, all_mountpoints=all_mps): n for n in targets}
+            for fut in as_completed(futs):
+                n = futs[fut]
+                try:
+                    outcomes[n] = fut.result()
+                except Exception as e:  # noqa: BLE001 - worker bug must not take down siblings
+                    err(f"Internal error unlocking '{n}': {escape(repr(e))}")
+                    outcomes[n] = Outcome.FAILED
+        # Phase 3 — finish anything that needs a human, sequentially
+        for n in targets:
+            if outcomes.get(n) is Outcome.NEEDS_PASSPHRASE:
+                log(f"'{n}' needs interactive input; continuing on the main thread...")
+                outcomes[n] = do_unlock(drives[n], None, interactive=True, all_mountpoints=all_mps)
+
+    # Persist passphrases that were typed in Phase 1 and proven correct
+    for n in prompted:
+        if outcomes.get(n) is Outcome.OK and secrets.get(n) and keyring_set(n, secrets[n] or ""):
+            success(f"Passphrase for '{n}' saved to the keyring.")
+    secrets.clear()
+
+    failed = [n for n, o in outcomes.items() if o is not Outcome.OK]
+    if failed:
+        err(f"Unlock incomplete for: {', '.join(failed)}")
+        return EXIT_FAIL
+    return EXIT_OK
+
+
+def lock_pipeline(drives: dict[str, Drive], targets: list[str]) -> int:
+    all_mps = {d.mountpoint for d in drives.values()}
+    outcomes: dict[str, Outcome] = {}
+    if len(targets) == 1:
+        outcomes[targets[0]] = do_lock(drives[targets[0]], interactive=True, all_mountpoints=all_mps)
+    else:
+        log(f"Dispatching parallel lock for {len(targets)} drives...")
+        with ThreadPoolExecutor(max_workers=min(len(targets), MAX_PARALLEL), thread_name_prefix="lock") as pool:
+            futs = {pool.submit(do_lock, drives[n], interactive=False, all_mountpoints=all_mps): n for n in targets}
+            for fut in as_completed(futs):
+                n = futs[fut]
+                try:
+                    outcomes[n] = fut.result()
+                except Exception as e:  # noqa: BLE001
+                    err(f"Internal error locking '{n}': {escape(repr(e))}")
+                    outcomes[n] = Outcome.FAILED
+        for n in targets:
+            if outcomes.get(n) is Outcome.FAILED and mounts_for_device(resolve_device(drives[n].fs_uuid)):
+                log(f"'{n}' still mounted after parallel pass; retrying interactively on the main thread...")
+                outcomes[n] = do_lock(drives[n], interactive=True, all_mountpoints=all_mps)
+    failed = [n for n, o in outcomes.items() if o is not Outcome.OK]
+    if failed:
+        err(f"Lock incomplete for: {', '.join(failed)}")
+        return EXIT_FAIL
+    return EXIT_OK
+
+
+def set_password(drives: dict[str, Drive], name: str) -> bool:
+    drive = drives.get(name)
+    if drive is None:
+        err(f"Drive '{name}' is not in the configuration.")
+        return False
+    if drive.type is not DriveType.PROTECTED:
+        err(f"'{name}' is a SIMPLE drive and has no passphrase.")
+        return False
+    console.print(Panel(f"Storing keyring passphrase for [bold cyan]{escape(name)}[/] "
+                        f"(service '{KEYRING_SERVICE}', account '{escape(name)}').",
+                        title="Keyring Setup", border_style="cyan"))
+    try:
+        pwd = getpass.getpass(f"Passphrase for '{name}': ")
+        confirm = getpass.getpass("Confirm: ")
+    except (KeyboardInterrupt, EOFError):
+        cancel_exit()
+        return False
+    if not pwd:
+        err("Empty passphrase refused.")
+        return False
+    if pwd != confirm:
+        err("Passphrases do not match.")
+        return False
+    if keyring_set(name, pwd):
+        clear_attempts(name)
+        success(f"Passphrase stored for '{name}'.")
         return True
-        
     return False
 
-# ------------------------------------------------------------------------------
-#  MAIN ENTRY
-# ------------------------------------------------------------------------------
-def main():
-    prevent_root_execution()
 
-    parser = argparse.ArgumentParser(
-        description="Universal Drive Manager (Platinum Hybrid Edition / Parallel Multi-Drive Enabled)",
-        formatter_class=argparse.RawTextHelpFormatter
+# ------------------------------------------------------------------------------
+#  CONFIG: strict schema validation + path normalization
+# ------------------------------------------------------------------------------
+UUID_PATTERNS: Final = (
+    re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"),  # ext4/btrfs/xfs/LUKS (lowercase)
+    re.compile(r"^[0-9A-F]{16}$"),                                                    # NTFS (uppercase)
+    re.compile(r"^[0-9A-F]{4}-[0-9A-F]{4}$"),                                        # vfat/exFAT (uppercase)
+)
+ALLOWED_KEYS: Final = frozenset({
+    "type", "mountpoint", "outer_uuid", "inner_uuid", "hint",
+    "fstype", "mount_options", "symlinks",
+    "post_unlock", "pre_lock", "post_lock",
+})
+NAME_RE: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+
+
+class ConfigError(ValueError):
+    pass
+
+
+def resolve_configured_path(raw: str, *, resolve_symlinks: bool) -> Path:
+    """Expands $VARS and ~, rebases legacy /home/<olduser>/... onto the active $HOME."""
+    expanded = os.path.expandvars(raw.strip())
+    p = Path(expanded).expanduser()
+    if not p.is_absolute():
+        raise ConfigError(f"path must be absolute after expansion: '{raw}'")
+    home = Path.home()
+    parts = p.parts
+    if len(parts) > 2 and parts[1] == "home" and parts[2] != home.name:
+        p = home.joinpath(*parts[3:])
+    return p.resolve() if resolve_symlinks else p.absolute()
+
+
+def _validate_uuid(field_name: str, value: object) -> str:
+    if not isinstance(value, str) or not any(rx.match(value) for rx in UUID_PATTERNS):
+        raise ConfigError(f"{field_name}='{value}' is not a valid blkid UUID "
+                          "(lowercase 8-4-4-4-12, uppercase 16-hex NTFS, or uppercase XXXX-XXXX FAT). "
+                          "Case matters: /dev/disk/by-uuid is case-sensitive.")
+    return value
+
+
+def parse_drive(name: str, data: object) -> Drive:
+    if not NAME_RE.match(name):
+        raise ConfigError("drive name must match [A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
+    if not isinstance(data, dict):
+        raise ConfigError("drive entry must be a table")
+    unknown = set(data) - ALLOWED_KEYS
+    if unknown:
+        raise ConfigError(f"unknown key(s): {', '.join(sorted(unknown))}")
+    for key in ("type", "mountpoint", "outer_uuid"):
+        if key not in data:
+            raise ConfigError(f"missing required key '{key}'")
+    try:
+        dtype = DriveType(str(data["type"]).upper())
+    except ValueError:
+        raise ConfigError(f"type must be PROTECTED or SIMPLE, got '{data['type']}'") from None
+    outer = _validate_uuid("outer_uuid", data["outer_uuid"])
+    inner = data.get("inner_uuid")
+    if dtype is DriveType.PROTECTED:
+        if inner is None:
+            raise ConfigError("PROTECTED drives require inner_uuid")
+        inner = _validate_uuid("inner_uuid", inner)
+        if inner == outer:
+            raise ConfigError("inner_uuid must differ from outer_uuid")
+    elif inner is not None:
+        raise ConfigError("inner_uuid is only valid for PROTECTED drives")
+    for key in ("hint", "fstype"):
+        if key in data and not isinstance(data[key], str):
+            raise ConfigError(f"{key} must be a string")
+    fstype_raw = data.get("fstype")
+    if isinstance(fstype_raw, str) and fstype_raw.strip().lower() == "ntfs3":
+        raise ConfigError('fstype "ntfs3" is retired; use "ntfs" (7.1+ in-kernel driver)')
+    fstype = normalize_fstype(fstype_raw) if isinstance(fstype_raw, str) else None
+    opts = data.get("mount_options", [])
+    if not isinstance(opts, list) or not all(isinstance(o, str) and o and "," not in o and " " not in o for o in opts):
+        raise ConfigError("mount_options must be a list of single, non-empty option strings")
+    if "force" in opts:
+        raise ConfigError("'force' is forbidden (clears the NTFS dirty bit -> data loss under Windows)")
+    links = data.get("symlinks", [])
+    if not isinstance(links, list) or not all(isinstance(s, str) and s for s in links):
+        raise ConfigError("symlinks must be a list of non-empty strings")
+    if not isinstance(data["mountpoint"], str) or not data["mountpoint"]:
+        raise ConfigError("mountpoint must be a non-empty string")
+    mountpoint = resolve_configured_path(data["mountpoint"], resolve_symlinks=True)
+    if mountpoint == Path("/") or mountpoint == Path.home():
+        raise ConfigError("mountpoint may not be / or $HOME")
+    symlinks = tuple(resolve_configured_path(s, resolve_symlinks=False) for s in links)
+    if mountpoint in symlinks:
+        raise ConfigError("a symlink cannot point to itself (symlink == mountpoint)")
+
+    # Lifecycle hooks validation
+    hooks: dict[str, tuple[str, ...]] = {}
+    for hook_key in ("post_unlock", "pre_lock", "post_lock"):
+        val = data.get(hook_key, [])
+        if isinstance(val, str):
+            val = [val] if val.strip() else []
+        if not isinstance(val, list) or not all(isinstance(c, str) and c.strip() for c in val):
+            raise ConfigError(f"{hook_key} must be a string or list of command strings")
+        hooks[hook_key] = tuple(c.strip() for c in val)
+
+    return Drive(
+        name, dtype, mountpoint, outer, inner, data.get("hint"), fstype, tuple(opts), symlinks,
+        post_unlock=hooks["post_unlock"], pre_lock=hooks["pre_lock"], post_lock=hooks["post_lock"],
     )
-    
-    parser.add_argument("-c", "--config", type=Path, help="Path to override drives.toml")
-    subparsers = parser.add_subparsers(dest="action", required=True)
 
-    subparsers.add_parser("status", help="Show status of all configured drives")
-    
-    unlock_p = subparsers.add_parser("unlock", help="Unlock and mount specified drive(s)")
-    unlock_p.add_argument("targets", nargs="+", help="Drive name(s) to unlock (e.g., 'browser media slow')")
 
-    lock_p = subparsers.add_parser("lock", help="Unmount and lock specified drive(s)")
-    lock_p.add_argument("targets", nargs="+", help="Drive name(s) to lock")
+def load_config(override: Path | None) -> dict[str, Drive]:
+    if override is not None:
+        if not override.is_file():
+            err(f"Config file '{override}' not found.")
+            sys.exit(EXIT_FAIL)
+        target = override
+    else:
+        xdg = os.environ.get("XDG_CONFIG_HOME", "").strip()
+        base = Path(xdg) if xdg else Path.home() / ".config"
+        candidates = [base / "drive_manager" / "drives.toml", Path(__file__).resolve().parent / "drives.toml"]
+        target = next((p for p in candidates if p.is_file()), None)
+        if target is None:
+            err("drives.toml not found. Searched: " + " , ".join(map(str, candidates)))
+            sys.exit(EXIT_FAIL)
+    try:
+        with open(target, "rb") as f:
+            raw = tomllib.load(f)
+    except tomllib.TOMLDecodeError as e:
+        err(f"TOML parse error in {target}: {e}")
+        sys.exit(EXIT_FAIL)
+    except OSError as e:
+        err(f"Cannot read {target}: {e.strerror}")
+        sys.exit(EXIT_FAIL)
+    top_unknown = set(raw) - {"drives"}
+    if top_unknown:
+        err(f"Config error: unknown top-level key(s) {', '.join(sorted(top_unknown))} in {target}")
+        sys.exit(EXIT_FAIL)
+    entries = raw.get("drives")
+    if not isinstance(entries, dict) or not entries:
+        err(f"Config error: no [drives.<name>] tables in {target}")
+        sys.exit(EXIT_FAIL)
+    drives: dict[str, Drive] = {}
+    for name, data in entries.items():
+        try:
+            drives[name] = parse_drive(name, data)
+        except ConfigError as e:
+            err(f"Config error in [drives.{name}]: {e}")
+            sys.exit(EXIT_FAIL)
+    # cross-drive collisions (UUIDs across outer/inner, mountpoint overlaps, symlinks)
+    seen: dict[str, str] = {}
+    mountpoints: dict[Path, str] = {}
+    for d in drives.values():
+        for label, key in (("outer_uuid", d.outer_uuid), ("inner_uuid", d.inner_uuid),
+                           *((f"symlink {s}", str(s)) for s in d.symlinks)):
+            if key is None:
+                continue
+            namespace = "uuid" if label in {"outer_uuid", "inner_uuid"} else "symlink"
+            k = f"{namespace}::{key}"
+            if k in seen and seen[k] != d.name:
+                err(f"Config error: {label} '{key}' is shared by drives '{seen[k]}' and '{d.name}'")
+                sys.exit(EXIT_FAIL)
+            seen[k] = d.name
+        for other_mp, other_name in mountpoints.items():
+            if d.mountpoint.is_relative_to(other_mp) or other_mp.is_relative_to(d.mountpoint):
+                err(f"Config error: overlapping mountpoints of '{other_name}' and '{d.name}'")
+                sys.exit(EXIT_FAIL)
+        mountpoints[d.mountpoint] = d.name
+        for s in d.symlinks:
+            for other in drives.values():
+                if other.mountpoint == s or other.mountpoint.is_relative_to(s):
+                    err(f"Config error: symlink '{s}' of drive '{d.name}' collides with the mountpoint of '{other.name}'")
+                    sys.exit(EXIT_FAIL)
+    return drives
 
-    setpass_p = subparsers.add_parser("set-password", help="Securely store a drive's password in the system keyring")
-    setpass_p.add_argument("targets", nargs="+", help="Drive name(s)")
 
-    args = parser.parse_args()
+# ------------------------------------------------------------------------------
+#  MAIN
+# ------------------------------------------------------------------------------
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="drive_manager.py",
+        description="Universal Drive Manager — Platinum Hybrid Edition (parallel LUKS/BitLocker fleet control)",
+        formatter_class=argparse.RawTextHelpFormatter,
+    )
+    parser.add_argument("-c", "--config", type=Path, help="Path to drives.toml (overrides XDG lookup)")
+    parser.add_argument("-V", "--version", action="version", version=f"%(prog)s {VERSION}")
+    sub = parser.add_subparsers(dest="action", required=True)
+    sub.add_parser("status", help="Live fleet table (no privileges required)")
+    p = sub.add_parser("unlock", help="Decrypt (if needed) and mount drive(s)")
+    p.add_argument("targets", nargs="+", metavar="DRIVE")
+    p = sub.add_parser("lock", help="Unmount everywhere and close container(s)")
+    p.add_argument("targets", nargs="+", metavar="DRIVE")
+    p = sub.add_parser("set-password", help="Store a passphrase in the Secret Service keyring")
+    p.add_argument("targets", nargs="+", metavar="DRIVE")
+    return parser
 
+
+def main() -> int:
+    prevent_root_execution()
+    args = build_parser().parse_args()
     check_dependencies()
     drives = load_config(args.config)
 
     match args.action:
         case "status":
             show_status(drives)
-            
-        case "set-password":
-            overall_success = True
-            for idx, target in enumerate(args.targets):
-                if idx > 0:
-                    console.print("\n[dim]" + "-" * 60 + "[/dim]\n")
-                if not set_keyring_password(drives, target):
-                    overall_success = False
-                    if idx < len(args.targets) - 1:
-                        hint_msg(f"Setup for '{target}' failed. Moving to next drive...")
-                    else:
-                        err(f"Setup for '{target}' failed.")
-            
-            if not overall_success:
-                sys.exit(1)
-            
-        case "unlock" | "lock":
-            for target in args.targets:
-                if target not in drives:
-                    err(f"Drive '{target}' not found in configuration.")
-                    sys.exit(1)
+            return EXIT_OK
 
-            prime_sudo()
+        case "set-password":
+            ok = True
+            for i, name in enumerate(args.targets):
+                if i:
+                    console.print("\n[dim]" + "-" * 60 + "[/dim]\n")
+                if not set_password(drives, name):
+                    ok = False
+                    err(f"Keyring setup for '{name}' failed.")
+            return EXIT_OK if ok else EXIT_FAIL
+
+        case "unlock" | "lock" as action:
+            unknown = [t for t in args.targets if t not in drives]
+            if unknown:
+                err(f"Unknown drive(s): {', '.join(unknown)}. Configured: {', '.join(sorted(drives))}")
+                return EXIT_FAIL
+            targets = list(dict.fromkeys(args.targets))   # de-duplicate, keep order
+            Sudo.prime()
+            Sudo.start_keepalive()
             acquire_lock()
-            
-            with CPUAccelerator():
-                if args.action == "unlock":
-                    overall_success = unlock_targets_pipeline(drives, args.targets)
-                else:
-                    overall_success = lock_targets_pipeline(drives, args.targets)
-            
-            if not overall_success:
-                sys.exit(1)
+            accel = CPUAccelerator()
+
+            def _on_signal(signum: int, _frame) -> None:
+                accel.restore()
+                sys.exit(128 + signum)
+
+            signal.signal(signal.SIGTERM, _on_signal)
+            signal.signal(signal.SIGHUP, _on_signal)
+            with accel:
+                if action == "unlock":
+                    return unlock_pipeline(drives, targets)
+                return lock_pipeline(drives, targets)
+
+        case _:
+            return EXIT_FAIL
+
 
 if __name__ == "__main__":
     try:
-        main()
-    except KeyboardInterrupt:
-        console.print("\n[bold red]\\[ERROR][/] Interrupted by user.")
-        sys.exit(130)
+        sys.exit(main())
+    except (KeyboardInterrupt, EOFError):
+        cancel_exit()

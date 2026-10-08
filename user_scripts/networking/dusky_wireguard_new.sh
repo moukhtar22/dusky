@@ -1,130 +1,95 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# dusky_wireguard_new.sh
-# ==============================================================================
-# Interactive wizard to create a new wg-quick tunnel config.
-# The resulting file is written as root:root 600 — private keys never land
-# on disk with loose permissions.
+# dusky_wireguard_new.sh — interactive wizard for a new wg-quick tunnel
 #
-# Usage: run from the Dusky Control Center WireGuard page.
+# Runs as the desktop user; exactly ONE sudo call writes the file. The root shell
+# sets umask 077 before open() and uses noclobber, so the config is born
+# root:root 0600 (no world/wheel-readable window as with tee → chown → chmod) and
+# can never overwrite an existing tunnel, even one this user cannot see.
 # ==============================================================================
 set -euo pipefail
+shopt -s inherit_errexit
 
-readonly CLR_GRN=$'\e[1;32m'
-readonly CLR_YLW=$'\e[1;33m'
-readonly CLR_RED=$'\e[1;31m'
-readonly CLR_BLU=$'\e[1;34m'
-readonly CLR_CYN=$'\e[1;36m'
-readonly CLR_RST=$'\e[0m'
-readonly CLR_DIM=$'\e[2m'
+readonly GRN=$'\e[1;32m' YLW=$'\e[1;33m' RED=$'\e[1;31m' BLU=$'\e[1;34m' CYN=$'\e[1;36m' DIM=$'\e[2m' RST=$'\e[0m'
+ok()     { printf '%s[OK]%s    %s\n' "$GRN" "$RST" "$1"; }
+info()   { printf '%s[INFO]%s  %s\n' "$BLU" "$RST" "$1"; }
+warn()   { printf '%s[WARN]%s  %s\n' "$YLW" "$RST" "$1"; }
+err()    { printf '%s[ERR]%s   %s\n' "$RED" "$RST" "$1" >&2; }
+header() { printf '\n%s══ %s ══%s\n\n' "$BLU" "$1" "$RST"; }
+# ask VAR "prompt" [default]
+ask()    { printf '%s%s%s ' "$CYN" "$2" "$RST"; read -r "$1"; [[ -n ${!1} || -z ${3-} ]] || printf -v "$1" '%s' "$3"; }
+pause()  { if [[ -t 0 ]]; then read -rp $'\nPress Enter to close...'; fi; }
 
-ok()     { printf '%s[OK]%s    %s\n' "$CLR_GRN" "$CLR_RST" "$1"; }
-info()   { printf '%s[INFO]%s  %s\n' "$CLR_BLU" "$CLR_RST" "$1"; }
-warn()   { printf '%s[WARN]%s  %s\n' "$CLR_YLW" "$CLR_RST" "$1"; }
-err()    { printf '%s[ERR]%s   %s\n' "$CLR_RED" "$CLR_RST" "$1" >&2; }
-prompt() { printf '%s%s%s ' "$CLR_CYN" "$1" "$CLR_RST"; }
-header() { printf '\n%s══ %s ══%s\n\n' "$CLR_BLU" "$1" "$CLR_RST"; }
+[[ -x /usr/bin/wg ]] || { err "wireguard-tools missing — run dusky_wireguard_setup.sh"; pause; exit 1; }
 
-# ── Dependency check ──────────────────────────────────────────────────────────
-if ! command -v wg &>/dev/null; then
-    err "wireguard-tools not installed. Run: sudo pacman -S wireguard-tools"
-    exit 1
+header "Dusky WireGuard — New Tunnel"
+info "Written to /etc/wireguard/<name>.conf as root:root 0600; the private key never touches a user path."
+
+# ── Interface name: wg-quick's own rule, bounded by IFNAMSIZ (15) ────────────
+while :; do
+    ask IFACE "Interface name (e.g. wg0, work):"
+    if [[ ! $IFACE =~ ^[a-zA-Z0-9_=+.-]{1,15}$ ]]; then
+        warn "1-15 chars of [a-zA-Z0-9_=+.-] (Linux IFNAMSIZ limit)"
+    elif [[ -e /etc/wireguard/$IFACE.conf ]]; then
+        warn "/etc/wireguard/$IFACE.conf already exists"
+    else
+        break
+    fi
+done
+readonly DEST="/etc/wireguard/$IFACE.conf"
+
+PRIVATE_KEY=$(wg genkey)
+PUBLIC_KEY=$(wg pubkey <<<"$PRIVATE_KEY")   # bash ≥5.1 feeds small here-strings via a pipe
+ok "Keypair generated (memory only)"
+printf '  %sPublic key:%s %s\n\n' "$DIM" "$RST" "$PUBLIC_KEY"
+
+while :; do
+    ask IFACE_ADDR "Tunnel address(es) (e.g. 10.0.0.2/24):"
+    [[ $IFACE_ADDR == */* ]] && break
+    warn "CIDR required (address/prefix)"
+done
+ask DNS "DNS server(s) (blank = none, e.g. 1.1.1.1):"
+if [[ -n $DNS ]] && ! command -v resolvconf >/dev/null; then
+    warn "wg-quick needs resolvconf for DNS=; install: sudo pacman -S systemd-resolvconf"
 fi
 
-header "Dusky WireGuard — New Tunnel Wizard"
-info "Config is written directly to /etc/wireguard/<name>.conf as root:root 600."
-info "The private key never touches a user-writable path."
-echo
-
-# ── Interface name ─────────────────────────────────────────────────────────────
-while true; do
-    prompt "Interface name (e.g. wg0, vpn1, work):"
-    read -r IFACE
-    IFACE="${IFACE//[^a-zA-Z0-9_-]/}"      # strip unsafe chars
-    if [[ -z "$IFACE" ]]; then
-        warn "Name cannot be empty"; continue
-    fi
-    if [[ -f "/etc/wireguard/${IFACE}.conf" ]]; then
-        warn "/etc/wireguard/${IFACE}.conf already exists — choose a different name"
-        continue
-    fi
-    break
+header "Peer (server)"
+while :; do
+    ask PEER_PUBKEY "Peer public key:"
+    [[ $PEER_PUBKEY =~ ^[A-Za-z0-9+/]{42}[AEIMQUYcgkosw480]=$ ]] && break
+    warn "Not a WireGuard public key (44-char base64 of 32 bytes)"
+done
+ask PEER_ENDPOINT "Peer endpoint host:port (blank = none, e.g. vpn.example.com:51820):"
+ask ALLOWED_IPS "Allowed IPs [0.0.0.0/0, ::/0]:" "0.0.0.0/0, ::/0"
+while :; do
+    ask KEEPALIVE "Persistent keepalive seconds (blank = off, e.g. 25):"
+    [[ -z $KEEPALIVE ]] || { [[ $KEEPALIVE =~ ^[0-9]+$ ]] && (( KEEPALIVE >= 1 && KEEPALIVE <= 65535 )); } && break
+    warn "1-65535 or blank"
 done
 
-# ── Key generation ─────────────────────────────────────────────────────────────
-info "Generating keypair ..."
-PRIVATE_KEY="$(wg genkey)"
-PUBLIC_KEY="$(printf '%s' "$PRIVATE_KEY" | wg pubkey)"
-ok "Keys generated (private key stays in memory only)"
-printf '  %sPublic key:%s  %s\n' "$CLR_DIM" "$CLR_RST" "$PUBLIC_KEY"
-echo
+printf -v CONFIG '[Interface]\nPrivateKey = %s\nAddress = %s\n' "$PRIVATE_KEY" "$IFACE_ADDR"
+[[ -z $DNS ]] || printf -v CONFIG '%sDNS = %s\n' "$CONFIG" "$DNS"
+printf -v CONFIG '%s\n[Peer]\nPublicKey = %s\n' "$CONFIG" "$PEER_PUBKEY"
+[[ -z $PEER_ENDPOINT ]] || printf -v CONFIG '%sEndpoint = %s\n' "$CONFIG" "$PEER_ENDPOINT"
+printf -v CONFIG '%sAllowedIPs = %s\n' "$CONFIG" "$ALLOWED_IPS"
+[[ -z $KEEPALIVE ]] || printf -v CONFIG '%sPersistentKeepalive = %s\n' "$CONFIG" "$KEEPALIVE"
 
-# ── Interface address ──────────────────────────────────────────────────────────
-prompt "Tunnel IP address (e.g. 10.0.0.2/24):"
-read -r IFACE_ADDR
-
-# ── DNS (optional) ─────────────────────────────────────────────────────────────
-prompt "DNS server (leave blank to skip, e.g. 1.1.1.1):"
-read -r DNS
-
-# ── Peer configuration ─────────────────────────────────────────────────────────
-header "Peer (Server) Configuration"
-prompt "Peer public key:"
-read -r PEER_PUBKEY
-
-prompt "Peer endpoint (host:port, e.g. vpn.example.com:51820):"
-read -r PEER_ENDPOINT
-
-prompt "Allowed IPs (e.g. 0.0.0.0/0 for full-tunnel, or 10.0.0.0/24):"
-read -r ALLOWED_IPS
-ALLOWED_IPS="${ALLOWED_IPS:-0.0.0.0/0, ::/0}"
-
-prompt "Persistent keepalive in seconds (leave blank to skip, e.g. 25):"
-read -r KEEPALIVE
-
-# ── Build config content ───────────────────────────────────────────────────────
-CONFIG_CONTENT="[Interface]
-PrivateKey = ${PRIVATE_KEY}
-Address = ${IFACE_ADDR}"
-
-if [[ -n "$DNS" ]]; then
-    CONFIG_CONTENT+="
-DNS = ${DNS}"
-fi
-
-CONFIG_CONTENT+="
-
-[Peer]
-PublicKey = ${PEER_PUBKEY}
-Endpoint = ${PEER_ENDPOINT}
-AllowedIPs = ${ALLOWED_IPS}"
-
-if [[ -n "$KEEPALIVE" && "$KEEPALIVE" =~ ^[0-9]+$ ]]; then
-    CONFIG_CONTENT+="
-PersistentKeepalive = ${KEEPALIVE}"
-fi
-
-# ── Review ─────────────────────────────────────────────────────────────────────
 header "Review"
-printf '%s%s%s\n' "$CLR_DIM" "$CONFIG_CONTENT" "$CLR_RST"
-echo
-prompt "Write to /etc/wireguard/${IFACE}.conf? [y/N]:"
-read -r CONFIRM
-if [[ ! "$CONFIRM" =~ ^[Yy]$ ]]; then
-    warn "Aborted — no file written"
+printf '%s%s%s\n\n' "$DIM" "${CONFIG/"$PRIVATE_KEY"/<hidden>}" "$RST"
+ask CONFIRM "Write $DEST? [y/N]:"
+if [[ $CONFIRM != [Yy]* ]]; then
+    warn "Aborted — nothing written"
+    pause
     exit 0
 fi
 
-# ── Write as root ─────────────────────────────────────────────────────────────
-DEST="/etc/wireguard/${IFACE}.conf"
-printf '%s\n' "$CONFIG_CONTENT" | sudo tee "$DEST" > /dev/null
-sudo chown root:root "$DEST"
-sudo chmod 600 "$DEST"
-
-ok "Config written: $DEST (root:root 600)"
-printf '  %sPublic key:%s  %s\n' "$CLR_DIM" "$CLR_RST" "$PUBLIC_KEY"
-echo
-info "Reload the Dusky Control Center (Ctrl+R) to see the new tunnel."
-echo
-printf 'Press Enter to close...'
-read -r
+if printf '%s\n' "$CONFIG" | sudo -- /usr/bin/bash -c 'umask 077; set -C; exec cat >"$1"' _ "$DEST"; then
+    unset PRIVATE_KEY CONFIG
+    ok "Written: $DEST (root:root 0600)"
+    printf '  %sPublic key:%s %s\n\n' "$DIM" "$RST" "$PUBLIC_KEY"
+    info "Reload the Dusky Control Center (Ctrl+R) to see the tunnel."
+else
+    err "Write failed (file exists or sudo denied) — nothing changed"
+    exit 1
+fi
+pause

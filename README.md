@@ -4,7 +4,7 @@
 
 A community Discord server has been created! You can join it below. Please note that the original developer is not involved with this community server in any capacity.
 
-[Join Community Discord Server](https://discord.gg/V2EeUJwd4)
+[Join Community Discord Server](https://discord.gg/gmyAxpAQYK)
 
 ## Updated demo video now out on YouTube with all major features covered! 
 (since the release of this video around 5 major features have been added, scroll down to the `overview` section for details)
@@ -121,7 +121,7 @@ git --git-dir=$HOME/dusky/ --work-tree=$HOME checkout -f
 
 ### Step 2: Run the Orchestra
 
-Run the master script to install dependencies, themes, and services, this will take a while. because it sets up everything. You'll be promted to say yes/no during setup, so dont leave it running unattended.
+Run the master script to install dependencies, themes, and services, this will take a while. because it sets up everything. You'll be prompted to say yes/no during setup, so dont leave it running unattended.
 
 ```bash
 ~/user_scripts/arch_setup_scripts/orchestrator.sh
@@ -253,12 +253,10 @@ GUI keybind invokable sliders for:
 
 
 Speech to text 
-- Whisper - for cpu 
-or 
-- Parakeet - for nvidia gpus. might also work on Amd (not sure)
+- Parakeet - for nvidia gpus (CUDA) or cpu 
 
 text to speech 
-- kokoro for both cpu and gpu
+- kokoro for cpu, nvidia gpus and amd gpus (via ROCm)
 
 - mechanical keypress sounds
 togglalble with a keybind or from rofi. 

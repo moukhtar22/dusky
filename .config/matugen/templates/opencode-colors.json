@@ -1,222 +1,367 @@
 {
   "$schema": "https://opencode.ai/theme.json",
-  "defs": {
-    "primary": "{{colors.primary.default.hex}}",
-    "on_primary": "{{colors.on_primary.default.hex}}",
-    "secondary": "{{colors.secondary.default.hex}}",
-    "on_secondary": "{{colors.on_secondary.default.hex}}",
-    "surface": "{{colors.surface.default.hex}}",
-    "on_surface": "{{colors.on_surface.default.hex}}",
-    "surface_variant": "{{colors.surface_variant.default.hex}}",
-    "on_surface_variant": "{{colors.on_surface_variant.default.hex}}",
-    "background": "{{colors.surface.default.hex}}",
-    "on_background": "{{colors.on_surface.default.hex}}",
-    "error": "{{colors.error.default.hex}}",
-    "on_error": "{{colors.on_error.default.hex}}",
-    "outline": "{{colors.outline.default.hex}}",
-    "outline_variant": "{{colors.outline_variant.default.hex}}"
-  },
-  "theme": {
-    "primary": {
-      "dark": "primary",
-      "light": "primary"
-    },
-    "secondary": {
-      "dark": "secondary",
-      "light": "secondary"
-    },
-    "accent": {
-      "dark": "primary",
-      "light": "primary"
-    },
-    "error": {
-      "dark": "error",
-      "light": "error"
-    },
-    "warning": {
-      "dark": "secondary",
-      "light": "secondary"
-    },
-    "success": {
-      "dark": "secondary",
-      "light": "secondary"
-    },
-    "info": {
-      "dark": "primary",
-      "light": "primary"
-    },
+  "base": {
+    "categorical": [
+      "blue",
+      "purple",
+      "green",
+      "orange",
+      "red",
+      "cyan"
+    ],
     "text": {
-      "dark": "on_surface",
-      "light": "on_surface"
-    },
-    "textMuted": {
-      "dark": "on_surface_variant",
-      "light": "on_surface_variant"
+      "base": "{{colors.on_surface.default.hex}}",
+      "muted": "{{colors.on_surface_variant.default.hex}}",
+      "action": {
+        "primary": {
+          "base": "{{colors.primary.default.hex}}",
+          "$hovered": "{{colors.primary_fixed.default.hex}}",
+          "$focused": "{{colors.on_primary.default.hex}}",
+          "$pressed": "{{colors.on_primary_container.default.hex}}",
+          "$selected": "{{colors.on_primary_container.default.hex}}",
+          "$disabled": "{{colors.outline_variant.default.hex}}"
+        },
+        "secondary": {
+          "base": "{{colors.on_surface_variant.default.hex}}",
+          "$hovered": "{{colors.on_surface.default.hex}}",
+          "$focused": "{{colors.on_surface.default.hex}}",
+          "$pressed": "{{colors.on_surface.default.hex}}",
+          "$selected": "{{colors.primary.default.hex}}",
+          "$disabled": "{{colors.outline_variant.default.hex}}"
+        },
+        "destructive": {
+          "base": "{{colors.error.default.hex}}",
+          "$hovered": "{{colors.on_error_container.default.hex}}",
+          "$focused": "{{colors.on_error.default.hex}}",
+          "$pressed": "{{colors.on_error_container.default.hex}}",
+          "$selected": "{{colors.on_error_container.default.hex}}",
+          "$disabled": "{{colors.outline_variant.default.hex}}"
+        }
+      },
+      "formfield": {
+        "base": "{{colors.on_surface.default.hex}}",
+        "$hovered": "{{colors.on_surface.default.hex}}",
+        "$focused": "{{colors.on_surface.default.hex}}",
+        "$pressed": "{{colors.on_surface.default.hex}}",
+        "$selected": "{{colors.primary.default.hex}}",
+        "$disabled": "{{colors.outline.default.hex}}"
+      },
+      "feedback": {
+        "error": {
+          "base": "{{colors.error.default.hex}}",
+          "muted": "{{colors.on_error_container.default.hex}}"
+        },
+        "warning": {
+          "base": "{{colors.primary.default.hex}}",
+          "muted": "{{colors.secondary.default.hex}}"
+        },
+        "success": {
+          "base": "{{colors.tertiary.default.hex}}",
+          "muted": "{{colors.on_tertiary_container.default.hex}}"
+        },
+        "info": {
+          "base": "{{colors.secondary.default.hex}}",
+          "muted": "{{colors.on_surface_variant.default.hex}}"
+        }
+      }
     },
     "background": {
-      "dark": "background",
-      "light": "background"
-    },
-    "backgroundPanel": {
-      "dark": "surface_variant",
-      "light": "surface_variant"
-    },
-    "backgroundElement": {
-      "dark": "surface_variant",
-      "light": "surface_variant"
+      "base": "{{colors.surface.default.hex}}",
+      "raised": {
+        "base": "{{colors.surface_container.default.hex}}",
+        "high": "{{colors.surface_container_high.default.hex}}",
+        "max": "{{colors.surface_container_highest.default.hex}}"
+      },
+      "action": {
+        "primary": {
+          "base": "{{colors.primary.default.hex}}",
+          "$hovered": "{{colors.primary_container.default.hex}}",
+          "$focused": "{{colors.primary.default.hex}}",
+          "$pressed": "{{colors.primary_container.default.hex}}",
+          "$selected": "{{colors.primary_container.default.hex}}",
+          "$disabled": "{{colors.surface_variant.default.hex}}"
+        },
+        "secondary": {
+          "base": "transparent"
+        },
+        "destructive": {
+          "base": "{{colors.error_container.default.hex}}",
+          "$hovered": "{{colors.error.default.hex}}",
+          "$focused": "{{colors.error_container.default.hex}}",
+          "$pressed": "{{colors.error_container.default.hex}}",
+          "$selected": "{{colors.error_container.default.hex}}",
+          "$disabled": "{{colors.surface_variant.default.hex}}"
+        }
+      },
+      "formfield": {
+        "base": "{{colors.surface_container.default.hex}}",
+        "$hovered": "{{colors.surface_container_high.default.hex}}",
+        "$focused": "{{colors.surface_container_high.default.hex}}",
+        "$pressed": "{{colors.surface_container_highest.default.hex}}",
+        "$selected": "{{colors.primary_container.default.hex}}",
+        "$disabled": "{{colors.surface.default.hex}}"
+      },
+      "feedback": {
+        "error": {
+          "base": "{{colors.error_container.default.hex}}"
+        },
+        "warning": {
+          "base": "{{colors.primary_container.default.hex}}"
+        },
+        "success": {
+          "base": "{{colors.tertiary_container.default.hex}}"
+        },
+        "info": {
+          "base": "{{colors.secondary_container.default.hex}}"
+        }
+      }
     },
     "border": {
-      "dark": "outline_variant",
-      "light": "outline_variant"
+      "base": "{{colors.outline_variant.default.hex}}"
     },
-    "borderActive": {
-      "dark": "outline",
-      "light": "outline"
+    "scrollbar": {
+      "base": "{{colors.outline.default.hex}}"
     },
-    "borderSubtle": {
-      "dark": "outline_variant",
-      "light": "outline_variant"
+    "syntax": {
+      "comment": "{{colors.outline.default.hex}}",
+      "keyword": "{{colors.primary.default.hex}}",
+      "function": "{{colors.secondary.default.hex}}",
+      "variable": "{{colors.on_surface.default.hex}}",
+      "string": "{{colors.tertiary.default.hex}}",
+      "number": "{{colors.primary_fixed.default.hex}}",
+      "type": "{{colors.primary.default.hex}}",
+      "operator": "{{colors.on_surface_variant.default.hex}}",
+      "punctuation": "{{colors.on_surface_variant.default.hex}}"
     },
-    "diffAdded": {
-      "dark": "secondary",
-      "light": "secondary"
+    "markdown": {
+      "text": "{{colors.on_surface.default.hex}}",
+      "heading": "{{colors.primary.default.hex}}",
+      "link": "{{colors.primary.default.hex}}",
+      "linkText": "{{colors.secondary.default.hex}}",
+      "code": "{{colors.tertiary.default.hex}}",
+      "blockQuote": "{{colors.on_surface_variant.default.hex}}",
+      "emphasis": "{{colors.secondary.default.hex}}",
+      "strong": "{{colors.on_surface.default.hex}}",
+      "horizontalRule": "{{colors.outline.default.hex}}",
+      "listItem": "{{colors.primary.default.hex}}",
+      "listEnumeration": "{{colors.secondary.default.hex}}",
+      "image": "{{colors.primary.default.hex}}",
+      "imageText": "{{colors.on_primary.default.hex}}",
+      "codeBlock": "{{colors.on_surface.default.hex}}"
     },
-    "diffRemoved": {
-      "dark": "error",
-      "light": "error"
-    },
-    "diffContext": {
-      "dark": "surface_variant",
-      "light": "surface_variant"
-    },
-    "diffHunkHeader": {
-      "dark": "surface_variant",
-      "light": "surface_variant"
-    },
-    "diffHighlightAdded": {
-      "dark": "secondary",
-      "light": "secondary"
-    },
-    "diffHighlightRemoved": {
-      "dark": "error",
-      "light": "error"
-    },
-    "diffAddedBg": {
-      "dark": "surface_variant",
-      "light": "surface_variant"
-    },
-    "diffRemovedBg": {
-      "dark": "surface_variant",
-      "light": "surface_variant"
-    },
-    "diffContextBg": {
-      "dark": "surface_variant",
-      "light": "surface_variant"
-    },
-    "diffLineNumber": {
-      "dark": "on_surface_variant",
-      "light": "on_surface_variant"
-    },
-    "diffAddedLineNumberBg": {
-      "dark": "surface_variant",
-      "light": "surface_variant"
-    },
-    "diffRemovedLineNumberBg": {
-      "dark": "surface_variant",
-      "light": "surface_variant"
-    },
-    "markdownText": {
-      "dark": "on_surface",
-      "light": "on_surface"
-    },
-    "markdownHeading": {
-      "dark": "primary",
-      "light": "primary"
-    },
-    "markdownLink": {
-      "dark": "primary",
-      "light": "primary"
-    },
-    "markdownLinkText": {
-      "dark": "secondary",
-      "light": "secondary"
-    },
-    "markdownCode": {
-      "dark": "secondary",
-      "light": "secondary"
-    },
-    "markdownBlockQuote": {
-      "dark": "surface_variant",
-      "light": "surface_variant"
-    },
-    "markdownEmph": {
-      "dark": "secondary",
-      "light": "secondary"
-    },
-    "markdownStrong": {
-      "dark": "primary",
-      "light": "primary"
-    },
-    "markdownHorizontalRule": {
-      "dark": "surface_variant",
-      "light": "surface_variant"
-    },
-    "markdownListItem": {
-      "dark": "primary",
-      "light": "primary"
-    },
-    "markdownListEnumeration": {
-      "dark": "secondary",
-      "light": "secondary"
-    },
-    "markdownImage": {
-      "dark": "primary",
-      "light": "primary"
-    },
-    "markdownImageText": {
-      "dark": "secondary",
-      "light": "secondary"
-    },
-    "markdownCodeBlock": {
-      "dark": "on_surface",
-      "light": "on_surface"
-    },
-    "syntaxComment": {
-      "dark": "on_surface_variant",
-      "light": "on_surface_variant"
-    },
-    "syntaxKeyword": {
-      "dark": "primary",
-      "light": "primary"
-    },
-    "syntaxFunction": {
-      "dark": "secondary",
-      "light": "secondary"
-    },
-    "syntaxVariable": {
-      "dark": "on_surface",
-      "light": "on_surface"
-    },
-    "syntaxString": {
-      "dark": "secondary",
-      "light": "secondary"
-    },
-    "syntaxNumber": {
-      "dark": "secondary",
-      "light": "secondary"
-    },
-    "syntaxType": {
-      "dark": "primary",
-      "light": "primary"
-    },
-    "syntaxOperator": {
-      "dark": "on_surface",
-      "light": "on_surface"
-    },
-    "syntaxPunctuation": {
-      "dark": "on_surface_variant",
-      "light": "on_surface_variant"
+    "diff": {
+      "text": {
+        "added": "{{colors.tertiary.default.hex}}",
+        "removed": "{{colors.error.default.hex}}",
+        "context": "{{colors.on_surface_variant.default.hex}}",
+        "hunkHeader": "{{colors.primary.default.hex}}"
+      },
+      "background": {
+        "added": "{{colors.tertiary_container.default.hex}}",
+        "removed": "{{colors.error_container.default.hex}}",
+        "context": "{{colors.surface_container.default.hex}}"
+      },
+      "highlight": {
+        "added": "{{colors.tertiary.default.hex}}",
+        "removed": "{{colors.error.default.hex}}"
+      },
+      "lineNumber": {
+        "text": "{{colors.outline.default.hex}}",
+        "background": {
+          "added": "{{colors.tertiary_container.default.hex}}",
+          "removed": "{{colors.error_container.default.hex}}"
+        }
+      }
+    }
+  },
+  "light": {
+    "hue": {
+      "gray": {
+        "100": "{{colors.on_surface.default.hex}}",
+        "200": "{{colors.on_surface_variant.default.hex}}",
+        "300": "{{colors.outline.default.hex}}",
+        "400": "{{colors.outline_variant.default.hex}}",
+        "500": "{{colors.surface_bright.default.hex}}",
+        "600": "{{colors.surface_container_high.default.hex}}",
+        "700": "{{colors.surface_container.default.hex}}",
+        "800": "{{colors.surface.default.hex}}",
+        "900": "{{colors.surface_container_lowest.default.hex}}"
+      },
+      "red": {
+        "100": "{{colors.on_error_container.default.hex}}",
+        "200": "{{colors.error.default.hex}}",
+        "300": "{{colors.error.default.hex}}",
+        "400": "{{colors.error.default.hex}}",
+        "500": "{{colors.error.default.hex}}",
+        "600": "{{colors.error_container.default.hex}}",
+        "700": "{{colors.error_container.default.hex}}",
+        "800": "{{colors.on_error.default.hex}}",
+        "900": "{{colors.on_error.default.hex}}"
+      },
+      "orange": {
+        "100": "{{colors.primary_fixed.default.hex}}",
+        "200": "{{colors.primary.default.hex}}",
+        "300": "{{colors.primary.default.hex}}",
+        "400": "{{colors.primary.default.hex}}",
+        "500": "{{colors.source_color.default.hex}}",
+        "600": "{{colors.primary_container.default.hex}}",
+        "700": "{{colors.primary_container.default.hex}}",
+        "800": "{{colors.on_primary.default.hex}}",
+        "900": "{{colors.on_primary_fixed.default.hex}}"
+      },
+      "yellow": {
+        "100": "{{colors.secondary_fixed.default.hex}}",
+        "200": "{{colors.secondary.default.hex}}",
+        "300": "{{colors.secondary.default.hex}}",
+        "400": "{{colors.secondary.default.hex}}",
+        "500": "{{colors.source_color.default.hex}}",
+        "600": "{{colors.secondary_container.default.hex}}",
+        "700": "{{colors.secondary_container.default.hex}}",
+        "800": "{{colors.on_secondary.default.hex}}",
+        "900": "{{colors.on_secondary_fixed.default.hex}}"
+      },
+      "green": {
+        "100": "{{colors.tertiary_fixed.default.hex}}",
+        "200": "{{colors.tertiary.default.hex}}",
+        "300": "{{colors.tertiary.default.hex}}",
+        "400": "{{colors.tertiary.default.hex}}",
+        "500": "{{colors.tertiary.default.hex}}",
+        "600": "{{colors.tertiary_container.default.hex}}",
+        "700": "{{colors.tertiary_container.default.hex}}",
+        "800": "{{colors.on_tertiary.default.hex}}",
+        "900": "{{colors.on_tertiary_fixed.default.hex}}"
+      },
+      "cyan": {
+        "100": "{{colors.tertiary_fixed.default.hex}}",
+        "200": "{{colors.tertiary.default.hex}}",
+        "300": "{{colors.tertiary.default.hex}}",
+        "400": "{{colors.tertiary.default.hex}}",
+        "500": "{{colors.tertiary.default.hex}}",
+        "600": "{{colors.tertiary_container.default.hex}}",
+        "700": "{{colors.tertiary_container.default.hex}}",
+        "800": "{{colors.on_tertiary.default.hex}}",
+        "900": "{{colors.on_tertiary_fixed.default.hex}}"
+      },
+      "blue": {
+        "100": "{{colors.primary_fixed.default.hex}}",
+        "200": "{{colors.primary.default.hex}}",
+        "300": "{{colors.primary.default.hex}}",
+        "400": "{{colors.primary.default.hex}}",
+        "500": "{{colors.source_color.default.hex}}",
+        "600": "{{colors.primary_container.default.hex}}",
+        "700": "{{colors.primary_container.default.hex}}",
+        "800": "{{colors.on_primary.default.hex}}",
+        "900": "{{colors.on_primary_fixed.default.hex}}"
+      },
+      "purple": {
+        "100": "{{colors.secondary_fixed.default.hex}}",
+        "200": "{{colors.secondary.default.hex}}",
+        "300": "{{colors.secondary.default.hex}}",
+        "400": "{{colors.secondary.default.hex}}",
+        "500": "{{colors.source_color.default.hex}}",
+        "600": "{{colors.secondary_container.default.hex}}",
+        "700": "{{colors.secondary_container.default.hex}}",
+        "800": "{{colors.on_secondary.default.hex}}",
+        "900": "{{colors.on_secondary_fixed.default.hex}}"
+      },
+      "accent": "$hue.orange",
+      "interactive": "$hue.orange",
+      "neutral": "$hue.gray"
+    }
+  },
+  "dark": {
+    "hue": {
+      "gray": {
+        "100": "{{colors.on_surface.default.hex}}",
+        "200": "{{colors.on_surface_variant.default.hex}}",
+        "300": "{{colors.outline.default.hex}}",
+        "400": "{{colors.outline_variant.default.hex}}",
+        "500": "{{colors.surface_bright.default.hex}}",
+        "600": "{{colors.surface_container_high.default.hex}}",
+        "700": "{{colors.surface_container.default.hex}}",
+        "800": "{{colors.surface.default.hex}}",
+        "900": "{{colors.surface_container_lowest.default.hex}}"
+      },
+      "red": {
+        "100": "{{colors.on_error_container.default.hex}}",
+        "200": "{{colors.error.default.hex}}",
+        "300": "{{colors.error.default.hex}}",
+        "400": "{{colors.error.default.hex}}",
+        "500": "{{colors.error.default.hex}}",
+        "600": "{{colors.error_container.default.hex}}",
+        "700": "{{colors.error_container.default.hex}}",
+        "800": "{{colors.on_error.default.hex}}",
+        "900": "{{colors.on_error.default.hex}}"
+      },
+      "orange": {
+        "100": "{{colors.primary_fixed.default.hex}}",
+        "200": "{{colors.primary.default.hex}}",
+        "300": "{{colors.primary.default.hex}}",
+        "400": "{{colors.primary.default.hex}}",
+        "500": "{{colors.source_color.default.hex}}",
+        "600": "{{colors.primary_container.default.hex}}",
+        "700": "{{colors.primary_container.default.hex}}",
+        "800": "{{colors.on_primary.default.hex}}",
+        "900": "{{colors.on_primary_fixed.default.hex}}"
+      },
+      "yellow": {
+        "100": "{{colors.secondary_fixed.default.hex}}",
+        "200": "{{colors.secondary.default.hex}}",
+        "300": "{{colors.secondary.default.hex}}",
+        "400": "{{colors.secondary.default.hex}}",
+        "500": "{{colors.source_color.default.hex}}",
+        "600": "{{colors.secondary_container.default.hex}}",
+        "700": "{{colors.secondary_container.default.hex}}",
+        "800": "{{colors.on_secondary.default.hex}}",
+        "900": "{{colors.on_secondary_fixed.default.hex}}"
+      },
+      "green": {
+        "100": "{{colors.tertiary_fixed.default.hex}}",
+        "200": "{{colors.tertiary.default.hex}}",
+        "300": "{{colors.tertiary.default.hex}}",
+        "400": "{{colors.tertiary.default.hex}}",
+        "500": "{{colors.tertiary.default.hex}}",
+        "600": "{{colors.tertiary_container.default.hex}}",
+        "700": "{{colors.tertiary_container.default.hex}}",
+        "800": "{{colors.on_tertiary.default.hex}}",
+        "900": "{{colors.on_tertiary_fixed.default.hex}}"
+      },
+      "cyan": {
+        "100": "{{colors.tertiary_fixed.default.hex}}",
+        "200": "{{colors.tertiary.default.hex}}",
+        "300": "{{colors.tertiary.default.hex}}",
+        "400": "{{colors.tertiary.default.hex}}",
+        "500": "{{colors.tertiary.default.hex}}",
+        "600": "{{colors.tertiary_container.default.hex}}",
+        "700": "{{colors.tertiary_container.default.hex}}",
+        "800": "{{colors.on_tertiary.default.hex}}",
+        "900": "{{colors.on_tertiary_fixed.default.hex}}"
+      },
+      "blue": {
+        "100": "{{colors.primary_fixed.default.hex}}",
+        "200": "{{colors.primary.default.hex}}",
+        "300": "{{colors.primary.default.hex}}",
+        "400": "{{colors.primary.default.hex}}",
+        "500": "{{colors.source_color.default.hex}}",
+        "600": "{{colors.primary_container.default.hex}}",
+        "700": "{{colors.primary_container.default.hex}}",
+        "800": "{{colors.on_primary.default.hex}}",
+        "900": "{{colors.on_primary_fixed.default.hex}}"
+      },
+      "purple": {
+        "100": "{{colors.secondary_fixed.default.hex}}",
+        "200": "{{colors.secondary.default.hex}}",
+        "300": "{{colors.secondary.default.hex}}",
+        "400": "{{colors.secondary.default.hex}}",
+        "500": "{{colors.source_color.default.hex}}",
+        "600": "{{colors.secondary_container.default.hex}}",
+        "700": "{{colors.secondary_container.default.hex}}",
+        "800": "{{colors.on_secondary.default.hex}}",
+        "900": "{{colors.on_secondary_fixed.default.hex}}"
+      },
+      "accent": "$hue.orange",
+      "interactive": "$hue.orange",
+      "neutral": "$hue.gray"
     }
   }
 }
-

@@ -1,41 +1,70 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="utf-8">
-  <title>Dusky Template Generator</title>
-  <link rel="stylesheet" href="popup.css">
+<meta charset="utf-8">
+<title>Dusky Template Generator</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    width: 470px; margin: 0; padding: 12px;
+    background: #191614; color: #f5ebe0;
+    font: 13px/1.45 system-ui, sans-serif;
+  }
+  header { display: flex; align-items: baseline; gap: 8px; margin-bottom: 8px; }
+  h1 { flex: 1; margin: 0; font-size: 13px; color: #e6c280; }
+  #domain { font: 12px ui-monospace, monospace; color: #d4a359; }
+  #path { margin: 0 0 8px; font: 10.5px ui-monospace, monospace; color: #8f857a;
+          overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #path b { color: #e6c280; font-weight: 600; }
+  textarea {
+    width: 100%; height: 300px; resize: vertical;
+    font: 11.5px/1.5 ui-monospace, monospace; color: #f5ebe0;
+    background: #0f0d0c; border: 1px solid #3d342c; border-radius: 8px; padding: 8px;
+    tab-size: 4; white-space: pre; overflow: auto;
+  }
+  textarea::placeholder { color: #8f857a; }
+  textarea:focus-visible { outline: 2px solid #e6c280; outline-offset: 1px; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 8px; }
+  button {
+    display: flex; flex-direction: column; gap: 1px; align-items: flex-start;
+    font: inherit; color: #f5ebe0; background: #2d2722;
+    border: 1px solid #3d342c; border-radius: 8px; padding: 7px 10px;
+    cursor: pointer; text-align: left;
+  }
+  button:hover:not(:disabled) { border-color: #d4a359; }
+  button:disabled { opacity: .4; cursor: default; }
+  button:focus-visible { outline: 2px solid #e6c280; outline-offset: 1px; }
+  button .t { font-weight: 700; }
+  button .s { color: #8f857a; font-size: 10.5px; }
+  .attention { border-color: #e6c280; }
+  .danger { border-color: #b8545e; }
+  .on { background: #e6c280; color: #191614; border-color: #e6c280; }
+  .on .s { color: #4a3a1e; }
+  .wide { grid-column: 1 / -1; }
+  .status { min-height: 2.6em; margin: 8px 0 0; font-size: 11.5px; color: #c4b8aa; }
+  .status.ok { color: #81c784; } .status.err { color: #e57373; }
+  .status.warn { color: #e6c280; } .status.busy { color: #d4a359; }
+  kbd { font: 10.5px ui-monospace, monospace; background: #0f0d0c;
+        border: 1px solid #3d342c; border-radius: 4px; padding: 0 4px; }
+</style>
 </head>
 <body>
-  <header class="head">
-    <span class="logo" aria-hidden="true">🦊</span>
+  <header>
     <h1>Dusky Template Generator</h1>
-    <span id="domain" class="badge" title="The template file is named after this domain">…</span>
+    <span id="domain">…</span>
   </header>
-
-  <div class="actions" role="group" aria-label="Generate">
-    <button id="auto" class="btn big" title="Scan this page's CSS colour variables and point them at your Matugen palette. Writes the file immediately.">
-      <b>⚡ Auto-map variables</b>
-      <small>site colour variables → palette tokens</small>
-    </button>
-    <button id="pick" class="btn big" title="Click parts of the page and give them a palette role. Every pick is saved immediately.">
-      <b>🎯 Pick elements</b>
-      <small>click things on the page, assign a role</small>
-    </button>
+  <p id="path"></p>
+  <textarea id="css" spellcheck="false" aria-label="Template CSS"></textarea>
+  <div class="grid">
+    <button id="auto"><b class="t">⚡ Auto-map</b><small class="s">scan this site's colour tokens</small></button>
+    <button id="pick"><b class="t">🎯 Pick elements</b><small class="s">click things on the page, assign a role</small></button>
+    <button id="save" class="wide"><b class="t">💾 Saved</b><small class="s">no unsaved changes</small></button>
+    <button id="copy"><b class="t">📋 Copy</b><small class="s">whole template</small></button>
+    <button id="reload"><b class="t">↻ Reload</b><small class="s">re-read from disk</small></button>
+    <button id="delete" class="wide danger"><b class="t">🗑 Delete</b><small class="s">remove this file from disk</small></button>
   </div>
-
-  <label class="sr-only" for="css">Template CSS</label>
-  <textarea id="css" spellcheck="false" wrap="off" placeholder="Loading…"></textarea>
-  <div class="meta"><code id="path"></code></div>
-
-  <div class="actions" role="group" aria-label="File">
-    <button id="save" class="btn" title="Write the text above to disk (Ctrl+S)">💾 Saved</button>
-    <button id="copy" class="btn" title="Copy the template to the clipboard">📋 Copy</button>
-    <button id="delete" class="btn danger" title="Delete this site's template file from disk">🗑 Delete</button>
-  </div>
-
-  <p id="status" class="status" role="status" aria-live="polite"></p>
-  <p class="hint"><kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>P</kbd> toggles the picker on any page · templates live in <code>~/.config/dusky_sites/</code></p>
-
-  <script src="popup.js"></script>
+  <p class="status" id="status" role="status" aria-live="polite"></p>
+  <script src="popup.js" type="module"></script>
 </body>
 </html>

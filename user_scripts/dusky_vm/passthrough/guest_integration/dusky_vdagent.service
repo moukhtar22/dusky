@@ -1,0 +1,14 @@
+[Unit]
+Description=SPICE clipboard bridge for Wayland guests
+PartOf=graphical-session.target
+After=graphical-session.target
+Requisite=graphical-session.target
+ConditionEnvironment=WAYLAND_DISPLAY
+
+[Service]
+ExecStart=/usr/bin/wayland-vdagent
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=graphical-session.target

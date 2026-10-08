@@ -1,86 +1,421 @@
 /*
- * Dusky Template Generator — content.js
+ * Dusky Template Generator — content.js (Gecko 156+)
  *
- * Injected on demand (activeTab) by background.js. Two jobs:
- *   scan    map the site's colour custom properties to Matugen palette tokens
- *   picker  click page elements, give them a palette role, see it live; every
- *           change is written straight into the template's picks region on disk
+ * Two jobs, one file:
+ *   1. scan()  — colour-token scanner behind the popup's Auto-map button;
+ *   2. picker  — an in-page, closed-shadow-DOM element picker that owns the
+ *                "picks" region of $XDG_CONFIG_HOME/dusky_sites/<domain>.css.
  *
- * Each rule is one plain CSS line — "selector { declarations }" followed by a short
- * meta comment — hydrated from disk when the picker starts, so disk stays the only truth.
- * All UI lives in a closed shadow root: page CSS and page scripts cannot touch it.
- * Nothing is registered on the page while the picker is idle.
+ * CASCADE CONTRACT (v4 — this is what makes previews and themes reliable):
+ *   All injected CSS lives in ONE constructable stylesheet adopted by the
+ *   document, structured as
+ *       @layer dusky.preview, dusky.live;
+ *   CSS Cascade 5 reverses layer order for !important declarations: the
+ *   EARLIEST layer wins, and layered !important beats unlayered !important.
+ *   Therefore  preview  ≻  live  ≻  the site's own !important rules,
+ *   independently of specificity, source order, and anything the page does to
+ *   <head>. Hover preview is consequently identical in pick and edit mode.
+ *
+ * Reliability contract:
+ *   · nothing is written unless the picks region was read first (hydrated);
+ *   · every write carries base_rev; a conflict re-reads, merges (local wins
+ *     per key) and retries with backoff;
+ *   · writes are serialised and coalesced by generation — a burst is one write.
+ *
+ * Rule identity (unchanged wire protocol): one rule per line, trailed by a
+ * "dusky key=<strict-urlencoded-key> | <meta>" CSS comment. Key shapes:
+ *   sel\u001F<selector>\u001F<group>   group: bg|text|border|fill|display|custom:<props>
+ *   var\u001F<scope>\u001F<--name>
+ *   raw\u001F<css>                     hand-written line we could not parse
  */
 "use strict";
 (() => {
   if (globalThis.__duskyTemplateGenerator) return;
   globalThis.__duskyTemplateGenerator = true;
 
-  // ─── palette contract (matugen/generated/dusky_sites.css) ─────────────────
+  /* ══ Material 3 palette contract ════════════════════════════════════ */
   const TOKENS = [
-    ["surface", "Surface"], ["surface_container", "Surface container"],
-    ["surface_container_high", "Surface container high"], ["surface_container_low", "Surface container low"],
-    ["primary", "Primary"], ["primary_container", "Primary container"],
-    ["secondary", "Secondary"], ["secondary_container", "Secondary container"],
-    ["tertiary", "Tertiary"], ["tertiary_container", "Tertiary container"],
-    ["on_surface", "On surface (text)"], ["on_surface_variant", "On surface variant"],
-    ["outline", "Outline (border)"], ["outline_variant", "Outline variant"],
-    ["error", "Error"], ["error_container", "Error container"]
+    ["background", "Background (Page canvas)"],
+    ["on_background", "On background"],
+    ["surface", "Surface (Base)"],
+    ["surface_container_lowest", "Surface container lowest"],
+    ["surface_container_low", "Surface container low"],
+    ["surface_container", "Surface container (Cards)"],
+    ["surface_container_high", "Surface container high (Modals)"],
+    ["surface_container_highest", "Surface container highest"],
+    ["surface_bright", "Surface bright"],
+    ["surface_dim", "Surface dim"],
+    ["surface_variant", "Surface variant"],
+    ["on_surface", "On surface (Main text)"],
+    ["on_surface_variant", "On surface variant (Muted)"],
+    ["inverse_surface", "Inverse surface"],
+    ["inverse_on_surface", "Inverse on surface"],
+    ["primary", "Primary (Brand accent)"],
+    ["on_primary", "On primary"],
+    ["primary_container", "Primary container"],
+    ["on_primary_container", "On primary container"],
+    ["primary_fixed", "Primary fixed (Hover)"],
+    ["primary_fixed_dim", "Primary fixed dim (Active)"],
+    ["secondary", "Secondary"],
+    ["on_secondary", "On secondary"],
+    ["secondary_container", "Secondary container"],
+    ["on_secondary_container", "On secondary container"],
+    ["secondary_fixed_dim", "Secondary fixed dim"],
+    ["on_secondary_fixed_variant", "On secondary fixed variant"],
+    ["tertiary", "Tertiary"],
+    ["on_tertiary", "On tertiary"],
+    ["tertiary_container", "Tertiary container"],
+    ["on_tertiary_container", "On tertiary container"],
+    ["outline", "Outline (Borders)"],
+    ["outline_variant", "Outline variant (Dividers)"],
+    ["error", "Error"],
+    ["on_error", "On error"],
+    ["error_container", "Error container"],
   ];
-  const ACCENT = /^(primary|secondary|tertiary|error)(_container)?$/;   // tokens that have an on_* partner
-  const paletteLoaded = () => !!getComputedStyle(document.documentElement).getPropertyValue("--surface").trim();
+  const TOKEN_NAMES = new Set(TOKENS.map(([t]) => t));
 
-  // ─── ⚡ scan: site custom properties → tokens ──────────────────────────────
-  const SKIP_NAME = /^--(tw|fa|darkreader|dusky)-|^--(surface|primary|secondary|tertiary|error|outline)(_[a-z_]+)?$|^--on_/;
-  const IS_COLOR = /^(#(?:[0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})$|(?:rgba?|hsla?|hwb|lab|lch|oklab|oklch|color|color-mix|light-dark)\()/i;
-  const IS_RGB_TRIPLET = /^\d{1,3}(?:\s*,\s*|\s+)\d{1,3}(?:\s*,\s*|\s+)\d{1,3}$/;
-  const IS_HSL_TRIPLET = /^[\d.]+(?:deg)?\s+[\d.]+%\s+[\d.]+%$/;
-  const KEYWORD = /^(inherit|initial|unset|revert|revert-layer|currentcolor|transparent|none|auto)$/i;
-  const NAME_RULES = [
-    [/(^|-)(error|danger|destructive|critical|negative)(-|$)/, "error"],
-    [/(^|-)(border|outline|divider|stroke|separator|rule)(-|$)/, "outline"],
-    [/(^|-)(text|txt|fg|foreground|font|heading|title|label|caption|placeholder|ink|on)(-|$)/, "text"],
-    [/(^|-)(primary|brand|accent|link|highlight|selected|active|focus|selection|interactive|cta)(-|$)/, "primary"],
-    [/(^|-)secondary(-|$)/, "secondary"],
-    [/(^|-)tertiary(-|$)/, "tertiary"],
-    [/(^|-)(overlay|tooltip|popover|popup|dropdown|menu|modal|dialog|elevated|raised|floating|toast|sheet|drawer)(-|$)/, "surface_container_high"],
-    [/(^|-)(inset|sunken|well|track|input|field|code|pre|subtle|muted|hover)(-|$)/, "surface_container_low"],
-    [/(^|-)(card|container|panel|sidebar|sidenav|nav|navbar|header|footer|toolbar|box|tile|widget|section|elevation|level|layer)(-|$)|(^|-)(surface|bg|background)-?\d/, "surface_container"],
-    [/(^|-)(bg|background|surface|canvas|page|body|base|app|root|default|window|backdrop|paper|main)(-|$)/, "surface"]
-  ];
-  const TEXT_ACCENT = /(^|-)(accent|link|brand)(-|$)/;
-  const TEXT_MUTED = /(^|-)(secondary|muted|subtle|tertiary|disabled|placeholder|hint|dim|faint|weak|quiet|soft|light)(-|$)/;
+  /* Everything Matugen itself injects. Exact names only: a prefix regex also
+   * swallows real site tokens such as --error_bg, --surface_alt, --primary_hover. */
+  const PALETTE_OWNED = new Set([
+    ...TOKEN_NAMES,
+    "error_container", "on_error_container", "inverse_primary",
+    "on_primary_fixed", "on_primary_fixed_variant",
+    "secondary_fixed", "on_secondary_fixed",
+    "tertiary_fixed", "tertiary_fixed_dim", "on_tertiary_fixed", "on_tertiary_fixed_variant",
+    "scrim", "shadow", "source_color", "surface_tint",
+  ]);
+  const PALETTE_SUFFIX = /_(rgb|rgba|hex|hsl|raw|strip)$/;
+  /* Framework internals that are never site design tokens. --mui-* and --wp--*
+   * are deliberately NOT here: those are mappable palettes. */
+  const NOISE_RE = /^--(tw-|fa-|dusky|darkreader|chakra-emotion)/i;
 
-  function tokenFor(name) {
-    const n = name.slice(2).toLowerCase().replace(/[_.]/g, "-");
-    for (const [re, token] of NAME_RULES) {
-      if (!re.test(n)) continue;
-      if (token !== "text") return token;
-      if (TEXT_ACCENT.test(n)) return "primary";
-      return TEXT_MUTED.test(n) ? "on_surface_variant" : "on_surface";
+  const skipVar = (name) => {
+    if (typeof name !== "string" || !name.startsWith("--")) return true;
+    if (NOISE_RE.test(name)) return true;
+    return PALETTE_OWNED.has(name.slice(2).toLowerCase().replace(PALETTE_SUFFIX, ""));
+  };
+
+  const paletteLoaded = () =>
+    getComputedStyle(document.documentElement).getPropertyValue("--surface").trim() !== "";
+
+  /* ══ Shadow host + closed root (also hosts the colour probe) ═════════ */
+  const hostEl = document.createElement("dusky-picker");
+  for (const [p, v] of Object.entries({
+    all: "initial", display: "block", position: "fixed", top: "0", left: "0",
+    width: "0", height: "0", overflow: "visible", "z-index": "2147483647",
+    "pointer-events": "none", isolation: "isolate",
+  })) hostEl.style.setProperty(p, v, "important");
+  const root = hostEl.attachShadow({ mode: "closed" });
+
+  /* ══ Perceptual colour engine ═══════════════════════════════════════ */
+  /* The probe lives in a detached element inside the closed root: the page can
+   * neither see it nor style it, and it never triggers layout. */
+  let colorProbe = null;
+  const getProbe = () => (colorProbe ??= document.createElement("span"));
+  const dropProbe = () => { colorProbe = null; };
+
+  const RGB_OUT = /^(?:rgb|rgba)\(\s*([\d.]+)[,\s]+([\d.]+)[,\s]+([\d.]+)(?:[,/\s]+([\d.%]+))?\s*\)$/i;
+  const IS_COLOR_SYNTAX =
+    /^(#(?:[0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})$|(?:rgba?|hsla?|hwb|lab|lch|oklab|oklch|color|color-mix|light-dark)\()/i;
+  const HSL_TRIPLET = /^(-?[\d.]+)(?:deg)?\s+([\d.]+)%\s+([\d.]+)%$/;
+  const RGB_TRIPLET = /^(\d{1,3})[,\s]+(\d{1,3})[,\s]+(\d{1,3})$/;
+  const KEYWORDISH = /^(inherit|initial|unset|revert|revert-layer|transparent|currentcolor|none)$/i;
+
+  function parseCssColor(raw) {
+    if (typeof raw !== "string") return null;
+    const v = raw.trim();
+    if (!v || KEYWORDISH.test(v)) return null;
+
+    const hsl = v.match(HSL_TRIPLET);
+    const triplet = !hsl && v.match(RGB_TRIPLET);
+    if (triplet) {
+      const [, r, g, b] = triplet.map(Number);
+      return r <= 255 && g <= 255 && b <= 255 ? { r, g, b, a: 1, shape: "rgb-triplet" } : null;
     }
+    /* Reject non-colours early so font/spacing variables never leak through. */
+    if (!(hsl || IS_COLOR_SYNTAX.test(v) || CSS.supports("color", v))) return null;
+
+    const probe = getProbe();
+    probe.style.color = "";
+    probe.style.color = hsl ? `hsl(${v})` : v;
+    if (!probe.style.color) return null;                /* the parser refused it */
+
+    /* Detached elements have no computed style, so resolve through the CSSOM:
+     * style.color is already serialised by the parser into a canonical form. */
+    const serialised = probe.style.color;
+    const match = RGB_OUT.exec(serialised) ?? RGB_OUT.exec(resolveViaRoot(serialised));
+    if (!match) return null;
+    const [, rs, gs, bs, as] = match;
+    const alpha = as === undefined ? 1 : (as.endsWith("%") ? parseFloat(as) / 100 : parseFloat(as));
+    return {
+      r: Math.round(+rs), g: Math.round(+gs), b: Math.round(+bs), a: alpha,
+      shape: hsl ? "hsl-triplet" : "color",
+    };
+  }
+
+  /* Canonicalise exotic colour syntaxes (oklch, color-mix, light-dark) to rgb()
+   * using a one-shot computed-value round trip on the shadow root's own node. */
+  let resolver = null;
+  function resolveViaRoot(value) {
+    if (!resolver?.isConnected) {
+      resolver = document.createElement("i");
+      resolver.style.cssText = "display:none!important";
+      root.append(resolver);
+    }
+    resolver.style.color = "";
+    resolver.style.color = value;
+    return getComputedStyle(resolver).color ?? "";
+  }
+
+  const srgb = (c) => ((c /= 255), c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
+  const luminance = (r, g, b) => 0.2126 * srgb(r) + 0.7152 * srgb(g) + 0.0722 * srgb(b);
+
+  function chromaHue(r, g, b) {
+    const rf = r / 255, gf = g / 255, bf = b / 255;
+    const max = Math.max(rf, gf, bf), min = Math.min(rf, gf, bf), d = max - min;
+    let h = 0;
+    if (d !== 0) {
+      if (max === rf) h = ((gf - bf) / d) % 6;
+      else if (max === gf) h = (bf - rf) / d + 2;
+      else h = (rf - gf) / d + 4;
+      h = Math.round(h * 60);
+      if (h < 0) h += 360;
+    }
+    return { chroma: d, hue: h };
+  }
+
+  /* ══ Framework signature table ══════════════════════════════════════ */
+  const SHADCN = {
+    "--background": "background", "--foreground": "on_background",
+    "--card": "surface_container", "--card-foreground": "on_surface",
+    "--popover": "surface_container_high", "--popover-foreground": "on_surface",
+    "--primary": "primary", "--primary-foreground": "on_primary",
+    "--secondary": "secondary_container", "--secondary-foreground": "on_secondary_container",
+    "--muted": "surface_container_low", "--muted-foreground": "on_surface_variant",
+    "--accent": "surface_container_high", "--accent-foreground": "on_surface",
+    "--destructive": "error", "--destructive-foreground": "on_error",
+    "--border": "outline_variant", "--input": "outline", "--ring": "primary",
+    "--sidebar": "surface_container", "--sidebar-background": "surface_container",
+    "--sidebar-foreground": "on_surface", "--sidebar-primary": "primary",
+    "--sidebar-accent": "surface_container_high", "--sidebar-border": "outline_variant",
+    "--sidebar-ring": "primary",
+  };
+
+  const MATERIAL = {
+    "primary": "primary", "on-primary": "on_primary",
+    "primary-container": "primary_container", "on-primary-container": "on_primary_container",
+    "secondary": "secondary", "on-secondary": "on_secondary",
+    "secondary-container": "secondary_container", "on-secondary-container": "on_secondary_container",
+    "tertiary": "tertiary", "on-tertiary": "on_tertiary",
+    "surface": "surface", "surface-bright": "surface_bright", "surface-dim": "surface_dim",
+    "surface-container": "surface_container", "surface-container-high": "surface_container_high",
+    "surface-container-highest": "surface_container_highest",
+    "surface-container-low": "surface_container_low",
+    "surface-container-lowest": "surface_container_lowest",
+    "on-surface": "on_surface", "on-surface-variant": "on_surface_variant",
+    "outline": "outline", "outline-variant": "outline_variant",
+    "error": "error", "on-error": "on_error",
+    "background-default": "background", "background-paper": "surface_container",
+    "text-primary": "on_surface", "text-secondary": "on_surface_variant",
+    "divider": "outline_variant",
+  };
+
+  function matchKnownFramework(name) {
+    const n = name.toLowerCase();
+
+    /* YouTube / Polymer */
+    if (n.startsWith("--yt-")) {
+      if (n.includes("base-background") || n.includes("general-background-a")) return "background";
+      if (n.includes("raised-background") || n.includes("menu-background")) return "surface_container";
+      if (n.includes("general-background-b")) return "surface_container_low";
+      if (n.includes("general-background-c")) return "surface_container_lowest";
+      if (n.includes("text-primary")) return "on_surface";
+      if (n.includes("text-secondary")) return "on_surface_variant";
+      if (n.includes("icon-inactive")) return "outline";
+      if (n.includes("icon-color") || n.includes("icon-active")) return "on_surface";
+      if (n.includes("brand-background-solid") || n.includes("call-to-action") ||
+          n.includes("static-brand-red") || n.includes("red-indicator") ||
+          n.includes("brand-icon-active")) return "primary";
+      if (n.includes("badge-chip-background")) return "surface_container_high";
+      if (n.includes("button-chip-background-hover")) return "surface_bright";
+      if (n.includes("10-percent-layer")) return "surface_variant";
+    }
+
+    /* Google Material / Gemini / MUI */
+    if (n.startsWith("--gem-sys-color--") || n.startsWith("--mat-") ||
+        n.startsWith("--bard-color-") || n.startsWith("--mui-palette-")) {
+      const tail = n.replace(/^--(gem-sys-color--|mat-|bard-color-|mui-palette-)/, "").replaceAll("-main", "");
+      if (MATERIAL[tail]) return MATERIAL[tail];
+      if (tail.includes("app-text-color")) return "on_surface";
+      if (tail.includes("background-color")) return "surface";
+    }
+
+    /* Tailwind v4 / shadcn / Radix */
+    if (SHADCN[n]) return SHADCN[n];
+
+    /* Discord */
+    if (n.startsWith("--neutral-")) {
+      const step = Number.parseInt(n.slice(10), 10);
+      if (Number.isFinite(step)) {
+        if (step >= 90) return "surface";
+        if (step >= 84) return "surface_container_low";
+        if (step >= 78) return "surface_container";
+        if (step >= 70) return "surface_container_high";
+        if (step <= 10) return "on_surface";
+        if (step <= 30) return "on_surface_variant";
+      }
+    }
+    if (n.startsWith("--brand-") || n.startsWith("--blurple-")) {
+      if (n.includes("560")) return "on_primary_container";
+      if (n.includes("10a") || n.includes("highlight")) return "inverse_on_surface";
+      if (n.includes("60")) return "secondary_container";
+      if (n.includes("50") || n.includes("65")) return "primary_container";
+      return "primary";
+    }
+
+    /* Instagram */
+    if (n.startsWith("--ig-")) {
+      if (n.includes("primary-background")) return "surface";
+      if (n.includes("elevated-background")) return "surface_container_low";
+      if (n.includes("separator")) return "outline_variant";
+      if (n.includes("-text") || n.includes("-icon")) return "on_surface";
+    }
+
+    /* Chess.com */
+    if (n.startsWith("--color-gray-") || n.startsWith("--gray-")) {
+      const step = Number.parseInt(n.replace(/\D+/g, ""), 10);
+      if (step >= 800) return "surface";
+      if (step >= 700) return "surface_container";
+      if (step >= 600) return "surface_container_high";
+      if (step >= 500) return "surface_container_highest";
+      if (step >= 400) return "surface_bright";
+    }
+    if (n.includes("green-200")) return "primary_fixed";
+    if (n.includes("green-300")) return "primary";
+    if (n.includes("green-400") || n.includes("green-500")) return "primary_container";
+    if (n.includes("neutrals-white")) return "on_surface";
+
+    /* Telegram */
+    if (n.includes("chat-hover")) return "surface_container_high";
+    if (n.includes("chat-active")) return "primary_container";
+    if (n.includes("bg-color-secondary")) return "surface_container_lowest";
+    if (n.includes("compact-menu")) return "surface_container_low";
+    if (n === "--theme-background-color" || n.includes("theme-bg")) return "surface";
+    if (n === "--color-text" || n.includes("color-text-secondary")) return "on_surface_variant";
+
+    /* Monkeytype */
+    if (n === "--bg-color") return "surface";
+    if (n === "--main-color" || n === "--text-color") return "primary";
+    if (n === "--caret-color") return "primary_fixed";
+    if (n === "--sub-color") return "primary_container";
+    if (n === "--sub-alt-color") return "surface_container_low";
+
     return "";
   }
 
-  // Only variables in effect on <html>/<body> can be overridden from ":root, body";
-  // component-scoped ones cannot, so those are not collected at all.
+  function classifyByValueAndName(name, col) {
+    const n = name.slice(2).toLowerCase().replaceAll(/[_.]/g, "-");
+    const lum = luminance(col.r, col.g, col.b);
+    const { chroma, hue } = chromaHue(col.r, col.g, col.b);
+
+    if (/(error|danger|destructive|critical|invalid)/.test(n)) return "error";
+    if (/(border|divider|separator|rule|stroke)/.test(n)) return lum > 0.3 ? "outline" : "outline_variant";
+    if (/outline/.test(n)) return "outline";
+    if (/(link|primary|brand|accent|cta)/.test(n) && chroma >= 0.1) return "primary";
+
+    if (chroma >= 0.15) {
+      if (hue >= 340 || hue <= 25) return /(btn|action|brand|primary)/.test(n) ? "primary" : "error";
+      if (hue <= 65) return "tertiary";
+      if (hue <= 170) return "secondary";
+      if (hue <= 280) return "primary";
+      return "tertiary";
+    }
+
+    if (lum <= 0.02) return /(body|canvas|bg-base|root|background|black)/.test(n)
+      ? "background" : "surface_container_lowest";
+    if (lum <= 0.06) return /(input|field|inset|sunken|deep)/.test(n) ? "surface_container_low" : "surface";
+    if (lum <= 0.12) return /(card|panel|box|container|sidebar|nav)/.test(n)
+      ? "surface_container" : "surface_container_low";
+    if (lum <= 0.22) return /(modal|dialog|popover|dropdown|menu|toast|elevated)/.test(n)
+      ? "surface_container_high" : "surface_container";
+    if (lum <= 0.38) return /(hover|active|bright)/.test(n) ? "surface_bright" : "surface_container_highest";
+    if (lum >= 0.70) return /(muted|secondary|dim|subtle|caption|hint|disabled|placeholder)/.test(n)
+      ? "on_surface_variant" : "on_surface";
+    return "on_surface_variant";
+  }
+
+  /* ══ Stylesheet traversal ═══════════════════════════════════════════ */
+  function walkRules(list, onStyleRule) {
+    for (const rule of list) {
+      if (rule.styleSheet) {
+        try { walkRules(rule.styleSheet.cssRules, onStyleRule); } catch { /* cross-origin */ }
+        continue;
+      }
+      if (rule.cssRules) {
+        try { walkRules(rule.cssRules, onStyleRule); } catch { /* opaque */ }
+      }
+      if (rule.selectorText && rule.style) onStyleRule(rule);
+    }
+  }
+
+  let customPropIndex = null;
+  let indexWatermark = -1;
+
+  function buildCustomPropIndex() {
+    const index = [];
+    for (const sheet of document.styleSheets) {
+      try {
+        walkRules(sheet.cssRules, (rule) => {
+          const props = [];
+          for (const p of rule.style) if (p.startsWith("--")) props.push(p);
+          if (props.length) index.push({ sel: rule.selectorText, props });
+        });
+      } catch { /* cross-origin */ }
+    }
+    return index;
+  }
+
+  /* Invalidate when the document gains or loses a stylesheet (SPA chunks). */
+  function propIndex() {
+    if (customPropIndex === null || indexWatermark !== document.styleSheets.length) {
+      customPropIndex = buildCustomPropIndex();
+      indexWatermark = document.styleSheets.length;
+    }
+    return customPropIndex;
+  }
+  const dropIndex = () => { customPropIndex = null; indexWatermark = -1; };
+
+  /* Escape for use inside a quoted CSS attribute value. CSS.escape() is the
+   * wrong tool here — it escapes identifiers, not string contents. */
+  const cssString = (v) => `"${String(v).replaceAll(/["\\]/g, "\\$&")}"`;
+
+  function detectRootScopes() {
+    const inner = new Set();
+    for (const el of [document.documentElement, document.body].filter(Boolean)) {
+      for (const cls of el.classList) {
+        if (/^(dark|dark-theme|theme-dark|dark-mode|night)$/i.test(cls)) inner.add(`.${CSS.escape(cls)}`);
+      }
+      for (const attr of el.getAttributeNames()) {
+        if (/^(data-theme|data-color-mode|data-bs-theme|theme|dark)$/i.test(attr)) {
+          const val = el.getAttribute(attr);
+          inner.add(val ? `[${attr}=${cssString(val)}]` : `[${attr}]`);
+        }
+      }
+    }
+    inner.add("[dark]").add(".dark").add('[data-theme="dark"]');
+    return `:root, :where(${[...inner].join(", ")})`;
+  }
+
   function collectVariables() {
     const names = new Set();
     const rootCs = getComputedStyle(document.documentElement);
     const bodyCs = document.body ? getComputedStyle(document.body) : rootCs;
-    for (const cs of [rootCs, bodyCs]) for (const p of cs) if (p.startsWith("--")) names.add(p);
-    const rootish = /(^|,)\s*(:root|html|body)\b/;
-    const walk = (rules) => {
-      for (const r of rules) {
-        if (r.styleSheet) { try { walk(r.styleSheet.cssRules); } catch (_) { /* cross-origin @import */ } }
-        if (r.cssRules && r.cssRules.length) walk(r.cssRules);
-        if (r.style && r.selectorText && rootish.test(r.selectorText)) {
-          for (const p of r.style) if (p.startsWith("--")) names.add(p);
-        }
-      }
-    };
-    for (const sheet of document.styleSheets) {
-      try { walk(sheet.cssRules); } catch (_) { /* cross-origin sheet: computed style still covers it */ }
+    for (const cs of new Set([rootCs, bodyCs])) {
+      for (const p of cs) if (p.startsWith("--")) names.add(p);
+    }
+    const rootish = /(^|,)\s*(?::root|html|body|\[dark\]|\.dark|\[data-theme)/i;
+    for (const { sel, props } of propIndex()) {
+      if (rootish.test(sel)) for (const p of props) names.add(p);
     }
     const out = new Map();
     for (const n of names) {
@@ -90,431 +425,1208 @@
     return out;
   }
 
+  /* Broad structural repaint, used ONLY when the page exposes fewer than three
+   * mappable tokens (the popup double-confirms before this is written). */
+  function structuralFallback() {
+    return [
+      "/* Structural theme — this page exposes no usable design tokens. */",
+      "html, body {",
+      "    background-color: var(--surface) !important;",
+      "    color: var(--on_surface) !important;",
+      "    color-scheme: dark !important;",
+      "}",
+      ":not(a):not(button):not(input):not(select):not(textarea):not(code):not(pre)",
+      ":not(table):not(svg):not(img):not(video):not([class*='icon']):not([class*='badge']):not([class*='btn']) {",
+      "    background-color: transparent !important;",
+      "    color: inherit !important;",
+      "}",
+      "header, nav, aside, footer, main > section, article,",
+      "[class*='card'], [class*='panel'], [class*='sidebar'], dialog, [role='dialog'] {",
+      "    background-color: var(--surface_container) !important;",
+      "    border-color: var(--outline_variant) !important;",
+      "    color: var(--on_surface) !important;",
+      "}",
+      "code, pre, kbd, samp {",
+      "    background-color: var(--surface_container_high) !important;",
+      "    color: var(--on_surface) !important;",
+      "}",
+      "a { color: var(--primary) !important; }",
+      "a:hover { color: var(--primary_fixed) !important; }",
+      "a:visited { color: var(--tertiary) !important; }",
+      "input, select, textarea {",
+      "    background-color: var(--surface_container_low) !important;",
+      "    color: var(--on_surface) !important;",
+      "    border-color: var(--outline) !important;",
+      "}",
+      "button, [type='submit'], [role='button'] {",
+      "    background-color: var(--primary) !important;",
+      "    color: var(--on_primary) !important;",
+      "    border-color: var(--outline_variant) !important;",
+      "}",
+      "table, th, td { border-color: var(--outline_variant) !important; }",
+      "th { background-color: var(--surface_container_high) !important; }",
+      "hr { border-color: var(--outline_variant) !important; }",
+      "::selection {",
+      "    background-color: var(--primary_container) !important;",
+      "    color: var(--on_primary_container) !important;",
+      "}",
+      "::placeholder { color: var(--on_surface_variant) !important; }",
+      "* { scrollbar-color: var(--outline) var(--surface_container_low) !important; }",
+    ].join("\n");
+  }
+
+  const indent = (lines) => lines.map((l) => (l ? `    ${l}` : "")).join("\n");
+
+  /* Raw swatch dumps (pink-100 … pink-900) are not semantic theme tokens. */
+  const SWATCH_DUMP =
+    /^--(pink|orange|yellow|purple|cyan|teal|lime|amber|violet|fuchsia|rose|emerald|sky)-[0-9]+[a-z]?$/;
+  const isSemanticThemeVar = (name) => !SWATCH_DUMP.test(name.toLowerCase());
+
   function scan() {
+    dropIndex();
     const groups = new Map();
     const unmapped = [];
     let found = 0;
-    for (const [name, value] of collectVariables()) {
-      if (SKIP_NAME.test(name)) continue;
-      let kind = "";
-      if (IS_COLOR.test(value)) kind = "color";
-      else if (IS_RGB_TRIPLET.test(value)) kind = "rgb";
-      else if (IS_HSL_TRIPLET.test(value)) kind = "hsl";
-      else if (/^[a-z]+$/i.test(value) && !KEYWORD.test(value) && CSS.supports("color", value)) kind = "color";
-      if (!kind) continue;
+
+    for (const [name, rawValue] of collectVariables()) {
+      if (skipVar(name) || !isSemanticThemeVar(name)) continue;
+      const col = parseCssColor(rawValue);
+      if (!col || col.a === 0) continue;
       found++;
-      const token = tokenFor(name);
-      if (!token || kind === "hsl") { unmapped.push(name); continue; }
-      const key = kind === "rgb" ? token + "_rgb" : token;
-      if (!groups.has(key)) groups.set(key, []);
-      groups.get(key).push(name);
+      const token = matchKnownFramework(name) || classifyByValueAndName(name, col);
+      if (!token || !TOKEN_NAMES.has(token)) { unmapped.push(name); continue; }
+      if (`--${token}` === name) continue;
+      const key = col.shape === "rgb-triplet" ? `${token}\u0000rgb`
+        : col.shape === "hsl-triplet" ? `${token}\u0000hsl` : token;
+      (groups.get(key) ?? groups.set(key, []).get(key)).push(name);
     }
-    const order = TOKENS.flatMap(([t]) => [t, t + "_rgb"]);
-    const lines = ["    :root, body {"];
+
+    const body = [];
     let mapped = 0;
-    for (const key of order) {
-      const names = groups.get(key);
-      if (!names) continue;
-      lines.push("        /* " + key.replace(/_rgb$/, " (rgb components)") + " */");
-      for (const n of names.sort()) { lines.push("        " + n + ": var(--" + key + ") !important;"); mapped++; }
+    let variableCount = 0;
+    for (const list of groups.values()) variableCount += list.length;
+
+    /* Fewer than three mappable variables means the page is not variable
+     * driven; only then do we reach for the (very broad) structural theme. */
+    const kind = variableCount >= 3 ? "tokens" : "structural";
+
+    if (kind === "tokens") {
+      body.push(`${detectRootScopes()} {`, "    color-scheme: dark !important;");
+      for (const [token] of TOKENS) {
+        for (const suffix of ["", "\u0000rgb", "\u0000hsl"]) {
+          const names = groups.get(token + suffix);
+          if (!names) continue;
+          const label = suffix === "\u0000rgb" ? `${token} (rgb components)`
+            : suffix === "\u0000hsl" ? `${token} (hsl components)` : token;
+          body.push(`    /* ${label} */`);
+          for (const n of names.toSorted()) {
+            body.push(`    ${n}: var(--${token}) !important;`);
+            mapped++;
+          }
+        }
+      }
+      body.push("}");
+    } else {
+      body.push(structuralFallback());
+      mapped = variableCount || 1;
     }
-    lines.push("    }");
+
     if (unmapped.length) {
-      const shown = unmapped.sort().slice(0, 40).join(", ") + (unmapped.length > 40 ? ", +" + (unmapped.length - 40) + " more" : "");
-      lines.push("    /* colour variables left unmapped (map by hand if you like): " + shown + " */");
+      const sorted = unmapped.toSorted();
+      const shown = sorted.slice(0, 30).join(", ") +
+        (sorted.length > 30 ? `, +${sorted.length - 30} more` : "");
+      body.push("", `/* unmapped: ${shown} */`);
     }
-    return { ok: true, found, mapped, body: mapped ? lines.join("\n") : "" };
+
+    dropProbe();
+    return {
+      ok: true, kind, found, mapped, palette: paletteLoaded(),
+      body: indent(body.join("\n").split("\n")),
+    };
   }
 
-  // ─── 🎯 picker: state and rule model ──────────────────────────────────────
+  /* ══ VISUAL PICKER ══════════════════════════════════════════════════ */
+  const LIMITS = { RULES: 600, DECL: 4096, SEL: 512, BODY: 512 * 1024 };
+
   const S = {
-    active: false, hydrated: false, note: "",
-    rules: [],                // [{ sel, decl, meta }] — or { raw } for a hand-edited line we could not parse
-    undo: [], redo: [],       // snapshots of rules, this page session only
-    stack: [], depth: 0,      // ancestor chain of the hovered element; depth 0 = the element itself
-    locked: false,            // true while the dialog is open: hovering no longer retargets
-    group: "bg", dialogPos: null, raf: 0, saveSeq: 0
+    active: false, hydrated: false, note: "", rev: 0, warnings: [],
+    rules: Object.freeze([]), undo: [], redo: [], stack: [], depth: 0,
+    locked: false, targetMode: "selector", group: "bg",
+    elementVars: [], panelPos: null, raf: 0, editKey: null, generation: 0,
   };
-  const RULE_RE = /^(.+?)\s*\{\s*(.*?)\s*\}\s*(?:\/\*\s*(.*?)\s*\*\/)?$/;
-  const parseRule = (line) => { const m = RULE_RE.exec(line); return m ? { sel: m[1], decl: m[2], meta: m[3] || "" } : { raw: line }; };
-  const ruleCss = (r) => (r.raw !== undefined ? r.raw : r.sel + " { " + r.decl + " }");
-  const ruleLine = (r) => (r.raw !== undefined ? r.raw : ruleCss(r) + (r.meta ? " /* " + r.meta + " */" : ""));
-  const target = () => S.stack[S.depth] || null;
+
+  const US = "\u001F";
+  const ROOT_ARMOR = ":root:root:root";
+  const ORIGIN = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+
+  /* ── Rule model ────────────────────────────────────────────────────── */
+  /* encodeURIComponent leaves !'()* alone and KEY_RE stops at '*', so a
+   * selector like [class*="icon"] would round-trip TRUNCATED. Escape the full
+   * RFC 3986 sub-delims set. */
+  const enc = (s) => encodeURIComponent(String(s))
+    .replaceAll(/[!'()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
+  const dec = (s) => { try { return decodeURIComponent(s); } catch { return s; } };
+  const KEY_RE = /\/\*\s*dusky\s+key=([^\s*|]+)\s*(?:\|\s*([^*]*?)\s*)?\*\/\s*$/;
+
+  const oneLine = (s) => String(s ?? "").replaceAll(/\s*[\r\n]+\s*/g, " ").trim();
+  const safeMeta = (s) => oneLine(s).replaceAll("*/", "* /").slice(0, 160);
+
+  const selKey = (sel, group) => `sel${US}${sel}${US}${group}`;
+  const varKey = (scope, name) => `var${US}${scope}${US}${name}`;
+  const rawKey = (css) => `raw${US}${css}`;
+
+  /* One parser for every key shape — no more positional indexing. */
+  function decodeKey(key) {
+    const [kind, a, b] = String(key ?? "").split(US);
+    if (kind === "var" && a && b?.startsWith("--")) return { kind: "var", scope: a, name: b };
+    if (kind === "raw" && a !== undefined) return { kind: "raw", css: a };
+    if (kind === "sel" && a && b) return { kind: "sel", sel: a, group: b };
+    return { kind: "invalid" };
+  }
+
+  const propsOf = (decl) => [...new Set(String(decl).split(";")
+    .map((d) => d.split(":")[0].trim().toLowerCase()).filter(Boolean))].toSorted();
+
+  const PROP_GROUP = [
+    [/^background(-color|-image)?$/, "bg"], [/^color$/, "text"],
+    [/^border(-[a-z]+)?-color$/, "border"], [/^fill$/, "fill"], [/^display$/, "display"],
+  ];
+  function groupOfDecl(decl) {
+    const props = propsOf(decl);
+    const first = props[0] ?? "";
+    if (first.startsWith("--")) return "var";
+    for (const [re, g] of PROP_GROUP) if (re.test(first)) return g;
+    return `custom:${props.join(",")}`;
+  }
+  const tokenOf = (decl) => /var\(\s*--([a-z0-9_]+)/i.exec(String(decl ?? ""))?.[1] ?? "";
+
+  function splitRule(text) {
+    let depth = 0, inStr = 0, selEnd = -1, bodyStart = -1, bodyEnd = -1;
+    for (let i = 0; i < text.length; i++) {
+      const c = text[i];
+      if (inStr) { if (c === "\\") i++; else if (c === inStr) inStr = 0; continue; }
+      if (c === '"' || c === "'") { inStr = c; continue; }
+      if (c === "{") { if (depth++ === 0) { selEnd = i; bodyStart = i + 1; } continue; }
+      if (c === "}") { if (--depth === 0) { bodyEnd = i; break; } }
+    }
+    if (selEnd < 0 || bodyEnd < 0) return null;
+    return { sel: text.slice(0, selEnd).trim(), decl: text.slice(bodyStart, bodyEnd).trim() };
+  }
+
+  function parseRule(line) {
+    const trimmed = line.trim();
+    if (!trimmed) return null;
+    const km = KEY_RE.exec(trimmed);
+    const storedKey = km ? dec(km[1]) : "";
+    const meta0 = km ? (km[2] ?? "").trim() : "";
+    const css = km ? trimmed.slice(0, km.index).trim() : trimmed;
+    if (!css) return null;
+
+    const parts = splitRule(css);
+    if (!parts?.sel || !parts?.decl) {
+      return { raw: css, meta: meta0 || "manual", key: rawKey(css) };
+    }
+    const decl = oneLine(parts.decl);
+    const group = groupOfDecl(decl);
+    const derived = group === "var" ? varKey(parts.sel, propsOf(decl)[0]) : selKey(parts.sel, group);
+    /* A stored key is honoured only when it parses AND its shape matches the
+     * CSS it labels; otherwise the CSS is authoritative (self-healing files). */
+    const stored = decodeKey(storedKey);
+    const keep = stored.kind === "var"
+      ? group === "var" && stored.scope === parts.sel
+      : stored.kind === "sel" && group !== "var" && stored.sel === parts.sel;
+    return { sel: parts.sel, decl, meta: meta0 || "restored", key: keep ? storedKey : derived };
+  }
+  const parseLines = (text) => String(text ?? "").split("\n").map(parseRule).filter(Boolean);
+
+  const ruleCss = (r) => (r.raw !== undefined ? r.raw : `${r.sel} { ${r.decl} }`);
+  const ruleLine = (r) =>
+    `${ruleCss(r)} /* dusky key=${enc(r.key)}${r.meta ? ` | ${safeMeta(r.meta)}` : ""} */`;
+  const serialise = () => S.rules.map((r) => `    ${ruleLine(r)}`).join("\n");
+
+  const target = () => S.stack.at(S.depth) ?? null;
 
   const GROUPS = {
-    bg: { extra: ["👻 Transparent", "background: transparent !important; box-shadow: none !important;", "bg: transparent"] },
-    text: { extra: ["↩ Inherit colour", "color: inherit !important;", "text: inherit"] },
-    border: { extra: ["⊘ No border", "border-color: transparent !important;", "border: none"] }
+    bg: { label: "Background", extra: { label: "👻 Transparent", css: "background: transparent !important; box-shadow: none !important;", meta: "bg: transparent" } },
+    text: { label: "Text", extra: { label: "↩ Inherit colour", css: "color: inherit !important;", meta: "text: inherit" } },
+    border: { label: "Border", extra: { label: "⊘ No border", css: "border-color: transparent !important;", meta: "border: none" } },
+    fill: { label: "Fill", extra: { label: "🎨 currentColor", css: "fill: currentColor !important;", meta: "fill: currentColor" } },
   };
+
+  const PAIRED_ON = {
+    primary: "on_primary", primary_container: "on_primary_container",
+    secondary: "on_secondary", secondary_container: "on_secondary_container",
+    tertiary: "on_tertiary", tertiary_container: "on_tertiary_container",
+    error: "on_error", error_container: "on_error", background: "on_background",
+  };
+
   function declFor(group, token) {
-    if (group === "text") return "color: var(--" + token + ") !important;";
-    if (group === "border") return "border-color: var(--" + token + ") !important;";
-    let d = "background: var(--" + token + ") !important;";
-    if (ACCENT.test(token)) d += " color: var(--on_" + token + ", var(--surface)) !important;";
-    return d;
+    if (group === "text") return `color: var(--${token}) !important;`;
+    if (group === "border") return `border-color: var(--${token}) !important;`;
+    if (group === "fill") return `fill: var(--${token}) !important; color: var(--${token}) !important;`;
+    const on = PAIRED_ON[token] ?? (token.startsWith("surface") ? "on_surface" : "");
+    return `background-color: var(--${token}) !important;` +
+      (on ? ` color: var(--${on}) !important; border-color: var(--outline_variant) !important;` : "");
   }
-  function important(text) {
-    return text.split(";").map((d) => d.trim()).filter(Boolean)
-      .map((d) => (/!important$/i.test(d) ? d : d + " !important") + ";").join(" ");
+  const colourGroup = (g) => (GROUPS[g] ? g : "bg");
+
+  const important = (text) => text.split(";").map((d) => d.trim()).filter(Boolean)
+    .map((d) => `${/!important\s*$/i.test(d) ? d : `${d} !important`};`).join(" ");
+
+  function validSelector(sel) {
+    if (typeof sel !== "string" || !sel || sel.length > LIMITS.SEL) return false;
+    try { document.querySelector(sel); return true; } catch { return false; }
   }
 
-  // ─── styles applied to the page itself ────────────────────────────────────
-  const liveStyle = document.createElement("style");
-  const hoverStyle = document.createElement("style");
-  function mountStyles() {
-    if (!liveStyle.isConnected) (document.head || document.documentElement).append(liveStyle, hoverStyle);
+  /* Validate a declaration list by parsing it into a detached style object. */
+  function normaliseDecl(text) {
+    const src = oneLine(text);
+    if (!src || src.length > LIMITS.DECL) return "";
+    const probe = document.createElement("div");
+    try { probe.style.cssText = src; } catch { return ""; }
+    if (!probe.style.length && !/--[\w-]+\s*:/.test(src)) return "";
+    return important(src);
   }
-  function renderLive() { mountStyles(); liveStyle.textContent = S.rules.map(ruleCss).join("\n"); }
-  function setHover(css) { mountStyles(); hoverStyle.textContent = css || ""; }
 
-  // ─── shadow UI ────────────────────────────────────────────────────────────
-  const UI_CSS = [
-    // NOTE: the outer stacking order is decided by the *host* element, not by
-    // anything inside the shadow root. A fixed panel with z-index 2147483647
-    // inside the shadow still paints *below* any page element with a positive
-    // z-index when the host itself is z-index:auto — which is exactly why the
-    // dialog looked "hidden behind" white cards. The host must carry the max
-    // z-index itself, plus pointer-events:none so only panels hit-test.
-    ":host { all: initial !important; display: block !important; position: fixed !important; top: 0 !important; left: 0 !important; width: 0 !important; height: 0 !important; overflow: visible !important; z-index: 2147483647 !important; pointer-events: none !important; isolation: isolate !important; }",
-    "* { box-sizing: border-box; }",
-    ".mask { position: fixed; z-index: 2147483646; display: none; pointer-events: none !important; border-radius: 2px; outline: 2px dashed #e6c280; box-shadow: 0 0 0 200vmax rgba(18, 15, 12, 0.5); }",
-    ".panel { position: fixed; z-index: 2147483647; pointer-events: auto; background: #191614; color: #f5ebe0; border: 1px solid #d4a359; border-radius: 10px; box-shadow: 0 12px 40px rgba(0, 0, 0, 0.75); font: 12px/1.4 system-ui, sans-serif; user-select: none; }",
-    ".bar { top: 12px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 8px; padding: 6px 10px; white-space: nowrap; cursor: grab; touch-action: none; max-width: calc(100vw - 24px); }",
-    ".grip { opacity: 0.5; padding: 0 2px; cursor: grab; }",
-    ".title { font-weight: 700; color: #e6c280; }",
-    ".info { max-width: 340px; overflow: hidden; text-overflow: ellipsis; color: #c4b8aa; font: 11px ui-monospace, monospace; }",
-    ".state { font-size: 11px; color: #c4b8aa; } .state.ok { color: #81c784; } .state.err { color: #e57373; } .state.warn { color: #e6c280; }",
-    "button { font: inherit; color: #f5ebe0; background: #2d2722; border: 1px solid #3d342c; border-radius: 6px; padding: 4px 8px; cursor: pointer; white-space: nowrap; }",
-    "button:hover:not(:disabled) { border-color: #d4a359; } button:disabled { opacity: 0.4; cursor: default; }",
-    "button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px solid #e6c280; outline-offset: 1px; }",
-    ".x { background: #b8545e; border-color: #b8545e; color: #fff; font-weight: 700; }",
-    ".grow { flex: 1; }",
-    ".dlg { top: 64px; right: 16px; width: 390px; max-width: calc(100vw - 32px); max-height: calc(100vh - 96px); overflow: auto; padding: 12px; outline: none; transition: opacity 0.15s; }",
-    ".dlg.ghost:not(:hover):not(:focus-within) { opacity: 0.25; }",
-    ".head { display: flex; align-items: center; gap: 6px; padding-bottom: 8px; margin-bottom: 8px; border-bottom: 1px solid #3d342c; cursor: grab; touch-action: none; }",
-    ".head .title { flex: 1; }",
-    ".row { display: flex; align-items: center; gap: 6px; margin: 6px 0; }",
-    ".lbl { flex: none; width: 58px; color: #c4b8aa; font-size: 11px; }",
-    ".tag { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #e6c280; font: 11px ui-monospace, monospace; }",
-    "input[type=range] { flex: 1; accent-color: #e6c280; margin: 0; }",
-    "select, input[type=text] { flex: 1; min-width: 0; font: 11px ui-monospace, monospace; color: #f5ebe0; background: #25201c; border: 1px solid #3d342c; border-radius: 6px; padding: 5px 6px; user-select: text; }",
-    ".seg { flex: 1; display: flex; } .seg button { flex: 1; border-radius: 0; } .seg button:first-child { border-radius: 6px 0 0 6px; } .seg button:last-child { border-radius: 0 6px 6px 0; }",
-    ".seg button[aria-pressed=true] { background: #e6c280; border-color: #e6c280; color: #191614; font-weight: 700; }",
-    ".grid { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; margin: 8px 0; }",
-    ".grid button { display: flex; align-items: center; gap: 7px; text-align: left; padding: 4px 7px; }",
-    ".sw { flex: none; width: 13px; height: 13px; border-radius: 50%; border: 1px solid #55493d; }",
-    ".hint { margin: 8px 0 0; color: #8f857a; font-size: 10.5px; }",
-    ".drawer { bottom: 16px; right: 16px; width: 380px; max-width: calc(100vw - 32px); max-height: 60vh; padding: 12px; display: flex; flex-direction: column; }",
-    ".list { overflow: auto; display: flex; flex-direction: column; gap: 4px; }",
-    ".item { display: flex; align-items: center; gap: 6px; padding: 4px 6px; background: #25201c; border: 1px solid #3d342c; border-radius: 6px; }",
-    ".item:hover { border-color: #d4a359; }",
-    ".item .sel { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 11px ui-monospace, monospace; }",
-    ".item .meta { flex: none; color: #e6c280; font-size: 10.5px; }",
-    ".item button { padding: 1px 6px; }"
-  ].join("\n");
-
-  const BAR_HTML = [
-    "<span class='grip' aria-hidden='true'>⠿</span>",
-    "<span class='title'>🎯 Dusky picker</span>",
-    "<span class='info' id='binfo'></span>",
-    "<span class='state' id='bstate'></span>",
-    "<button id='bundo' title='Undo (Ctrl+Z)'>↶</button>",
-    "<button id='bredo' title='Redo (Ctrl+Shift+Z)'>↷</button>",
-    "<button id='brules' title='Rules saved for this site'>Rules</button>",
-    "<button id='bexit' class='x' title='Stop picking (Esc)'>✕ Exit</button>"
-  ].join("");
-
-  const DIALOG_HTML = [
-    "<div class='head' id='dhead'>",
-    "<span class='grip' aria-hidden='true'>⠿</span>",
-    "<span class='title'>🎨 Theme this element</span>",
-    "<button id='dghost' title='See-through while the pointer is elsewhere' aria-pressed='false'>👁</button>",
-    "<button id='dclose' title='Close (Esc)'>✕</button>",
-    "</div>",
-    "<div class='row'><span class='lbl'>Element</span><span class='tag' id='dtag'></span></div>",
-    "<div class='row'><span class='lbl'>Depth</span>",
-    "<button id='dchild' title='Down, towards what you hovered (↓)'>↓ child</button>",
-    "<input type='range' id='dslider' min='0' max='0' value='0' aria-label='DOM depth: 0 is the clicked element, higher values select its parents'>",
-    "<button id='dparent' title='Up, to the parent element (↑)'>↑ parent</button>",
-    "</div>",
-    "<div class='row'><span class='lbl'>Selector</span><select id='dsel' aria-label='CSS selector written to the template'></select></div>",
-    "<div class='row'><span class='lbl'>Apply to</span>",
-    "<div class='seg' id='dseg' role='group' aria-label='Property'>",
-    "<button data-group='bg' aria-pressed='true'>Background</button>",
-    "<button data-group='text' aria-pressed='false'>Text</button>",
-    "<button data-group='border' aria-pressed='false'>Border</button>",
-    "</div></div>",
-    "<div class='grid' id='dgrid'></div>",
-    "<div class='row'><button id='dextra' class='grow'></button>",
-    "<button id='dhide' class='x grow' title='display: none — Shift+click on the page does this in one go'>🙈 Hide element</button></div>",
-    "<div class='row'><input type='text' id='dcustom' placeholder='custom CSS, e.g. border-radius: 8px; opacity: .9' aria-label='Custom CSS declarations'>",
-    "<button id='dapply'>Apply</button></div>",
-    "<p class='hint' id='dhint'>Hover a swatch to preview · click to save · ↑ ↓ change depth · Esc closes</p>"
-  ].join("");
-
-  const DRAWER_HTML = [
-    "<div class='head' id='rhead'>",
-    "<span class='grip' aria-hidden='true'>⠿</span>",
-    "<span class='title'>📋 Rules for this site</span>",
-    "<button id='rclear' class='x' title='Remove every rule (Ctrl+Z brings them back)'>Clear all</button>",
-    "<button id='rclose' title='Close'>✕</button>",
-    "</div>",
-    "<div class='list' id='rlist'></div>",
-    "<p class='hint'>Hover a rule to highlight its elements · ✕ removes it · these are the lines in the picks block of the template</p>"
-  ].join("");
-
-  const host = document.createElement("dusky-picker");
-  // Defense in depth: page stylesheets CAN target the host element itself
-  // (closed shadow DOM does not protect it). Inline !important styles beat any
-  // page rule — e.g. sites with `* { position: static }` or a competing
-  // `dusky-picker { z-index: 0 }` — and keep the picker in the top layer.
-  // Keep in sync with the `:host` rule above.
-  for (const [prop, value] of [
-    ["all", "initial"], ["display", "block"], ["position", "fixed"],
-    ["top", "0"], ["left", "0"], ["width", "0"], ["height", "0"],
-    ["overflow", "visible"], ["z-index", "2147483647"],
-    ["pointer-events", "none"], ["isolation", "isolate"],
-  ]) {
-    try { host.style.setProperty(prop, value, "important"); } catch (_) { /* very old engine */ }
+  function getElementVars(elm) {
+    if (elm?.nodeType !== 1) return [];
+    const cs = getComputedStyle(elm);
+    const seen = new Set();
+    const out = [];
+    const add = (prop) => {
+      if (!prop?.startsWith("--") || skipVar(prop) || seen.has(prop)) return;
+      const v = cs.getPropertyValue(prop).trim();
+      if (!v) return;
+      seen.add(prop);
+      out.push({ name: prop, value: v.length > 44 ? `${v.slice(0, 41)}…` : v });
+    };
+    for (const cls of elm.classList) {
+      add(/^[a-z-]+-\((--[\w-]+)\)$/.exec(cls)?.[1]);
+      const tok = /^[a-z-]+-token-([\w-]+)$/.exec(cls)?.[1];
+      if (tok) add(`--${tok}`);
+    }
+    for (const p of elm.style) add(p);
+    for (const { sel, props } of propIndex()) {
+      let hit = false;
+      try { hit = elm.matches(sel); } catch { continue; }
+      if (hit) for (const p of props) add(p);
+    }
+    for (const prop of ["background-color", "color", "border-color", "fill"]) {
+      add(/var\((--[\w-]+)/.exec(cs.getPropertyValue(prop))?.[1]);
+    }
+    return out;
   }
-  const root = host.attachShadow({ mode: "closed" });
-  root.innerHTML = "<style>" + UI_CSS + "</style><div class='mask' id='mask'></div>";
-  const q = (id) => root.getElementById(id);
-  const isOurs = (e) => {
-    try {
-      if (e.composedPath().includes(host)) return true;
-    } catch (_) { /* composedPath unavailable — fall through */ }
-    // Fallback for synthetic events: anything whose target lives inside the
-    // shadow root retargets to the host in the light DOM.
-    try {
-      const t = e.target;
-      if (t === host) return true;
-      if (t instanceof Node && t.getRootNode() === root) return true;
-    } catch (_) { /* ignore */ }
-    return false;
+
+  /* ══ STYLE ENGINE — one adopted sheet, two cascade layers ═══════════ */
+  /* @layer dusky.preview, dusky.live;  ⇒ for !important declarations the
+   * EARLIEST layer wins (CSS Cascade 5 §layer ordering), so the preview always
+   * beats the live rule, and both beat the site's unlayered !important CSS. */
+  const SHEET = new CSSStyleSheet();
+  let liveCss = "";
+  let previewCss = "";
+
+  function flushSheet() {
+    SHEET.replaceSync(
+      "@layer dusky.preview, dusky.live;\n" +
+      `@layer dusky.live{\n${liveCss}\n}\n` +
+      `@layer dusky.preview{\n${previewCss}\n}\n`,
+    );
+    if (!document.adoptedStyleSheets.includes(SHEET)) {
+      document.adoptedStyleSheets = [...document.adoptedStyleSheets, SHEET];
+    }
+  }
+  function detachSheet() {
+    liveCss = previewCss = "";
+    document.adoptedStyleSheets = document.adoptedStyleSheets.filter((s) => s !== SHEET);
+  }
+
+  const renderLive = () => { liveCss = S.rules.map(ruleCss).join("\n"); flushSheet(); };
+
+  const OUTLINE = "outline:2px dashed #e6c280 !important;outline-offset:-2px !important";
+
+  /* THE single preview entry point — pick mode, edit mode, chips, drawer rows
+   * and the extra buttons all go through here, so they cannot diverge. */
+  const Preview = {
+    show(spec) {
+      if (!spec) return Preview.clear();
+      const chunks = [];
+      if (spec.highlight && validSelector(spec.highlight)) {
+        chunks.push(`${spec.highlight}{${OUTLINE}}`);
+      }
+      if (spec.css) chunks.push(spec.css);
+      previewCss = chunks.join("\n");
+      flushSheet();
+    },
+    clear() { previewCss = ""; flushSheet(); },
   };
-  let bar = null, dialog = null, drawer = null;
 
-  function el(tag, attrs, ...children) {
+  /* Build a preview spec for ANY rule key + token. Used by edit mode. */
+  function previewForKey(key, sel, decl, token) {
+    const k = decodeKey(key);
+    if (k.kind === "var") {
+      const scope = sel || k.scope || ROOT_ARMOR;
+      return token
+        ? { highlight: scope === ROOT_ARMOR ? "" : scope, css: `${scope}{${k.name}: var(--${token}) !important}` }
+        : { highlight: scope === ROOT_ARMOR ? "" : scope, css: "" };
+    }
+    if (k.kind === "raw") return { highlight: "", css: "" };
+    const useSel = sel || k.sel;
+    if (!token) return { highlight: useSel, css: "" };
+    if (k.group === "display") {
+      /* A hidden element cannot show a colour: preview the un-hide instead. */
+      return { highlight: useSel, css: `${useSel}{display:revert !important;${OUTLINE}}` };
+    }
+    if (k.group?.startsWith("custom:")) {
+      /* Substitute the token into the existing var() if the rule has one,
+       * otherwise just highlight — never lie with an unrelated background. */
+      const swapped = String(decl ?? "").replaceAll(/var\(\s*--[a-z0-9_]+/gi, `var(--${token}`);
+      return { highlight: useSel, css: swapped === decl ? "" : `${useSel}{${swapped}}` };
+    }
+    return { highlight: useSel, css: `${useSel}{${declFor(colourGroup(k.group), token)}}` };
+  }
+
+  /* ══ Shadow UI ══════════════════════════════════════════════════════ */
+  const UI_CSS = `
+:host{all:initial!important;display:block!important;position:fixed!important;inset:0 auto auto 0!important;width:0!important;height:0!important;overflow:visible!important;z-index:2147483647!important;pointer-events:none!important;isolation:isolate!important}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+button,input,select,textarea{font:inherit;color:inherit;background:none;border:0}
+.mask{position:fixed;display:none;pointer-events:none;outline:2px dashed #e6c280;outline-offset:-2px;background:rgba(230,194,128,.07);border-radius:2px}
+.panel{position:fixed;pointer-events:auto;background:#191614;color:#f5ebe0;border:1px solid #3d342c;border-radius:10px;box-shadow:0 14px 44px rgba(0,0,0,.65);font:13px/1.45 system-ui,sans-serif;display:flex;flex-direction:column;gap:6px;padding:8px;transition:opacity .12s ease}
+.panel.ghost{opacity:.25}
+.panel.ghost:hover,.panel.ghost:focus-within{opacity:1}
+.bar{top:10px;left:50%;transform:translateX(-50%);flex-direction:row;align-items:center;gap:6px;padding:6px 8px;max-width:min(96vw,980px)}
+.dlg{top:64px;right:16px;width:440px;max-height:calc(100vh - 88px);overflow:auto}
+.drawer{right:16px;bottom:16px;width:420px;max-height:62vh;overflow:hidden}
+.head{display:flex;align-items:center;gap:6px;cursor:grab;user-select:none}
+.head:active{cursor:grabbing}
+.grip{color:#6d645a;font-size:12px}
+.title{flex:1;font-weight:700;color:#e6c280;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.info{color:#c4b8aa;font:11.5px ui-monospace,monospace;max-width:38ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.state{font-size:11px;color:#c4b8aa;max-width:34ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.state.ok{color:#81c784}.state.err{color:#e57373}.state.warn{color:#e6c280}
+.panel button{cursor:pointer;background:#2d2722;border:1px solid #3d342c;border-radius:7px;padding:4px 8px;color:#f5ebe0;white-space:nowrap}
+.panel button:hover:not(:disabled){border-color:#d4a359}
+.panel button:disabled{opacity:.4;cursor:default}
+.panel button:focus-visible,.panel select:focus-visible,.panel input:focus-visible,.panel textarea:focus-visible{outline:2px solid #e6c280;outline-offset:1px}
+.panel button.x{border-color:#6d3b40;color:#ffb4ab}
+.panel button.grow{flex:1;justify-content:center;text-align:center}
+.row{display:flex;align-items:center;gap:6px}
+.row[hidden]{display:none!important}
+.lbl{flex:0 0 68px;color:#8f857a;font-size:11.5px}
+.tag{flex:1;font:11.5px ui-monospace,monospace;color:#e6c280;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.panel select,.panel input[type=text],.panel textarea{flex:1;min-width:0;background:#0f0d0c;border:1px solid #3d342c;border-radius:7px;padding:4px 6px;font:11.5px ui-monospace,monospace;color:#f5ebe0}
+.panel textarea{min-height:64px;resize:vertical}
+.panel input[type=range]{flex:1;accent-color:#e6c280}
+.seg{display:flex;flex:1;gap:2px;background:#0f0d0c;border:1px solid #3d342c;border-radius:7px;padding:2px}
+.seg button{flex:1;border:0;background:transparent;padding:3px 4px;font-size:11.5px;border-radius:5px}
+.seg button[aria-pressed="true"]{background:#e6c280;color:#191614;font-weight:700}
+.panel button[aria-pressed="true"]{background:#e6c280;color:#191614;border-color:#e6c280}
+.swatches{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:4px;max-height:260px;overflow:auto;padding:2px 0}
+.swatch{display:flex;align-items:center;gap:8px;width:100%;text-align:left;padding:5px 8px}
+.swatch[aria-pressed="true"]{border-color:#e6c280}
+.chip,.dot{width:14px;height:14px;border-radius:4px;border:1px solid #3d342c;flex:0 0 auto;display:inline-block;background:#333}
+.swatch-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11.5px}
+.hint,.lead{color:#8f857a;font-size:11.5px;line-height:1.4}
+.lead{color:#c4b8aa}
+.list{overflow:auto;max-height:48vh;display:flex;flex-direction:column;gap:4px}
+.item{display:flex;gap:4px;align-items:stretch}
+.item .open{flex:1;display:flex;align-items:center;gap:8px;min-width:0;text-align:left}
+.item .sel{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:11.5px ui-monospace,monospace;color:#e6c280}
+.item .meta{color:#8f857a;font-size:10.5px;white-space:nowrap}
+.item .del{flex:0 0 auto}
+.bar{flex-wrap:wrap}
+.seg{flex-wrap:wrap}
+`;
+
+  const uiStyle = document.createElement("style");
+  uiStyle.textContent = UI_CSS;
+  root.append(uiStyle);
+
+  const maskEl = document.createElement("div");
+  maskEl.className = "mask";
+  root.append(maskEl);
+
+  /* Sentence-level chrome. Hover previews, click writes. */
+  const BAR_HTML = `
+<div class="head" id="bhead">
+  <span class="grip" aria-hidden="true">⠿</span>
+  <span class="title">Dusky picker</span>
+</div>
+<span class="info" id="binfo">Click any element to theme it</span>
+<span class="state" id="bstate" role="status"></span>
+<button type="button" id="bundo" title="Undo the last rule change (Ctrl+Z)">Undo</button>
+<button type="button" id="bredo" title="Redo (Ctrl+Shift+Z / Ctrl+Y)">Redo</button>
+<button type="button" id="bup" title="Theme the parent container instead (Arrow Up)">Parent</button>
+<button type="button" id="bdn" title="Theme a nested child instead (Arrow Down)">Child</button>
+<button type="button" id="block" title="Keep this element selected while you move the mouse">Lock</button>
+<button type="button" id="brules" title="List, edit or delete every picked rule for this site">Rules (0)</button>
+<button type="button" id="bsync" title="Re-read disk and keep any local picks the file does not have">⟲ Resync</button>
+<button type="button" id="bstop" class="x" title="Close the picker (Esc)">Stop</button>`;
+
+  const PICK_HTML = `
+<div class="head" id="phead">
+  <span class="grip" aria-hidden="true">⠿</span>
+  <span class="title" id="ptitle">Theme this element</span>
+  <button type="button" id="pclose" class="x" title="Close this panel, keep picking">✕</button>
+</div>
+<p class="lead" id="pinfo">Choose what the rule matches, which part to paint, then a palette colour. Hover previews; click saves.</p>
+<div class="row" id="pstack-row">
+  <span class="lbl">Target</span>
+  <div class="seg" id="pstack"></div>
+</div>
+<div class="row" id="pdepth-row">
+  <span class="lbl">Depth</span>
+  <input type="range" id="pslider" min="0" max="0" value="0" aria-label="DOM depth">
+  <span class="tag" id="pdepth" style="flex:0 0 40px;text-align:right"></span>
+</div>
+<div class="row" id="psel-row">
+  <span class="lbl">Matches</span>
+  <select id="psel" title="CSS selector written into the template. Prefer rows that say 'this element only'."></select>
+</div>
+<div class="row">
+  <span class="lbl">Mode</span>
+  <div class="seg">
+    <button type="button" id="pmode-sel" aria-pressed="true" title="Paint this element's background, text, border or fill">Element</button>
+    <button type="button" id="pvarbtn" aria-pressed="false" title="Point one of this element's CSS variables at a Matugen token">CSS variable</button>
+  </div>
+</div>
+<div class="row" id="pvar-row" hidden>
+  <span class="lbl">Variable</span>
+  <select id="pvar" title="Custom properties found on this element"></select>
+</div>
+<div class="row" id="pseg-row">
+  <span class="lbl">Part</span>
+  <div class="seg" id="pseg">
+    <button type="button" data-group="bg" aria-pressed="true" title="background-color plus a readable text colour">Background</button>
+    <button type="button" data-group="text" title="color">Text</button>
+    <button type="button" data-group="border" title="border-color">Border</button>
+    <button type="button" data-group="fill" title="SVG fill">Fill</button>
+  </div>
+</div>
+<div class="row">
+<button type="button" id="pextra" class="grow"></button>
+<button type="button" id="phide" class="grow" title="Same as Shift+click — writes display:none for the selector">Hide this element</button>
+</div>
+<p class="hint" id="phint"></p>
+<div id="pgrid"></div>
+<div class="row" id="pcustom-row">
+  <span class="lbl">Custom</span>
+  <input id="pcustom" type="text" placeholder="or type CSS, then Enter — e.g. opacity: 0.8" title="Any declaration list. Saved as a picked rule.">
+</div>`;
+
+  const EDIT_HTML = `
+<div class="head" id="ehead">
+  <span class="grip" aria-hidden="true">⠿</span>
+  <span class="title">Edit saved rule</span>
+  <button type="button" id="edel" class="x" title="Remove this rule from the template">Delete</button>
+  <button type="button" id="eclose" title="Close">✕</button>
+</div>
+<div class="row" id="esel-row">
+  <span class="lbl" id="esel-lbl">Selector</span>
+  <input id="esel" type="text" title="What this rule matches. Press Enter to save.">
+</div>
+<div class="row" id="evar-row" hidden>
+  <span class="lbl">Variable</span>
+  <span class="tag" id="evar"></span>
+</div>
+<div class="row" id="eprop-row">
+  <span class="lbl">Property</span>
+  <div class="seg" id="eseg">
+    <button type="button" data-group="bg">Background</button>
+    <button type="button" data-group="text">Text</button>
+    <button type="button" data-group="border">Border</button>
+    <button type="button" data-group="fill">Fill</button>
+  </div>
+</div>
+<div class="row" id="eraw-row" hidden>
+  <span class="lbl">CSS</span>
+  <textarea id="eraw" title="Hand-written rule. Tab or Enter saves."></textarea>
+</div>
+<div class="row" id="ecustom-row">
+  <span class="lbl">Decl</span>
+  <input id="ecustom" type="text" title="Declaration list. Enter saves.">
+</div>
+<p class="hint" id="ehint"></p>
+<div id="egrid"></div>`;
+
+  const DRAWER_HTML = `
+<div class="head" id="rhead">
+  <span class="grip" aria-hidden="true">⠿</span>
+  <span class="title">Rules for this site</span>
+  <button type="button" id="rclear" title="Remove every picked rule (Auto-map tokens are untouched)">Clear picks</button>
+  <button type="button" id="rclose" class="x">✕</button>
+</div>
+<p class="hint">Click a row to edit it. Hover previews. These lines live in the picks region of the template.</p>
+<div class="list" id="rlist"></div>`;
+
+  let bar = null, panel = null, drawer = null, panelKind = "";
+  let pickGrid = null, editGrid = null, flashTimer = 0;
+
+  const q = (id) => root.getElementById(id);
+
+  function el(tag, attrs = {}, ...kids) {
     const n = document.createElement(tag);
-    for (const k in attrs) {
-      const v = attrs[k];
+    for (const [k, v] of Object.entries(attrs ?? {})) {
       if (k === "text") n.textContent = v;
       else if (k === "class") n.className = v;
-      else if (k === "style") Object.assign(n.style, v);
-      else if (k.startsWith("on")) n.addEventListener(k.slice(2), v);
-      else if (k === "disabled") n.disabled = !!v;
-      else n.setAttribute(k, v);
+      else if (k === "style" && v && typeof v === "object") Object.assign(n.style, v);
+      else if (k.startsWith("on") && typeof v === "function") n.addEventListener(k.slice(2), v);
+      else if (v === false || v == null) { /* skip */ }
+      else if (v === true) n.setAttribute(k, "");
+      else n.setAttribute(k, String(v));
     }
-    n.append(...children);
+    for (const c of kids) if (c) n.append(c);
     return n;
   }
 
-  function drag(panel, handle, onMove) {
+  function isOurs(e) {
+    const path = e.composedPath?.() ?? [];
+    return path.includes(hostEl);
+  }
+
+  function setState(text, kind = "") {
+    const n = q("bstate");
+    if (!n) { S.note = text; return; }
+    n.textContent = text;
+    n.className = `state ${kind}`;
+  }
+
+  function baseState() {
+    const t = target();
+    const label = t
+      ? `${t.localName}${t.id ? "#" + t.id : ""}`
+      : "click an element";
+    setState(S.note || (S.hydrated ? label : "host unreachable"), S.note ? "err" : "");
+  }
+
+  function flash(text, kind = "ok") {
+    setState(text, kind);
+    clearTimeout(flashTimer);
+    flashTimer = setTimeout(() => { flashTimer = 0; baseState(); }, 2400);
+  }
+
+  function drag(node, handle) {
+    if (!handle || !node) return;
+    let ox = 0, oy = 0, dragging = false;
     handle.addEventListener("pointerdown", (e) => {
-      if (e.button !== 0 || e.target.closest("button, input, select, textarea, a, [contenteditable]")) return;
-      // Ignore clicks that would start a text selection inside the handle itself.
-      if (e.target.closest("input, select, textarea")) return;
-      const r = panel.getBoundingClientRect();
-      const ox = e.clientX - r.left, oy = e.clientY - r.top;
-      const w = r.width, h = r.height;
-      const move = (ev) => {
-        const x = Math.min(Math.max(0, ev.clientX - ox), Math.max(0, innerWidth - w));
-        const y = Math.min(Math.max(0, ev.clientY - oy), Math.max(0, innerHeight - h));
-        Object.assign(panel.style, { left: x + "px", top: y + "px", right: "auto", bottom: "auto", transform: "none" });
-        if (onMove) onMove(x, y);
-      };
-      const stop = () => {
-        handle.removeEventListener("pointermove", move);
-        handle.removeEventListener("pointerup", stop);
-        handle.removeEventListener("pointercancel", stop);
-        try { if (handle.hasPointerCapture(e.pointerId)) handle.releasePointerCapture(e.pointerId); } catch (_) { /* already released */ }
-      };
-      try { handle.setPointerCapture(e.pointerId); } catch (_) { /* touch/mouse without capture support */ }
-      handle.addEventListener("pointermove", move);
-      handle.addEventListener("pointerup", stop);
-      handle.addEventListener("pointercancel", stop);
+      if (e.button !== 0 || e.target.closest("button,input,select,textarea,a,[contenteditable]")) return;
+      dragging = true;
+      const r = node.getBoundingClientRect();
+      ox = e.clientX - r.left;
+      oy = e.clientY - r.top;
+      handle.setPointerCapture(e.pointerId);
       e.preventDefault();
-      e.stopPropagation();
     });
+    handle.addEventListener("pointermove", (e) => {
+      if (!dragging) return;
+      const x = Math.min(window.innerWidth - 40, Math.max(0, e.clientX - ox));
+      const y = Math.min(window.innerHeight - 40, Math.max(0, e.clientY - oy));
+      node.style.left = `${x}px`;
+      node.style.top = `${y}px`;
+      node.style.right = "auto";
+      node.style.bottom = "auto";
+      node.style.transform = "none";
+      S.panelPos = { x, y };
+    });
+    handle.addEventListener("pointerup", () => { dragging = false; });
   }
 
-  // ─── spotlight mask ───────────────────────────────────────────────────────
   function drawMask() {
-    const m = q("mask"), t = target();
-    if (!t || !t.isConnected) { m.style.display = "none"; return; }
+    const t = target();
+    if (!t || !S.active) { maskEl.style.display = "none"; return; }
     const r = t.getBoundingClientRect();
-    Object.assign(m.style, { display: "block", left: r.left + "px", top: r.top + "px", width: r.width + "px", height: r.height + "px" });
-  }
-  function scheduleMask() {
-    if (!S.raf) S.raf = requestAnimationFrame(() => { S.raf = 0; drawMask(); });
-  }
-
-  // ─── selector candidates ──────────────────────────────────────────────────
-  const SKIP_CLASS = /^(is-|has-|js-|dusky)|^(active|selected|open|hover|focus|focused|visible|hidden|show|shown|collapsed|expanded|disabled|checked|current)$/;
-  const HASHY = /^(css|sc|jsx|jss|svelte|emotion)-|^_[a-z0-9]+$|__[a-z0-9]{5,}$|^[^-_]*\d[^-_]*$/i;
-  function goodClasses(n) {
-    const all = [...n.classList].filter((c) => !SKIP_CLASS.test(c));
-    const good = all.filter((c) => !HASHY.test(c));
-    return (good.length ? good : all).slice(0, 3);
-  }
-  const simple = (n) => n.localName + goodClasses(n).map((c) => "." + CSS.escape(c)).join("");
-  const describe = (n) => n.localName + (n.id ? "#" + n.id : "") + goodClasses(n).map((c) => "." + c).join("");
-  const attrStr = (v) => '"' + v.replace(/["\\]/g, "\\$&") + '"';
-
-  function pathSel(n) {
-    const parts = [];
-    for (let cur = n; cur && cur !== document.body && cur !== document.documentElement && parts.length < 3; cur = cur.parentElement) {
-      if (cur.id) { parts.unshift("#" + CSS.escape(cur.id)); break; }
-      let s = simple(cur);
-      const siblings = cur.parentElement ? [...cur.parentElement.children] : [];
-      if (siblings.some((c) => c !== cur && c.matches(s))) {
-        s += ":nth-of-type(" + (siblings.filter((c) => c.localName === cur.localName).indexOf(cur) + 1) + ")";
-      }
-      parts.unshift(s);
-    }
-    return parts.join(" > ") || n.localName;
-  }
-
-  function candidates(n) {
-    if (!n || n === document.documentElement) return [{ sel: "html", count: 1 }];
-    if (n === document.body) return [{ sel: "body", count: 1 }];
-    const out = [];
-    if (n.id) out.push("#" + CSS.escape(n.id));
-    const s = simple(n);
-    if (s !== n.localName) out.push(s);
-    for (const a of ["role", "aria-label", "data-testid", "name"]) {
-      const v = n.getAttribute(a);
-      if (v && v.length < 60) out.push(n.localName + "[" + a + "=" + attrStr(v) + "]");
-    }
-    out.push(pathSel(n), n.localName);
-    const seen = new Set();
-    return out.filter((sel) => !seen.has(sel) && seen.add(sel)).map((sel) => {
-      let count = 0;
-      try { count = document.querySelectorAll(sel).length; } catch (_) { /* unusual selector */ }
-      return { sel, count };
+    Object.assign(maskEl.style, {
+      display: "block",
+      top: `${r.top}px`, left: `${r.left}px`,
+      width: `${r.width}px`, height: `${r.height}px`,
     });
   }
 
-  // ─── control bar ──────────────────────────────────────────────────────────
-  function buildBar() {
-    bar = el("section", { class: "panel bar", role: "toolbar", "aria-label": "Dusky picker" });
-    bar.innerHTML = BAR_HTML;
-    root.append(bar);
-    drag(bar, bar);
-    q("bundo").addEventListener("click", undo);
-    q("bredo").addEventListener("click", redo);
-    q("brules").addEventListener("click", toggleDrawer);
-    q("bexit").addEventListener("click", () => setActive(false));
-    if (S.note) setState("⚠ not saving: " + S.note, "err");
-    else if (!paletteLoaded()) setState("⚠ palette variables are not loaded on this page — previews may look transparent", "warn");
-    refreshBar();
+  function scheduleMask() {
+    if (S.raf) return;
+    S.raf = requestAnimationFrame(() => { S.raf = 0; drawMask(); });
   }
+
+  const noisyClass = (c) =>
+    !c || c.length > 28 || /\d{5,}/.test(c) ||
+    /^(is-|has-|js-|css-|active|open|show|selected|focus|hover|scrolled|sticky)$/i.test(c);
+
+  function nthPath(elm) {
+    const parts = [];
+    for (let n = elm; n && n.nodeType === 1 && parts.length < 5; n = n.parentElement) {
+      if (n.id && /^[A-Za-z][\w-]*$/.test(n.id)) {
+        parts.unshift(`#${CSS.escape(n.id)}`);
+        break;
+      }
+      const tag = n.localName;
+      const parent = n.parentElement;
+      if (!parent) { parts.unshift(tag); break; }
+      const sibs = [...parent.children].filter((c) => c.localName === tag);
+      const idx = sibs.indexOf(n) + 1;
+      parts.unshift(sibs.length > 1 ? `${tag}:nth-of-type(${idx})` : tag);
+    }
+    return parts.join(" > ");
+  }
+
+  function candidates(elm) {
+    const out = [];
+    const seen = new Set();
+    if (!elm || elm.nodeType !== 1) return out;
+    const add = (sel) => {
+      if (!sel || seen.has(sel) || sel.length > LIMITS.SEL || !validSelector(sel)) return;
+      let n = 0;
+      try { n = document.querySelectorAll(sel).length; } catch { return; }
+      if (!n) return;
+      seen.add(sel);
+      out.push({ sel, n });
+    };
+    const tag = elm.localName;
+    if (elm.id) add(`#${CSS.escape(elm.id)}`);
+    const classes = [...elm.classList].filter((c) => !noisyClass(c)).slice(0, 4);
+    if (classes.length) add(`${tag}.${classes.map((c) => CSS.escape(c)).join(".")}`);
+    for (const c of classes.slice(0, 2)) add(`.${CSS.escape(c)}`);
+    const role = elm.getAttribute("role");
+    if (role) add(`${tag}[role=${cssString(role)}]`);
+    const testid = elm.getAttribute("data-testid") || elm.getAttribute("data-test");
+    if (testid) add(`[data-testid=${cssString(testid)}]`);
+    const name = elm.getAttribute("name");
+    if (name) add(`${tag}[name=${cssString(name)}]`);
+    const aria = elm.getAttribute("aria-label");
+    if (aria && aria.length < 80) add(`${tag}[aria-label=${cssString(aria)}]`);
+    const type = elm.getAttribute("type");
+    if (type) add(`${tag}[type=${cssString(type)}]`);
+    add(tag);
+    add(nthPath(elm));
+    out.sort((a, b) => a.n - b.n || a.sel.length - b.sel.length);
+    return out;
+  }
+
+  function selected() {
+    const box = q("psel");
+    if (box?.value) return box.value.trim();
+    return candidates(target()).at(0)?.sel ?? "";
+  }
+
+  function describe(node) {
+    if (!node) return "Click anything on the page.";
+    const id = node.id ? `#${node.id}` : "";
+    const cls = [...node.classList].slice(0, 3).map((c) => `.${c}`).join("");
+    return `${node.localName}${id}${cls}`;
+  }
+
+  function previewOf(token) {
+    if (panelKind === "edit") {
+      const r = currentEdit();
+      if (!r) return { highlight: "", css: "" };
+      const sel = q("esel")?.value?.trim() || r.sel;
+      return previewForKey(r.key, sel, r.decl, token);
+    }
+    if (panelKind !== "pick") {
+      const tsel = selected();
+      return { highlight: tsel, css: "" };
+    }
+    if (S.targetMode === "variable") {
+      const name = q("pvar")?.value;
+      return token && name
+        ? { highlight: "", css: `${ROOT_ARMOR}{${name}: var(--${token}) !important}` }
+        : { highlight: selected(), css: "" };
+    }
+    const sel = selected();
+    if (!sel) return null;
+    if (!token) return { highlight: sel, css: "" };
+    return { highlight: sel, css: `${sel}{${declFor(colourGroup(S.group), token)}}` };
+  }
+
+  class PaletteGrid {
+    constructor(mount, { onHover, onLeave, onPick }) {
+      this.mount = mount;
+      this.onHover = onHover;
+      this.onLeave = onLeave;
+      this.onPick = onPick;
+      this.active = "";
+      this.buttons = [];
+      this.build();
+    }
+    build() {
+      this.mount.textContent = "";
+      const wrap = el("div", { class: "swatches" });
+      for (const [token, label] of TOKENS) {
+        const b = el("button", {
+          class: "swatch", type: "button",
+          title: `${label}  —  var(--${token})`,
+          "data-token": token, "aria-label": label,
+        });
+        b.append(
+          el("i", { class: "chip", style: { background: `var(--${token}, #333)` } }),
+          el("span", { class: "swatch-name", text: label }),
+        );
+        b.addEventListener("pointerenter", () => this.onHover?.(token));
+        b.addEventListener("pointerleave", () => this.onLeave?.());
+        b.addEventListener("focus", () => this.onHover?.(token));
+        b.addEventListener("blur", () => this.onLeave?.());
+        b.addEventListener("click", () => this.onPick?.(token));
+        wrap.append(b);
+      }
+      this.mount.append(wrap);
+      this.buttons = [...wrap.children];
+    }
+    setActive(token) {
+      this.active = token || "";
+      for (const b of this.buttons) {
+        b.setAttribute("aria-pressed", String(b.dataset.token === this.active));
+      }
+    }
+  }
+
   function refreshBar() {
     if (!bar) return;
     const t = target();
-    q("binfo").textContent = t
-      ? "<" + describe(t) + ">" + (S.stack.length > 1 ? "  · depth " + S.depth + "/" + (S.stack.length - 1) : "")
-      : "Hover an element · click to theme it · Shift+click hides it · Esc exits";
+    q("binfo").textContent = t ? describe(t) : "Click any element to theme it";
     q("bundo").disabled = !S.undo.length;
     q("bredo").disabled = !S.redo.length;
-    q("brules").textContent = "Rules (" + S.rules.length + ")";
-  }
-  function setState(text, cls) {
-    const s = q("bstate");
-    if (s) { s.textContent = text; s.className = "state " + cls; }
-  }
-
-  // ─── element dialog ───────────────────────────────────────────────────────
-  const selected = () => (dialog ? q("dsel").value : candidates(target())[0].sel);
-  function outline(extra) {
-    const sel = selected();
-    setHover(sel + " { outline: 2px dashed #e6c280 !important; outline-offset: -2px !important; }" + (extra ? "\n" + sel + " { " + extra + " }" : ""));
+    q("bup").disabled = !S.stack.length || S.depth >= S.stack.length - 1;
+    q("bdn").disabled = !S.stack.length || S.depth <= 0;
+    const lock = q("block");
+    lock.setAttribute("aria-pressed", String(!!S.locked));
+    lock.textContent = S.locked ? "Locked" : "Lock";
+    q("brules").textContent = `Rules (${S.rules.length})`;
+    if (!flashTimer) baseState();
   }
 
-  function openDialog() {
-    if (dialog) dialog.remove();
-    dialog = el("section", { class: "panel dlg", role: "dialog", "aria-label": "Theme this element", tabindex: "-1" });
-    dialog.innerHTML = DIALOG_HTML;
-    if (S.dialogPos) Object.assign(dialog.style, { left: S.dialogPos.x + "px", top: S.dialogPos.y + "px", right: "auto" });
-    root.append(dialog);
-    drag(dialog, q("dhead"), (x, y) => { S.dialogPos = { x, y }; });
+  function buildBar() {
+    bar = el("div", { class: "panel bar", id: "bar", role: "toolbar", "aria-label": "Dusky picker toolbar" });
+    bar.innerHTML = BAR_HTML;
+    root.append(bar);
+    drag(bar, q("bhead"));
+    q("bundo").addEventListener("click", undo);
+    q("bredo").addEventListener("click", redo);
+    q("bup").addEventListener("click", () => step(1));
+    q("bdn").addEventListener("click", () => step(-1));
+    q("block").addEventListener("click", () => { S.locked = !S.locked; refreshBar(); });
+    q("brules").addEventListener("click", toggleDrawer);
+    q("bsync").addEventListener("click", () => { void recover(true); });
+    q("bstop").addEventListener("click", () => { void setActive(false); });
+    refreshBar();
+  }
 
-    q("dclose").addEventListener("click", closeDialog);
-    q("dghost").addEventListener("click", (e) => {
-      const on = dialog.classList.toggle("ghost");
-      e.currentTarget.setAttribute("aria-pressed", String(on));
+  function currentEdit() {
+    if (!S.editKey) return null;
+    return S.rules.find((r) => r.key === S.editKey) ?? null;
+  }
+
+  function closePanel() {
+    panel?.remove();
+    panel = null;
+    panelKind = "";
+    pickGrid = editGrid = null;
+    S.editKey = null;
+    S.locked = false;
+    Preview.clear();
+    refreshBar();
+  }
+
+  function refreshPanel() {
+    if (panelKind === "pick") refreshPick(false);
+    else if (panelKind === "edit") refreshEdit();
+  }
+
+  function refreshPick(rebuildSels = false) {
+    if (panelKind !== "pick" || !panel) return;
+    const t = target();
+    q("ptitle").textContent = t ? `Theme <${t.localName}>` : "Theme this element";
+    q("pinfo").textContent = t
+      ? `${describe(t)} — pick a unique selector, a part, then a colour.`
+      : "Click anything on the page.";
+
+    const stackBox = q("pstack");
+    stackBox.textContent = "";
+    S.stack.slice(0, 6).forEach((node, i) => {
+      const label = i === 0 ? `this <${node.localName}>` : `<${node.localName}>`;
+      const b = el("button", { type: "button", text: label });
+      b.setAttribute("aria-pressed", String(i === S.depth));
+      b.title = i === 0 ? "The element you clicked" : `Ancestor ${i} — theme this container instead`;
+      b.addEventListener("click", () => { S.depth = i; retarget(); });
+      stackBox.append(b);
     });
-    q("dslider").addEventListener("input", (e) => { S.depth = Number(e.target.value); retarget(); });
-    q("dchild").addEventListener("click", () => step(-1));
-    q("dparent").addEventListener("click", () => step(1));
-    q("dsel").addEventListener("change", () => outline());
-    q("dseg").addEventListener("click", (e) => {
-      const b = e.target.closest("button[data-group]");
+    const sl = q("pslider");
+    if (sl) {
+      sl.max = String(Math.max(0, S.stack.length - 1));
+      sl.value = String(S.depth);
+      sl.disabled = S.stack.length < 2;
+    }
+    const dt = q("pdepth");
+    if (dt) dt.textContent = S.stack.length > 1 ? `${S.depth}/${S.stack.length - 1}` : "";
+
+    if (rebuildSels) {
+      const box = q("psel");
+      const prev = box.value;
+      box.textContent = "";
+      for (const c of candidates(t)) {
+        const opt = document.createElement("option");
+        opt.value = c.sel;
+        opt.textContent = c.n === 1 ? `${c.sel}  (this element only)` : `${c.sel}  (matches ${c.n})`;
+        box.append(opt);
+      }
+      if ([...box.options].some((o) => o.value === prev)) box.value = prev;
+    }
+
+    const varMode = S.targetMode === "variable";
+    q("pmode-sel").setAttribute("aria-pressed", String(!varMode));
+    q("pvarbtn").setAttribute("aria-pressed", String(varMode));
+    q("pvarbtn").disabled = S.elementVars.length === 0;
+    q("pvar-row").hidden = !varMode;
+    q("pseg-row").hidden = varMode;
+    q("psel-row").hidden = varMode;
+
+    if (varMode) {
+      const box = q("pvar");
+      const prev = box.value;
+      box.textContent = "";
+      for (const v of S.elementVars) {
+        const opt = document.createElement("option");
+        opt.value = v.name;
+        opt.textContent = `${v.name}  =  ${v.value}`;
+        box.append(opt);
+      }
+      if ([...box.options].some((o) => o.value === prev)) box.value = prev;
+    }
+
+    for (const b of q("pseg").children) {
+      b.setAttribute("aria-pressed", String(b.dataset.group === S.group));
+    }
+    const extra = GROUPS[S.group]?.extra;
+    q("pextra").textContent = extra?.label ?? "";
+    q("pextra").hidden = varMode || !extra;
+    q("phint").textContent = varMode
+      ? "Hover a swatch to preview remapping this variable across the page; click saves."
+      : "Hover previews · click saves · Shift+click hides.";
+    pickGrid?.setActive("");
+  }
+
+  function applyPick(token) {
+    if (S.targetMode === "variable") {
+      const name = q("pvar")?.value;
+      if (!name) { flash("pick a CSS variable first", "err"); return; }
+      upsert({
+        sel: ROOT_ARMOR,
+        decl: `${name}: var(--${token}) !important;`,
+        meta: `var ${name} → ${token}`,
+        key: varKey(ROOT_ARMOR, name),
+      });
+      flash(`✓ ${name} → ${token}`);
+      return;
+    }
+    const sel = selected();
+    if (!validSelector(sel)) { flash("no usable selector here", "err"); return; }
+    const group = colourGroup(S.group);
+    upsert({
+      sel,
+      decl: declFor(group, token),
+      meta: `${group}: ${token}`,
+      key: selKey(sel, group),
+    });
+    flash(`✓ ${group}: ${token} on ${sel}`);
+  }
+
+  function applyExtra() {
+    const extra = GROUPS[S.group]?.extra;
+    const sel = selected();
+    if (!extra || !validSelector(sel)) return;
+    upsert({
+      sel,
+      decl: important(extra.css),
+      meta: extra.meta,
+      key: selKey(sel, S.group),
+    });
+    flash(`✓ ${extra.meta}`);
+  }
+
+  /* Light depth-chrome sync for slider drags: no querySelectorAll storms, so the
+   * thumb never sticks on heavy pages. Full rebuild happens on release. */
+  function syncDepthChrome() {
+    drawMask();
+    refreshBar();
+    if (panelKind !== "pick" || !panel) return;
+    const t = target();
+    q("ptitle").textContent = t ? `Theme <${t.localName}>` : "Theme this element";
+    q("pinfo").textContent = t
+      ? `${describe(t)} — pick a unique selector, a part, then a colour.`
+      : "Click anything on the page.";
+    for (const [i, b] of [...q("pstack").children].entries()) {
+      b.setAttribute("aria-pressed", String(i === S.depth));
+    }
+    const dt = q("pdepth");
+    if (dt) dt.textContent = S.stack.length > 1 ? `${S.depth}/${S.stack.length - 1}` : "";
+    Preview.show(previewOf(null));
+  }
+
+  function bindPick() {
+    q("pclose").addEventListener("click", closePanel);
+    q("pslider").addEventListener("input", (e) => {
+      S.depth = Number(e.target.value);
+      e.target.value = String(S.depth);
+      syncDepthChrome();
+    });
+    q("pslider").addEventListener("change", () => { retarget(); });
+    q("psel").addEventListener("change", () => Preview.show(previewOf(null)));
+    q("pvar").addEventListener("change", () => Preview.show(previewOf(null)));
+    q("pmode-sel").addEventListener("click", () => {
+      S.targetMode = "selector";
+      refreshPick(false);
+      Preview.show(previewOf(null));
+    });
+    q("pvarbtn").addEventListener("click", () => {
+      if (!S.elementVars.length) return;
+      S.targetMode = "variable";
+      refreshPick(false);
+      Preview.show(previewOf(null));
+    });
+    q("pseg").addEventListener("click", (e) => {
+      const b = e.target.closest("[data-group]");
       if (!b) return;
       S.group = b.dataset.group;
-      for (const x of q("dseg").children) x.setAttribute("aria-pressed", String(x === b));
-      q("dextra").textContent = GROUPS[S.group].extra[0];
+      refreshPick(false);
+      Preview.show(previewOf(null));
     });
+    q("pextra").addEventListener("click", applyExtra);
+    const hoverExtra = (css) => {
+      if (S.targetMode !== "selector") return;
+      const sel = selected();
+      Preview.show({ highlight: sel, css: validSelector(sel) ? `${sel}{${css}}` : "" });
+    };
+    q("pextra").addEventListener("pointerenter", () => {
+      const extra = GROUPS[S.group]?.extra;
+      if (extra) hoverExtra(important(extra.css));
+    });
+    q("pextra").addEventListener("focus", () => {
+      const extra = GROUPS[S.group]?.extra;
+      if (extra) hoverExtra(important(extra.css));
+    });
+    q("pextra").addEventListener("pointerleave", () => Preview.show(previewOf(null)));
+    q("pextra").addEventListener("blur", () => Preview.show(previewOf(null)));
+    q("phide").addEventListener("pointerenter", () => hoverExtra("display:none !important;"));
+    q("phide").addEventListener("focus", () => hoverExtra("display:none !important;"));
+    q("phide").addEventListener("pointerleave", () => Preview.show(previewOf(null)));
+    q("phide").addEventListener("blur", () => Preview.show(previewOf(null)));
+    q("phide").addEventListener("click", () => {
+      const sel = selected();
+      if (!validSelector(sel)) { flash("no usable selector here", "err"); return; }
+      if (/^(html|body|:root)$/i.test(sel.trim())) { flash("refusing to hide the whole page", "err"); return; }
+      upsert({ sel, decl: "display: none !important;", meta: "hidden", key: selKey(sel, "display") });
+      flash(`✓ hidden ${sel}`);
+    });
+    q("pcustom").addEventListener("keydown", (e) => {
+      if (e.key !== "Enter") return;
+      e.preventDefault();
+      const sel = selected();
+      const decl = normaliseDecl(q("pcustom").value);
+      if (!validSelector(sel) || !decl) { flash("need a selector and some CSS", "err"); return; }
+      const group = groupOfDecl(decl);
+      const name = propsOf(decl)[0];
+      upsert({
+        sel, decl, meta: "custom",
+        key: group === "var" ? varKey(sel, name) : selKey(sel, group),
+      });
+      q("pcustom").value = "";
+      flash("✓ custom rule saved");
+    });
+    pickGrid = new PaletteGrid(q("pgrid"), {
+      onHover: (tok) => Preview.show(previewOf(tok)),
+      onLeave: () => Preview.show(previewOf(null)),
+      onPick: applyPick,
+    });
+  }
 
-    const grid = q("dgrid");
-    for (const [token, label] of TOKENS) {
-      const b = el("button", { title: "var(--" + token + ")" },
-        el("i", { class: "sw", style: { background: "var(--" + token + ", transparent)" } }),
-        el("span", { text: label }));
-      b.addEventListener("mouseenter", () => outline(declFor(S.group, token)));
-      b.addEventListener("mouseleave", () => outline());
-      b.addEventListener("click", () => apply(declFor(S.group, token), S.group + ": " + token));
-      grid.append(b);
+  function openPick() {
+    S.locked = true;
+    S.elementVars = getElementVars(target());
+    if (!S.elementVars.length) S.targetMode = "selector";
+    if (panelKind !== "pick" || !panel) {
+      panel?.remove();
+      editGrid = null;
+      panelKind = "pick";
+      panel = el("section", { class: "panel dlg ghost", role: "dialog", "aria-label": "Theme this element" });
+      panel.innerHTML = PICK_HTML;
+      root.append(panel);
+      drag(panel, q("phead"));
+      bindPick();
     }
-    const extra = q("dextra");
-    extra.textContent = GROUPS[S.group].extra[0];
-    extra.addEventListener("mouseenter", () => outline(GROUPS[S.group].extra[1]));
-    extra.addEventListener("mouseleave", () => outline());
-    extra.addEventListener("click", () => apply(GROUPS[S.group].extra[1], GROUPS[S.group].extra[2]));
-    const hide = q("dhide");
-    hide.addEventListener("mouseenter", () => outline("display: none !important;"));
-    hide.addEventListener("mouseleave", () => outline());
-    hide.addEventListener("click", () => apply("display: none !important;", "hidden"));
-    const custom = q("dcustom");
-    const applyCustom = () => { const t = custom.value.trim(); if (t) apply(important(t), "custom"); };
-    q("dapply").addEventListener("click", applyCustom);
-    custom.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); applyCustom(); } });
-
-    refreshDialog();
-    dialog.focus({ preventScroll: true });
+    refreshPick(true);
+    Preview.show(previewOf(null));
+    refreshBar();
   }
 
-  function refreshDialog() {
-    const t = target();
-    if (!dialog || !t) return;
-    q("dtag").textContent = "<" + describe(t) + ">";
-    const sl = q("dslider");
-    sl.max = String(Math.max(0, S.stack.length - 1));
-    sl.value = String(S.depth);
-    q("dchild").disabled = S.depth === 0;
-    q("dparent").disabled = S.depth >= S.stack.length - 1;
-    const sel = q("dsel");
-    sel.textContent = "";
-    for (const c of candidates(t)) {
-      sel.append(el("option", { value: c.sel, text: c.sel + "   — " + c.count + (c.count === 1 ? " match" : " matches") }));
+  function bindEdit() {
+    q("eclose").addEventListener("click", closePanel);
+    q("edel").addEventListener("click", () => {
+      if (S.editKey) removeRule(S.editKey);
+      closePanel();
+    });
+    q("esel").addEventListener("change", commitSelector);
+    q("esel").addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); commitSelector(); }
+    });
+    q("ecustom").addEventListener("change", commitDecl);
+    q("ecustom").addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); commitDecl(); }
+    });
+    q("eraw").addEventListener("change", commitRaw);
+    q("eraw").addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); commitRaw(); }
+    });
+    q("eseg").addEventListener("click", (e) => {
+      const b = e.target.closest("[data-group]");
+      if (!b) return;
+      const r = currentEdit();
+      if (!r || r.raw !== undefined) return;
+      const k = decodeKey(r.key);
+      if (k.kind === "var") return;
+      const group = b.dataset.group;
+      const tok = tokenOf(r.decl);
+      writeRule(r.key, {
+        sel: r.sel,
+        decl: tok ? declFor(group, tok) : r.decl,
+        meta: `${group}: ${tok || "custom"}`,
+        key: selKey(r.sel, group),
+      });
+    });
+    editGrid = new PaletteGrid(q("egrid"), {
+      onHover: (tok) => Preview.show(previewOf(tok)),
+      onLeave: () => Preview.show(previewOf(null)),
+      onPick: applyEdit,
+    });
+  }
+
+  function openEdit(r) {
+    if (!r) return;
+    S.editKey = r.key;
+    S.locked = true;
+    if (panelKind !== "edit" || !panel) {
+      panel?.remove();
+      pickGrid = null;
+      panelKind = "edit";
+      panel = el("section", { class: "panel dlg ghost", role: "dialog", "aria-label": "Edit a saved rule" });
+      panel.innerHTML = EDIT_HTML;
+      root.append(panel);
+      drag(panel, q("ehead"));
+      bindEdit();
     }
-    outline();
+    refreshEdit();
+    Preview.show(previewOf(null));
+    refreshBar();
   }
 
-  function closeDialog() {
-    if (dialog) dialog.remove();
-    dialog = null;
-    S.locked = false;
-    setHover("");
+  function applyEdit(token) {
+    const r = currentEdit();
+    if (!r) return;
+    const k = decodeKey(r.key);
+    if (k.kind === "var") {
+      writeRule(r.key, {
+        sel: r.sel,
+        decl: `${k.name}: var(--${token}) !important;`,
+        meta: `var ${k.name} → ${token}`,
+        key: varKey(r.sel, k.name),
+      });
+      flash(`✓ ${k.name} → ${token}`);
+      return;
+    }
+    if (r.raw !== undefined || k.kind === "raw") return;
+    if (k.kind === "sel" && typeof k.group === "string" && k.group.startsWith("custom:")) {
+      const swapped = String(r.decl ?? "").replaceAll(/var\(\s*--[a-z0-9_]+/gi, `var(--${token}`);
+      writeRule(r.key, {
+        sel: r.sel,
+        decl: swapped === r.decl ? declFor("bg", token) : important(swapped),
+        meta: `${k.group}: ${token}`,
+        key: swapped === r.decl ? selKey(r.sel, "bg") : r.key,
+      });
+      flash(`✓ ${token}`);
+      return;
+    }
+    const group = colourGroup(k.group);
+    writeRule(r.key, {
+      sel: r.sel, decl: declFor(group, token),
+      meta: `${group}: ${token}`, key: selKey(r.sel, group),
+    });
+    flash(`✓ ${group}: ${token}`);
   }
 
-  function apply(decl, meta) {
-    addRule(selected(), decl, meta);
-    closeDialog();
+  function commitSelector() {
+    const r = currentEdit();
+    if (!r) return;
+    const sel = q("esel").value.trim();
+    const k = decodeKey(r.key);
+    if (!validSelector(sel)) { flash("invalid selector", "err"); q("esel").value = r.sel ?? ""; return; }
+    if (sel === r.sel) return;
+    const key = k.kind === "var" ? varKey(sel, k.name) : selKey(sel, k.group ?? groupOfDecl(r.decl));
+    writeRule(r.key, { ...r, sel, key });
+    flash("✓ selector updated");
   }
 
-  // ─── rules drawer ─────────────────────────────────────────────────────────
+  function commitDecl() {
+    const r = currentEdit();
+    if (!r || r.raw !== undefined) return;
+    const decl = normaliseDecl(q("ecustom").value);
+    if (!decl) { flash("that is not a valid declaration", "err"); return; }
+    const k = decodeKey(r.key);
+    if (k.kind === "var") {
+      const first = propsOf(decl)[0] ?? "";
+      const name = first.startsWith("--") ? first : k.name;
+      writeRule(r.key, {
+        sel: r.sel, decl, meta: `var ${name} → ${tokenOf(decl) || "custom"}`, key: varKey(r.sel, name),
+      });
+    } else {
+      const group = groupOfDecl(decl);
+      writeRule(r.key, {
+        sel: r.sel, decl, meta: `${group}: ${tokenOf(decl) || "custom"}`, key: selKey(r.sel, group),
+      });
+    }
+    flash("✓ declaration updated");
+  }
+
+  function commitRaw() {
+    const r = currentEdit();
+    if (!r) return;
+    const next = parseRule(oneLine(q("eraw").value));
+    if (!next) { flash("nothing to save", "err"); return; }
+    writeRule(r.key, next);
+    flash("✓ rule updated");
+  }
+
+  /* Refresh mutates state only — it NEVER rebuilds the palette grid. */
+  function refreshEdit() {
+    if (panelKind !== "edit") return;
+    const r = currentEdit();
+    if (!r) { closePanel(); return; }
+    const k = decodeKey(r.key);
+    const isVar = k.kind === "var";
+    const isRaw = r.raw !== undefined;
+
+    q("esel-lbl").textContent = isVar ? "Scope" : "Selector";
+    q("esel-row").hidden = isRaw;
+    if (!isRaw && q("esel") !== root.activeElement) q("esel").value = r.sel;
+    q("evar-row").hidden = !isVar;
+    if (isVar) q("evar").textContent = k.name;
+    q("eprop-row").hidden = isVar || isRaw;
+    q("eraw-row").hidden = !isRaw;
+    if (isRaw && q("eraw") !== root.activeElement) q("eraw").value = r.raw;
+    q("ecustom-row").hidden = isRaw;
+    if (!isRaw && q("ecustom") !== root.activeElement) q("ecustom").value = r.decl;
+    q("egrid").hidden = isRaw;
+
+    const group = k.kind === "sel" ? colourGroup(k.group) : "";
+    for (const b of q("eseg").children) b.setAttribute("aria-pressed", String(b.dataset.group === group));
+    editGrid?.setActive(tokenOf(r.decl));
+
+    q("ehint").textContent = isRaw
+      ? "Hand-written rule — edit the CSS and press Tab/Enter to save it."
+      : isVar
+        ? "Hover or Tab a swatch to preview this variable pointing at another palette colour; click commits. Scope is where the override is declared."
+        : k.group?.startsWith("custom:") || k.group === "display"
+          ? "Hover a swatch to preview substituting the colour inside this rule; click commits."
+          : "Hover or Tab a swatch to preview · click commits · switch Property to convert the rule · the selector is editable.";
+  }
+
+  /* ── Rules drawer ──────────────────────────────────────────────────── */
   function toggleDrawer() {
     if (drawer) { drawer.remove(); drawer = null; return; }
     drawer = el("section", { class: "panel drawer", role: "dialog", "aria-label": "Rules for this site" });
@@ -522,9 +1634,12 @@
     root.append(drawer);
     drag(drawer, q("rhead"));
     q("rclose").addEventListener("click", toggleDrawer);
-    q("rclear").addEventListener("click", () => { if (S.rules.length) { snapshot(); S.rules = []; commit(); } });
+    q("rclear").addEventListener("click", () => {
+      if (S.rules.length) { snapshot(); S.rules = Object.freeze([]); commit(); }
+    });
     refreshDrawer();
   }
+
   function refreshDrawer() {
     if (!drawer) return;
     const list = q("rlist");
@@ -533,151 +1648,339 @@
       list.append(el("p", { class: "hint", text: "No rules yet — click any element on the page." }));
       return;
     }
-    S.rules.forEach((r, i) => {
-      const item = el("div", { class: "item" },
-        el("span", { class: "sel", title: ruleLine(r), text: r.raw !== undefined ? r.raw : r.sel }),
-        el("span", { class: "meta", text: r.raw !== undefined ? "manual" : r.meta }),
-        el("button", { title: "Remove this rule", text: "✕", onclick: () => { snapshot(); S.rules.splice(i, 1); commit(); } }));
-      if (r.raw === undefined) {
-        item.addEventListener("mouseenter", () => setHover(r.sel + " { outline: 2px dashed #e6c280 !important; outline-offset: -2px !important; }"));
-        item.addEventListener("mouseleave", () => (dialog ? outline() : setHover("")));
-      }
-      list.append(item);
-    });
-  }
-
-  // ─── rule mutations, undo, persistence ────────────────────────────────────
-  function snapshot() {
-    S.undo.push(S.rules.slice());
-    if (S.undo.length > 100) S.undo.shift();
-    S.redo = [];
-  }
-  function addRule(sel, decl, meta) {
-    const group = meta.split(":")[0];
-    const i = group === "custom" ? -1 : S.rules.findIndex((r) => r.sel === sel && (r.meta || "").split(":")[0] === group);
-    snapshot();
-    const rule = { sel, decl, meta };
-    if (i >= 0) S.rules[i] = rule; else S.rules.push(rule);
-    commit();
-  }
-  function undo() { if (S.undo.length) { S.redo.push(S.rules); S.rules = S.undo.pop(); commit(); } }
-  function redo() { if (S.redo.length) { S.undo.push(S.rules); S.rules = S.redo.pop(); commit(); } }
-  function commit() { renderLive(); refreshBar(); refreshDrawer(); persist(); }
-
-  async function persist() {
-    const seq = ++S.saveSeq;
-    setState("saving…", "");
-    const body = S.rules.map((r) => "    " + ruleLine(r)).join("\n");
-    const reply = await browser.runtime.sendMessage({ type: "splice", region: "picks", body })
-      .catch((e) => ({ ok: false, error: String((e && e.message) || e) }));
-    if (seq !== S.saveSeq) return;                                  // a newer save is in flight
-    if (reply && reply.ok) setState("✓ saved " + String(reply.path).split("/").pop(), "ok");
-    else setState("⚠ not saved: " + ((reply && reply.error) || "no reply"), "err");
-  }
-
-  async function hydrate() {
-    if (S.hydrated) return;
-    const reply = await browser.runtime.sendMessage({ type: "read" })
-      .catch((e) => ({ ok: false, error: String((e && e.message) || e) }));
-    if (reply && reply.ok) {
-      S.hydrated = true;
-      S.note = "";
-      S.rules = String(reply.picks || "").split("\n").map((l) => l.trim()).filter(Boolean).map(parseRule);
-    } else {
-      S.note = (reply && reply.error) || "cannot reach the native host";
+    for (const r of S.rules) {
+      const tok = tokenOf(r.decl);
+      const open = el("button", { class: "open", type: "button", title: ruleLine(r), onclick: () => openEdit(r) },
+        el("i", { class: "dot", style: { background: tok ? `var(--${tok}, transparent)` : "transparent" } }),
+        el("span", { class: "sel", text: r.raw !== undefined ? r.raw : r.sel }),
+        el("span", { class: "meta", text: r.meta || "manual" }));
+      /* Hover here previews the rule — and leaving restores whatever the open
+       * panel was previewing, WITHOUT rebuilding any panel DOM. */
+      open.addEventListener("pointerenter", () => Preview.show(previewForKey(r.key, r.sel, r.decl, "")));
+      open.addEventListener("pointerleave", () => Preview.show(previewOf(null)));
+      list.append(el("div", { class: "item" }, open,
+        el("button", {
+          class: "del x", type: "button", title: "Remove this rule", text: "✕",
+          onclick: () => removeRule(r.key),
+        })));
     }
   }
 
-  // ─── page events (registered only while active) ───────────────────────────
+  /* ══ Mutation / history / persistence ═══════════════════════════════ */
+  function snapshot() {
+    S.undo.push(S.rules);                       /* frozen array — safe by value */
+    if (S.undo.length > 100) S.undo.shift();
+    S.redo = [];
+  }
+  const undo = () => { if (S.undo.length) { S.redo.push(S.rules); S.rules = S.undo.pop(); commit(); } };
+  const redo = () => { if (S.redo.length) { S.undo.push(S.rules); S.rules = S.redo.pop(); commit(); } };
+
+  function commit() {
+    S.generation++;
+    renderLive();
+    refreshBar();
+    refreshDrawer();
+    refreshPanel();
+    schedulePersist();
+  }
+
+  function validRule(rule) {
+    if (rule.raw !== undefined) return rule.raw.length <= LIMITS.DECL;
+    if (!validSelector(rule.sel)) { flash("invalid selector", "err"); return false; }
+    if (!rule.decl || rule.decl.length > LIMITS.DECL) { flash("declaration too long", "err"); return false; }
+    if (decodeKey(rule.key).kind === "invalid") { flash("internal: bad rule key", "err"); return false; }
+    return true;
+  }
+
+  function upsert(rule) {
+    if (!validRule(rule)) return;
+    const i = S.rules.findIndex((r) => r.key === rule.key);
+    if (i < 0 && S.rules.length >= LIMITS.RULES) { flash(`rule limit (${LIMITS.RULES}) reached`, "err"); return; }
+    snapshot();
+    const next = S.rules.slice();
+    if (i >= 0) next[i] = rule; else next.push(rule);
+    S.rules = Object.freeze(next);
+    commit();
+  }
+
+  /* Replace oldKey in place, even when the new rule has a different key. */
+  function writeRule(oldKey, rule) {
+    if (!validRule(rule)) return;
+    snapshot();
+    const next = S.rules.slice();
+    if (rule.key !== oldKey) {
+      const dup = next.findIndex((r) => r.key === rule.key);
+      if (dup >= 0) next.splice(dup, 1);
+    }
+    const at = next.findIndex((r) => r.key === oldKey);
+    if (at >= 0) next[at] = rule; else next.push(rule);
+    S.rules = Object.freeze(next);
+    S.editKey = rule.key;
+    commit();
+  }
+
+  function removeRule(key) {
+    const i = S.rules.findIndex((r) => r.key === key);
+    if (i < 0) return;
+    snapshot();
+    const next = S.rules.slice();
+    next.splice(i, 1);
+    S.rules = Object.freeze(next);
+    commit();
+  }
+
+  const send = (msg) => browser.runtime.sendMessage({ ...msg, origin: ORIGIN })
+    .catch((e) => ({ ok: false, error: String(e?.message ?? e) }));
+
+  /* Keep local rules, adopt anything new that appeared on disk. */
+  function mergeForeign(foreignPicks) {
+    const mine = new Map(S.rules.map((r) => [r.key, r]));
+    const merged = [];
+    for (const r of parseLines(foreignPicks)) {
+      if (mine.has(r.key)) { merged.push(mine.get(r.key)); mine.delete(r.key); }
+      else merged.push(r);
+    }
+    merged.push(...mine.values());
+    S.rules = Object.freeze(merged);
+  }
+
+  let saveInFlight = null;
+
+  function schedulePersist() {
+    if (!S.hydrated) {                          /* never write what we never read */
+      setState(`⚠ NOT SAVING — ${S.note || "host unreachable"} · press ⟲`, "err");
+      return;
+    }
+    if (saveInFlight) return;                   /* generation loop picks it up */
+    saveInFlight = (async () => {
+      try {
+        let written = -1;
+        while (written !== S.generation) {
+          const generation = S.generation;
+          await persistOnce();
+          written = generation;
+        }
+      } finally { saveInFlight = null; }
+    })();
+  }
+
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  async function persistOnce() {
+    const body = serialise();
+    if (body.length > LIMITS.BODY) {
+      S.note = "picks region exceeds 512 KiB — remove some rules";
+      setState(`⚠ NOT SAVED: ${S.note}`, "err");
+      return;
+    }
+    setState("saving…", "");
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const reply = await send({ type: "splice", region: "picks", body: serialise(), base_rev: S.rev });
+      if (reply?.ok) {
+        S.rev = reply.rev ?? 0;
+        S.note = "";
+        flash(`✓ saved ${String(reply.path ?? "").split("/").pop()}`);
+        return;
+      }
+      if (!reply?.conflict) {
+        S.note = reply?.error ?? "no reply";
+        setState(`⚠ NOT SAVED: ${S.note}`, "err");
+        return;
+      }
+      /* Someone else wrote the file: adopt their rules, keep ours, retry. */
+      const fresh = await send({ type: "read" });
+      if (fresh?.ok) {
+        S.rev = fresh.rev ?? 0;
+        mergeForeign(fresh.picks);
+        renderLive(); refreshBar(); refreshDrawer(); refreshPanel();
+      }
+      await sleep(40 + Math.random() * 120 * (attempt + 1));
+    }
+    S.note = "the file keeps changing on disk";
+    setState(`⚠ NOT SAVED: ${S.note} — press ⟲`, "err");
+  }
+
+  async function hydrate(force = false) {
+    if (S.hydrated && !force) return true;
+    const reply = await send({ type: "read" });
+    if (!reply?.ok) {
+      S.note = reply?.error ?? "cannot reach the native host";
+      return false;
+    }
+    S.hydrated = true;
+    S.note = "";
+    S.rev = reply.rev ?? 0;
+    S.warnings = reply.warnings ?? [];
+    S.rules = Object.freeze(parseLines(reply.picks));
+    return true;
+  }
+
+  /* Re-read disk and re-apply anything we have locally that disk lacks. */
+  async function recover(manual = false) {
+    await saveInFlight?.catch(() => {});
+    const local = S.rules;
+    const before = serialise();
+    if (!await hydrate(true)) { baseState(); return false; }
+    const merged = S.rules.slice();
+    for (const r of local) {
+      const i = merged.findIndex((x) => x.key === r.key);
+      if (i >= 0) merged[i] = r; else merged.push(r);
+    }
+    S.rules = Object.freeze(merged);
+    renderLive(); refreshBar(); refreshDrawer(); refreshPanel();
+    if (serialise() !== before) { S.generation++; schedulePersist(); }
+    if (manual) flash("⟲ resynced with disk");
+    return true;
+  }
+
+  /* Disk changed under us (popup saved / deleted): disk wins. */
+  async function rehydrate() {
+    await saveInFlight?.catch(() => {});
+    const before = S.rules;
+    const beforeText = serialise();
+    if (!await hydrate(true)) { baseState(); return; }
+    if (serialise() !== beforeText) S.undo.push(before);
+    renderLive(); refreshBar(); refreshDrawer(); refreshPanel();
+    flash("↻ reloaded from disk");
+  }
+
+  /* ══ Targeting ══════════════════════════════════════════════════════ */
   function setStack(elm) {
     const chain = [];
-    for (let n = elm; n && n.nodeType === 1; n = n.parentElement) chain.push(n);
+    for (let n = elm; n?.nodeType === 1; n = n.parentElement) chain.push(n);
     S.stack = chain;
     S.depth = 0;
     retarget();
   }
-  function retarget() { drawMask(); refreshBar(); refreshDialog(); }
+  function retarget() {
+    drawMask();
+    refreshBar();
+    if (panelKind === "pick") {
+      S.elementVars = getElementVars(target());
+      q("pvarbtn").disabled = S.elementVars.length === 0;
+      if (!S.elementVars.length) S.targetMode = "selector";
+      refreshPick(true);
+    }
+  }
   function step(delta) {
     if (!S.stack.length) return;
     S.depth = Math.min(Math.max(0, S.depth + delta), S.stack.length - 1);
     retarget();
   }
   function typing() {
-    const a = root.activeElement || document.activeElement;
+    const a = root.activeElement ?? document.activeElement;
     return !!a && (a.isContentEditable || /^(input|select|textarea)$/i.test(a.tagName));
   }
 
-  function onOver(e) { if (!S.locked && !isOurs(e)) setStack(e.target); }
-  function onPointerDown(e) {
+  /* ══ Page events ════════════════════════════════════════════════════ */
+  const onOver = (e) => { if (!S.locked && !isOurs(e)) setStack(e.target); };
+  const onPointerDown = (e) => {
     if (isOurs(e)) return;
-    e.preventDefault();                                             // no focus, drag or selection on the page
+    e.preventDefault();
     e.stopImmediatePropagation();
-  }
+  };
+
   function onClick(e) {
     if (isOurs(e)) return;
     e.preventDefault();
     e.stopImmediatePropagation();
-    if (!S.stack.length) setStack(e.target);
-    if (e.shiftKey) { addRule(candidates(target())[0].sel, "display: none !important;", "hidden"); return; }
-    S.locked = true;
-    openDialog();
+    const sameTarget = panelKind === "pick" && S.stack.includes(e.target);
+
+    if (e.shiftKey) {
+      /* Honour the panel's selector + depth when it is open on this element. */
+      if (!sameTarget) { S.locked = false; setStack(e.target); }
+      const sel = sameTarget ? selected() : (candidates(target()).at(0)?.sel ?? "");
+      if (!validSelector(sel)) { flash("no usable selector here", "err"); return; }
+      if (/^(html|body)$/i.test(sel.trim())) { flash("refusing to hide the whole page", "err"); return; }
+      upsert({ sel, decl: "display: none !important;", meta: "hidden", key: selKey(sel, "display") });
+      flash(`✓ hidden ${sel}`);
+      return;
+    }
+    if (panelKind === "edit") closePanel();
+    S.locked = false;
+    setStack(e.target);
+    openPick();
   }
+
   function onKey(e) {
     const k = e.key, ctrl = e.ctrlKey || e.metaKey;
-    if (k === "Escape") { if (dialog) closeDialog(); else if (drawer) toggleDrawer(); else setActive(false); }
-    else if (typing()) return;
-    else if (k === "ArrowUp" || k === "ArrowDown") { if (!S.stack.length) return; step(k === "ArrowUp" ? 1 : -1); }
-    else if (ctrl && !e.altKey && k.toLowerCase() === "z") { if (e.shiftKey) redo(); else undo(); }
+    if (k === "Escape") {
+      /* First Esc leaves the field (keeping what you typed), second closes. */
+      if (typing()) (root.activeElement ?? document.activeElement)?.blur?.();
+      else if (panel) closePanel();
+      else if (drawer) toggleDrawer();
+      else void setActive(false);
+    } else if (typing()) return;
+    else if (k === "ArrowUp" || k === "ArrowDown") {
+      if (!S.stack.length) return;
+      step(k === "ArrowUp" ? 1 : -1);
+    } else if (ctrl && !e.altKey && k.toLowerCase() === "z") { e.shiftKey ? redo() : undo(); }
     else if (ctrl && !e.altKey && k.toLowerCase() === "y") redo();
     else return;
     e.preventDefault();
     e.stopImmediatePropagation();
   }
+
   const LISTENERS = [["mouseover", onOver], ["pointerdown", onPointerDown], ["click", onClick], ["keydown", onKey]];
+  let listenerCtl = null;
 
   async function setActive(on) {
     if (on === S.active) return;
     S.active = on;
     if (on) {
-      await hydrate();
-      document.documentElement.append(host);
+      dropIndex();
+      await hydrate(true);
+      document.documentElement.append(hostEl);
       buildBar();
       renderLive();
-      for (const [type, fn] of LISTENERS) window.addEventListener(type, fn, true);
-      window.addEventListener("scroll", scheduleMask, { capture: true, passive: true });
-      window.addEventListener("resize", scheduleMask, { passive: true });
+      listenerCtl = new AbortController();
+      const { signal } = listenerCtl;
+      const opts = { capture: true, signal };
+      for (const [type, fn] of LISTENERS) window.addEventListener(type, fn, opts);
+      window.addEventListener("scroll", scheduleMask, { capture: true, passive: true, signal });
+      window.addEventListener("resize", scheduleMask, { passive: true, signal });
+      /* SPA route changes leave the stack pointing at detached nodes. */
+      globalThis.navigation?.addEventListener("navigate", () => {
+        S.stack = []; S.depth = 0; dropIndex(); closePanel();
+      }, { signal });
     } else {
-      closeDialog();
+      closePanel();
       if (drawer) toggleDrawer();
-      if (bar) bar.remove();
+      bar?.remove();
       bar = null;
-      for (const [type, fn] of LISTENERS) window.removeEventListener(type, fn, true);
-      window.removeEventListener("scroll", scheduleMask, { capture: true });
-      window.removeEventListener("resize", scheduleMask);
+      listenerCtl?.abort();
+      listenerCtl = null;
       S.stack = [];
       S.depth = 0;
       S.locked = false;
-      drawMask();
-      host.remove();
+      dropIndex();
+      hostEl.remove();
+      dropProbe();
+      await saveInFlight?.catch(() => {});
+      detachSheet();
     }
   }
 
-  // ─── messages from popup / background ─────────────────────────────────────
+  /* ══ Extension messages ═════════════════════════════════════════════ */
   browser.runtime.onMessage.addListener((msg) => {
-    switch (msg && msg.type) {
+    switch (msg?.type) {
       case "ping":
-        return Promise.resolve({ ok: true, active: S.active, rules: S.rules.length });
+        return Promise.resolve({ ok: true, active: S.active, rules: S.rules.length, hydrated: S.hydrated });
       case "scan":
         try { return Promise.resolve(scan()); }
-        catch (e) { return Promise.resolve({ ok: false, error: "Scan failed: " + ((e && e.message) || e) }); }
+        catch (e) { return Promise.resolve({ ok: false, error: `Scan failed: ${e?.message ?? e}` }); }
       case "picker":
-        return setActive(msg.enable === undefined ? !S.active : !!msg.enable).then(() => ({ ok: true, active: S.active }));
+        return setActive(msg.enable ?? !S.active).then(() => ({ ok: true, active: S.active }));
       case "reset":
-        S.rules = []; S.undo = []; S.redo = []; S.hydrated = true; S.note = "";
-        renderLive(); refreshBar(); refreshDrawer();
+        S.rules = Object.freeze([]); S.undo = []; S.redo = [];
+        S.hydrated = true; S.note = ""; S.rev = 0;
+        renderLive(); refreshBar(); refreshDrawer(); refreshPanel(); baseState();
         return Promise.resolve({ ok: true });
+      case "rehydrate":
+        if (!S.active) { S.hydrated = false; return Promise.resolve({ ok: true, active: false }); }
+        return rehydrate().then(() => ({ ok: true, rules: S.rules.length }));
       default:
-        return undefined;
+        return false;
     }
   });
 })();

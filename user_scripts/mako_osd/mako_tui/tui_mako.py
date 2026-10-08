@@ -572,7 +572,7 @@ SCHEMA = {
             extended_help="**Dusky Updater**\n\nHandles update alerts spawned by the system dotfile synchronization scripts."
         ),
         ConfigItem(label="Layer", key="layer", scope='summary="Dusky Dotfiles"', type_="cycle", default="overlay", options=["background", "bottom", "top", "overlay"], parent_ref="menu_updater", extended_help="**Updater Layer**\n\nArranges the update notification at a specific Wayland surface layer."),
-        ConfigItem(label="OnClick", key="on-button-left", scope='summary="Dusky Dotfiles"', type_="string", default="exec dusky-run kitty --class update_dusky.py --hold ~/user_scripts/update_dusky/python/update_dusky.py", parent_ref="menu_updater", extended_help="**Trigger Update**\n\nShell script executed on interaction to launch the update terminal."),
+        ConfigItem(label="OnClick", key="on-button-left", scope='summary="Dusky Dotfiles"', type_="string", default="exec dusky-run kitty --class update_dusky.py --hold ~/user_scripts/update_dusky/python/update_dusky_supervisor.py", parent_ref="menu_updater", extended_help="**Trigger Update**\n\nShell script executed on interaction to launch the update terminal."),
         ConfigItem(label="Anchor", key="anchor", scope='app-name="Dusky Updater"', type_="cycle", default="bottom-center", options=["top-right", "top-center", "top-left", "bottom-right", "bottom-center", "bottom-left", "center-right", "center-left", "center"], parent_ref="menu_updater", extended_help="**Completion Position**\n\nScreen anchor for the compact completion alert (pushed with `app-name=Dusky Updater`)."),
         ConfigItem(label="Layer", key="layer", scope='app-name="Dusky Updater"', type_="cycle", default="overlay", options=["background", "bottom", "top", "overlay"], parent_ref="menu_updater", extended_help="**Completion Layer**\n\nArranges the compact completion alert at a specific Wayland surface layer."),
         ConfigItem(label="Width", key="width", scope='app-name="Dusky Updater"', type_="int", default=150, min_val=50, max_val=800, step=10, parent_ref="menu_updater", extended_help="**Completion Width**\n\nWidth of the compact completion pill (kept tight to hug the text)."),
@@ -758,21 +758,47 @@ SCHEMA = {
 
         ConfigItem(
             label="Hypr Rotate", key="menu_hypr_rotate", scope="DEFAULT", type_="menu", default=None, is_parent=True, group="Visuals & Rotation",
-            extended_help="**Screen Rotation Overlay**\n\nControls the popup aesthetic for screen rotation notifications. Targets notifications pushed with `app-name=hypr-rotate`."
+            extended_help="**Screen Rotation Overlay**\n\nCenter-screen pill for rotation confirmations. Targets notifications pushed with `app-name=hypr-rotate`."
         ),
-        ConfigItem(label="Anchor", key="anchor", scope="app-name=hypr-rotate", type_="cycle", default="bottom-center", options=["top-right", "top-center", "top-left", "bottom-right", "bottom-center", "bottom-left", "center-right", "center-left", "center"], parent_ref="menu_hypr_rotate", extended_help="**Rotate Anchor**\n\nWhere the screen rotation notification anchors on screen."),
+        ConfigItem(label="Anchor", key="anchor", scope="app-name=hypr-rotate", type_="cycle", default="center", options=["top-right", "top-center", "top-left", "bottom-right", "bottom-center", "bottom-left", "center-right", "center-left", "center"], parent_ref="menu_hypr_rotate", extended_help="**Rotate Anchor**\n\nDead-center keeps the pill centered across resolution and fractional-scale changes."),
         ConfigItem(label="Layer", key="layer", scope="app-name=hypr-rotate", type_="cycle", default="overlay", options=["background", "bottom", "top", "overlay"], parent_ref="menu_hypr_rotate", extended_help="**Rotate Layer**\n\nArranges the notification at a specific Wayland surface layer."),
-        ConfigItem(label="Width", key="width", scope="app-name=hypr-rotate", type_="int", default=240, min_val=50, max_val=800, step=5, parent_ref="menu_hypr_rotate", extended_help="**Rotate Box Width**\n\nTotal width allocated for the rotation notification pill."),
-        ConfigItem(label="Height", key="height", scope="app-name=hypr-rotate", type_="int", default=42, min_val=10, max_val=200, step=2, parent_ref="menu_hypr_rotate", extended_help="**Rotate Box Height**\n\nTotal height allocated for the rotation notification pill."),
-        ConfigItem(label="Margin", key="margin", scope="app-name=hypr-rotate", type_="string", default="0,0,30,0", parent_ref="menu_hypr_rotate", extended_help="**Rotate Margin**\n\nSpacing pushing the notification away from screen boundaries."),
+        ConfigItem(label="Width", key="width", scope="app-name=hypr-rotate", type_="int", default=280, min_val=50, max_val=800, step=5, parent_ref="menu_hypr_rotate", extended_help="**Rotate Box Width**\n\nTotal width allocated for the rotation notification pill."),
+        ConfigItem(label="Height", key="height", scope="app-name=hypr-rotate", type_="int", default=48, min_val=10, max_val=200, step=2, parent_ref="menu_hypr_rotate", extended_help="**Rotate Box Height**\n\nTotal height allocated for the rotation notification pill."),
+        ConfigItem(label="Margin", key="margin", scope="app-name=hypr-rotate", type_="string", default="0", parent_ref="menu_hypr_rotate", extended_help="**Rotate Margin**\n\nKept at 0 so anchor=center stays dead-center."),
         ConfigItem(label="Padding", key="padding", scope="app-name=hypr-rotate", type_="string", default="6,14", parent_ref="menu_hypr_rotate", extended_help="**Rotate Internal Padding**\n\nInternal spacing separating text/icons from borders."),
-        ConfigItem(label="Radius", key="border-radius", scope="app-name=hypr-rotate", type_="int", default=20, min_val=0, max_val=50, step=1, parent_ref="menu_hypr_rotate", extended_help="**Rotate Corner Smoothing**\n\nApplies rounded arcs to the notification pill."),
+        ConfigItem(label="Radius", key="border-radius", scope="app-name=hypr-rotate", type_="int", default=24, min_val=0, max_val=50, step=1, parent_ref="menu_hypr_rotate", extended_help="**Rotate Corner Smoothing**\n\nHalf of height (24) gives a true pill shape."),
         ConfigItem(label="Size", key="border-size", scope="app-name=hypr-rotate", type_="int", default=1, min_val=0, max_val=10, step=1, parent_ref="menu_hypr_rotate", extended_help="**Rotate Border Stroke**\n\nThickness of the outer border ring."),
         ConfigItem(label="Icons", key="icons", scope="app-name=hypr-rotate", type_="bool", default=True, parent_ref="menu_hypr_rotate", extended_help="**Rotate Icon Toggle**\n\nEnables display of the system rotation icon."),
-        ConfigItem(label="Timeout", key="default-timeout", scope="app-name=hypr-rotate", type_="int", default=1500, min_val=0, max_val=10000, step=100, parent_ref="menu_hypr_rotate", extended_help="**Rotate Lifespan**\n\nMilliseconds the notification stays visible."),
-        ConfigItem(label="Background", key="background-color", scope="app-name=hypr-rotate", type_="color", default="{{colors.surface.default.hex}}1a", options=COLOR_OPTIONS, hints=COLOR_HINTS, parent_ref="menu_hypr_rotate", extended_help="**Rotate Fill Color**" + ALPHA_HELP),
+        ConfigItem(label="MaxIcon", key="max-icon-size", scope="app-name=hypr-rotate", type_="int", default=18, min_val=16, max_val=64, step=2, parent_ref="menu_hypr_rotate", extended_help="**Rotate Icon Size**\n\nPixel bound for the rotation icon."),
+        ConfigItem(label="Align", key="text-alignment", scope="app-name=hypr-rotate", type_="cycle", default="center", options=["left", "center", "right"], parent_ref="menu_hypr_rotate", extended_help="**Rotate Alignment**\n\nJustification of the notification text."),
+        ConfigItem(label="Font", key="font", scope="app-name=hypr-rotate", type_="string", default="monospace 9.5", parent_ref="menu_hypr_rotate", extended_help="**Rotate Font Override**\n\nCustom typography for the rotation pill."),
+        ConfigItem(label="Format", key="format", scope="app-name=hypr-rotate", type_="string", default="<b>%s</b>\\n<span size=\"small\">%b</span>", parent_ref="menu_hypr_rotate", extended_help="**Rotate Text Format**\n\nStructures the two-line payload (bold summary over a smaller body line)."),
+        ConfigItem(label="Timeout", key="default-timeout", scope="app-name=hypr-rotate", type_="int", default=1800, min_val=0, max_val=10000, step=100, parent_ref="menu_hypr_rotate", extended_help="**Rotate Lifespan**\n\nMilliseconds the notification stays visible."),
+        ConfigItem(label="Background", key="background-color", scope="app-name=hypr-rotate", type_="color", default="{{colors.surface.default.hex}}cc", options=COLOR_OPTIONS, hints=COLOR_HINTS, parent_ref="menu_hypr_rotate", extended_help="**Rotate Fill Color**" + ALPHA_HELP),
         ConfigItem(label="Text", key="text-color", scope="app-name=hypr-rotate", type_="color", default="{{colors.on_surface.default.hex}}", options=COLOR_OPTIONS, hints=COLOR_HINTS, parent_ref="menu_hypr_rotate", extended_help="**Rotate Text Color**" + ALPHA_HELP),
-        ConfigItem(label="Border", key="border-color", scope="app-name=hypr-rotate", type_="color", default="{{colors.outline.default.hex}}33", options=COLOR_OPTIONS, hints=COLOR_HINTS, parent_ref="menu_hypr_rotate", extended_help="**Rotate Border Color**" + ALPHA_HELP),
+        ConfigItem(label="Border", key="border-color", scope="app-name=hypr-rotate", type_="color", default="{{colors.primary.default.hex}}66", options=COLOR_OPTIONS, hints=COLOR_HINTS, parent_ref="menu_hypr_rotate", extended_help="**Rotate Border Color**" + ALPHA_HELP),
+
+        ConfigItem(
+            label="Hypr Scale", key="menu_hypr_scale", scope="DEFAULT", type_="menu", default=None, is_parent=True, group="Visuals & Rotation",
+            extended_help="**Fractional Scale Overlay**\n\nCenter-screen pill for fractional-scale confirmations. Targets notifications pushed with `app-name=hypr-scale`."
+        ),
+        ConfigItem(label="Anchor", key="anchor", scope="app-name=hypr-scale", type_="cycle", default="center", options=["top-right", "top-center", "top-left", "bottom-right", "bottom-center", "bottom-left", "center-right", "center-left", "center"], parent_ref="menu_hypr_scale", extended_help="**Scale Anchor**\n\nDead-center keeps the pill centered across resolution and fractional-scale changes."),
+        ConfigItem(label="Layer", key="layer", scope="app-name=hypr-scale", type_="cycle", default="overlay", options=["background", "bottom", "top", "overlay"], parent_ref="menu_hypr_scale", extended_help="**Scale Layer**\n\nArranges the notification at a specific Wayland surface layer."),
+        ConfigItem(label="Width", key="width", scope="app-name=hypr-scale", type_="int", default=300, min_val=50, max_val=800, step=5, parent_ref="menu_hypr_scale", extended_help="**Scale Box Width**\n\nTotal width allocated for the scale notification pill."),
+        ConfigItem(label="Height", key="height", scope="app-name=hypr-scale", type_="int", default=48, min_val=10, max_val=200, step=2, parent_ref="menu_hypr_scale", extended_help="**Scale Box Height**\n\nTotal height allocated for the scale notification pill."),
+        ConfigItem(label="Margin", key="margin", scope="app-name=hypr-scale", type_="string", default="0", parent_ref="menu_hypr_scale", extended_help="**Scale Margin**\n\nKept at 0 so anchor=center stays dead-center."),
+        ConfigItem(label="Padding", key="padding", scope="app-name=hypr-scale", type_="string", default="6,14", parent_ref="menu_hypr_scale", extended_help="**Scale Internal Padding**\n\nInternal spacing separating text/icons from borders."),
+        ConfigItem(label="Radius", key="border-radius", scope="app-name=hypr-scale", type_="int", default=24, min_val=0, max_val=50, step=1, parent_ref="menu_hypr_scale", extended_help="**Scale Corner Smoothing**\n\nHalf of height (24) gives a true pill shape."),
+        ConfigItem(label="Size", key="border-size", scope="app-name=hypr-scale", type_="int", default=1, min_val=0, max_val=10, step=1, parent_ref="menu_hypr_scale", extended_help="**Scale Border Stroke**\n\nThickness of the outer border ring."),
+        ConfigItem(label="Icons", key="icons", scope="app-name=hypr-scale", type_="bool", default=False, parent_ref="menu_hypr_scale", extended_help="**Scale Icon Toggle**\n\nEnables display of the system display icon."),
+        ConfigItem(label="MaxIcon", key="max-icon-size", scope="app-name=hypr-scale", type_="int", default=18, min_val=16, max_val=64, step=2, parent_ref="menu_hypr_scale", extended_help="**Scale Icon Size**\n\nPixel bound for the display icon."),
+        ConfigItem(label="Align", key="text-alignment", scope="app-name=hypr-scale", type_="cycle", default="center", options=["left", "center", "right"], parent_ref="menu_hypr_scale", extended_help="**Scale Alignment**\n\nJustification of the notification text."),
+        ConfigItem(label="Font", key="font", scope="app-name=hypr-scale", type_="string", default="monospace 9.5", parent_ref="menu_hypr_scale", extended_help="**Scale Font Override**\n\nCustom typography for the scale pill."),
+        ConfigItem(label="Format", key="format", scope="app-name=hypr-scale", type_="string", default="<b>%s</b>", parent_ref="menu_hypr_scale", extended_help="**Scale Text Format**\n\nSingle-line bold summary (monitor, scale, and logical size on one line)."),
+        ConfigItem(label="Timeout", key="default-timeout", scope="app-name=hypr-scale", type_="int", default=1800, min_val=0, max_val=10000, step=100, parent_ref="menu_hypr_scale", extended_help="**Scale Lifespan**\n\nMilliseconds the notification stays visible."),
+        ConfigItem(label="Background", key="background-color", scope="app-name=hypr-scale", type_="color", default="{{colors.surface.default.hex}}cc", options=COLOR_OPTIONS, hints=COLOR_HINTS, parent_ref="menu_hypr_scale", extended_help="**Scale Fill Color**" + ALPHA_HELP),
+        ConfigItem(label="Text", key="text-color", scope="app-name=hypr-scale", type_="color", default="{{colors.on_surface.default.hex}}", options=COLOR_OPTIONS, hints=COLOR_HINTS, parent_ref="menu_hypr_scale", extended_help="**Scale Text Color**" + ALPHA_HELP),
+        ConfigItem(label="Border", key="border-color", scope="app-name=hypr-scale", type_="color", default="{{colors.primary.default.hex}}66", options=COLOR_OPTIONS, hints=COLOR_HINTS, parent_ref="menu_hypr_scale", extended_help="**Scale Border Color**" + ALPHA_HELP),
 
         ConfigItem(
             label="Hypr Anim", key="menu_hypr_anim", scope="DEFAULT", type_="menu", default=None, is_parent=True, group="Visuals & Rotation",
@@ -1289,9 +1315,18 @@ SCHEMA = {
             key="action_test_rotate",
             scope="DEFAULT",
             type_="action",
-            default="notify-send -a hypr-rotate -i object-rotate-right -h string:x-canonical-private-synchronous:display-rotate 'Display Rotated' 'eDP-1 • 0° (normal)'",
+            default="notify-send -a hypr-rotate -i object-rotate-right -h string:x-canonical-private-synchronous:hypr-rotate 'eDP-1 • 90°' 'ephemeral'",
             group="Execution",
-            extended_help="**Hypr Rotate Test**\n\nFires a mock Display Rotated notification to preview your Hypr Rotate pill styling."
+            extended_help="**Hypr Rotate Test**\n\nFires a mock center-screen rotation pill to preview your Hypr Rotate styling."
+        ),
+        ConfigItem(
+            label="TestScale",
+            key="action_test_scale",
+            scope="DEFAULT",
+            type_="action",
+            default="notify-send -a hypr-scale -h string:x-canonical-private-synchronous:hypr-scale 'eDP-1 • 1.5× • 1280×720'",
+            group="Execution",
+            extended_help="**Hypr Scale Test**\n\nFires a mock center-screen scale pill to preview your Hypr Scale styling."
         ),
     ]
 }

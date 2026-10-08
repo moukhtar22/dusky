@@ -1,266 +1,226 @@
 #!/usr/bin/env bash
-# ---------------------------------------------------------------------------
-#  tlp-toggle — Native TLP power profile manager for Wayland
-# ---------------------------------------------------------------------------
-
+# Native TLP profile selection and status for the Dusky desktop.
 set -euo pipefail
 
-# -- Bash version gate (5.1+) --
-if (( BASH_VERSINFO[0] < 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] < 1) )); then
-    printf 'Fatal: Bash 5.1+ required\n' >&2
-    exit 1
-fi
-
-# -- Configuration --
 readonly STATE_FILE="$HOME/.config/dusky/settings/tlp_state"
 readonly STATE_DIR="${STATE_FILE%/*}"
-readonly LOCK_FILE="${XDG_RUNTIME_DIR:-/tmp}/tlp_toggle.lock"
+readonly LOCK_FILE="${XDG_RUNTIME_DIR:-$STATE_DIR}/tlp_toggle.lock"
 readonly -a PROFILES=('power-saver' 'balanced' 'performance')
-
-# -- UI Mappings --
-declare -rA ICON_NERDFONT=(
-    [performance]=$'\U000f04c5'    # 󰓅
-    [balanced]=$'\U000f007e'       # 󰖳
-    [power-saver]=$'\U000f032a'    # 󰌪
-    [unknown]='?'
+declare -rA ICON=(
+    [performance]=$'\U000f04c5' [balanced]=$'\U000f007e'
+    [power-saver]=$'\U000f032a' [unknown]='?'
 )
-
-declare -rA ICON_NOTIFY=(
+declare -rA LABEL=(
+    [performance]='Performance' [balanced]='Balanced'
+    [power-saver]='Power Saver' [unknown]='Unknown'
+)
+declare -rA NOTIFY_ICON=(
     [performance]='battery-full-charged-symbolic'
     [balanced]='battery-good-symbolic'
     [power-saver]='battery-caution-symbolic'
-    [unknown]='dialog-warning'
 )
 
-declare -rA LABEL=(
-    [performance]='Performance'
-    [balanced]='Balanced'
-    [power-saver]='Power Saver'
-)
-
-declare -rA CSS_CLASS=(
-    [performance]='performance'
-    [balanced]='balanced'
-    [power-saver]='power-saver'
-)
-
-# -- Logging --
-err() { printf '\033[31m[ERR]\033[0m %s\n' "$*" >&2; exit 1; }
-
-# -- Initialization & Locking --
-mkdir -p "$STATE_DIR"
-
-# Concurrency lock (RAM-backed, atomic)
-exec 200>"$LOCK_FILE"
-if ! flock -n 200; then exit 0; fi
-
-# Get actual profile from TLP runtime state or fallback to local state file
-get_actual_profile() {
-    local pwr_file="/run/tlp/last_pwr"
-    if [[ -f "$pwr_file" ]]; then
-        local pp_code ps_code
-        if read -r pp_code ps_code < "$pwr_file" 2>/dev/null; then
-            case "$pp_code" in
-                0) echo "performance"; return 0 ;;
-                1) echo "balanced"; return 0 ;;
-                2) echo "power-saver"; return 0 ;;
-            esac
-        fi
-    fi
-    # Fallback to local state file
-    if [[ -f "$STATE_FILE" ]]; then
-        cat "$STATE_FILE"
-    else
-        echo "balanced"
-    fi
-}
-
-# Initialize state file if missing
-if [[ ! -f "$STATE_FILE" ]]; then
-    echo "balanced" > "$STATE_FILE"
-fi
-CURRENT_STATE=$(get_actual_profile)
-
-# -- Core Functions --
-send_notification() {
-    local profile="$1"
-    if command -v notify-send >/dev/null 2>&1; then
-        local pretty="${LABEL[$profile]:-$profile}"
-        local font_icon="${ICON_NERDFONT[$profile]:-}"
-        notify-send \
-            --app-name="dusky-tlp" \
-            --urgency="low" \
-            --hint=string:x-canonical-private-synchronous:power-profile \
-            "TLP ${pretty}" \
-            "${font_icon}  ${pretty}" &
-        disown
-    fi
-}
-
-send_error_notification() {
-    local profile="$1"
-    if command -v notify-send >/dev/null 2>&1; then
-        notify-send \
-            --app-name="TLP Manager" \
-            --urgency="critical" \
-            --icon="dialog-error" \
-            "Power Profile Error" \
-            "Failed to switch to ${profile}. Check sudoers." &
-        disown
-    fi
-}
-
-set_state() {
-    local target="$1"
-    
-    # Validate profile against known PROFILES array
-    local valid=0
-    for p in "${PROFILES[@]}"; do
-        if [[ "$p" == "$target" ]]; then valid=1; break; fi
-    done
-    [[ $valid -eq 1 ]] || err "Unknown profile: $target"
-
-    # Idempotency Guard
-    if [[ "$CURRENT_STATE" == "$target" ]]; then
-        exit 0 
-    fi
-
-    # -n forces non-interactive mode. It fails instantly if sudo requires a password.
-    if sudo -n tlp "$target" >/dev/null 2>&1; then
-        # Atomic file write
-        local tmp_file="${STATE_FILE}.tmp"
-        echo "$target" > "$tmp_file"
-        mv "$tmp_file" "$STATE_FILE"
-        
-        send_notification "$target"
-        exit 0
-    else
-        send_error_notification "$target"
-        err "Failed to execute 'sudo tlp $target'. Verify NOPASSWD in sudoers."
-    fi
-}
-
-toggle_state() {
-    local direction="${1:-forward}"
-    local idx=-1
-    local count=${#PROFILES[@]}
-    
-    # Locate current index
-    for i in "${!PROFILES[@]}"; do
-        if [[ "${PROFILES[$i]}" == "$CURRENT_STATE" ]]; then
-            idx=$i
-            break
-        fi
-    done
-    
-    # Self-healing fallback if state file was corrupted
-    if [[ $idx -eq -1 ]]; then
-        set_state "balanced"
-    fi
-    
-    # Array math for cycling
-    local next_idx
-    if [[ "$direction" == "reverse" ]]; then
-        next_idx=$(( (idx - 1 + count) % count ))
-    else
-        next_idx=$(( (idx + 1) % count ))
-    fi
-    
-    set_state "${PROFILES[$next_idx]}"
-}
+err() { printf '[ERR] %s\n' "$*" >&2; exit 1; }
 
 show_help() {
-    cat <<EOF
-tlp-toggle — Native TLP power profile manager for Wayland
+    cat <<'EOF'
+tlp-toggle — TLP profile manager
 
 USAGE
-    tlp-toggle toggle              Cycle forward (power-saver → balanced → performance)
-    tlp-toggle toggle --reverse    Cycle backward (performance → balanced → power-saver)
-    tlp-toggle performance         Set performance profile
-    tlp-toggle balanced            Set balanced profile
-    tlp-toggle power-saver         Set power-saver profile
-    tlp-toggle status              Print raw text state (for GTK app)
-    tlp-toggle status --json       Print Waybar compatible JSON payload
-    tlp-toggle status --probe      Print detailed status (Profile, Power Source, Mode)
-    tlp-toggle status --probe-json Print detailed status in JSON format
-    tlp-toggle -h | --help         Show this help
+    tlp-toggle [toggle [--reverse]] Cycle profiles (power-saver → balanced → performance)
+    tlp-toggle performance         Select Performance
+    tlp-toggle balanced            Select Balanced
+    tlp-toggle power-saver         Select Power Saver
+    tlp-toggle auto                Apply saved settings and resume automatic operation
+    tlp-toggle status              Print active profile
+    tlp-toggle status --json       Print Waybar JSON
+    tlp-toggle status --probe      Print profile, power source, and mode
+    tlp-toggle status --probe-json Print detailed JSON
+    tlp-toggle -h | --help         Show help
+
+Profile selection follows TLP_AUTO_SWITCH on subsequent power-source changes.
+Explicit Performance selection attempts to clear userspace frequency caps.
+Configured boost/performance settings and hardware limits still apply.
+Switching requires root or existing non-interactive sudo authorization.
 EOF
 }
 
-# -- Routing --
-ACTION="${1:-}"
-SUBFLAG="${2:-}"
+# Validate arguments before any filesystem writes or dependency checks.
+action=${1:-toggle}
+flag=${2:-}
+(( $# <= 2 )) || err 'Too many arguments. Use --help.'
+case "$action" in
+    -h|--help|help)
+        [[ -z $flag ]] || err 'Help takes no arguments.'
+        show_help; exit 0 ;;
+    toggle|-c|--cycle)
+        case "$flag" in ''|--reverse|-r) ;; *) err "Unknown toggle option: $flag" ;; esac ;;
+    status)
+        case "$flag" in ''|--json|--probe|-p|--probe-json|--json-probe|-j) ;; *) err "Unknown status option: $flag" ;; esac ;;
+    performance|balanced|power-saver|auto)
+        [[ -z $flag ]] || err "$action takes no arguments." ;;
+    *) err "Unknown command: $action" ;;
+esac
+command -v tlp-stat >/dev/null || err 'tlp-stat is not installed.'
 
-# Dependency Check
-if ! command -v tlp >/dev/null 2>&1; then
-    err "TLP command not found. Please ensure tlp is installed."
+current=unknown
+mode=unknown
+power_source=Unknown
+parse_profile() {
+    local raw=$1
+    local profile=${raw%%/*}
+    profile=${profile%% *}
+    case "$profile" in
+        performance|balanced|power-saver) current=$profile ;;
+        *) current=unknown ;;
+    esac
+    if [[ $current == unknown ]]; then
+        mode=unknown
+    elif [[ $raw == *'(manual)'* ]]; then
+        mode=manual
+    else
+        mode=auto
+    fi
+}
+
+read_profile() {
+    local output
+    if ! output=$(LC_ALL=C tlp-stat -m); then
+        err 'Unable to read the active TLP profile.'
+    fi
+    parse_profile "$output"
+}
+
+# Status reads do not lock, initialize, or trust the desktop cache.
+if [[ $action == status ]]; then
+    case "$flag" in
+        --probe|-p|--probe-json|--json-probe|-j)
+            if ! output=$(LC_ALL=C tlp-stat -s); then
+                err 'Unable to read TLP status.'
+            fi
+            while IFS= read -r line; do
+                if [[ $line =~ ^TLP[[:space:]]+profile[[:space:]]*=[[:space:]]*(.*)$ ]]; then
+                    parse_profile "${BASH_REMATCH[1]}"
+                elif [[ $line =~ ^Power[[:space:]]+source[[:space:]]*=[[:space:]]*(.*)$ ]]; then
+                    case "${BASH_REMATCH[1]}" in
+                        AC) power_source=AC ;;
+                        battery|Battery) power_source=Battery ;;
+                    esac
+                fi
+            done <<< "$output" ;;
+        *) read_profile ;;
+    esac
+    case "$flag" in
+        --json)
+            printf '{"text":"%s %s","alt":"%s","class":"%s","tooltip":"Power profile: %s"}\n' \
+                "${ICON[$current]}" "${LABEL[$current]}" "$current" "$current" "${LABEL[$current]}" ;;
+        --probe|-p)
+            printf 'Active Profile: %s\nPower Source:   %s\nMode:           %s\n' "$current" "$power_source" "$mode" ;;
+        --probe-json|--json-probe|-j)
+            printf '{"profile":"%s","power_source":"%s","mode":"%s"}\n' "$current" "$power_source" "$mode" ;;
+        *) printf '%s\n' "$current" ;;
+    esac
+    exit 0
 fi
 
-case "$ACTION" in
+command -v tlp >/dev/null || err 'TLP is not installed.'
+mkdir -p -- "$STATE_DIR"
+# Only mutations serialize. Queue quick successive clicks instead of discarding them.
+exec {lock_fd}>"$LOCK_FILE"
+flock -w 5 "$lock_fd" || err 'Another TLP switch is still running.'
+
+case "$action" in
     toggle|-c|--cycle)
-        if [[ "$SUBFLAG" == "--reverse" || "$SUBFLAG" == "-r" ]]; then
-            toggle_state "reverse"
+        read_profile
+        index=-1
+        for i in "${!PROFILES[@]}"; do
+            if [[ ${PROFILES[i]} == "$current" ]]; then index=$i; break; fi
+        done
+        if (( index < 0 )); then
+            target=balanced
+        elif [[ $flag == --reverse || $flag == -r ]]; then
+            target=${PROFILES[(index + 2) % 3]}
         else
-            toggle_state "forward"
-        fi
-        ;;
-    performance|balanced|power-saver)
-        set_state "$ACTION"
-        ;;
-    status)
-        if [[ "$SUBFLAG" == "--json" ]]; then
-            icon="${ICON_NERDFONT[$CURRENT_STATE]:-${ICON_NERDFONT[unknown]}}"
-            label="${LABEL[$CURRENT_STATE]:-$CURRENT_STATE}"
-            css="${CSS_CLASS[$CURRENT_STATE]:-unknown}"
-            printf '{"text":"%s %s","alt":"%s","class":"%s","tooltip":"Power profile: %s"}\n' \
-                "$icon" "$label" "$CURRENT_STATE" "$css" "$label"
-        elif [[ "$SUBFLAG" == "--probe" || "$SUBFLAG" == "-p" ]]; then
-            pp_code=""
-            ps_code=""
-            if [[ -f "/run/tlp/last_pwr" ]]; then
-                read -r pp_code ps_code < "/run/tlp/last_pwr" 2>/dev/null || true
-            fi
-            source="Unknown"
-            case "${ps_code:-}" in
-                0) source="AC" ;;
-                1) source="Battery" ;;
-            esac
-            mode="auto"
-            if [[ -f "/run/tlp/manual_mode" ]]; then
-                mode="manual"
-            fi
-            echo "Active Profile: $CURRENT_STATE"
-            echo "Power Source:   $source"
-            echo "Mode:           $mode"
-        elif [[ "$SUBFLAG" == "--probe-json" || "$SUBFLAG" == "-j" || "$SUBFLAG" == "--json-probe" ]]; then
-            pp_code=""
-            ps_code=""
-            if [[ -f "/run/tlp/last_pwr" ]]; then
-                read -r pp_code ps_code < "/run/tlp/last_pwr" 2>/dev/null || true
-            fi
-            source="Unknown"
-            case "${ps_code:-}" in
-                0) source="AC" ;;
-                1) source="Battery" ;;
-            esac
-            mode="auto"
-            if [[ -f "/run/tlp/manual_mode" ]]; then
-                mode="manual"
-            fi
-            printf '{"profile":"%s","power_source":"%s","mode":"%s"}\n' "$CURRENT_STATE" "$source" "$mode"
-        else
-            echo "$CURRENT_STATE"
-        fi
-        ;;
-    -h|--help|help)
-        show_help
-        ;;
-    *)
-        # Default behavior: run cycle if no arguments provided
-        if [[ -z "$ACTION" ]]; then
-            toggle_state "forward"
-        else
-            err "Unknown command: $ACTION"
-        fi
-        ;;
+            target=${PROFILES[(index + 1) % 3]}
+        fi ;;
+    auto) target=start ;;
+    *) target=$action ;;
 esac
+
+# Always execute explicit selections: selecting the same profile also clears manual mode.
+if (( EUID == 0 )); then
+    command=(tlp "$target")
+else
+    command=(sudo -n tlp "$target")
+fi
+profile_command=("${command[@]}")
+unclamp_requested=0
+frequency_warning=''
+if [[ $target == performance ]]; then
+    # Linux frequency QoS uses S32_MAX as its unconstrained maximum request.
+    # TLP writes the request with its existing privileges; each driver clamps
+    # the effective limit to its own policy's capabilities. The request survives
+    # Intel's turbo-off clamp until TLP enables turbo later in the same switch.
+    # Deliberately override any configured PRF frequency ceiling for this click.
+    for policy in /sys/devices/system/cpu/cpufreq/policy*; do
+        [[ -f $policy/scaling_max_freq ]] || continue
+        command+=(-- CPU_SCALING_MAX_FREQ_ON_PRF=2147483647)
+        unclamp_requested=1
+        break
+    done
+fi
+if ! output=$("${command[@]}" 2>&1); then
+    switch_failed=1
+    if (( unclamp_requested )); then
+        [[ -z $output ]] || printf '%s\n' "$output" >&2
+        printf '[WARN] Frequency cap reset failed; retrying the normal Performance profile.\n' >&2
+        frequency_warning='Frequency cap reset was skipped.'
+        if output=$("${profile_command[@]}" 2>&1); then
+            switch_failed=0
+        fi
+    fi
+    if (( switch_failed )); then
+        printf '%s\n' "$output" >&2
+        if command -v notify-send >/dev/null; then
+            (exec {lock_fd}>&-; notify-send --app-name=dusky-tlp --urgency=critical \
+                --icon=dialog-error 'Power Profile Error' 'TLP failed. See command output for details.') >/dev/null 2>&1 &
+        fi
+        err "Failed to execute TLP command: $target"
+    fi
+fi
+# Preserve TLP warnings rather than silently claiming every setting was applied.
+[[ -z $output ]] || printf '%s\n' "$output" >&2
+read_profile
+if [[ $current == unknown || ( $target != start && $current != "$target" ) ]]; then
+    err "TLP did not report the requested profile (reported: $current)."
+fi
+
+if [[ $target == performance ]]; then
+    # TLP can return success despite a rejected sysfs write. Check effective
+    # limits without failing a valid profile switch on unsupported/hotplug CPUs.
+    for policy in /sys/devices/system/cpu/cpufreq/policy*; do
+        [[ -r $policy/scaling_max_freq && -r $policy/cpuinfo_max_freq ]] || continue
+        if ! { read -r actual < "$policy/scaling_max_freq" &&
+               read -r maximum < "$policy/cpuinfo_max_freq"; } 2>/dev/null ||
+           [[ ! $actual =~ ^[0-9]+$ || ! $maximum =~ ^[0-9]+$ ]]; then
+            printf '[WARN] Unable to verify frequency limits for %s.\n' "${policy##*/}" >&2
+            frequency_warning='Frequency limits could not be fully verified.'
+        elif (( 10#$actual < 10#$maximum )); then
+            printf '[WARN] %s remains limited to %s kHz (available maximum: %s kHz).\n' \
+                "${policy##*/}" "$actual" "$maximum" >&2
+            frequency_warning='A CPU frequency limit remains; see command output.'
+        fi
+    done
+fi
+
+# Keep the legacy cache for existing consumers, but never use it as runtime truth.
+temporary=$(mktemp -- "${STATE_FILE}.XXXXXX")
+trap 'rm -f -- "$temporary"' EXIT
+printf '%s\n' "$current" > "$temporary"
+mv -f -- "$temporary" "$STATE_FILE"
+if command -v notify-send >/dev/null; then
+    (exec {lock_fd}>&-; notify-send --app-name=dusky-tlp --urgency=low \
+        --icon="${NOTIFY_ICON[$current]}" \
+        --hint=string:x-canonical-private-synchronous:power-profile \
+        "TLP ${LABEL[$current]}" "${ICON[$current]}  ${LABEL[$current]}${frequency_warning:+ — $frequency_warning}") >/dev/null 2>&1 &
+fi

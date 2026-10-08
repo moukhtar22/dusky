@@ -23,6 +23,7 @@ xdg-desktop-portal-hyprland
 xdg-desktop-portal-gtk
 localsearch
 polkit
+dbus
 xdg-utils
 socat
 inotify-tools
@@ -34,6 +35,9 @@ qt5-wayland
 qt6-wayland
 gtk3
 gtk4
+glib2
+dconf
+gsettings-desktop-schemas
 nwg-look
 qt5ct
 qt6ct
@@ -49,6 +53,8 @@ otf-atkinsonhyperlegiblemono-nerd
 ttf-atkinson-hyperlegible
 otf-atkinson-hyperlegible
 noto-fonts-emoji
+ttf-liberation
+terminus-font
 sassc
 python-packaging
 python
@@ -63,6 +69,8 @@ papirus-icon-theme
 python-pyquery
 python-textual
 python-rich
+python-regex
+python-pillow
 # Group 4: Desktop Experience
 waybar
 awww
@@ -112,6 +120,7 @@ usbutils
 gnome-disk-utility
 unzip
 zip
+tar
 unrar
 7zip
 cpio
@@ -198,6 +207,7 @@ wget
 curl
 openssh
 ufw
+wayvnc
 vsftpd
 reflector
 bmon
@@ -262,6 +272,7 @@ stylua
 prettier
 tree-sitter-cli
 nano
+lua51
 luarocks
 # Group 10: Multimedia
 ffmpeg

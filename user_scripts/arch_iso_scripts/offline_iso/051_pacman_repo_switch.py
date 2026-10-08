@@ -63,18 +63,21 @@ def backup_file(target: Path) -> None:
 
 
 def clear_stale_pacman_lock() -> None:
-    lck = Path("/var/lib/pacman/db.lck")
-    if lck.is_file():
-        res = subprocess.run(["pgrep", "-x", "pacman"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        if res.returncode != 0:
-            try:
-                lck.unlink()
-                console.print("[yellow][WARN] Removed stale pacman lock file (/var/lib/pacman/db.lck)[/yellow]")
-            except Exception as e:
-                console.print(f"[yellow][WARN] Could not remove stale lock file: {e}[/yellow]")
+    try:
+        subprocess.run(["pkill", "-9", "-x", "pacman"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+    except Exception:
+        pass
+
+    for lck in [Path("/var/lib/pacman/db.lck"), Path("/mnt/var/lib/pacman/db.lck")]:
+        try:
+            if lck.is_file():
+                lck.unlink(missing_ok=True)
+                console.print(f"[yellow][WARN] Purged pacman lock file ({lck})[/yellow]")
+        except Exception as e:
+            console.print(f"[yellow][WARN] Could not remove lock file: {e}[/yellow]")
 
 
-def switch_to_online(pacman_conf: Path, mirrorlist: Path) -> None:
+def switch_to_online(pacman_conf: Path, mirrorlist: Path, *, sync: bool = True) -> None:
     console.print(Panel("[bold cyan]Switching to ONLINE Repositories (Arch Linux HTTPS)[/bold cyan]", box=box.ROUNDED))
     
     backup_file(pacman_conf)
@@ -138,6 +141,10 @@ Server = https://berlin.mirror.pkgbuild.com/$repo/os/x86_64
     atomic_write(mirrorlist, mirror_content)
 
     console.print("[bold green][OK] Online repository configuration successfully applied.[/bold green]")
+
+    if not sync:
+        console.print("[cyan]Configuration restored; package database sync skipped.[/cyan]")
+        return
 
     clear_stale_pacman_lock()
 
@@ -234,14 +241,17 @@ def main():
     parser = argparse.ArgumentParser(description="Pacman Repository State Manager")
     parser.add_argument("--online", action="store_true", help="Switch to Online HTTPS mirrors")
     parser.add_argument("--offline", action="store_true", help="Switch to Offline local file:// repository")
+    parser.add_argument("--no-sync", action="store_true", help="Restore online configuration without contacting mirrors")
     parser.add_argument("--arch", action="store_true", help="Backward compatibility flag (ignored)")
     args = parser.parse_args()
+    if args.no_sync and (not args.online or args.offline):
+        parser.error("--no-sync requires --online without --offline")
 
     pacman_conf = Path("/etc/pacman.conf")
     mirrorlist = Path("/etc/pacman.d/mirrorlist")
 
     if args.online:
-        switch_to_online(pacman_conf, mirrorlist)
+        switch_to_online(pacman_conf, mirrorlist, sync=not args.no_sync)
     elif args.offline:
         switch_to_offline(pacman_conf, mirrorlist)
     else:

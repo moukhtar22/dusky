@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Dusky Cursor TUI
+GenericName=Cursor Configurator
+Comment=Cursor theme, pointer size, and Matugen-adaptive custom color manager
+Exec=foot --app-id=dusky_tui python3 /home/dusk/user_scripts/cursor/tui_cursor.py
+Terminal=false
+Categories=Settings;DesktopSettings;System;Utility;
+Keywords=dusky;cursor;pointer;mouse;theme;size;bibata;adwaita;color;recolor;matugen;tui;config;settings;
+Icon=preferences-desktop-theme
+StartupNotify=true
+StartupWMClass=dusky_tui

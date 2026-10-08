@@ -40,19 +40,20 @@ ForegroundNormal={{colors.on_surface.default.red}},{{colors.on_surface.default.g
 ForegroundPositive={{colors.tertiary.default.red}},{{colors.tertiary.default.green}},{{colors.tertiary.default.blue}}
 ForegroundVisited={{colors.secondary.default.red}},{{colors.secondary.default.green}},{{colors.secondary.default.blue}}
 
+# Container selections stay readable when a view paints normal text on them.
 [Colors:Selection]
-BackgroundAlternate={{colors.primary.default.red}},{{colors.primary.default.green}},{{colors.primary.default.blue}}
-BackgroundNormal={{colors.primary.default.red}},{{colors.primary.default.green}},{{colors.primary.default.blue}}
+BackgroundAlternate={{colors.primary_container.default.red}},{{colors.primary_container.default.green}},{{colors.primary_container.default.blue}}
+BackgroundNormal={{colors.primary_container.default.red}},{{colors.primary_container.default.green}},{{colors.primary_container.default.blue}}
 DecorationFocus={{colors.primary.default.red}},{{colors.primary.default.green}},{{colors.primary.default.blue}}
 DecorationHover={{colors.primary.default.red}},{{colors.primary.default.green}},{{colors.primary.default.blue}}
-ForegroundActive={{colors.primary.default.red}},{{colors.primary.default.green}},{{colors.primary.default.blue}}
-ForegroundInactive={{colors.outline.default.red}},{{colors.outline.default.green}},{{colors.outline.default.blue}}
-ForegroundLink={{colors.primary.default.red}},{{colors.primary.default.green}},{{colors.primary.default.blue}}
-ForegroundNegative={{colors.error.default.red}},{{colors.error.default.green}},{{colors.error.default.blue}}
-ForegroundNeutral={{colors.secondary.default.red}},{{colors.secondary.default.green}},{{colors.secondary.default.blue}}
-ForegroundNormal={{colors.on_primary.default.red}},{{colors.on_primary.default.green}},{{colors.on_primary.default.blue}}
-ForegroundPositive={{colors.tertiary.default.red}},{{colors.tertiary.default.green}},{{colors.tertiary.default.blue}}
-ForegroundVisited={{colors.secondary.default.red}},{{colors.secondary.default.green}},{{colors.secondary.default.blue}}
+ForegroundActive={{colors.on_primary_container.default.red}},{{colors.on_primary_container.default.green}},{{colors.on_primary_container.default.blue}}
+ForegroundInactive={{colors.on_primary_container.default.red}},{{colors.on_primary_container.default.green}},{{colors.on_primary_container.default.blue}}
+ForegroundLink={{colors.on_primary_container.default.red}},{{colors.on_primary_container.default.green}},{{colors.on_primary_container.default.blue}}
+ForegroundNegative={{colors.on_primary_container.default.red}},{{colors.on_primary_container.default.green}},{{colors.on_primary_container.default.blue}}
+ForegroundNeutral={{colors.on_primary_container.default.red}},{{colors.on_primary_container.default.green}},{{colors.on_primary_container.default.blue}}
+ForegroundNormal={{colors.on_primary_container.default.red}},{{colors.on_primary_container.default.green}},{{colors.on_primary_container.default.blue}}
+ForegroundPositive={{colors.on_primary_container.default.red}},{{colors.on_primary_container.default.green}},{{colors.on_primary_container.default.blue}}
+ForegroundVisited={{colors.on_primary_container.default.red}},{{colors.on_primary_container.default.green}},{{colors.on_primary_container.default.blue}}
 
 [Colors:Tooltip]
 BackgroundAlternate={{colors.surface_container_lowest.default.red}},{{colors.surface_container_lowest.default.green}},{{colors.surface_container_lowest.default.blue}}
@@ -123,13 +124,9 @@ ColorScheme=Matugen
 Name=Matugen
 shadeSortColumn=true
 
-[Icons]
-Theme=Papirus-Dark
-
 [KDE]
 ColorScheme=Matugen
 contrast=4
-widgetStyle=Fusion
 
 [UiSettings]
 ColorScheme=Matugen
@@ -142,3 +139,4 @@ inactiveBackground={{colors.surface_container_lowest.default.red}},{{colors.surf
 inactiveBlend={{colors.outline.default.red}},{{colors.outline.default.green}},{{colors.outline.default.blue}}
 inactiveForeground={{colors.outline.default.red}},{{colors.outline.default.green}},{{colors.outline.default.blue}}
 
+# dusky-kde-complete

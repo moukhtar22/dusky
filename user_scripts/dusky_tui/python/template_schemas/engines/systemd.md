@@ -1,42 +1,11 @@
 # Engine: `systemd`
 
-- **Class:** `SystemdEngine` — `engines/systemd.py`
-- **Engine types:** `systemd`
-- **Default target:** (none — set TARGET_FILE; engine reports `/etc/systemd/system` but no file is ever read or written)
+`SystemdEngine` reads service and timer unit-file states with `systemctl list-unit-files`. User units use `systemctl --user`; system units use the system manager. The returned `user/<unit>` and `system/<unit>` values are `"true"` for `enabled` or `enabled-runtime`, and `"false"` for other discoverable states. Runtime activity is a separate property. `TARGET_FILE` is cosmetic; the engine does not watch or edit one file.
 
-## Target format
+The service-manager schema keeps its curated definitions and asks the engine which unit files exist before building Core folders. Empty folders are omitted. Discovery also builds the Active, Enabled, Timers, All, and Read Only tabs. Press F5 in this TUI to refresh the inventory. A failed discovery leaves the existing rows in place and reports an error. Targeted queries with no matching units return an empty map. Systemd can list a loaded concrete instance only through the manager; the engine resolves requested instances with `systemctl show`. Uninstantiated templates are not ordinary toggle rows.
 
-File-less engine. It executes `systemctl` directly: `systemctl enable --now <unit>` / `systemctl disable --now <unit>` for user scope, and `sudo -n systemctl …` for system scope. The schema `TARGET_FILE` value is cosmetic.
+The service-manager schema sets `HIDE_MISSING_ITEMS = True`. This frontend option hides rows absent from engine state and folders left empty by that filtering; other schemas can opt in too. Units without an ordinary enablement switch, such as `static`, `masked`, `alias`, `generated`, or `transient`, appear only in the Read Only tab, grouped by their systemd state. The tab notice explains common states, and each row has state-specific help. These rows do not participate in presets or reset actions.
 
-## Scope / key mapping
+An editable bool toggle runs `systemctl enable --now UNIT` or `systemctl disable --now UNIT`. System scope uses `sudo -n`; a password-required result invokes the frontend's sudo prompt. Each write has a bounded wait. After a failed or timed-out command, the engine rereads enablement so the frontend can reconcile the displayed value. A failed start/stop can therefore be reported while the toggle still reflects a successful enable/disable. If the reread also fails, the pending change remains unresolved instead of being reported as committed. Batch writes retain per-unit results and never blindly repeat a completed unit.
 
-- `scope` must be exactly `"user"` (→ `systemctl --user`) or `"system"` (→ `sudo -n systemctl`). Anything else is treated as system scope.
-- `key` = the full unit name including suffix, e.g. `bluetooth.service`, `update_checker.timer`. Schema must only reference units that exist.
-- State key format: `user/<unit>` and `system/<unit>`; value `"true"` if the unit is **active** (`systemctl is-active` / `list-units --state=active`), `"false"` otherwise.
-
-## Types & value handling
-
-- `type_` must be `bool` (the engine ignores `item_type` entirely).
-- `"true"` → enable; any other serialized value (`"false"`) → disable. `--now` is always used, so enabling also starts and disabling also stops.
-- `ConfigItem.serialize` converts Python `True`/`False` to `"true"`/`"false"` before the engine sees them — so `default=True`/`default=False` work directly.
-- Units missing from state (not installed, or `load_state` failed) are simply absent: the UI falls back to the schema default. No `__DELETE__`/`unset`/`nil` semantics — bool toggles only.
-
-## Quirks
-
-- `load_state` scans `systemctl list-unit-files --type=service,timer` (installed) and `list-units --type=service,timer --state=active` (active) per scope; a unit that is enabled-but-stopped is reported `"false"`. There is no separate "enabled" bit.
-- System-scope writes go through `sudo -n` (never interactive). If stderr contains `password is required`, `sudo:`, `polkit`, or `terminal is required`, the engine returns `(False, "AUTH_REQUIRED", …)` and the TUI prompts for a password. Writes have a 15 s timeout; batch writes 20 s.
-- `write_batch` groups changes into at most 4 transactions (user/system × enable/disable); any auth failure marks the whole batch `AUTH_REQUIRED`.
-- The UI may call `load_state_for_units(...)` (targeted `systemctl is-active` batch) for deferred tabs instead of `load_state()`; both return the same `user/<unit>`/`system/<unit>` shape.
-
-## Example items
-
-```python
-ConfigItem(label="Night Light", key="hyprsunset.service", scope="user",
-           type_="bool", default=False,
-           extended_help="**Unit:** `hyprsunset.service`\n**Scope:** User\n\nBlue light filter."),
-ConfigItem(label="SSH Server", key="sshd.service", scope="system",
-           type_="bool", default=False,
-           extended_help="**Unit:** `sshd.service`\n**Scope:** System\n\nOpenSSH daemon."),
-ConfigItem(label="Update Checker", key="update_checker.timer", scope="user",
-           type_="bool", default=True, group="Timers"),
-```
+`scope` must be `"user"` or `"system"`; `key` must be a full `.service` or `.timer` name. A value-less `type_="menu"` item can group unit rows by setting each child's `parent_ref` to the menu key. Menu rows are not sent to systemctl.

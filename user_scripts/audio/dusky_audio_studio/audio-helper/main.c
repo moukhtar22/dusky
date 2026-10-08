@@ -1,17 +1,17 @@
-/* G-Helper audio helper: PipeWire filter exposing a virtual "G-Helper Microphone"
- * source with a fixed DSP chain (rnnoise -> parametric EQ -> delay -> reverb).
+/* Dusky Audio Studio: PipeWire virtual microphone and playback sink with DSP.
  *
  * IPC: line-based commands on stdin, fixed-size binary audio frames on stdout
- *      (see protocol.h). Frame rate ~60 Hz, mono, 48 kHz.
+ *      (see protocol.h). Telemetry rate ~60 Hz; audio runs at 48 kHz.
  *
  * Threading model: one PipeWire main thread runs the loop, timers, and stdin
- * reader. The RT process callback runs in a separate RT thread. Parameters
- * are exchanged via C11 _Atomic primitives (lock-free, wait-free).
+ * reader. Audio callbacks may run on separate PipeWire data loops. Parameters
+ * and bounded rings are exchanged with C11 atomics without callback waits.
  *
- * Latency: ~10 ms (fixed, from rnnoise's 480-sample frame size at 48 kHz).
+ * RNNoise output is 960 samples behind input at 48 kHz. Frame collection
+ * adds 479 samples, giving 1,439 samples (~30 ms) in this streaming path;
+ * PipeWire buffers and device paths add further latency.
  *
- * License: GPL-3.0 (same as parent project). rnnoise sources bundled under
- * vendor/rnnoise/ are BSD-3-Clause (compatible).
+ * License: GPL-3.0 (same as parent project). RNNoise links from the system.
  */
 
 #define _GNU_SOURCE
@@ -74,10 +74,9 @@ static struct
     _Atomic int vocoder_shift_semis; /* -24..+24 transpose applied when follow=1 */
 
     /* Master output gain applied at the virtual source stream (NOT the
-     * monitor) so the apps recording from "G-Helper Microphone" hear it
+     * monitor) so apps recording from "Dusky Mic" hear it
      * at the user-chosen level. Per-mille: 0=mute, 1000=unity, 2000=+6 dB.
-     * The output stage runs a tanh soft-clipper so boosts above unity
-     * stay graceful instead of digitally clipping. */
+     * Boosts above unity may exceed digital full scale. */
     _Atomic int master_vol_mille;
 
     /* Post-EQ output gain in centi-dB applied immediately after the biquad
@@ -238,7 +237,7 @@ static void params_init(void)
         int q;
         int g;
     } defaults[GHA_EQ_BANDS] = {
-        {3, 80, 707, 0},      /* high-pass 80 Hz */
+        {0, 80, 707, 0},      /* peak 80 Hz */
         {1, 120, 707, 300},   /* low-shelf +3 dB */
         {0, 250, 1000, 0},    /* peak idle (mud control) */
         {0, 400, 1000, -200}, /* peak -2 dB at 400 (mud cut) */
@@ -544,7 +543,7 @@ struct voc_band
  *   The carrier generator inside the vocoder reads `tracked_hz` whenever
  *   the user has the "follow" toggle on.
  * ------------------------------------------------------------------------- */
-#define PITCH_BUF_LEN 1024 /* ~21 ms window */
+#define PITCH_BUF_LEN 2048 /* ~43 ms; covers 70 Hz at 48 kHz */
 #define PITCH_HOP 480      /* refresh cadence (matches rnnoise) */
 #define PITCH_MIN_HZ 70.0f
 #define PITCH_MAX_HZ 400.0f
@@ -557,6 +556,8 @@ struct pitch_tracker
     int samples_since_refresh; /* fires the autocorrelation every PITCH_HOP */
     float tracked_hz;          /* smoothed estimate (Hz), held across silence */
     float log_smoother;        /* one-pole LPF state in log-Hz domain */
+    int valid;
+    int miss_hops;
 };
 
 struct vocoder_state
@@ -641,41 +642,41 @@ static void pitch_tracker_push(struct pitch_tracker *p, float x, float fs)
         return;
     p->samples_since_refresh = 0;
 
-    /* Linearise the ring into a contiguous local buffer for the AC pass. */
-    float lin[PITCH_BUF_LEN];
+    /* Downsample by two: a full low-pitch period fits, at modest RT cost. */
+    enum { NBUF = PITCH_BUF_LEN / 2 };
+    float lin[NBUF];
     int start = p->head;
-    for (int i = 0; i < PITCH_BUF_LEN; i++)
-        lin[i] = p->buf[(start + i) % PITCH_BUF_LEN];
+    for (int i = 0; i < NBUF; i++)
+        lin[i] = 0.5f * (p->buf[(start + 2 * i) % PITCH_BUF_LEN] +
+                         p->buf[(start + 2 * i + 1) % PITCH_BUF_LEN]);
 
     /* Silence gate: cheap mean-square. */
     float ms = 0.0f;
-    for (int i = 0; i < PITCH_BUF_LEN; i++)
+    for (int i = 0; i < NBUF; i++)
         ms += lin[i] * lin[i];
-    ms /= (float)PITCH_BUF_LEN;
+    ms /= (float)NBUF;
     float rms = sqrtf(ms);
     if (rms < PITCH_SILENCE_RMS)
-        return; /* hold last */
+        goto missed;
 
     /* Lag bounds in samples. min lag = fs/max_hz; max lag = fs/min_hz. */
-    int min_lag = (int)(fs / PITCH_MAX_HZ);
-    int max_lag = (int)(fs / PITCH_MIN_HZ);
-    if (max_lag > PITCH_BUF_LEN / 2)
-        max_lag = PITCH_BUF_LEN / 2;
+    int min_lag = (int)((fs / 2.0f) / PITCH_MAX_HZ);
+    int max_lag = (int)ceilf((fs / 2.0f) / PITCH_MIN_HZ);
     if (min_lag < 8)
         min_lag = 8;
 
     /* Normalised autocorrelation: r(k) / sqrt(r0_a * r0_b). The "two
      * windows" formulation keeps the result in 0..1 and is well-conditioned
      * for voiced speech. */
-    int N = PITCH_BUF_LEN - max_lag;
+    int N = NBUF - max_lag;
     float r0_a = 0.0f;
     for (int i = 0; i < N; i++)
         r0_a += lin[i] * lin[i];
     if (r0_a < 1e-9f)
-        return;
+        goto missed;
 
-    int best_lag = min_lag;
     float best_score = -1.0f;
+    float scores[NBUF] = {0};
     for (int k = min_lag; k <= max_lag; k++)
     {
         float num = 0.0f;
@@ -688,36 +689,45 @@ static void pitch_tracker_push(struct pitch_tracker *p, float x, float fs)
         if (r0_b < 1e-9f)
             continue;
         float score = num / sqrtf(r0_a * r0_b);
+        scores[k] = score;
         if (score > best_score)
-        {
             best_score = score;
-            best_lag = k;
-        }
     }
 
     /* Reject weak / unvoiced frames so we don't track room rumble. */
     if (best_score < 0.4f)
-        return;
+        goto missed;
+
+    /* Use the first strong local maximum: a global maximum often picks
+     * a multiple of the fundamental period and reports an octave too low. */
+    int best_lag = 0;
+    float threshold = fmaxf(0.55f, best_score * 0.88f);
+    if (scores[min_lag] >= threshold && scores[min_lag] >= scores[min_lag + 1])
+        best_lag = min_lag;
+    for (int k = min_lag + 1; best_lag == 0 && k < max_lag; k++)
+        if (scores[k] >= threshold && scores[k] >= scores[k - 1] &&
+            scores[k] >= scores[k + 1])
+        {
+            best_lag = k;
+            break;
+        }
+    if (best_lag == 0)
+    {
+        for (int k = min_lag; k <= max_lag; k++)
+            if (scores[k] == best_score)
+            {
+                best_lag = k;
+                break;
+            }
+    }
 
     /* Parabolic interpolation around the peak for sub-sample lag. */
     float lag = (float)best_lag;
     if (best_lag > min_lag && best_lag < max_lag)
     {
-        float ym = 0.0f, yp = 0.0f, num_m = 0.0f, num_p = 0.0f;
-        float r0_bm = 0.0f, r0_bp = 0.0f;
-        int km = best_lag - 1, kp = best_lag + 1;
-        for (int i = 0; i < N; i++)
-        {
-            num_m += lin[i] * lin[i + km];
-            num_p += lin[i] * lin[i + kp];
-            r0_bm += lin[i + km] * lin[i + km];
-            r0_bp += lin[i + kp] * lin[i + kp];
-        }
-        if (r0_bm > 1e-9f)
-            ym = num_m / sqrtf(r0_a * r0_bm);
-        if (r0_bp > 1e-9f)
-            yp = num_p / sqrtf(r0_a * r0_bp);
-        float denom = (ym - 2.0f * best_score + yp);
+        float ym = scores[best_lag - 1], yp = scores[best_lag + 1];
+        float center = scores[best_lag];
+        float denom = ym - 2.0f * center + yp;
         if (fabsf(denom) > 1e-6f)
         {
             float delta = 0.5f * (ym - yp) / denom;
@@ -726,7 +736,7 @@ static void pitch_tracker_push(struct pitch_tracker *p, float x, float fs)
         }
     }
 
-    float instant_hz = fs / lag;
+    float instant_hz = (fs / 2.0f) / lag;
     if (instant_hz < PITCH_MIN_HZ)
         instant_hz = PITCH_MIN_HZ;
     if (instant_hz > PITCH_MAX_HZ)
@@ -746,6 +756,13 @@ static void pitch_tracker_push(struct pitch_tracker *p, float x, float fs)
         p->log_smoother += alpha * (log_now - p->log_smoother);
     }
     p->tracked_hz = expf(p->log_smoother);
+    p->valid = 1;
+    p->miss_hops = 0;
+    return;
+
+missed:
+    if (++p->miss_hops >= 10)
+        p->valid = 0;
 }
 
 static inline float vocoder_tick(struct vocoder_state *v, float x,
@@ -927,8 +944,11 @@ static inline float psh_tick(struct pitch_shifter *ps, float x, float ratio)
 
     float delay_a = phase_a * (float)PSH_GRAIN_SIZE;
     float delay_b = phase_b * (float)PSH_GRAIN_SIZE;
-    float read_a = (float)ps->write_pos - 1.0f - delay_a;
-    float read_b = (float)ps->write_pos - 1.0f - delay_b;
+    /* Keep positions inside the ring before converting to float. An absolute
+     * sample counter loses sub-sample precision and eventually overflows int. */
+    float write = (float)((ps->write_pos - 1u) & PSH_RING_MASK);
+    float read_a = write - delay_a;
+    float read_b = write - delay_b;
 
     int ia0 = ((int)floorf(read_a)) & PSH_RING_MASK;
     int ia1 = (ia0 + 1) & PSH_RING_MASK;
@@ -1020,68 +1040,22 @@ static inline float bitcrush_tick(struct bitcrusher *bc, float x,
 }
 
 /* ---------------------------------------------------------------------------
- *   Visualization: Goertzel spectrum + waveform downsample
- * ------------------------------------------------------------------------- */
-
-static float g_band_coeff[GHA_SPECTRUM_BINS]; /* 2*cos(2*pi*f/fs) per bin */
-
-static void spectrum_init(void)
-{
-    /* Log-spaced bins from 50 Hz to 16 kHz */
-    float lo = 50.0f, hi = 16000.0f;
-    for (int i = 0; i < GHA_SPECTRUM_BINS; i++)
-    {
-        float t = (float)i / (GHA_SPECTRUM_BINS - 1);
-        float f = lo * powf(hi / lo, t);
-        g_band_coeff[i] = 2.0f * cosf(2.0f * (float)M_PI * f / SAMPLE_RATE);
-    }
-}
-
-/* Compute Goertzel magnitudes over a sample window. Result is log-magnitude
- * dB clipped to [-80, 0]. Window length should be a few hundred samples. */
-static void spectrum_compute(const float *samples, int n, float *out_db)
-{
-    for (int b = 0; b < GHA_SPECTRUM_BINS; b++)
-    {
-        float coeff = g_band_coeff[b];
-        float s_prev = 0.0f, s_prev2 = 0.0f;
-        for (int i = 0; i < n; i++)
-        {
-            float s = samples[i] + coeff * s_prev - s_prev2;
-            s_prev2 = s_prev;
-            s_prev = s;
-        }
-        float power = s_prev * s_prev + s_prev2 * s_prev2 - coeff * s_prev * s_prev2;
-        power /= (float)(n * n);
-        float db = 10.0f * log10f(power + 1e-12f);
-        if (db < -80.0f)
-            db = -80.0f;
-        if (db > 0.0f)
-            db = 0.0f;
-        out_db[b] = db;
-    }
-}
-
-/* ---------------------------------------------------------------------------
  *   Audio frame snapshot (RT -> main loop)
  * ------------------------------------------------------------------------- */
 
 struct snapshot
 {
     _Atomic uint32_t seq;
+    _Atomic int published_slot;
+    /* 0=free, 1=ready, 2=writer owns, 3=reader owns. */
+    _Atomic int slot_state[2];
     _Atomic uint32_t flags;
     _Atomic float vad_prob;
     _Atomic float tracked_pitch_hz; /* latest pitch tracker output */
-    /* Recent windows for FFT and waveform display. We double-buffer:
-     * RT writes to slot[seq & 1], reader reads the *other* slot once seq
-     * advances. Tear-free without locks. */
-    float in_window[2][512];
-    float out_window[2][512];
-    int window_len[2];
     float rms_in_sum[2];
     float rms_out_sum[2];
-    /* Energy removed by RNNoise per emit window. RMS of (rn_in - rn_out)
-     * summed over the rnnoise frames that fell inside the emit window. */
+    /* Aligned dry versus processed signal difference per emit window.
+     * This measures signal change, not isolated noise attenuation. */
     float rnn_diff_sum[2];
     int rnn_diff_n[2];
     int rms_n[2];
@@ -1097,10 +1071,9 @@ static struct snapshot g_snap;
  * active once wireplumber has routed a real mic to us). Consumer = virtual
  * source stream callback (only active when an app is recording from us).
  *
- * When the consumer is absent, the producer advances head past tail, which
- * effectively drops oldest samples - acceptable for a voice mic where we
- * never want big buffered backlogs. Single-producer single-consumer with
- * C11 atomic indices is lock-free and wait-free.
+ * Sequence numbers are monotonic. A lagging reader skips overwritten samples
+ * and resumes near the live producer position. Each atomic slot carries its
+ * sequence number so a concurrent overwrite cannot be mistaken for old data.
  *
  * A second instance of the same ring is used to feed the optional monitor
  * playback stream so the user can hear their own processed voice. We keep
@@ -1110,7 +1083,7 @@ static struct snapshot g_snap;
 
 struct post_ring
 {
-    float buf[POST_RING_CAP];
+    _Atomic uint64_t buf[POST_RING_CAP];
     _Atomic uint32_t head;
     _Atomic uint32_t tail;
 };
@@ -1122,6 +1095,8 @@ struct rt_state
     int eq_seq[GHA_EQ_BANDS]; /* last applied param hash */
     struct delay_state delay;
     struct reverb_state reverb;
+    int was_delay_on;
+    int was_reverb_on;
     struct vocoder_state vocoder;
     struct pitch_tracker pitch; /* lives across capture callbacks */
 
@@ -1157,6 +1132,8 @@ struct rt_state
     /* rnnoise 480-sample input buffer */
     float rn_in[RNN_FRAME];
     int rn_fill;
+    float raw_frame[3][RNN_FRAME];
+    int raw_frame_index;
 
     /* rnnoise output ring (samples ready for downstream chain) */
     float rn_out_ring[RING_CAP];
@@ -1174,17 +1151,10 @@ struct rt_state
     float gate_gain;
     int hangover_left;
 
-    /* Window accumulators for FFT/waveform display */
-    float in_win[512];
-    float out_win[512];
-    int in_win_pos;
-    int out_win_pos;
     float rms_in_sum;
     float rms_out_sum;
     int rms_n;
-    /* Per-emit-window noise-reduction accumulator. Sums (rn_in - rn_out)^2
-     * across all rnnoise frames within the window. We also count the number
-     * of samples that contributed so the consumer can compute the RMS. */
+    /* Per-emit-window aligned dry-minus-processed signal energy. */
     float rnn_diff_sum;
     int rnn_diff_n;
 };
@@ -1221,6 +1191,8 @@ struct sink_channel_state
     DenoiseState *rn;
     float rn_in[RNN_FRAME];
     int rn_fill;
+    float raw_frame[3][RNN_FRAME];
+    int raw_frame_index;
     float rn_out_ring[RING_CAP];
     int rn_out_head, rn_out_tail;
     float vad_ema;
@@ -1314,6 +1286,11 @@ struct sink_rt_state
 {
     struct delay_state delay_l, delay_r;
     struct reverb_state reverb_l, reverb_r;
+    int was_delay_on;
+    int was_reverb_on;
+    int rnn_running;
+    int rnn_warmup;
+    float rnn_wet;
     struct pitch_shifter psh_l, psh_r;
     struct pitch_tracker pitch;
     struct vocoder_state vocoder_l, vocoder_r;
@@ -1382,6 +1359,8 @@ struct app
     _Atomic int sink_tgt_pending;
     char src_pending_target[256];
     char sink_pending_target[256];
+    char current_source[256];
+    char current_sink[256];
 };
 static struct app g_app;
 
@@ -1397,26 +1376,57 @@ static struct stream_ctx g_mon_ctx;
 static struct stream_ctx g_sink_in_ctx;
 static struct stream_ctx g_sink_out_ctx;
 
-/* Push one sample into a SPSC ring with drop-oldest-on-full semantics.
- * Tail is normally consumer-owned, but on overflow the producer advances it
- * too - so the advance must be a CAS. A blind store could revert a tail
- * increment the consumer made concurrently (capture and virtual-source
- * callbacks run on separate PipeWire data threads), moving tail backwards
- * and briefly replaying stale audio. If the CAS loses because the consumer
- * just freed a slot, we simply keep our sample - no drop needed. */
+/* The producer owns head, the consumer owns tail. Float bits and sequence
+ * travel in one atomic word, so the reader never observes a torn sample. */
 static inline uint32_t ring_push(struct post_ring *r, uint32_t head, float v)
 {
-    uint32_t next = (head + 1) % POST_RING_CAP;
-    uint32_t t = atomic_load_explicit(&r->tail, memory_order_acquire);
-    if (next == t)
-    {
-        uint32_t desired = (t + 1) % POST_RING_CAP;
-        atomic_compare_exchange_strong_explicit(&r->tail, &t, desired,
-                                                memory_order_release,
-                                                memory_order_acquire);
-    }
-    r->buf[head] = v;
-    return next;
+    uint32_t bits;
+    memcpy(&bits, &v, sizeof(bits));
+    uint64_t packed = ((uint64_t)head << 32) | bits;
+    atomic_store_explicit(&r->buf[head % POST_RING_CAP], packed, memory_order_release);
+    head++;
+    atomic_store_explicit(&r->head, head, memory_order_release);
+    return head;
+}
+
+static inline float ring_pop(struct post_ring *r, uint32_t *tail)
+{
+    uint32_t head = atomic_load_explicit(&r->head, memory_order_acquire);
+    if (head - *tail > POST_RING_CAP)
+        *tail = head - POST_RING_CAP;
+    if (*tail == head)
+        return 0.0f;
+    uint64_t packed = atomic_load_explicit(&r->buf[*tail % POST_RING_CAP],
+                                           memory_order_acquire);
+    if ((uint32_t)(packed >> 32) != *tail)
+        return 0.0f;
+    uint32_t bits = (uint32_t)packed;
+    float value;
+    memcpy(&value, &bits, sizeof(value));
+    (*tail)++;
+    return value;
+}
+
+/* Both playback channels share one consumer position. The right producer
+ * head is published after the left sample, so it marks complete frames. */
+static inline void ring_pop_stereo(struct post_ring *left, struct post_ring *right,
+                                   uint32_t *tail, float *out_l, float *out_r)
+{
+    *out_l = *out_r = 0.0f;
+    uint32_t head = atomic_load_explicit(&right->head, memory_order_acquire);
+    if (head - *tail > POST_RING_CAP)
+        *tail = head - POST_RING_CAP;
+    if (*tail == head)
+        return;
+    uint32_t slot = *tail % POST_RING_CAP;
+    uint64_t l = atomic_load_explicit(&left->buf[slot], memory_order_acquire);
+    uint64_t r = atomic_load_explicit(&right->buf[slot], memory_order_acquire);
+    if ((uint32_t)(l >> 32) != *tail || (uint32_t)(r >> 32) != *tail)
+        return;
+    uint32_t lb = (uint32_t)l, rb = (uint32_t)r;
+    memcpy(out_l, &lb, sizeof(lb));
+    memcpy(out_r, &rb, sizeof(rb));
+    (*tail)++;
 }
 
 /* Capture stream RT callback (always-on producer).
@@ -1439,8 +1449,23 @@ static void cb_in_process(void *userdata)
         return;
     }
     uint32_t stride = sizeof(float);
-    uint32_t n_samples = buf->datas[0].chunk->size / stride;
-    const float *in = buf->datas[0].data;
+    uint32_t maxsize = buf->datas[0].maxsize;
+    uint32_t offset = maxsize ? buf->datas[0].chunk->offset % maxsize : 0;
+    uint32_t size = buf->datas[0].chunk->size;
+    if (size > maxsize)
+        size = maxsize;
+    int32_t frame_stride = buf->datas[0].chunk->stride;
+    if (frame_stride == 0)
+        frame_stride = (int32_t)stride;
+    if (frame_stride < (int32_t)stride || frame_stride % sizeof(float) != 0 ||
+        (uint32_t)frame_stride > maxsize)
+    {
+        pw_stream_queue_buffer(ctx->stream, b);
+        return;
+    }
+    uint32_t n_samples = size / (uint32_t)frame_stride;
+    const uint8_t *in = buf->datas[0].data;
+    uint32_t pos = offset;
 
     rt_refresh_eq();
     rt_refresh_voice_bpf();
@@ -1450,6 +1475,12 @@ static void cb_in_process(void *userdata)
     int eq_on = atomic_load(&g_params.eq_on);
     int delay_on = atomic_load(&g_params.delay_on);
     int reverb_on = atomic_load(&g_params.reverb_on);
+    if (delay_on && !g_rt.was_delay_on)
+        memset(&g_rt.delay, 0, sizeof(g_rt.delay));
+    if (reverb_on && !g_rt.was_reverb_on)
+        memset(&g_rt.reverb, 0, sizeof(g_rt.reverb));
+    g_rt.was_delay_on = delay_on;
+    g_rt.was_reverb_on = reverb_on;
 
     int d_samples = (atomic_load(&g_params.delay_ms) * SAMPLE_RATE) / 1000;
     float d_fb = atomic_load(&g_params.delay_feedback) * 0.001f;
@@ -1501,7 +1532,7 @@ static void cb_in_process(void *userdata)
     float target_ratio;
     if (autotune_on)
     {
-        target_ratio = autotune_ratio_for(g_rt.pitch.tracked_hz, autotune_target);
+        target_ratio = autotune_ratio_for(g_rt.pitch.valid ? g_rt.pitch.tracked_hz : 0.0f, autotune_target);
     }
     else if (psh_cs != 0)
     {
@@ -1552,10 +1583,19 @@ static void cb_in_process(void *userdata)
 
     for (uint32_t i = 0; i < n_samples; i++)
     {
-        float x = in[i];
+        float x;
+        if (pos + sizeof(x) <= maxsize)
+            memcpy(&x, in + pos, sizeof(x));
+        else
+        {
+            uint32_t first = maxsize - pos;
+            memcpy(&x, in + pos, first);
+            memcpy((uint8_t *)&x + first, in, sizeof(x) - first);
+        }
+        pos += (uint32_t)frame_stride;
+        if (pos >= maxsize)
+            pos -= maxsize;
 
-        g_rt.in_win[g_rt.in_win_pos] = x;
-        g_rt.in_win_pos = (g_rt.in_win_pos + 1) % 512;
         g_rt.rms_in_sum += x * x;
 
         /* Stage 1: rnnoise ALWAYS runs so its VAD is meaningful even when
@@ -1568,11 +1608,13 @@ static void cb_in_process(void *userdata)
          * the raw mic path when the user has deliberately bypassed the
          * whole denoise stage. */
         float rn_input_sample = rnn_on ? biquad_tick(&g_rt.rnn_hpf, x) : x;
+        g_rt.raw_frame[g_rt.raw_frame_index][g_rt.rn_fill] = x;
         g_rt.rn_in[g_rt.rn_fill++] = rn_input_sample * 32768.0f;
         if (g_rt.rn_fill == RNN_FRAME)
         {
             float denoised[RNN_FRAME];
             float vad = rnnoise_process_frame(g_rt.rn, denoised, g_rt.rn_in);
+            const float *dry = g_rt.raw_frame[(g_rt.raw_frame_index + 1) % 3];
 
             /* Asymmetric EMA on VAD: snap up so onsets are not chopped,
              * decay slowly so brief gaps between syllables do not trip
@@ -1586,24 +1628,6 @@ static void cb_in_process(void *userdata)
                                ? prev + alpha_up * (vad - prev)
                                : prev + alpha_dn * (vad - prev);
             atomic_store(&g_snap.vad_prob, g_rt.vad_ema);
-
-            /* Real noise-reduction metric: energy of (input - denoised).
-             * When the denoiser is doing nothing, the diff is ~0; when it
-             * cuts a steady fan, the diff sums to many dB. Only meaningful
-             * if RNNoise is actually in the path - bypass forces 0. */
-            if (rnn_on)
-            {
-                float diff_sum = 0.0f;
-                for (int k = 0; k < RNN_FRAME; k++)
-                {
-                    float d = g_rt.rn_in[k] - denoised[k];
-                    diff_sum += d * d;
-                }
-                g_rt.rnn_diff_sum += diff_sum;
-                g_rt.rnn_diff_n += RNN_FRAME;
-            }
-
-            const float *src = rnn_on ? denoised : g_rt.rn_in;
 
             /* Soft post-RNNoise gate. Aggressiveness picks how deep the
              * attenuation goes during sustained silence (target gain at
@@ -1627,9 +1651,10 @@ static void cb_in_process(void *userdata)
              * eliminate audible clicks. */
             const float gain_coeff = 1.0f - expf(-1.0f / (SAMPLE_RATE * 0.005f));
 
+            float diff_sum = 0.0f;
             for (int k = 0; k < RNN_FRAME; k++)
             {
-                float s = src[k] * (1.0f / 32768.0f);
+                float s = denoised[k] * (1.0f / 32768.0f);
 
                 if (rnn_on)
                 {
@@ -1658,9 +1683,18 @@ static void cb_in_process(void *userdata)
 
                     /* Continuous dry/wet blend: at aggro=0, 100% raw audio passes through.
                      * At aggro=1.0, 100% denoised + gated audio passes through. */
-                    float raw = g_rt.rn_in[k] * (1.0f / 32768.0f);
                     float processed = s * g_rt.gate_gain;
-                    s = (1.0f - aggro) * raw + aggro * processed;
+                    s = (1.0f - aggro) * dry[k] + aggro * processed;
+                }
+                else
+                    s = dry[k];
+
+                /* Measure the final blend against its aligned dry input.
+                 * This reports signal change, not isolated noise removal. */
+                if (rnn_on)
+                {
+                    float d = (dry[k] - s) * 32768.0f;
+                    diff_sum += d * d;
                 }
 
                 int next = (g_rt.rn_out_head + 1) % RING_CAP;
@@ -1670,7 +1704,13 @@ static void cb_in_process(void *userdata)
                     g_rt.rn_out_head = next;
                 }
             }
+            if (rnn_on)
+            {
+                g_rt.rnn_diff_sum += diff_sum;
+                g_rt.rnn_diff_n += RNN_FRAME;
+            }
             g_rt.rn_fill = 0;
+            g_rt.raw_frame_index = (g_rt.raw_frame_index + 1) % 3;
         }
 
         float y = 0.0f;
@@ -1701,7 +1741,7 @@ static void cb_in_process(void *userdata)
         {
             y = vocoder_tick(&g_rt.vocoder, y, (float)SAMPLE_RATE,
                              voc_carrier_hz, voc_detune, voc_mix,
-                             g_rt.pitch.tracked_hz, voc_follow, voc_shift,
+                             g_rt.pitch.valid ? g_rt.pitch.tracked_hz : 0.0f, voc_follow, voc_shift,
                              matrix_mille);
         }
 
@@ -1767,43 +1807,59 @@ static void cb_in_process(void *userdata)
         if (bc_bits > 0 || bc_ds > 1)
             y = bitcrush_tick(&g_rt.bitcrusher, y, bc_bits, bc_ds);
 
-        g_rt.out_win[g_rt.out_win_pos] = y;
-        g_rt.out_win_pos = (g_rt.out_win_pos + 1) % 512;
         g_rt.rms_out_sum += y * y;
         g_rt.rms_n++;
 
-        /* Drop-oldest ring push: if full, advance tail. Producer-only access
-         * to tail is acceptable here because consumer callbacks don't run
-         * while we hold the data-loop thread for a single callback. */
+        /* Overwrite stale samples without touching consumer state. */
         phead = ring_push(&g_post, phead, y);
         if (mon_on)
             mhead = ring_push(&g_mon, mhead, y);
     }
-    atomic_store_explicit(&g_post.head, phead, memory_order_release);
-    atomic_store_explicit(&g_mon.head, mhead, memory_order_release);
     pw_stream_queue_buffer(ctx->stream, b);
 
     /* Publish snapshot every ~16 ms */
     if (g_rt.rms_n >= FRAME_EMIT_SAMPLES)
     {
         uint32_t cur = atomic_load(&g_snap.seq);
-        int slot = (cur + 1) & 1;
-        memcpy(g_snap.in_window[slot], g_rt.in_win, sizeof(g_rt.in_win));
-        memcpy(g_snap.out_window[slot], g_rt.out_win, sizeof(g_rt.out_win));
-        g_snap.window_len[slot] = 512;
-        g_snap.rms_in_sum[slot] = g_rt.rms_in_sum;
-        g_snap.rms_out_sum[slot] = g_rt.rms_out_sum;
-        g_snap.rms_n[slot] = g_rt.rms_n;
-        /* The noise-reduction accumulator is in PCM16-scale (matches
-         * rnnoise's domain). Consumer normalises to dBFS by referencing
-         * the input RMS in dB. */
-        g_snap.rnn_diff_sum[slot] = g_rt.rnn_diff_sum;
-        g_snap.rnn_diff_n[slot] = g_rt.rnn_diff_n;
-        atomic_store(&g_snap.tracked_pitch_hz, g_rt.pitch.tracked_hz);
-        int out_rnn = atomic_load(&g_params.out_rnnoise_on);
-        uint32_t flags = (rnn_on ? 1u : 0u) | (eq_on ? 2u : 0u) | (delay_on ? 4u : 0u) | (reverb_on ? 8u : 0u) | (mon_on ? 16u : 0u) | (voc_on ? 32u : 0u) | (out_rnn ? 64u : 0u);
-        atomic_store(&g_snap.flags, flags);
-        atomic_store(&g_snap.seq, cur + 1);
+        int slot = 1 - atomic_load(&g_snap.published_slot);
+        int expected = 0;
+        if (!atomic_compare_exchange_strong(&g_snap.slot_state[slot], &expected, 2))
+        {
+            expected = 1;
+            if (!atomic_compare_exchange_strong(&g_snap.slot_state[slot], &expected, 2))
+            {
+                slot = 1 - slot;
+                expected = 0;
+                if (!atomic_compare_exchange_strong(&g_snap.slot_state[slot], &expected, 2))
+                {
+                    expected = 1;
+                    if (!atomic_compare_exchange_strong(&g_snap.slot_state[slot], &expected, 2))
+                        slot = -1;
+                }
+            }
+        }
+        if (slot >= 0)
+        {
+            g_snap.rms_in_sum[slot] = g_rt.rms_in_sum;
+            g_snap.rms_out_sum[slot] = g_rt.rms_out_sum;
+            g_snap.rms_n[slot] = g_rt.rms_n;
+            g_snap.rnn_diff_sum[slot] = g_rt.rnn_diff_sum;
+            g_snap.rnn_diff_n[slot] = g_rt.rnn_diff_n;
+            atomic_store(&g_snap.tracked_pitch_hz, g_rt.pitch.valid ? g_rt.pitch.tracked_hz : 0.0f);
+            int out_rnn = atomic_load(&g_params.out_rnnoise_on);
+            uint32_t flags = (rnn_on ? GHA_FLAG_RNNOISE_ON : 0u) |
+                             (eq_on ? GHA_FLAG_EQ_ON : 0u) |
+                             (delay_on ? GHA_FLAG_DELAY_ON : 0u) |
+                             (reverb_on ? GHA_FLAG_REVERB_ON : 0u) |
+                             (mon_on ? GHA_FLAG_MONITOR_ON : 0u) |
+                             (voc_on ? GHA_FLAG_VOCODER_ON : 0u) |
+                             (out_rnn ? GHA_FLAG_OUT_RNNOISE_ON : 0u) |
+                             (atomic_load(&g_params.out_eq_on) ? GHA_FLAG_OUT_EQ_ON : 0u);
+            atomic_store(&g_snap.flags, flags);
+            atomic_store(&g_snap.slot_state[slot], 1);
+            atomic_store(&g_snap.published_slot, slot);
+            atomic_store(&g_snap.seq, cur + 1);
+        }
         g_rt.rms_in_sum = g_rt.rms_out_sum = 0.0f;
         g_rt.rms_n = 0;
         g_rt.rnn_diff_sum = 0.0f;
@@ -1834,7 +1890,6 @@ static void cb_out_process(void *userdata)
         n_samples = (uint32_t)b->requested;
     float *out = buf->datas[0].data;
 
-    uint32_t head = atomic_load_explicit(&g_post.head, memory_order_acquire);
     uint32_t tail = atomic_load_explicit(&g_post.tail, memory_order_relaxed);
 
     /* The ring already holds master-gained samples (gain applied in
@@ -1843,13 +1898,7 @@ static void cb_out_process(void *userdata)
      * output buffer - no gain math here. */
     for (uint32_t i = 0; i < n_samples; i++)
     {
-        if (tail == head)
-        {
-            out[i] = 0.0f;
-            continue;
-        }
-        out[i] = g_post.buf[tail];
-        tail = (tail + 1) % POST_RING_CAP;
+        out[i] = ring_pop(&g_post, &tail);
     }
     atomic_store_explicit(&g_post.tail, tail, memory_order_release);
 
@@ -1879,18 +1928,11 @@ static void cb_mon_process(void *userdata)
         n_samples = (uint32_t)b->requested;
     float *out = buf->datas[0].data;
 
-    uint32_t head = atomic_load_explicit(&g_mon.head, memory_order_acquire);
     uint32_t tail = atomic_load_explicit(&g_mon.tail, memory_order_relaxed);
 
     for (uint32_t i = 0; i < n_samples; i++)
     {
-        if (tail == head)
-        {
-            out[i] = 0.0f;
-            continue;
-        }
-        out[i] = g_mon.buf[tail];
-        tail = (tail + 1) % POST_RING_CAP;
+        out[i] = ring_pop(&g_mon, &tail);
     }
     atomic_store_explicit(&g_mon.tail, tail, memory_order_release);
 
@@ -1916,6 +1958,20 @@ static void cb_mon_process(void *userdata)
 /* Process one RNNoise frame for a single sink channel. Identical algorithm
  * to the input pipeline's gate, but parameterised per-channel so L and R
  * can gate independently (one person talking on L, silence on R). */
+static void sink_channel_reset(struct sink_channel_state *ch)
+{
+    rnnoise_init(ch->rn, NULL);
+    memset(ch->rn_in, 0, sizeof(ch->rn_in));
+    memset(ch->raw_frame, 0, sizeof(ch->raw_frame));
+    ch->rn_fill = 0;
+    ch->raw_frame_index = 0;
+    ch->rn_out_head = ch->rn_out_tail = 0;
+    ch->vad_ema = 0.0f;
+    ch->gate_gain = 1.0f;
+    ch->hangover_left = 0;
+    ch->rnn_hpf.z1 = ch->rnn_hpf.z2 = 0.0f;
+}
+
 static void sink_channel_process_frame(struct sink_channel_state *ch, int aggro_mille)
 {
     float denoised[RNN_FRAME];
@@ -1964,7 +2020,7 @@ static void sink_channel_process_frame(struct sink_channel_state *ch, int aggro_
 
         /* Continuous dry/wet blend: at aggro=0, 100% raw audio passes through.
          * At aggro=1.0, 100% denoised + gated audio passes through. */
-        float raw = ch->rn_in[k] * (1.0f / 32768.0f);
+        float raw = ch->raw_frame[(ch->raw_frame_index + 1) % 3][k];
         float processed = s * ch->gate_gain;
         s = (1.0f - aggro) * raw + aggro * processed;
 
@@ -1976,6 +2032,7 @@ static void sink_channel_process_frame(struct sink_channel_state *ch, int aggro_
         }
     }
     ch->rn_fill = 0;
+    ch->raw_frame_index = (ch->raw_frame_index + 1) % 3;
 }
 
 /* Feed one sample to a sink channel's RNNoise input buffer. When the
@@ -1985,6 +2042,7 @@ static float sink_channel_tick(struct sink_channel_state *ch, float x, int aggro
 {
     /* Pre-RNNoise 70 Hz high-pass (same as input pipeline). */
     float rn_in = biquad_tick(&ch->rnn_hpf, x);
+    ch->raw_frame[ch->raw_frame_index][ch->rn_fill] = x;
     ch->rn_in[ch->rn_fill++] = rn_in * 32768.0f;
     if (ch->rn_fill == RNN_FRAME)
         sink_channel_process_frame(ch, aggro_mille);
@@ -2000,7 +2058,7 @@ static float sink_channel_tick(struct sink_channel_state *ch, float x, int aggro
 }
 
 /* Sink capture RT callback. The virtual sink receives interleaved stereo
- * F32 from whatever apps route audio into "G-Helper Clean Output".
+ * F32 from apps routed into "Dusky Audio".
  * When out_rnnoise_on is active, each channel is independently denoised.
  * When bypassed, audio passes through untouched. */
 static void cb_sink_in_process(void *userdata)
@@ -2016,14 +2074,36 @@ static void cb_sink_in_process(void *userdata)
         return;
     }
     uint32_t stride = sizeof(float) * 2; /* stereo interleaved */
-    uint32_t n_samples = buf->datas[0].chunk->size / stride;
-    const float *in = buf->datas[0].data;
+    uint32_t maxsize = buf->datas[0].maxsize;
+    uint32_t offset = maxsize ? buf->datas[0].chunk->offset % maxsize : 0;
+    uint32_t size = buf->datas[0].chunk->size;
+    if (size > maxsize)
+        size = maxsize;
+    int32_t frame_stride = buf->datas[0].chunk->stride;
+    if (frame_stride == 0)
+        frame_stride = (int32_t)stride;
+    if (frame_stride < (int32_t)stride || frame_stride % sizeof(float) != 0 ||
+        (uint32_t)frame_stride > maxsize)
+    {
+        pw_stream_queue_buffer(ctx->stream, b);
+        return;
+    }
+    uint32_t n_samples = size / (uint32_t)frame_stride;
+    const uint8_t *in = buf->datas[0].data;
+    uint32_t pos = offset;
 
     rt_refresh_sink_eq();
     rt_refresh_sink_voice_bpf();
 
     int rnn_on = atomic_load(&g_params.out_rnnoise_on);
     int aggro = atomic_load(&g_params.out_rnn_aggressiveness);
+    if (rnn_on && !g_sink_rt.rnn_running)
+    {
+        sink_channel_reset(&g_sink_ch_l);
+        sink_channel_reset(&g_sink_ch_r);
+        g_sink_rt.rnn_running = 1;
+        g_sink_rt.rnn_warmup = 0;
+    }
     int out_eq_on = atomic_load(&g_params.out_eq_on);
     float out_eq_post_gain = powf(10.0f,
                                   (float)atomic_load(&g_params.out_eq_gain_centidb) / 100.0f / 20.0f);
@@ -2034,6 +2114,18 @@ static void cb_sink_in_process(void *userdata)
     float d_mix = atomic_load(&g_params.out_delay_mix) * 0.001f;
 
     int out_reverb_on = atomic_load(&g_params.out_reverb_on);
+    if (out_delay_on && !g_sink_rt.was_delay_on)
+    {
+        memset(&g_sink_rt.delay_l, 0, sizeof(g_sink_rt.delay_l));
+        memset(&g_sink_rt.delay_r, 0, sizeof(g_sink_rt.delay_r));
+    }
+    if (out_reverb_on && !g_sink_rt.was_reverb_on)
+    {
+        memset(&g_sink_rt.reverb_l, 0, sizeof(g_sink_rt.reverb_l));
+        memset(&g_sink_rt.reverb_r, 0, sizeof(g_sink_rt.reverb_r));
+    }
+    g_sink_rt.was_delay_on = out_delay_on;
+    g_sink_rt.was_reverb_on = out_reverb_on;
     float r_room = atomic_load(&g_params.out_reverb_room) * 0.001f;
     float r_damp = atomic_load(&g_params.out_reverb_damp) * 0.001f;
     float r_width = atomic_load(&g_params.out_reverb_width) * 0.001f;
@@ -2071,7 +2163,7 @@ static void cb_sink_in_process(void *userdata)
     float target_ratio = 1.0f;
     if (out_autotune_on)
     {
-        target_ratio = autotune_ratio_for(g_sink_rt.pitch.tracked_hz, out_atn_target_hz);
+        target_ratio = autotune_ratio_for(g_sink_rt.pitch.valid ? g_sink_rt.pitch.tracked_hz : 0.0f, out_atn_target_hz);
     }
     else if (out_psh_centisemis != 0)
     {
@@ -2083,14 +2175,37 @@ static void cb_sink_in_process(void *userdata)
 
     for (uint32_t i = 0; i < n_samples; i++)
     {
-        float l = in[i * 2 + 0];
-        float r = in[i * 2 + 1];
-
-        /* 1. Two-Way RNNoise */
-        if (rnn_on)
+        float frame[2];
+        if (pos + sizeof(frame) <= maxsize)
+            memcpy(frame, in + pos, sizeof(frame));
+        else
         {
-            l = sink_channel_tick(&g_sink_ch_l, l, aggro);
-            r = sink_channel_tick(&g_sink_ch_r, r, aggro);
+            uint32_t first = maxsize - pos;
+            memcpy(frame, in + pos, first);
+            memcpy((uint8_t *)frame + first, in, sizeof(frame) - first);
+        }
+        pos += (uint32_t)frame_stride;
+        if (pos >= maxsize)
+            pos -= maxsize;
+        float l = frame[0];
+        float r = frame[1];
+
+        /* 1. Two-Way RNNoise. Keep the low-latency bypass and fade across
+         * changes only after fresh RNNoise history has filled. */
+        if (g_sink_rt.rnn_running)
+        {
+            float processed_l = sink_channel_tick(&g_sink_ch_l, l, aggro);
+            float processed_r = sink_channel_tick(&g_sink_ch_r, r, aggro);
+            if (g_sink_rt.rnn_warmup < 3 * RNN_FRAME)
+                g_sink_rt.rnn_warmup++;
+            if (rnn_on && g_sink_rt.rnn_warmup >= 3 * RNN_FRAME)
+                g_sink_rt.rnn_wet = fminf(1.0f, g_sink_rt.rnn_wet + 1.0f / RNN_FRAME);
+            else if (!rnn_on)
+                g_sink_rt.rnn_wet = fmaxf(0.0f, g_sink_rt.rnn_wet - 1.0f / RNN_FRAME);
+            l += g_sink_rt.rnn_wet * (processed_l - l);
+            r += g_sink_rt.rnn_wet * (processed_r - r);
+            if (!rnn_on && g_sink_rt.rnn_wet == 0.0f)
+                g_sink_rt.rnn_running = 0;
         }
 
         /* 2. Stereo Pitch Shifter & Autotune.
@@ -2114,11 +2229,11 @@ static void cb_sink_in_process(void *userdata)
         {
             l = vocoder_tick(&g_sink_rt.vocoder_l, l, (float)SAMPLE_RATE,
                              out_voc_carrier_hz, out_voc_detune, out_voc_mix,
-                             g_sink_rt.pitch.tracked_hz, out_voc_follow, out_voc_shift,
+                             g_sink_rt.pitch.valid ? g_sink_rt.pitch.tracked_hz : 0.0f, out_voc_follow, out_voc_shift,
                              out_matrix_mille);
             r = vocoder_tick(&g_sink_rt.vocoder_r, r, (float)SAMPLE_RATE,
                              out_voc_carrier_hz, out_voc_detune, out_voc_mix,
-                             g_sink_rt.pitch.tracked_hz, out_voc_follow, out_voc_shift,
+                             g_sink_rt.pitch.valid ? g_sink_rt.pitch.tracked_hz : 0.0f, out_voc_follow, out_voc_shift,
                              out_matrix_mille);
         }
 
@@ -2192,8 +2307,6 @@ static void cb_sink_in_process(void *userdata)
         lhead = ring_push(&g_sink_l, lhead, l);
         rhead = ring_push(&g_sink_r, rhead, r);
     }
-    atomic_store_explicit(&g_sink_l.head, lhead, memory_order_release);
-    atomic_store_explicit(&g_sink_r.head, rhead, memory_order_release);
     pw_stream_queue_buffer(ctx->stream, b);
 }
 
@@ -2218,29 +2331,17 @@ static void cb_sink_out_process(void *userdata)
         n_samples = (uint32_t)b->requested;
     float *out = buf->datas[0].data;
 
-    uint32_t lh = atomic_load_explicit(&g_sink_l.head, memory_order_acquire);
-    uint32_t lt = atomic_load_explicit(&g_sink_l.tail, memory_order_relaxed);
-    uint32_t rh = atomic_load_explicit(&g_sink_r.head, memory_order_acquire);
-    uint32_t rt_ = atomic_load_explicit(&g_sink_r.tail, memory_order_relaxed);
+    uint32_t tail = atomic_load_explicit(&g_sink_r.tail, memory_order_relaxed);
 
     for (uint32_t i = 0; i < n_samples; i++)
     {
-        float l = 0.0f, r = 0.0f;
-        if (lt != lh)
-        {
-            l = g_sink_l.buf[lt];
-            lt = (lt + 1) % POST_RING_CAP;
-        }
-        if (rt_ != rh)
-        {
-            r = g_sink_r.buf[rt_];
-            rt_ = (rt_ + 1) % POST_RING_CAP;
-        }
+        float l, r;
+        ring_pop_stereo(&g_sink_l, &g_sink_r, &tail, &l, &r);
         out[i * 2 + 0] = l;
         out[i * 2 + 1] = r;
     }
-    atomic_store_explicit(&g_sink_l.tail, lt, memory_order_release);
-    atomic_store_explicit(&g_sink_r.tail, rt_, memory_order_release);
+    atomic_store_explicit(&g_sink_l.tail, tail, memory_order_release);
+    atomic_store_explicit(&g_sink_r.tail, tail, memory_order_release);
 
     buf->datas[0].chunk->offset = 0;
     buf->datas[0].chunk->stride = (int32_t)stride;
@@ -2264,6 +2365,9 @@ static void cb_state_changed(void *userdata, enum pw_stream_state old,
             pw_stream_state_as_string(state),
             error ? " err=" : "",
             error ? error : "");
+    if (state == PW_STREAM_STATE_ERROR &&
+        (ctx == &g_out_ctx || ctx == &g_sink_in_ctx))
+        pw_main_loop_quit(g_app.loop);
 }
 
 static const struct pw_stream_events in_stream_events = {
@@ -2337,6 +2441,8 @@ static int create_capture_stream(struct app *app, const char *target)
         props,
         &in_stream_events,
         &g_in_ctx);
+    if (!app->in_stream)
+        return -1;
     g_in_ctx.stream = app->in_stream;
 
     uint8_t pod_buf[1024];
@@ -2367,15 +2473,19 @@ static void apply_pending_source(struct app *app)
 
     const char *target = app->src_pending_target;
 
-    pw_stream_destroy(app->in_stream);
+    if (app->in_stream)
+        pw_stream_destroy(app->in_stream);
     app->in_stream = NULL;
     g_in_ctx.stream = NULL;
 
     if (create_capture_stream(app, target) < 0)
         fprintf(stderr, "[ghelper-audio] reconnect to '%s' failed\n", target);
     else
+    {
+        snprintf(app->current_source, sizeof(app->current_source), "%s", target);
         fprintf(stderr, "[ghelper-audio] capture target set to '%s'\n",
                 target[0] ? target : "default");
+    }
 }
 
 /* Create (or recreate) the monitor playback stream targeting the active
@@ -2405,6 +2515,8 @@ static int create_monitor_stream(struct app *app, const char *target)
         props,
         &mon_stream_events,
         &g_mon_ctx);
+    if (!app->mon_stream)
+        return -1;
     g_mon_ctx.stream = app->mon_stream;
 
     uint8_t pod_buf[1024];
@@ -2494,6 +2606,8 @@ static int create_sink_out_stream(struct app *app, const char *target)
         props,
         &sink_out_stream_events,
         &g_sink_out_ctx);
+    if (!app->sink_out_stream)
+        return -1;
     g_sink_out_ctx.stream = app->sink_out_stream;
 
     uint8_t pod_buf[1024];
@@ -2523,15 +2637,19 @@ static void apply_pending_sink_target(struct app *app)
 
     const char *target = app->sink_pending_target;
 
-    pw_stream_destroy(app->sink_out_stream);
+    if (app->sink_out_stream)
+        pw_stream_destroy(app->sink_out_stream);
     app->sink_out_stream = NULL;
     g_sink_out_ctx.stream = NULL;
 
     if (create_sink_out_stream(app, target) < 0)
         fprintf(stderr, "[ghelper-audio] sink-out reconnect to '%s' failed\n", target);
     else
+    {
+        snprintf(app->current_sink, sizeof(app->current_sink), "%s", target);
         fprintf(stderr, "[ghelper-audio] sink-out target set to '%s'\n",
                 target[0] ? target : "default");
+    }
 
     /* Retarget monitor stream if active */
     if (app->mon_stream)
@@ -2556,8 +2674,11 @@ static void on_timer(void *userdata, uint64_t expirations)
     uint32_t seq = atomic_load(&g_snap.seq);
     if (seq == last_seq)
         return;
+    int slot = atomic_load(&g_snap.published_slot);
+    int expected = 1;
+    if (!atomic_compare_exchange_strong(&g_snap.slot_state[slot], &expected, 3))
+        return;
     last_seq = seq;
-    int slot = seq & 1;
 
     struct gha_frame f;
     memset(&f, 0, sizeof(f));
@@ -2572,50 +2693,34 @@ static void on_timer(void *userdata, uint64_t expirations)
     {
         float rms_in = sqrtf(g_snap.rms_in_sum[slot] / n);
         float rms_out = sqrtf(g_snap.rms_out_sum[slot] / n);
-        f.rms_in_db = 20.0f * log10f(rms_in + 1e-9f);
-        f.rms_out_db = 20.0f * log10f(rms_out + 1e-9f);
+        f.rms_in_db = fmaxf(-80.0f, 20.0f * log10f(rms_in + 1e-9f));
+        f.rms_out_db = fmaxf(-80.0f, 20.0f * log10f(rms_out + 1e-9f));
     }
     else
     {
         f.rms_in_db = f.rms_out_db = -80.0f;
     }
 
-    /* Actual noise reduction: RMS of (rn_in - rn_out) measured in PCM16
-     * domain (rnnoise's input scale), normalised to dBFS, then mapped to
-     * a positive "dB above silence" scale so the meter reads 0 = nothing
-     * removed, ~40 = aggressive denoise on a noisy mic. Reads 0 when
-     * rnnoise was bypassed (RT thread skipped accumulation). */
+    /* Level of the aligned dry-minus-final-blend signal, not an estimate
+     * of removed noise. Speech changed by the model contributes too. */
     int dn = g_snap.rnn_diff_n[slot];
     if (dn > 0)
     {
         float diff_rms_pcm = sqrtf(g_snap.rnn_diff_sum[slot] / dn);
         float diff_rms = diff_rms_pcm * (1.0f / 32768.0f);
-        float noise_dbfs = 20.0f * log10f(diff_rms + 1e-9f); /* ~ -90..0 */
-        const float floor_dbfs = -60.0f;
-        if (noise_dbfs < floor_dbfs)
-            f.noise_reduction_db = 0.0f;
-        else
-            f.noise_reduction_db = noise_dbfs - floor_dbfs;
+        f.processing_delta_dbfs = fmaxf(-80.0f,
+                                         20.0f * log10f(diff_rms + 1e-9f));
     }
     else
     {
-        f.noise_reduction_db = 0.0f;
+        f.processing_delta_dbfs = -80.0f;
     }
 
     f.tracked_pitch_hz = atomic_load(&g_snap.tracked_pitch_hz);
 
-    /* Downsample 512 -> 256 by averaging pairs */
-    for (int i = 0; i < GHA_WAVEFORM_SAMPLES; i++)
-    {
-        f.waveform_in[i] = 0.5f * (g_snap.in_window[slot][2 * i] + g_snap.in_window[slot][2 * i + 1]);
-        f.waveform_out[i] = 0.5f * (g_snap.out_window[slot][2 * i] + g_snap.out_window[slot][2 * i + 1]);
-    }
-
-    spectrum_compute(g_snap.in_window[slot], 512, f.spectrum_in);
-    spectrum_compute(g_snap.out_window[slot], 512, f.spectrum_out);
-
     fwrite(&f, sizeof(f), 1, stdout);
     fflush(stdout);
+    atomic_store(&g_snap.slot_state[slot], 0);
 }
 
 /* ---------------------------------------------------------------------------
@@ -2661,6 +2766,8 @@ static void parse_cmd(char *line)
          * device. Same deferred-apply pattern as SRC for input capture. */
         const char *val = line + 9;
         while (*val == ' ') val++;
+        if (strcmp(g_app.current_sink, val) == 0 && !atomic_load(&g_app.sink_tgt_pending))
+            return;
         snprintf(g_app.sink_pending_target, sizeof(g_app.sink_pending_target),
                  "%s", val);
         atomic_store(&g_app.sink_tgt_pending, 1);
@@ -2710,6 +2817,10 @@ static void parse_cmd(char *line)
         if (sscanf(line + 8, "%d %d %d %d %d %d %d",
                    &mix, &hz, &atk, &rel, &det, &follow, &shift) == 7)
         {
+            if (mix < 0) mix = 0;
+            if (mix > 1000) mix = 1000;
+            if (det < 0) det = 0;
+            if (det > 200) det = 200;
             if (hz < 50) hz = 50;
             if (hz > 880) hz = 880;
             if (atk < 1) atk = 1;
@@ -2747,7 +2858,10 @@ static void parse_cmd(char *line)
     }
     else if (!strncmp(line, "OUT_ATT ", 8))
     {
-        atomic_store(&g_params.out_voice_autotune_target_hz, atoi(line + 8));
+        int v = atoi(line + 8);
+        if (v < 0) v = 0;
+        if (v > 1000) v = 1000;
+        atomic_store(&g_params.out_voice_autotune_target_hz, v);
     }
     else if (!strncmp(line, "OUT_BCR ", 8))
     {
@@ -2849,6 +2963,10 @@ static void parse_cmd(char *line)
         if (sscanf(line + 4, "%d %d %d %d %d %d %d",
                    &mix, &hz, &atk, &rel, &det, &follow, &shift) == 7)
         {
+            if (mix < 0) mix = 0;
+            if (mix > 1000) mix = 1000;
+            if (det < 0) det = 0;
+            if (det > 200) det = 200;
             if (hz < 50)
                 hz = 50;
             if (hz > 880)
@@ -2878,6 +2996,8 @@ static void parse_cmd(char *line)
     {
         int on = atoi(line + 4) ? 1 : 0;
         atomic_store(&g_params.monitor_on, on);
+        if ((g_app.mon_stream != NULL) == (on != 0) && !atomic_load(&g_app.mon_pending))
+            return;
         /* Queue a connect/disconnect for the loop thread to process. The
          * actual pw_stream_connect/disconnect must NOT run from this stdin
          * callback - we defer to the main-loop iteration via a flag. */
@@ -2888,6 +3008,8 @@ static void parse_cmd(char *line)
         const char *t = line + 4;
         while (*t == ' ')
             t++;
+        if (strcmp(g_app.current_source, t) == 0 && !atomic_load(&g_app.src_pending))
+            return;
         size_t n = strlen(t);
         if (n >= sizeof(g_app.src_pending_target))
             n = sizeof(g_app.src_pending_target) - 1;
@@ -2960,9 +3082,9 @@ static void parse_cmd(char *line)
     }
     else if (!strncmp(line, "VOL ", 4))
     {
-        /* Master gain in per-mille. 0=mute, 1000=unity, 2000=+6 dB (soft
-         * clipped). Affects the virtual-source output only; the monitor
-         * playback stream stays at unity so self-checking is honest. */
+        /* Master gain in per-mille. 0=mute, 1000=unity, 2000=+6 dB.
+         * The same post-gain signal feeds the virtual source and monitor.
+         * Values above unity may exceed full scale; there is no limiter. */
         int v = atoi(line + 4);
         if (v < 0)
             v = 0;
@@ -3167,9 +3289,13 @@ static void do_quit(void *userdata, int signal_number)
 
 int main(int argc, char *argv[])
 {
+    if (argc == 2 && strcmp(argv[1], "--protocol-version") == 0)
+    {
+        printf("%u\n", GHA_PROTOCOL_VERSION);
+        return 0;
+    }
     pw_init(&argc, &argv);
     params_init();
-    spectrum_init();
 
     g_rt.rn = rnnoise_create(NULL);
     if (!g_rt.rn)
@@ -3252,6 +3378,11 @@ int main(int argc, char *argv[])
     struct app *app = &g_app;
     memset(app, 0, sizeof(*app));
     app->loop = pw_main_loop_new(NULL);
+    if (!app->loop)
+    {
+        fprintf(stderr, "PipeWire main loop creation failed\n");
+        return 1;
+    }
 
     pw_loop_add_signal(pw_main_loop_get_loop(app->loop), SIGINT, do_quit, app);
     pw_loop_add_signal(pw_main_loop_get_loop(app->loop), SIGTERM, do_quit, app);
@@ -3266,6 +3397,7 @@ int main(int argc, char *argv[])
         fprintf(stderr, "in_stream connect failed\n");
         return 1;
     }
+    snprintf(app->current_source, sizeof(app->current_source), "default");
 
     /* ---- Virtual-source stream (PW_DIRECTION_OUTPUT): exposed as a
      * recordable Audio/Source visible to PulseAudio compat (pactl,
@@ -3290,6 +3422,11 @@ int main(int argc, char *argv[])
         out_props,
         &out_stream_events,
         &g_out_ctx);
+    if (!app->out_stream)
+    {
+        fprintf(stderr, "virtual source creation failed\n");
+        return 1;
+    }
     g_out_ctx.stream = app->out_stream;
 
     struct spa_pod_builder b_out = SPA_POD_BUILDER_INIT(pod_buf, sizeof(pod_buf));
@@ -3351,6 +3488,11 @@ int main(int argc, char *argv[])
         sink_in_props,
         &sink_in_stream_events,
         &g_sink_in_ctx);
+    if (!app->sink_in_stream)
+    {
+        fprintf(stderr, "virtual sink creation failed\n");
+        return 1;
+    }
     g_sink_in_ctx.stream = app->sink_in_stream;
 
     struct spa_pod_builder b_sink_in = SPA_POD_BUILDER_INIT(pod_buf, sizeof(pod_buf));
@@ -3380,11 +3522,17 @@ int main(int argc, char *argv[])
         fprintf(stderr, "sink_out_stream connect failed\n");
         return 1;
     }
+    snprintf(app->current_sink, sizeof(app->current_sink), "default");
 
     /* 60 Hz timer to emit audio frames on stdout */
     struct timespec interval = {0, 16000000}; /* 16 ms */
     app->timer = pw_loop_add_timer(pw_main_loop_get_loop(app->loop),
                                    (void (*)(void *, uint64_t))on_timer, app);
+    if (!app->timer)
+    {
+        fprintf(stderr, "PipeWire timer creation failed\n");
+        return 1;
+    }
     pw_loop_update_timer(pw_main_loop_get_loop(app->loop),
                          app->timer, &interval, &interval, false);
 
@@ -3394,6 +3542,11 @@ int main(int argc, char *argv[])
                                     SPA_IO_IN | SPA_IO_HUP | SPA_IO_ERR,
                                     false,
                                     on_stdin, app);
+    if (!app->stdin_src)
+    {
+        fprintf(stderr, "PipeWire command input creation failed\n");
+        return 1;
+    }
 
     fprintf(stderr, "[ghelper-audio] ready (proto v%u, fs=%d Hz, frame=%d)\n",
             GHA_PROTOCOL_VERSION, SAMPLE_RATE, RNN_FRAME);

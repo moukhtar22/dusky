@@ -36,48 +36,57 @@ log_error() {
     printf '%s[ERROR]%s %s\n' "${RED}" "${NC}" "$1" >&2
 }
 
+TEMP_UNIT=""
+
 # Cleanup/Error Trap
 cleanup() {
     local exit_code=$?
+    [[ -z "$TEMP_UNIT" ]] || rm -f -- "$TEMP_UNIT"
     # Suppress message for user-initiated exits (Ctrl+C = 130, etc.)
     if [[ ${exit_code} -ne 0 && ${exit_code} -lt 128 ]]; then
         log_error "Script failed with exit code ${exit_code}."
     fi
 }
 trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
 
 # --- State Detection Functions ---
 
 has_battery() {
-    # 1. Try upower if available (preferred)
-    if command -v upower &>/dev/null; then
-        if upower -e 2>/dev/null | grep -qiE 'BAT|battery'; then
-            return 0
-        fi
+    local info type_file type_val scope present
+    # DisplayDevice excludes peripheral batteries and includes system UPS devices.
+    if command -v upower >/dev/null &&
+        info=$(LC_ALL=C upower --show-info /org/freedesktop/UPower/devices/DisplayDevice 2>/dev/null); then
+        [[ $info =~ present:[[:space:]]*yes([[:space:]]|$) &&
+           $info =~ power\ supply:[[:space:]]*yes([[:space:]]|$) &&
+           $info =~ $'\n'[[:space:]]*(battery|ups)([[:space:]]|$) ]]
+        return
     fi
-
-    # 2. Fallback to sysfs check of type
-    local type_file
+    # Allow installation while the daemon is unavailable, using kernel metadata.
     for type_file in /sys/class/power_supply/*/type; do
-        if [[ -f "${type_file}" ]]; then
-            local type_val
-            type_val=$(tr '[:upper:]' '[:lower:]' < "${type_file}" 2>/dev/null | tr -d '[:space:]') || true
-            if [[ "${type_val}" == "battery" ]]; then
-                return 0
-            fi
+        [[ -r $type_file ]] || continue
+        IFS= read -r type_val < "$type_file" || continue
+        [[ $type_val == Battery || $type_val == UPS ]] || continue
+        scope=System present=1
+        if [[ -r ${type_file%type}scope ]]; then
+            IFS= read -r scope < "${type_file%type}scope" || continue
         fi
+        if [[ -r ${type_file%type}present ]]; then
+            IFS= read -r present < "${type_file%type}present" || continue
+        fi
+        [[ $scope == System && $present == 1 ]] && return 0
     done
-
-    # 3. Fallback to simple glob
-    if compgen -G "/sys/class/power_supply/BAT*" > /dev/null 2>&1; then
-        return 0
-    fi
-
     return 1
 }
 
 is_service_installed() {
-    [[ -f "${TARGET_FILE}" ]]
+    [[ -f "${TARGET_FILE}" || -L "${TARGET_FILE}" ]]
+}
+
+is_service_loaded() {
+    [[ $(systemctl --user show --property=LoadState --value "${SERVICE_NAME}" 2>/dev/null) == loaded ]]
 }
 
 is_service_enabled() {
@@ -99,18 +108,31 @@ do_install() {
         return 1
     fi
 
+    if [[ ! -f "${SCRIPT_FILE}" ]]; then
+        log_error "Monitor script not found at: ${SCRIPT_FILE}"
+        return 1
+    fi
+    local cmd
+    for cmd in upower busctl systemctl; do
+        if ! command -v "$cmd" >/dev/null; then
+            log_error "Required command not found: $cmd"
+            return 1
+        fi
+    done
+
     # 2. Preparation: Ensure target directory exists
     if [[ ! -d "${SYSTEMD_USER_DIR}" ]]; then
         log_info "Creating systemd user directory: ${SYSTEMD_USER_DIR}"
         mkdir -p "${SYSTEMD_USER_DIR}"
     fi
 
-    # 3. Copy the service file
-    # Remove target first in case it's a stale symlink from an old install
-    log_info "Installing service file (copying)..."
-    rm -f "${TARGET_FILE}"
-    cp -f "${SOURCE_FILE}" "${TARGET_FILE}"
+    # 3. Replace atomically, including a stale symlink, after a successful copy.
+    log_info "Installing service file..."
     chmod +x "${SCRIPT_FILE}"
+    TEMP_UNIT=$(mktemp "${SYSTEMD_USER_DIR}/.${SERVICE_NAME}.XXXXXX")
+    install --mode=644 --no-target-directory -- "${SOURCE_FILE}" "$TEMP_UNIT"
+    mv --force --no-target-directory -- "$TEMP_UNIT" "${TARGET_FILE}"
+    TEMP_UNIT=""
 
     # 4. Systemd registration
     log_info "Reloading systemd user daemon..."
@@ -121,7 +143,7 @@ do_install() {
     systemctl --user enable "${SERVICE_NAME}"
     systemctl --user restart "${SERVICE_NAME}"
 
-    log_success "Battery notification service installed and running."
+    log_success "Battery notification service installed and enabled; start requested."
 }
 
 do_uninstall() {
@@ -129,8 +151,8 @@ do_uninstall() {
 
     local changed=false
 
-    # 1. Stop the service if it's currently active
-    if is_service_active; then
+    # Stop loaded units even while they are activating or waiting to restart.
+    if is_service_loaded; then
         log_info "Stopping ${SERVICE_NAME}..."
         systemctl --user stop "${SERVICE_NAME}"
         changed=true
@@ -164,8 +186,9 @@ do_uninstall() {
 # --- UI Function (Interactive Mode) ---
 
 show_interactive_ui() {
-    local battery_status
+    local battery_status battery_present=false
     if has_battery; then
+        battery_present=true
         battery_status="${GREEN}Detected${NC}"
     else
         battery_status="${YELLOW}Not detected${NC}"
@@ -194,7 +217,7 @@ show_interactive_ui() {
     printf '\n'
 
     # If no battery, warn the user but still let them choose
-    if ! has_battery; then
+    if [[ $battery_present == false ]]; then
         log_warn "No battery detected. This service is intended for laptops with batteries."
         log_warn "Installing on a desktop or battery-less system is not recommended."
         printf '\n'
@@ -216,7 +239,7 @@ show_interactive_ui() {
         case "${choice}" in
             1)
                 printf '\n'
-                if ! has_battery; then
+                if [[ $battery_present == false ]]; then
                     local confirm=""
                     if ! read -rp "${BLUE}[QUERY]${NC} No battery present. Proceed anyway? (y/N): " confirm; then
                         # EOF (Ctrl+D) — treat as "No"
@@ -234,7 +257,7 @@ show_interactive_ui() {
                 ;;
             2)
                 printf '\n'
-                if ! is_service_installed && ! is_service_enabled && ! is_service_active; then
+                if ! is_service_installed && ! is_service_enabled && ! is_service_loaded; then
                     log_info "Service is not installed. Nothing to uninstall."
                     return 0
                 fi
@@ -255,27 +278,32 @@ show_interactive_ui() {
 # --- Main Logic ---
 
 main() {
-    # --- Argument Parsing ---
-    local auto_mode=false
-    for arg in "$@"; do
-        if [[ "${arg}" == "--auto" ]]; then
-            auto_mode=true
-            break
-        fi
-    done
-
-    # --- Auto Mode: Original non-interactive behavior, completely unchanged ---
-    if [[ "${auto_mode}" == true ]]; then
-        if ! has_battery; then
-            log_info "Auto-mode: No battery detected. Skipping installation."
-            exit 0
-        fi
-        do_install
-        exit 0
+    if (( $# > 1 )); then
+        log_error "Expected at most one option: --auto or --help"
+        return 2
     fi
+    case "${1:-}" in
+        --auto)
+            if ! has_battery; then
+                log_info "Auto-mode: No system battery or UPS detected. Skipping installation."
+                return 0
+            fi
+            do_install
+            return
+            ;;
+        -h|--help)
+            printf 'Usage: %s [--auto | --help]\n' "${0##*/}"
+            printf 'Without options, manage the battery service interactively.\n'
+            return 0
+            ;;
+        "") ;;
+        *) log_error "Unknown option: $1"; return 2 ;;
+    esac
 
     # --- Interactive Mode: Always show UI ---
     show_interactive_ui
 }
 
-main "$@"
+if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
+    main "$@"
+fi

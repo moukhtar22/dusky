@@ -3,7 +3,7 @@
 
 Runs under .venv-worker. Provider choice follows config hardware:
   nvidia: CUDAExecutionProvider (strict, profile-verified) + CPU fallback
-  amd:    tries MIGraphX/ROCM if available, else CPU (reliable)
+  amd:    tries MIGraphX if available, else CPU
   cpu:    CPUExecutionProvider only
 
 Sealed memfds are re-validated on receipt (size + seals + F_SEAL_EXEC=0x0020).
@@ -30,14 +30,15 @@ import time
 from pathlib import Path
 from typing import Any
 
-MIN_PYTHON = (3, 14, 6)
+MIN_PYTHON = (3, 14, 7)
+os.environ["ORT_DISABLE_TELEMETRY"] = "1"
 SAMPLE_RATE = 16000
 BYTES_PER_SAMPLE = 2
 MAX_PACKET = 65536
 MAX_INLINE = 57344
 
 if sys.version_info < MIN_PYTHON:
-    raise SystemExit("Worker requires CPython 3.14.6+")
+    raise SystemExit("Worker requires CPython 3.14.7+")
 _gil = getattr(sys, "_is_gil_enabled", None)
 if _gil is None or not _gil():
     raise SystemExit("Worker requires GIL-enabled CPython")
@@ -71,8 +72,8 @@ def fail(msg: str, code: int = 2) -> None:
 def assert_worker_namespace(hardware: str) -> None:
     owners = sorted(set(importlib.metadata.packages_distributions().get("onnxruntime", [])))
     expected = ["onnxruntime-gpu"] if hardware == "nvidia" else ["onnxruntime"]
-    # AMD experimental wheels (onnxruntime-migraphx/rocm) still export
-    # "onnxruntime", so accept them on amd but never on nvidia/cpu strict paths.
+    # The packaged AMD path uses the CPU wheel. Custom builds must retain
+    # its distribution name to pass the namespace check.
     if hardware == "amd" and owners == ["onnxruntime"]:
         return
     if owners != expected:
@@ -124,18 +125,17 @@ class AsrEngine:
         opts = _ort.SessionOptions()
         opts.execution_mode = _ort.ExecutionMode.ORT_SEQUENTIAL
         opts.graph_optimization_level = _ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-        # Variable-length audio (partial tail chunks, 0.25-15 s phrases):
-        # pre-planned mem patterns never hit, so they only cost VRAM.
+        # Avoid retaining allocation patterns for many variable audio lengths.
         opts.enable_mem_pattern = False
-        if hardware == "cpu":
-            # Throughput path: file transcription is embarrassingly parallel
-            # across ORT intra-op threads; single-thread would 4-8x slowdown.
-            opts.intra_op_num_threads = max(1, os.cpu_count() or 4)
-            opts.inter_op_num_threads = 1
-        else:
-            # Low-VRAM path (2GB): one inference at a time minimizes arena peak.
-            opts.intra_op_num_threads = 1
-            opts.inter_op_num_threads = 1
+        available = _ort.get_available_providers()
+        # Quantized graphs retain CPU operators even with CUDA enabled.
+        # Intra-op CPU threads speed those operators without running concurrent
+        # GPU requests: execution_mode remains sequential and the worker serial.
+        threads = int(config.get("cpu_threads", 0))
+        if threads < 0:
+            fail("cpu_threads must be nonnegative")
+        opts.intra_op_num_threads = threads or min(8, os.process_cpu_count() or 1)
+        opts.inter_op_num_threads = 1
         opts.log_severity_level = 3
         if profiling:
             opts.enable_profiling = True
@@ -147,11 +147,12 @@ class AsrEngine:
             # and also respects the ReadOnlyPaths sandbox at runtime.
             if profile_dir is not None:
                 opts.profile_file_prefix = str(profile_dir / "dusky_worker_profile")
-        available = _ort.get_available_providers()
         if hardware == "nvidia":
             if "CUDAExecutionProvider" not in available:
                 fail(f"CUDAExecutionProvider missing; available={available}")
-            limit_mb = max(512, int(config.get("gpu_mem_limit_mb", 4096)))
+            limit_mb = int(config.get("gpu_mem_limit_mb", 4096))
+            if limit_mb <= 0:
+                fail("gpu_mem_limit_mb must be positive")
             providers: list[Any] = [(("CUDAExecutionProvider"), {
                 "device_id": 0, "arena_extend_strategy": "kSameAsRequested",
                 "gpu_mem_limit": limit_mb * 1024 * 1024,
@@ -165,8 +166,8 @@ class AsrEngine:
                 "enable_cuda_graph": "0",
                 "use_tf32": True, "do_copy_in_default_stream": True}), "CPUExecutionProvider"]
         elif hardware == "amd":
-            # Opportunistic: use MIGraphX/ROCM only if the installed wheel provides them.
-            prefs = [ep for ep in ("MIGraphXExecutionProvider", "ROCMExecutionProvider") if ep in available]
+            # MIGraphX is only available in a separately supplied custom wheel.
+            prefs = [ep for ep in ("MIGraphXExecutionProvider",) if ep in available]
             providers = prefs + ["CPUExecutionProvider"] if "CPUExecutionProvider" in available else prefs
             if not providers:
                 fail(f"No usable EP; available={available}")
@@ -356,6 +357,8 @@ def run_worker(fd: int, config_path: Path) -> int:
                 deadline = time.monotonic() + timeout
             op = req.get("op", "recognize")
             if op == "shutdown":
+                if audio_fd is not None:
+                    os.close(audio_fd)
                 send_response(sock, {"ok": True, "request_id": req.get("request_id")})
                 return 0
             if op != "recognize":
@@ -433,14 +436,6 @@ def self_test(config_path: Path) -> int:
         return 0
     finally:
         shutil.rmtree(prof_dir, ignore_errors=True)
-        # Belt-and-braces: undiscovered aux sessions (preprocessors) may
-        # still use the default prefix and land in cwd. Sweep them so the
-        # source tree / APP_DIR never accumulates strays again.
-        for stale in Path.cwd().glob("onnxruntime_profile__*.json"):
-            try:
-                stale.unlink()
-            except OSError:
-                pass
 
 
 def main() -> int:

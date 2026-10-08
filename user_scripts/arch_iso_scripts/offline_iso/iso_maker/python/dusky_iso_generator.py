@@ -1,20 +1,17 @@
 #!/usr/bin/env python3
-# ==============================================================================
-# Dusky Arch ISO Factory — Python 3.14.6 / 2026-07 final
-# Offline official repo + AUR repo + archiso (releng) image
-#
-# Stack (no legacy compat):
-#   Python 3.14.6 · linux 7.x-arch · systemd 261+
-#   pacman 7.1 (DownloadUser=alpm, sandbox) · archiso 88+ · rich 15+
-# ==============================================================================
+"""Dusky Arch ISO Factory — offline official + AUR repositories and an archiso releng ISO (x86_64).
 
-from __future__ import annotations
+Platform: Arch Linux · Linux 7.3+ · Python 3.14.7+ · pacman 7.1+ · archiso 91+ · rich 15+.
+Runs as root (re-execs itself through sudo); git/makepkg run as the invoking user.
+"""
 
+import argparse
 import atexit
-import concurrent.futures
+import concurrent.futures as cf
 import fcntl
-import grp
+import functools
 import hashlib
+import io
 import json
 import os
 import pwd
@@ -28,74 +25,86 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
 import time
+import tomllib
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Callable, Collection, Iterable, Iterator, Sequence
+from compression import zstd  # noqa: F401  PEP 784: tarfile "w:zst" / "r|*" need it; fail fast if absent
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import NoReturn
 
-# ==============================================================================
-# Early help (no third-party, no root)
-# ==============================================================================
-_HELP = """\
-󰏖 Dusky Arch ISO & Offline Repo Factory
-=======================================
-
-Usage:
-  ./dusky_iso_generator.py [options]
-
-Pipelines (--action):
-  official_iso   Download official Pacman repo + build ISO (Default)
-  aur_iso        Build AUR repo + build ISO
-  full           Full pipeline: Pacman repo + AUR repo + ISO
-  iso            Build ISO only (using existing offline repos)
-  official       Download official Pacman repo only (no ISO)
-  aur            Build AUR repo only (no ISO)
-  both           Build both Pacman & AUR repos (no ISO)
-
-Options:
-  --action ACTION        Select pipeline action (see list above)
-  --official-repo PATH   Official package repo directory (default: /srv/offline-repo/official)
-  --aur-repo PATH        AUR package repo directory (default: /srv/offline-repo/aur)
-  --workspace PATH       Scratch workspace for ISO build (default: /mnt/zram1 or /tmp)
-  --source-dir PATH      Installer payload and dotfiles assets directory
-  --auto                 Non-interactive mode (use defaults without prompting)
-  -h, --help             Show this help message and exit
-
-Examples:
-  # Interactive menu (prompts for options):
-  ./dusky_iso_generator.py
-
-  # Full automated build on ZRAM:
-  ./dusky_iso_generator.py --action full --auto
-
-  # Build ISO only with custom workspace:
-  ./dusky_iso_generator.py --action iso --workspace /tmp/my_iso_build
-"""
-
-if "-h" in sys.argv or "--help" in sys.argv:
-    print(_HELP)
-    raise SystemExit(0)
-
-VERSION = "7.1.2-py314-2026.07"
+# ═══════════════════════════════════ configuration ═══════════════════════════════════
+VERSION = "8.0.5-py314-2026.10"
 REPO_NAME = "archrepo"
+DB_NAME = f"{REPO_NAME}.db.tar.zst"
+FILES_NAME = f"{REPO_NAME}.files.tar.zst"
+CUSTOM_PACKAGES_FILE = "custom_packages.txt"
+CUSTOM_BUILDS_FILE = "custom_builds.json"
 AUR_RPC = "https://aur.archlinux.org/rpc/v5/info"
-PKGNAME_RE = re.compile(r"^[a-z0-9@_+][a-z0-9@._+\-]*$")
-ANSI_RE = re.compile(r"\x1b\[[0-9;]*[mGKHFJ]|\x1b\]8;;.*?\x1b\\")
-# pkgname-version-pkgrel-arch.pkg.tar.(zst|xz|gz|...)
-PKGFILE_RE = re.compile(
-    r"^(?P<name>.+)-(?P<ver>[^-]+)-(?P<rel>[^-]+)-(?P<arch>[^-]+)\.pkg\.tar\.(?P<ext>.+)$"
-)
-ZRAM_CANDIDATE = Path("/mnt/zram1")
-REEXEC_ENV = "DUSKY_FACTORY_REEXEC"
-MAX_MIRROR_HTML = 2 * 1024 * 1024
-MAX_RPC_BYTES = MAX_MIRROR_HTML  # AUR JSON cap (same 2 MiB)
-PACMAN_SW_CHUNK = 120
 AUR_RPC_BATCH = 80
-REQUIRED_AUR: frozenset[str] = frozenset({"paru"})
+MAX_RPC_BYTES = 4 << 20
+PARALLEL_DOWNLOADS = 5
+SYNC_ATTEMPTS = 5
+DOWNLOAD_ATTEMPTS = 5
+CLONE_ATTEMPTS = 3
+SOURCE_ATTEMPTS = 3
+MAX_DEFER = 50
+CLONE_TIMEOUT_S = 300
+BUILD_TIMEOUT_S = 3600
+REPO_ADD_MIN_SHARD = 32
+COPY_CHUNK = 1 << 20
+ZRAM_CANDIDATE = Path("/mnt/zram1")
+LOCK_PATH = Path("/run/dusky-iso-factory.lock")
+HOST_DB_LOCK = Path("/var/lib/pacman/db.lck")
+HOST_MIRRORLIST = Path("/etc/pacman.d/mirrorlist")
+RELENG = Path("/usr/share/archiso/configs/releng")
+REEXEC_ENV = "DUSKY_FACTORY_REEXEC"
+DEFAULT_OFFICIAL = Path("/srv/offline-repo/official")
+DEFAULT_AUR = Path("/srv/offline-repo/aur")
+ARCH_REPOS = frozenset({
+    "core", "extra", "multilib", "core-testing", "extra-testing", "multilib-testing",
+    "gnome-unstable", "kde-unstable",
+})
+EXCLUDED_REPO_PREFIXES = ("cachyos",)  # x86-64-v3/v4 rebuilds: not portable to generic x86_64
+VCS_SUFFIXES = ("-git", "-hg", "-svn", "-bzr")
+REQUIRED_AUR = frozenset({"paru"})
+LIVE_PKG_ALIASES = {"broadcom-wl": "broadcom-wl-dkms"}
+BOOTSTRAP_DEPS = {"git": "git", "mkarchiso": "archiso"}
+
+# action -> (official phase, AUR phase, ISO phase); dict order is the interactive menu order
+ACTIONS: dict[str, tuple[bool, bool, bool]] = {
+    "official_iso": (True, False, True),
+    "aur_iso": (False, True, True),
+    "full": (True, True, True),
+    "iso": (False, False, True),
+    "official": (True, False, False),
+    "aur": (False, True, False),
+    "both": (True, True, False),
+}
+ACTION_HELP = {
+    "official_iso": "official repo + ISO (default)",
+    "aur_iso": "AUR repo + ISO",
+    "full": "official repo + AUR repo + ISO",
+    "iso": "ISO from existing repos",
+    "official": "official repo only",
+    "aur": "AUR repo only",
+    "both": "official + AUR repos, no ISO",
+}
+
+PKGNAME_RE = re.compile(r"[a-z0-9@_+][a-z0-9@._+-]*")
+PKGFILE_RE = re.compile(r"(?P<name>[^/]+)-(?P<ver>[^-/]+-[^-/]+)-(?P<arch>[^-/]+)\.pkg\.tar(?:\.[a-z0-9]+)?")
+DEP_OP_RE = re.compile(r"[<>=]")
+SO_DEP_RE = re.compile(r"\.so(?:\.[0-9]+)*$")
+CLOSURE_LINE_RE = re.compile(r"^(\S+) (\S+) ([0-9]+)$", re.MULTILINE)
+UNSAT_RE = re.compile(r"unable to satisfy dependency '[^']+' required by (\S+)")
+NOT_FOUND_RE = re.compile(r"target not found: (\S+)")
+MOUNT_ESCAPE_RE = re.compile(r"\\([0-7]{3})")
 
 _FACTORY_MAKEPKG_CONF_TEMPLATE = r'''#!/hint/bash
 # shellcheck disable=2034
@@ -103,20 +112,26 @@ _FACTORY_MAKEPKG_CONF_TEMPLATE = r'''#!/hint/bash
 CARCH="x86_64"
 CHOST="x86_64-pc-linux-gnu"
 
-CFLAGS="-march=x86-64 -mtune=generic -O2 -pipe -fno-plt -fexceptions \
+CFLAGS="-march=x86-64 -mtune=generic -O2 -pipe -fno-plt -fno-semantic-interposition -fexceptions \
         -Wp,-D_FORTIFY_SOURCE=3 -Wformat -Werror=format-security \
         -fstack-clash-protection -fcf-protection \
         -fno-omit-frame-pointer -mno-omit-leaf-frame-pointer"
 CXXFLAGS="$CFLAGS -Wp,-D_GLIBCXX_ASSERTIONS"
+
+FFLAGS="-march=x86-64 -mtune=generic -O2 -pipe -fno-plt -fno-semantic-interposition \
+        -Wp,-D_FORTIFY_SOURCE=3 -fstack-clash-protection -fcf-protection \
+        -fno-omit-frame-pointer -mno-omit-leaf-frame-pointer"
+FCFLAGS="$FFLAGS"
+
 __LDFLAGS_LINE__
 LTOFLAGS="-flto=auto"
-MAKEFLAGS="-j$(nproc) -l$(nproc)"
-NINJAFLAGS="-j$(nproc)"
+MAKEFLAGS="-j$(nproc) -l$(( $(nproc) * 3 / 2 ))"
+NPROC="$(nproc)"
 RUSTFLAGS="__RUSTFLAGS__"
 DEBUG_CFLAGS="-g"
 DEBUG_CXXFLAGS="$DEBUG_CFLAGS"
 
-BUILDENV=(!distcc color !ccache !check !sign)
+BUILDENV=(!distcc color __CCACHE__ !check !sign)
 OPTIONS=(strip docs !libtool !staticlibs emptydirs zipman purge !debug lto autodeps)
 INTEGRITY_CHECK=(sha256)
 STRIP_BINARIES="--strip-all"
@@ -144,7 +159,7 @@ VCSCLIENTS=('bzr::breezy'
 COMPRESSGZ=(gzip -c -f -n)
 COMPRESSBZ2=(bzip2 -c -f)
 COMPRESSXZ=(xz -c -z -)
-COMPRESSZST=(zstd -c -T0 -)
+COMPRESSZST=(zstd -c -T0 --auto-threads=logical -)
 COMPRESSLRZ=(lrzip -q)
 COMPRESSLZO=(lzop -q)
 COMPRESSZ=(compress -c -f)
@@ -155,40 +170,33 @@ PKGEXT='.pkg.tar.zst'
 SRCEXT='.src.tar.gz'
 '''
 
-_MAKEPKG_ENV_SCRUB = (
-    "CFLAGS",
-    "CXXFLAGS",
-    "CPPFLAGS",
-    "LDFLAGS",
-    "LTOFLAGS",
-    "RUSTFLAGS",
-    "MAKEFLAGS",
-    "NINJAFLAGS",
-    "CARGO_BUILD_RUSTFLAGS",
-    "CARGO_TARGET_CPU",
-    "MAKEPKG_CONF",
-    "CARCH",
-    "CHOST",
-    "DEBUG_CFLAGS",
-    "DEBUG_CXXFLAGS",
-    "DEBUG_RUSTFLAGS",
-    "GOAMD64",
+MAKEPKG_ENV_SCRUB = (
+    "CFLAGS", "CXXFLAGS", "CPPFLAGS", "FFLAGS", "FCFLAGS", "LDFLAGS", "LTOFLAGS", "RUSTFLAGS",
+    "MAKEFLAGS", "NINJAFLAGS", "NPROC", "CARGO_BUILD_RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS",
+    "CARGO_TARGET_CPU", "MAKEPKG_CONF",
+    "CARCH", "CHOST", "DEBUG_CFLAGS", "DEBUG_CXXFLAGS", "DEBUG_RUSTFLAGS", "GOAMD64",
+    "PKGDEST", "SRCDEST", "SRCPKGDEST", "LOGDEST", "BUILDDIR", "PKGEXT", "SRCEXT",
 )
 
+# Injected at the top of mkarchiso's _build_iso_image(): runs after pacstrap/mksquashfs, before
+# xorriso. The staging dir lives in the same workspace filesystem, so this is one rename(2).
+MKARCHISO_HOOK = r'''    # --- dusky factory: offline repository (staged + sha256-verified by the factory) ---
+    printf '[dusky] INFO: moving offline repository into the ISO 9660 tree\n'
+    install -d -m 0755 -- "${isofs_dir}/${install_dir}"
+    mv -T -- @STAGING@ "${isofs_dir}/${install_dir}/repo" \
+        || { printf '[dusky] ERROR: offline repository injection failed\n' >&2; exit 1; }
+'''
 
-# ==============================================================================
-# Package sets
-# ==============================================================================
-ALL_GROUPS: Dict[str, List[str]] = {
+ALL_GROUPS: dict[str, list[str]] = {
     "offline": [
-        "intel-ucode", "amd-ucode", "linux", "mkinitcpio", "glaze", "python-cssselect", "base", "base-devel",
+        "intel-ucode", "amd-ucode", "linux", "mkinitcpio", "terminus-font", "glaze", "python-cssselect", "base", "base-devel",
         "python-lxml", "python-certifi", "python-charset-normalizer", "python-idna",
         "python-requests", "python-urllib3", "deno", "yt-dlp", "yt-dlp-ejs", "hunspell",
         "xf86-input-libinput", "xorg-xauth", "boost-libs", "plymouth", "grub", "os-prober",
         "cryptsetup", "efibootmgr",
     ],
     "graphics": [
-        "intel-media-driver", "vpl-gpu-rt", "mesa", "vulkan-intel", "mesa-utils",
+        "intel-media-driver", "vpl-gpu-rt", "mesa", "vulkan-intel", "vulkan-radeon", "mesa-utils",
         "intel-gpu-tools", "libva", "libva-utils", "vulkan-icd-loader", "vulkan-tools",
         "sof-firmware", "linux-firmware", "linux-headers", "acpi_call", "kernel-modules-hook",
         "linux-firmware-nvidia", "linux-firmware-amdgpu", "linux-firmware-radeon",
@@ -198,20 +206,19 @@ ALL_GROUPS: Dict[str, List[str]] = {
     ],
     "hyprland": [
         "hyprland", "xorg-xwayland", "xdg-desktop-portal-hyprland", "xdg-desktop-portal-gtk",
-        "localsearch", "polkit", "xdg-utils", "socat", "inotify-tools",
+        "localsearch", "polkit", "dbus", "xdg-utils", "socat", "inotify-tools",
         "libnotify", "mako", "file",
     ],
     "appearance": [
-        "qt5-wayland", "qt6-wayland", "gtk3", "gtk4", "nwg-look", "qt5ct", "qt6ct", "qt6-svg",
+        "qt5-wayland", "qt6-wayland", "gtk3", "gtk4", "glib2", "dconf", "gsettings-desktop-schemas", "nwg-look", "qt5ct", "qt6ct", "qt6-svg",
         "qt6-multimedia-ffmpeg", "adw-gtk-theme", "upower", "plocate", "matugen",
         "otf-font-awesome", "ttf-jetbrains-mono-nerd", "otf-atkinsonhyperlegiblemono-nerd",
         "ttf-atkinson-hyperlegible", "otf-atkinson-hyperlegible",
-        "noto-fonts-emoji", "sassc", "python-packaging", "python", "python-gobject",
+        "noto-fonts-emoji", "ttf-liberation", "sassc", "python-packaging", "python", "python-gobject",
         "python-cairo", "python-opengl", "gtk-layer-shell", "python-evdev", "python-pyudev",
-        "fontconfig", "python-pyquery", "python-textual", "python-rich", "papirus-icon-theme",
+        "fontconfig", "python-pyquery", "python-textual", "python-rich", "python-regex", "python-pillow", "papirus-icon-theme",
     ],
     "desktop": [
-        #"waybar",
         "awww", "hyprlock", "hypridle", "hyprsunset", "hyprpicker", "rofi", "hyprshutdown",
         "libdbusmenu-qt5", "libdbusmenu-glib", "brightnessctl",
     ],
@@ -223,7 +230,7 @@ ALL_GROUPS: Dict[str, List[str]] = {
     ],
     "filesystem": [
         "btrfs-progs", "compsize", "zram-generator", "udisks2", "udiskie", "dosfstools",
-        "xdg-user-dirs", "usbutils", "gnome-disk-utility", "unzip", "zip", "unrar",
+        "xdg-user-dirs", "usbutils", "gnome-disk-utility", "unzip", "zip", "tar", "unrar",
         "7zip", "cpio", "file-roller", "rsync", "nfs-utils", "nilfs-utils", "smartmontools",
         "dmraid", "hdparm", "hwdetect", "lsscsi", "sg3_utils", "cpupower", "dust", "dkms",
         "thunar", "thunar-archive-plugin", "thunar-volman", "thunar-media-tags-plugin",
@@ -234,7 +241,7 @@ ALL_GROUPS: Dict[str, List[str]] = {
     ],
     "network": [
         "networkmanager", "wireless-regdb", "iwd", "nm-connection-editor", "inetutils", "wget",
-        "curl", "openssh", "ufw", "vsftpd", "reflector", "bmon", "ethtool", "httrack", "wavemon",
+        "curl", "openssh", "ufw", "wayvnc", "vsftpd", "reflector", "bmon", "ethtool", "httrack", "wavemon",
         "firefox", "nss-mdns", "dnsmasq", "modemmanager", "usb_modeswitch",
     ],
     "terminal": [
@@ -245,7 +252,7 @@ ALL_GROUPS: Dict[str, List[str]] = {
     "dev": [
         "neovim", "git", "git-delta", "lazygit", "meson", "cmake", "clang", "uv", "rq", "jq",
         "pv", "bc", "viu", "chafa", "ueberzugpp", "ccache", "mold", "shellcheck", "shfmt",
-        "stylua", "prettier", "tree-sitter-cli", "nano", "luarocks",
+        "stylua", "prettier", "tree-sitter-cli", "nano", "lua51", "luarocks",
     ],
     "multimedia": [
         "ffmpeg", "mpv", "mpv-mpris", "satty", "swayimg", "resvg", "imagemagick", "libheif",
@@ -266,8 +273,7 @@ ALL_GROUPS: Dict[str, List[str]] = {
     "btrfs": ["snapper"],
 }
 
-# Seed list only — runtime queue is a copy that may grow with AUR deps.
-AUR_SEED: Tuple[str, ...] = (
+AUR_SEED: tuple[str, ...] = (
     "wlogout",
     "adwaita-qt6",
     "adwaita-qt5",
@@ -279,289 +285,173 @@ AUR_SEED: Tuple[str, ...] = (
     "paru",
     "waybar-git",
     "papirus-folders",
+    "bibata-cursor-theme-bin",
 )
 
-# ==============================================================================
-# Startup: pacman lock, elevation, deps
-# ==============================================================================
-def _pacman_like_running() -> bool:
-    proc = Path("/proc")
-    if not proc.is_dir():
-        return True
-    for entry in proc.iterdir():
-        if not entry.name.isdigit():
+
+# ═══════════════════════ pre-rich: errors, host lock, CLI, bootstrap ═══════════════════════
+class FactoryError(Exception):
+    """Fatal, user-facing error (reported without a traceback)."""
+
+
+class Interrupted(BaseException):
+    """Raised in the main thread on SIGTERM/SIGHUP (SIGINT raises KeyboardInterrupt)."""
+
+    def __init__(self, signum: int) -> None:
+        super().__init__(signum)
+        self.signum = signum
+
+
+def die(msg: str) -> NoReturn:
+    raise FactoryError(msg)
+
+
+def _lock_holders(lock: Path) -> list[int]:
+    """PIDs with `lock` open. libalpm keeps db.lck open for the whole transaction, so
+    'file exists but no process holds it' is the one reliable staleness signal (covers
+    pacman, paru/yay, pamac, PackageKit — any libalpm frontend)."""
+    target = os.fspath(lock)
+    holders: list[int] = []
+    for pid in os.listdir("/proc"):
+        if not pid.isdigit():
             continue
+        fd_dir = f"/proc/{pid}/fd"
         try:
-            comm = (entry / "comm").read_text(encoding="utf-8", errors="replace").strip()
-        except (OSError, PermissionError):
+            fds = os.listdir(fd_dir)
+        except OSError:
             continue
-        if comm in {"pacman", "pacman-conf", "yay", "paru", "makepkg"}:
-            return True
-    return False
-
-
-def wait_for_pacman_lock(timeout_s: float = 300.0, poll_s: float = 2.0) -> None:
-    lock_file = Path("/var/lib/pacman/db.lck")
-    if not lock_file.exists():
-        return
-    print("[!!] Pacman database lock detected. Waiting...", flush=True)
-    deadline = time.monotonic() + timeout_s
-    while lock_file.exists():
-        if not _pacman_like_running():
-            print("[!!] Stale pacman lock (no package manager process). Removing.", flush=True)
+        for fd in fds:
             try:
-                lock_file.unlink(missing_ok=True)
-            except OSError as exc:
-                print(f"[XX] Cannot remove stale lock: {exc}", flush=True)
-                raise SystemExit(1) from exc
-            break
-        if time.monotonic() >= deadline:
-            print(f"[XX] Pacman lock held after {int(timeout_s)}s. Exiting.", flush=True)
-            raise SystemExit(1)
-        time.sleep(poll_s)
-    print("[OK] Pacman lock clear.", flush=True)
+                if os.readlink(f"{fd_dir}/{fd}") == target:
+                    holders.append(int(pid))
+                    break
+            except OSError:
+                continue
+    return holders
 
 
-def check_startup_elevation_and_deps() -> None:
-    if not Path("/etc/arch-release").exists():
+def wait_for_host_pacman_lock(say: Callable[[str], object], timeout: float = 600.0) -> None:
+    if not HOST_DB_LOCK.exists():
         return
+    say(f"{HOST_DB_LOCK} present; waiting for its holder...")
+    deadline = time.monotonic() + timeout
+    unheld = 0
+    while HOST_DB_LOCK.exists():
+        if _lock_holders(HOST_DB_LOCK):
+            unheld = 0
+        else:
+            unheld += 1
+            if unheld >= 2:  # two observations 1 s apart: not the close()->unlink() window of a live pacman
+                say("stale pacman lock (no process holds it open); removing")
+                HOST_DB_LOCK.unlink(missing_ok=True)
+                break
+        if time.monotonic() >= deadline:
+            die(f"{HOST_DB_LOCK} still held after {int(timeout)} s")
+        time.sleep(1.0)
 
-    required_tools = {
-        "git": "git",
-        "mkarchiso": "archiso",
-        "paccache": "pacman-contrib",
-        "rsync": "rsync",
-        "bsdtar": "libarchive",
-        "zstd": "zstd",
-        "xz": "xz",
-    }
-    missing: List[str] = []
-    for tool, pkg in required_tools.items():
-        if shutil.which(tool) is None:
-            missing.append(pkg)
 
-    rich_missing = False
+def parse_args(argv: Sequence[str]) -> argparse.Namespace:
+    actions = "\n".join(f"  {name:<13} {ACTION_HELP[name]}" for name in ACTIONS)
+    parser = argparse.ArgumentParser(
+        prog="dusky_iso_generator.py",
+        description="Dusky Arch ISO Factory: offline official + AUR repositories and an archiso "
+        "releng ISO (x86_64 only). Re-executes itself as root through sudo.",
+        epilog=f"actions:\n{actions}\n\n"
+        "environment:\n"
+        "  DUSKY_DOTFILES_PIN   commit/ref of github.com/dusklinux/dusky to inject into /etc/skel\n"
+        "  DUSKY_DOTFILES_SHA   expected dotfiles HEAD (full sha or prefix); mismatch aborts\n\n"
+        f"version {VERSION}",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        suggest_on_error=True,
+    )
+    parser.add_argument("--action", choices=list(ACTIONS), help="what to build (default: official_iso)")
+    parser.add_argument("--official-repo", type=Path, metavar="DIR", help=f"default: {DEFAULT_OFFICIAL}")
+    parser.add_argument("--aur-repo", type=Path, metavar="DIR", help=f"default: {DEFAULT_AUR}")
+    parser.add_argument("--workspace", type=Path, metavar="DIR",
+                        help=f"ISO workspace base (default: {ZRAM_CANDIDATE} if mounted, else /tmp)")
+    parser.add_argument("--output-dir", type=Path, metavar="DIR",
+                        help=f"ISO output directory (default: {ZRAM_CANDIDATE} if mounted, else ~/dusky_isos)")
+    parser.add_argument("--source-dir", type=Path, metavar="DIR",
+                        help="installer payload (default: ~/user_scripts/arch_iso_scripts/offline_iso)")
+    parser.add_argument("--rebuild-local", action="store_true",
+                        help="rebuild all local ISO recipes even when cached inputs match")
+    parser.add_argument("--auto", action="store_true", help="non-interactive; default action official_iso")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
+    return parser.parse_args(argv)
+
+
+def bootstrap() -> None:
+    """Before rich is importable: enforce Arch/x86_64, re-exec as root, install hard deps.
+    No `pacman -Sy` here: -Sy followed by -S is a partial upgrade (unsupported on Arch)."""
+    if not Path("/etc/arch-release").exists():
+        raise SystemExit("[XX] Not on Arch Linux")
+    if (machine := os.uname().machine) != "x86_64":
+        raise SystemExit(f"[XX] x86_64 only (uname -m = {machine})")
+    if os.geteuid() != 0:
+        if os.environ.get(REEXEC_ENV) == "1":
+            raise SystemExit("[XX] Elevation failed (already re-exec'd once).")
+        if not sys.stdin.isatty() and "SUDO_ASKPASS" not in os.environ:
+            raise SystemExit("[XX] Root required. Re-run from a TTY or via sudo.")
+        print("Elevating privileges to root (may prompt for sudo password)...", flush=True)
+        os.execvpe("sudo", ["sudo", "-E", "--", sys.executable, *sys.argv], os.environ | {REEXEC_ENV: "1"})
+    missing = sorted({pkg for tool, pkg in BOOTSTRAP_DEPS.items() if shutil.which(tool) is None})
     try:
         import rich  # noqa: F401
     except ImportError:
-        rich_missing = True
         missing.append("python-rich")
-
-    missing = list(dict.fromkeys(missing))
-
-    if os.geteuid() != 0:
-        if os.environ.get(REEXEC_ENV) == "1":
-            print("[XX] Elevation failed (already re-exec'd once).", flush=True)
-            raise SystemExit(1)
-        print("Elevating privileges to root (may prompt for sudo password)...", flush=True)
-        env = os.environ.copy()
-        env[REEXEC_ENV] = "1"
-        sudo_args = ["sudo", "-E", "--"]
-        # Avoid indefinite block on non-TTY without askpass.
-        if not sys.stdin.isatty() and not env.get("SUDO_ASKPASS"):
-            print("[XX] Root required. Re-run from a TTY or via sudo.", flush=True)
-            raise SystemExit(1)
-        os.execvpe("sudo", sudo_args + [sys.executable, *sys.argv], env)
-
-    if missing:
-        print(f"Installing missing dependencies: {', '.join(missing)}...", flush=True)
-        wait_for_pacman_lock()
-        syn = subprocess.run(["pacman", "-Sy", "--noconfirm"], shell=False)
-        if syn.returncode != 0:
-            print("[XX] pacman -Sy failed.", flush=True)
-            raise SystemExit(1)
-        inst = subprocess.run(
-            ["pacman", "-S", "--needed", "--noconfirm", *missing],
-            shell=False,
-        )
-        if inst.returncode != 0:
-            print("[XX] pacman -S failed for dependencies.", flush=True)
-            raise SystemExit(1)
-        if rich_missing:
-            # Ensure fresh interpreter state imports rich cleanly.
-            env = os.environ.copy()
-            env[REEXEC_ENV] = "1"
-            os.execvpe(sys.executable, [sys.executable, *sys.argv], env)
+    if not missing:
+        return
+    print(f"Installing missing dependencies: {' '.join(missing)}", flush=True)
+    try:
+        wait_for_host_pacman_lock(lambda m: print(f"[!!] {m}", flush=True))
+    except FactoryError as exc:
+        raise SystemExit(f"[XX] {exc}") from None
+    if subprocess.run(["pacman", "-S", "--needed", "--noconfirm", "--", *missing]).returncode != 0:
+        raise SystemExit("[XX] pacman -S failed (stale host sync DB? run: pacman -Syu)")
+    if "python-rich" in missing:
+        os.execve(sys.executable, [sys.executable, *sys.argv], os.environ | {REEXEC_ENV: "1"})
 
 
 if __name__ == "__main__":
-    check_startup_elevation_and_deps()
+    ARGS = parse_args(sys.argv[1:])
+    bootstrap()
 
-try:
-    from rich import box
-    from rich.align import Align
-    from rich.console import Console
-    from rich.panel import Panel
-    from rich.progress import BarColumn, Progress, SpinnerColumn, TaskProgressColumn, TextColumn
-    from rich.prompt import Confirm, Prompt
-    from rich.table import Table
-except ImportError:
-    print("Missing python-rich. Install: sudo pacman -S python-rich", flush=True)
-    raise SystemExit(1)
+from rich import box  # noqa: E402  (imported after bootstrap may have installed python-rich)
+from rich.console import Console  # noqa: E402
+from rich.markup import escape  # noqa: E402
+from rich.panel import Panel  # noqa: E402
+from rich.progress import BarColumn, Progress, SpinnerColumn, TaskProgressColumn, TextColumn  # noqa: E402
+from rich.prompt import Confirm, Prompt  # noqa: E402
+from rich.table import Table  # noqa: E402
 
-console = Console()
-
-# ==============================================================================
-# Process-global cleanup / lock
-# ==============================================================================
-_cleanup_paths: List[Path] = []
-_factory_lock_fd: Optional[int] = None
-_exiting = False
+console = Console(highlight=False)
 
 
-def _register_cleanup(path: Path) -> None:
-    _cleanup_paths.append(path)
-
-
-def _run_cleanups() -> None:
-    global _factory_lock_fd
-    for p in reversed(_cleanup_paths):
-        try:
-            if p.is_dir() and not p.is_symlink():
-                shutil.rmtree(p, ignore_errors=True)
-            elif p.exists() or p.is_symlink():
-                p.unlink(missing_ok=True)
-        except OSError:
-            pass
-    _cleanup_paths.clear()
-    if _factory_lock_fd is not None:
-        try:
-            fcntl.flock(_factory_lock_fd, fcntl.LOCK_UN)
-            os.close(_factory_lock_fd)
-        except OSError:
-            pass
-        _factory_lock_fd = None
-
-
-def _signal_exit(signum: int, _frame: object) -> None:
-    global _exiting
-    if _exiting:
-        return
-    _exiting = True
-    try:
-        sys.stderr.write(f"\n[XX] Signal {signum}; cleaning up.\n")
-        sys.stderr.flush()
-    except OSError:
-        pass
-    send_notification(
-        "Dusky Factory",
-        f"Process interrupted (signal {signum})",
-        icon="dialog-warning",
-    )
-    _run_cleanups()
-    os._exit(128 + signum)
-
-
-def acquire_factory_lock() -> None:
-    global _factory_lock_fd
-    candidates = [
-        Path("/run/dusky-iso-factory.lock"),
-        Path("/var/lock/dusky-iso-factory.lock"),
-        Path(tempfile.gettempdir()) / "dusky-iso-factory.lock",
-    ]
-    last_err: Optional[BaseException] = None
-    for path in candidates:
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            fd = os.open(str(path), os.O_CREAT | os.O_RDWR, 0o600)
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                os.close(fd)
-                die(f"Another factory instance holds {path}")
-            os.ftruncate(fd, 0)
-            os.write(fd, f"{os.getpid()}\n".encode())
-            _factory_lock_fd = fd
-            return
-        except OSError as exc:
-            last_err = exc
-            continue
-    die(f"Cannot create factory lock: {last_err}")
-
-
-# ==============================================================================
-# UI + fs helpers
-# ==============================================================================
 def info(msg: str) -> None:
-    console.print(f"\n[bold cyan]==>[/] {msg}")
+    console.print(f"\n[bold cyan]==>[/] {escape(msg)}")
 
 
 def step(msg: str) -> None:
-    console.print(f"  [bold magenta]->[/] {msg}")
+    console.print(f"  [bold magenta]->[/] {escape(msg)}")
 
 
 def ok(msg: str) -> None:
-    console.print(f"[bold green][OK][/] {msg}")
+    console.print(f"[bold green]\\[OK][/] {escape(msg)}")
 
 
 def warn(msg: str) -> None:
-    console.print(f"[bold yellow][!!][/] {msg}")
+    console.print(f"[bold yellow]\\[!!][/] {escape(msg)}")
 
 
 def err(msg: str) -> None:
-    console.print(f"[bold red][XX][/] {msg}")
-
-
-def send_notification(title: str, msg: str, icon: str = "dialog-information") -> None:
-    notify_bin = shutil.which("notify-send")
-    if not notify_bin:
-        return
-
-    real_user, _ = get_real_user()
-    if os.geteuid() == 0 and real_user and real_user != "root":
-        try:
-            pw = pwd.getpwnam(real_user)
-            env = os.environ.copy()
-            bus_path = f"/run/user/{pw.pw_uid}/bus"
-            if os.path.exists(bus_path):
-                env["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path={bus_path}"
-            cmd = [
-                "runuser",
-                "-u",
-                real_user,
-                "--",
-                notify_bin,
-                title,
-                msg,
-                "-i",
-                icon,
-                "-a",
-                "Dusky Factory",
-            ]
-            subprocess.run(
-                cmd,
-                env=env,
-                check=False,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            return
-        except Exception:
-            pass
-
-    cmd = [notify_bin, title, msg, "-i", icon, "-a", "Dusky Factory"]
-    subprocess.run(
-        cmd,
-        check=False,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-
-
-def die(msg: str) -> None:
-    err(msg)
-    send_notification("Dusky Factory", f"Failed: {msg}", icon="dialog-error")
-    _run_cleanups()
-    raise SystemExit(1)
+    console.print(f"[bold red]\\[XX][/] {escape(msg)}")
 
 
 def human_bytes(n: int) -> str:
-    if n <= 0:
-        return "0 B"
-    f = float(n)
-    for u in ("B", "KiB", "MiB", "GiB", "TiB"):
-        if f < 1024 or u == "TiB":
-            return f"{int(f)} {u}" if u == "B" else f"{f:.2f} {u}"
+    f = float(max(n, 0))
+    for unit in ("B", "KiB", "MiB", "GiB"):
+        if f < 1024:
+            return f"{int(f)} B" if unit == "B" else f"{f:.2f} {unit}"
         f /= 1024
     return f"{f:.2f} TiB"
 
@@ -577,1843 +467,1584 @@ def format_duration(seconds: float) -> str:
     return f"{hours}h {mins}m {sec}s"
 
 
-def secure_mkdtemp(prefix: str, base: Optional[Path] = None) -> Path:
-    parent = str(base) if base is not None else None
-    p = Path(tempfile.mkdtemp(prefix=prefix, dir=parent))
-    # Refuse whitespace paths (pacman.conf Include / shell injection surface).
-    if any(c.isspace() for c in str(p)):
-        shutil.rmtree(p, ignore_errors=True)
-        die(f"Temp path contains whitespace: {p}")
-    p.chmod(0o700)
-    _register_cleanup(p)
-    return p
+def backoff(attempt: int, cap: float = 30.0) -> None:
+    time.sleep(min(cap, 2.0**attempt + random.uniform(0, 1)))
 
 
-def check_is_arch() -> None:
-    if not Path("/etc/arch-release").exists():
-        die("Not on Arch Linux")
+def require_tool(name: str, hint: str = "") -> None:
+    if shutil.which(name) is None:
+        die(f"missing tool: {name}" + (f" ({hint})" if hint else ""))
 
 
-def check_tool(name: str) -> bool:
-    return shutil.which(name) is not None
+# ═══════════════════════════════ process control ═══════════════════════════════
+# Every child runs in its own process group (process_group=0). On error/interrupt/timeout the
+# whole group (makepkg -> make -> cc, mkarchiso -> pacstrap -> pacman, ...) is terminated, so
+# no grandchild keeps writing into directories that cleanup is about to delete.
+_children: set[subprocess.Popen[str]] = set()
+_children_lock = threading.RLock()  # re-entrant: the signal handler runs on the main thread, which may hold it
+_interrupted = False
 
 
-def path_is_safe_conf_value(p: Path) -> bool:
-    s = str(p)
-    if not s or s.strip() != s:
-        return False
-    for c in s:
-        if c.isspace() or ord(c) < 32 or c == "#":
-            return False
-    return True
-
-
-def get_real_user() -> Tuple[str, Path]:
-    su = os.environ.get("SUDO_USER")
-    if su and re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}", su):
-        try:
-            pw = pwd.getpwnam(su)
-            return su, Path(pw.pw_dir)
-        except KeyError:
-            pass
-    uid = os.getuid() if os.geteuid() == 0 else os.geteuid()
-    # When root without SUDO_USER, prefer UID 0 home only as last resort.
+def _signal_group(proc: subprocess.Popen[str], sig: int) -> None:
     try:
-        if os.geteuid() == 0 and not su:
-            # Prefer non-root from pwd of login uid if available.
+        os.killpg(proc.pid, sig)
+    except ProcessLookupError:
+        pass
+
+
+def _kill_group(proc: subprocess.Popen[str], grace: float = 10.0) -> None:
+    _signal_group(proc, signal.SIGTERM)
+    try:
+        proc.wait(timeout=grace)
+    except subprocess.TimeoutExpired:
+        pass
+    _signal_group(proc, signal.SIGKILL)  # stragglers that ignored SIGTERM
+    proc.wait()
+
+
+def terminate_children(sig: int = signal.SIGTERM) -> None:
+    with _children_lock:
+        procs = tuple(_children)
+    for proc in procs:
+        _signal_group(proc, sig)
+
+
+def _on_signal(signum: int, _frame: object) -> None:
+    global _interrupted
+    terminate_children()
+    if _interrupted:  # second signal: keep cleanup running, just re-signal children
+        return
+    _interrupted = True
+    if signum == signal.SIGINT:
+        raise KeyboardInterrupt
+    raise Interrupted(signum)
+
+
+def run(
+    cmd: Sequence[str | os.PathLike[str]],
+    *,
+    user: "RealUser | None" = None,
+    env: dict[str, str] | None = None,
+    cwd: Path | None = None,
+    capture: bool = False,
+    merge: bool = False,
+    log: Path | None = None,
+    timeout: float | None = None,
+    check: bool = False,
+) -> subprocess.CompletedProcess[str]:
+    """Run a child with stdin=/dev/null in its own process group; `user` drops privileges in the
+    child via setgroups/setregid/setreuid (no runuser/PAM process per call)."""
+    argv = [os.fspath(c) for c in cmd]
+    creds: dict[str, object] = {}
+    if user is not None and (user.uid != os.geteuid() or user.gid != os.getegid()):
+        creds = {"user": user.uid, "group": user.gid, "extra_groups": list(user.groups)}
+    log_fh = open(log, "ab", buffering=0) if log is not None else None
+    try:
+        if log_fh is not None:
+            stdout, stderr = log_fh, subprocess.STDOUT
+        else:
+            stdout = subprocess.PIPE if capture else None
+            stderr = subprocess.STDOUT if merge else (subprocess.PIPE if capture else None)
+        with subprocess.Popen(
+            argv, stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr, cwd=cwd, env=env,
+            encoding="utf-8", errors="replace", process_group=0, **creds,
+        ) as proc:
+            with _children_lock:
+                _children.add(proc)
             try:
-                login = os.getlogin()
-                if login and login != "root":
-                    pw = pwd.getpwnam(login)
-                    return pw.pw_name, Path(pw.pw_dir)
-            except (OSError, KeyError):
-                pass
-        pw = pwd.getpwuid(uid)
-        return pw.pw_name, Path(pw.pw_dir)
-    except KeyError:
-        return f"uid{uid}", Path.home()
+                out, errout = proc.communicate(timeout=timeout)
+            except BaseException:
+                _kill_group(proc)
+                raise
+            finally:
+                with _children_lock:
+                    _children.discard(proc)
+    finally:
+        if log_fh is not None:
+            log_fh.close()
+    result = subprocess.CompletedProcess(argv, proc.returncode, out, errout)
+    if check and result.returncode != 0:
+        detail = f"{errout or ''}{out or ''}".strip()[-2000:]
+        die(f"command failed (exit {result.returncode}): {shlex.join(argv)}" + (f"\n{detail}" if detail else ""))
+    return result
 
 
-def validate_sudo_ids() -> Tuple[Optional[int], Optional[int]]:
+def parallel_map[T, R](fn: Callable[[T], R], items: Sequence[T], workers: int) -> list[R]:
+    """ThreadPoolExecutor.map that cancels queued work when the caller is interrupted."""
+    ex = cf.ThreadPoolExecutor(max_workers=max(1, min(workers, len(items) or 1)))
     try:
-        suid = os.environ.get("SUDO_UID")
-        sgid = os.environ.get("SUDO_GID")
-        if not suid or not sgid:
-            return None, None
-        if not re.fullmatch(r"[0-9]{1,9}", suid) or not re.fullmatch(r"[0-9]{1,9}", sgid):
-            return None, None
-        uid = int(suid)
-        gid = int(sgid)
-        if uid == 0:
-            return None, None
-        pwd.getpwuid(uid)
-        grp.getgrgid(gid)
-        return uid, gid
-    except (KeyError, ValueError, OverflowError):
-        return None, None
+        return list(ex.map(fn, items))
+    except BaseException:
+        # Worker threads do not receive the main thread's exception. Descendants can
+        # ignore SIGTERM and keep captured pipes open indefinitely; stop their groups
+        # before waiting for executor shutdown or removing shard/workspace directories.
+        terminate_children(signal.SIGKILL)
+        ex.shutdown(wait=True, cancel_futures=True)
+        raise
+    finally:
+        ex.shutdown(wait=True)
 
 
-def ensure_sudo_cached() -> None:
-    if os.geteuid() == 0:
-        return
-    if not check_tool("sudo"):
-        die("sudo required")
-    console.print("[yellow]Caching sudo (may prompt)...[/]")
-    if subprocess.run(["sudo", "-v"], shell=False).returncode != 0:
-        die("sudo auth failed")
+# ═══════════════════════════════════ users ═══════════════════════════════════
+@dataclass(frozen=True, slots=True)
+class RealUser:
+    name: str
+    uid: int
+    gid: int
+    home: Path
+    groups: tuple[int, ...]
+
+    @property
+    def is_root(self) -> bool:
+        return self.uid == 0
 
 
-def restore_ownership(path: Path) -> None:
-    if not path.exists():
-        return
-    uid, gid = validate_sudo_ids()
-    if uid is None or gid is None:
-        return
-    subprocess.run(
-        ["chown", "-R", "-h", "--no-dereference", f"{uid}:{gid}", str(path)],
-        shell=False,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=False,
-    )
-
-
-def fsync_path(path: Path) -> None:
-    try:
-        fd = os.open(str(path), os.O_RDONLY)
+@functools.cache
+def real_user() -> RealUser:
+    pw: pwd.struct_passwd | None = None
+    if (sudo_user := os.environ.get("SUDO_USER")) and sudo_user != "root":
         try:
-            os.fsync(fd)
-        finally:
-            os.close(fd)
+            pw = pwd.getpwnam(sudo_user)
+        except KeyError:
+            pw = None
+    if pw is None:
+        try:
+            login = os.getlogin()
+            if login != "root":
+                pw = pwd.getpwnam(login)
+        except (OSError, KeyError):
+            pw = None
+    if pw is None:
+        pw = pwd.getpwuid(os.getuid())
+    return RealUser(pw.pw_name, pw.pw_uid, pw.pw_gid, Path(pw.pw_dir),
+                    tuple(os.getgrouplist(pw.pw_name, pw.pw_gid)))
+
+
+def user_env(user: RealUser, **extra: str) -> dict[str, str]:
+    env = os.environ | {
+        "HOME": str(user.home), "USER": user.name, "LOGNAME": user.name,
+        "GIT_TERMINAL_PROMPT": "0", "GCM_INTERACTIVE": "never",
+    }
+    env.setdefault("GIT_ASKPASS", "/bin/true")
+    return env | extra
+
+
+def notify(title: str, msg: str, icon: str = "dialog-information") -> None:
+    """Fire-and-forget desktop notification (never blocks cleanup on a dbus activation timeout)."""
+    if (exe := shutil.which("notify-send")) is None:
+        return
+    user = real_user()
+    env = dict(os.environ)
+    creds: dict[str, object] = {}
+    if not user.is_root:
+        runtime = f"/run/user/{user.uid}"
+        env |= {"HOME": str(user.home), "USER": user.name, "LOGNAME": user.name, "XDG_RUNTIME_DIR": runtime}
+        if os.path.exists(f"{runtime}/bus"):
+            env["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path={runtime}/bus"
+        creds = {"user": user.uid, "group": user.gid, "extra_groups": list(user.groups)}
+    try:
+        subprocess.Popen([exe, "-a", "Dusky Factory", "-i", icon, title, msg], stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env,
+                         start_new_session=True, **creds)
     except OSError:
         pass
+
+
+# ═══════════════════════════════ filesystem ═══════════════════════════════
+_cleanup_paths: list[Path] = []
+_lock_fd: int | None = None
+
+
+def assert_conf_safe(path: Path) -> None:
+    """Paths end up in pacman.conf (Server/CacheDir/DBPath): whitespace or '#' changes parsing."""
+    s = os.fspath(path)
+    if not s or any(c.isspace() or c == "#" or ord(c) < 32 for c in s):
+        die(f"path unusable in pacman.conf (whitespace, '#' or control chars): {s!r}")
+
+
+def make_tempdir(prefix: str, *, owner: RealUser | None = None) -> Path:
+    path = Path(tempfile.mkdtemp(prefix=prefix))  # created 0700
+    _cleanup_paths.append(path)
+    if owner is not None:
+        os.chown(path, owner.uid, owner.gid)
+    return path
+
+
+def mounts_under(path: Path) -> list[str]:
+    root = os.path.realpath(path)
+    prefix = root.rstrip("/") + "/"
+    found: list[str] = []
+    with open("/proc/self/mountinfo", encoding="utf-8", errors="surrogateescape") as fh:
+        for line in fh:
+            mp = MOUNT_ESCAPE_RE.sub(lambda m: chr(int(m[1], 8)), line.split(" ", 5)[4])
+            if mp == root or mp.startswith(prefix):
+                found.append(mp)
+    return found
+
+
+def remove_tree(path: Path, *, strict: bool = False) -> None:
+    """rmtree that never descends into mounts (an aborted pacstrap leaves proc/sys/dev binds)."""
+    if not os.path.lexists(path):
+        return
+    if path.is_symlink() or not path.is_dir():
+        path.unlink(missing_ok=True)
+        return
+    if mps := mounts_under(path):
+        tops = sorted({m for m in mps if not any(m != o and m.startswith(o.rstrip("/") + "/") for o in mps)})
+        warn(f"unmounting {len(mps)} mount(s) under {path}")
+        run(["umount", "--recursive", "--lazy", "--", *tops])
+        if mounts_under(path):
+            die(f"refusing to delete {path}: mounts remain beneath it")
+    shutil.rmtree(path, ignore_errors=not strict)
+
+
+def run_cleanups() -> None:
+    while _cleanup_paths:
+        path = _cleanup_paths.pop()
+        try:
+            remove_tree(path)
+        except Exception as exc:  # atexit context: report, never raise
+            print(f"[!!] cleanup of {path} failed: {exc}", file=sys.stderr)
+
+
+@contextmanager
+def atomic_path(dest: Path, *, durable: bool = True) -> Iterator[Path]:
+    """Yield a sibling temp path; on success fsync (optional) and rename over `dest`."""
+    tmp = dest.with_name(f".{dest.name}.{secrets.token_hex(4)}.tmp")
+    try:
+        yield tmp
+        if durable:
+            fd = os.open(tmp, os.O_RDONLY | os.O_CLOEXEC)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+        os.replace(tmp, dest)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def fsync_dir(path: Path) -> None:
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
     try:
-        fd = os.open(str(path), os.O_DIRECTORY)
-        try:
-            os.fsync(fd)
-        finally:
-            os.close(fd)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def drop_page_cache(path: Path) -> None:
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC)
     except OSError:
-        pass
+        return
+    try:
+        os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+    finally:
+        os.close(fd)
 
 
-def disk_free(path: Path) -> int:
+def ensure_disk_space(path: Path, need: int, label: str) -> None:
     probe = path
-    while not probe.exists() and probe != probe.parent:
+    while not probe.exists():
         probe = probe.parent
-    return int(shutil.disk_usage(probe).free)
+    free = shutil.disk_usage(probe).free
+    if free < need:
+        die(f"insufficient space for {label} at {path}: need ~{human_bytes(need)}, free {human_bytes(free)}")
 
 
-def ensure_disk_space(path: Path, need_bytes: int, label: str) -> None:
-    free = disk_free(path)
-    if free < need_bytes:
-        die(
-            f"Insufficient disk for {label} at {path}: "
-            f"need ~{human_bytes(need_bytes)}, free {human_bytes(free)}"
-        )
+def restore_ownership(root: Path, user: RealUser) -> None:
+    """chown -R equivalent that only touches inodes whose owner differs (no ctime/journal churn
+    on the thousands of files that are already correct)."""
+    if user.is_root or not root.exists():
+        return
+    uid, gid = user.uid, user.gid
+    changed = 0
+
+    def fix(path: str, st: os.stat_result) -> None:
+        nonlocal changed
+        if st.st_uid != uid or st.st_gid != gid:
+            os.chown(path, uid, gid, follow_symlinks=False)
+            changed += 1
+
+    fix(os.fspath(root), root.lstat())
+    stack = [os.fspath(root)]
+    while stack:
+        with os.scandir(stack.pop()) as it:
+            for entry in it:
+                fix(entry.path, entry.stat(follow_symlinks=False))
+                if entry.is_dir(follow_symlinks=False):
+                    stack.append(entry.path)
+    if changed:
+        step(f"ownership -> {user.name}: {changed} inode(s) under {root}")
 
 
-def is_mountpoint(p: Path) -> bool:
+def file_size(path: Path) -> int:
     try:
-        return p.is_mount()
-    except (OSError, ValueError):
+        return path.stat().st_size
+    except FileNotFoundError:
+        return -1
+
+
+def tail_text(path: Path, nbytes: int = 3000) -> str:
+    try:
+        with open(path, "rb") as fh:
+            size = fh.seek(0, os.SEEK_END)
+            fh.seek(max(0, size - nbytes))
+            return fh.read().decode("utf-8", "replace")
+    except OSError:
+        return ""
+
+
+def acquire_factory_lock() -> None:
+    global _lock_fd
+    fd = os.open(LOCK_PATH, os.O_CREAT | os.O_RDWR | os.O_CLOEXEC, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(fd)
+        die(f"another factory instance holds {LOCK_PATH}")
+    os.ftruncate(fd, 0)
+    os.write(fd, f"{os.getpid()}\n".encode())
+    _lock_fd = fd  # released by the kernel when the process exits
+
+
+# ═══════════════════════════════ versions & names ═══════════════════════════════
+_DIGIT = frozenset("0123456789")
+_ALPHA = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
+_ALNUM = _DIGIT | _ALPHA
+
+
+def _rpmvercmp(a: str, b: str) -> int:
+    """Port of libalpm rpmvercmp() (lib/libalpm/version.c), ASCII classes like the C locale."""
+    if a == b:
+        return 0
+    la, lb = len(a), len(b)
+    i = j = 0
+    while i < la and j < lb:
+        pi, pj = i, j
+        while i < la and a[i] not in _ALNUM:
+            i += 1
+        while j < lb and b[j] not in _ALNUM:
+            j += 1
+        if i >= la or j >= lb:
+            break
+        if i - pi != j - pj:  # differing separator lengths decide
+            return -1 if i - pi < j - pj else 1
+        cls = _DIGIT if a[i] in _DIGIT else _ALPHA
+        ei, ej = i, j
+        while ei < la and a[ei] in cls:
+            ei += 1
+        while ej < lb and b[ej] in cls:
+            ej += 1
+        if ej == j:  # segment types differ: numeric is newer than alpha
+            return 1 if cls is _DIGIT else -1
+        sa, sb = a[i:ei], b[j:ej]
+        if cls is _DIGIT:
+            sa, sb = sa.lstrip("0"), sb.lstrip("0")
+            if len(sa) != len(sb):
+                return 1 if len(sa) > len(sb) else -1
+        if sa != sb:
+            return 1 if sa > sb else -1
+        i, j = ei, ej
+    if i >= la and j >= lb:
+        return 0
+    # "the final showdown": a remaining alpha segment never beats an empty string
+    if (i >= la and not (j < lb and b[j] in _ALPHA)) or (i < la and a[i] in _ALPHA):
+        return -1
+    return 1
+
+
+def _split_evr(evr: str) -> tuple[str, str, str | None]:
+    """Port of libalpm parseEVR(): [epoch:]version[-release]."""
+    k, n = 0, len(evr)
+    while k < n and evr[k] in _DIGIT:
+        k += 1
+    dash = evr.rfind("-", k)
+    if k < n and evr[k] == ":":
+        epoch, start = evr[:k] or "0", k + 1
+    else:
+        epoch, start = "0", 0
+    if dash == -1:
+        return epoch, evr[start:], None
+    return epoch, evr[start:dash], evr[dash + 1:]
+
+
+def vercmp(a: str, b: str) -> int:
+    """alpm_pkg_vercmp() semantics (what `vercmp` and pacman use); -1, 0 or 1."""
+    if a == b:
+        return 0
+    e1, v1, r1 = _split_evr(a)
+    e2, v2, r2 = _split_evr(b)
+    if c := _rpmvercmp(e1, e2):
+        return c
+    if c := _rpmvercmp(v1, v2):
+        return c
+    return _rpmvercmp(r1, r2) if r1 is not None and r2 is not None else 0
+
+
+def parse_pkg_filename(name: str) -> tuple[str, str, str] | None:
+    """Parse the archive filename; makepkg normally omits the epoch from its version."""
+    m = PKGFILE_RE.fullmatch(name)
+    return (m["name"], m["ver"], m["arch"]) if m else None
+
+
+def dep_name(dep: str) -> str:
+    return DEP_OP_RE.split(dep, maxsplit=1)[0].strip()
+
+
+def is_aur_candidate(name: str) -> bool:
+    """Library/pkgconfig provides are never AUR package names."""
+    return bool(PKGNAME_RE.fullmatch(name)) and not SO_DEP_RE.search(name)
+
+
+def newest_files(filenames: Iterable[str], arches: Collection[str] = ("x86_64", "any"),
+                 *, versions: dict[str, str] | None = None) -> dict[str, str]:
+    """pkgname -> filename of its newest version (vercmp), ignoring foreign arches."""
+    best: dict[str, tuple[str, str]] = {}
+    for fn in filenames:
+        if (parsed := parse_pkg_filename(fn)) is None or parsed[2] not in arches:
+            continue
+        name, ver, _ = parsed
+        if versions is not None:
+            ver = versions.get(fn, ver)  # package metadata includes epochs; filenames do not
+        if (cur := best.get(name)) is None or vercmp(ver, cur[0]) > 0:
+            best[name] = (ver, fn)
+    return {name: fn for name, (_, fn) in best.items()}
+
+
+def package_version(path: Path) -> str:
+    """Read the epoch-aware version from the built archive's .PKGINFO."""
+    with tarfile.open(path, "r|*") as tf:
+        for member in tf:
+            if member.name == ".PKGINFO" and (fh := tf.extractfile(member)) is not None:
+                for line in fh.read().decode("utf-8").splitlines():
+                    if line.startswith("pkgver = "):
+                        return line.removeprefix("pkgver = ")
+                break
+    die(f"{path}: .PKGINFO has no package version")
+
+
+def version_satisfies(version: str, dependency: str) -> bool:
+    if (constraint := re.search(r"(<=|>=|=|<|>)(.+)$", dependency)) is None:
+        return True
+    comparison = vercmp(version, constraint[2])
+    match constraint[1]:
+        case "=":
+            return comparison == 0
+        case ">":
+            return comparison > 0
+        case "<":
+            return comparison < 0
+        case ">=":
+            return comparison >= 0
+        case "<=":
+            return comparison <= 0
+    return False
+
+
+def package_files(repo: Path) -> list[str]:
+    if not repo.is_dir():
+        return []
+    with os.scandir(repo) as it:
+        return [e.name for e in it if PKGFILE_RE.fullmatch(e.name) and e.is_file(follow_symlinks=False)]
+
+
+# ═══════════════════════════════ repository databases ═══════════════════════════════
+# A repo DB is a tar of "<name>-<ver>/desc" (+ "<name>-<ver>/files" in the .files DB). The .files
+# DB is a superset of the .db, so reading it yields everything needed to rewrite both.
+_DB_KEYS = frozenset({"NAME", "VERSION", "FILENAME", "CSIZE", "SHA256SUM", "PROVIDES"})
+_INDEX_KEYS = frozenset({"NAME", "PROVIDES", "GROUPS"})
+
+
+def desc_fields(data: bytes, wanted: frozenset[str]) -> dict[str, list[str]]:
+    out: dict[str, list[str]] = {}
+    for block in data.decode("utf-8", "replace").split("\n\n"):
+        head, _, body = block.strip("\n").partition("\n")
+        if len(head) > 2 and head[0] == "%" == head[-1] and (key := head[1:-1]) in wanted:
+            out[key] = body.split("\n") if body else []
+    return out
+
+
+@dataclass(slots=True)
+class DbEntry:
+    name: str
+    version: str
+    filename: str
+    csize: int
+    sha256: str
+    provides: tuple[str, ...]
+    members: list[tuple[tarfile.TarInfo, bytes | None]]  # directory + desc (+ files)
+
+
+def read_repo_db(path: Path) -> dict[str, DbEntry]:
+    """Parse a repo DB in one sequential pass (stream mode; gzip/zstd auto-detected)."""
+    groups: dict[str, list[tuple[tarfile.TarInfo, bytes | None]]] = {}
+    with tarfile.open(path, "r|*") as tf:
+        for member in tf:
+            data: bytes | None = None
+            if member.isfile():
+                fh = tf.extractfile(member)
+                data = fh.read() if fh is not None else b""
+            groups.setdefault(member.name.split("/", 1)[0], []).append((member, data))
+    entries: dict[str, DbEntry] = {}
+    for top, members in groups.items():
+        desc = next((d for m, d in members if d is not None and m.name.endswith("/desc")), None)
+        if desc is None:
+            continue
+        f = desc_fields(desc, _DB_KEYS)
         try:
-            return os.path.ismount(str(p))
-        except OSError:
-            return False
+            entry = DbEntry(
+                name=f["NAME"][0], version=f["VERSION"][0], filename=f["FILENAME"][0],
+                csize=int(f["CSIZE"][0]), sha256=f["SHA256SUM"][0].lower(),
+                provides=tuple(dep_name(p) for p in f.get("PROVIDES", ())), members=members,
+            )
+        except (KeyError, IndexError, ValueError) as exc:
+            die(f"{path}: malformed desc for {top!r} ({exc!r})")
+        entries[entry.name] = entry
+    return entries
 
 
-def get_alpm_gid() -> Optional[int]:
+def load_db_by_filename(repo: Path) -> dict[str, DbEntry]:
+    path = repo / FILES_NAME
+    if not path.is_file():
+        return {}
     try:
-        return grp.getgrnam("alpm").gr_gid
-    except KeyError:
-        return None
+        return {e.filename: e for e in read_repo_db(path).values()}
+    except Exception as exc:  # self-heal: an unreadable DB is simply rebuilt
+        warn(f"{path} unreadable ({exc}); rebuilding from scratch")
+        return {}
 
 
-def run_cmd(
-    cmd: Sequence[str],
-    *,
-    sudo: bool = False,
-    as_user: Optional[str] = None,
-    env: Optional[Dict[str, str]] = None,
-    cwd: Optional[Path] = None,
-    capture: bool = False,
-    check: bool = True,
-    merge_stderr: bool = False,
-    timeout: Optional[int] = None,
-    non_interactive: bool = False,
-) -> subprocess.CompletedProcess[str]:
-    full: List[str] = []
-    euid_root = os.geteuid() == 0
+def repo_db_links_ok(repo: Path) -> bool:
+    return all((repo / link).is_symlink() and os.readlink(repo / link) == target
+               for link, target in ((f"{REPO_NAME}.db", DB_NAME), (f"{REPO_NAME}.files", FILES_NAME)))
 
-    if as_user:
-        if euid_root:
-            full = ["runuser", "-u", as_user, "--"]
+
+def write_repo_db(repo: Path, entries: Iterable[DbEntry], *, durable: bool = True) -> None:
+    """Write archrepo.db.tar.zst (desc only) and archrepo.files.tar.zst (all members) atomically,
+    plus the archrepo.db / archrepo.files symlinks pacman fetches."""
+    ordered = sorted(entries, key=lambda e: e.name)
+    with atomic_path(repo / DB_NAME, durable=durable) as db_tmp, \
+            atomic_path(repo / FILES_NAME, durable=durable) as files_tmp:
+        with tarfile.open(db_tmp, "w:zst") as db_tf, tarfile.open(files_tmp, "w:zst") as files_tf:
+            for entry in ordered:
+                for info_, data in entry.members:
+                    files_tf.addfile(info_, None if data is None else io.BytesIO(data))
+                    if data is None or info_.name.endswith("/desc"):
+                        db_tf.addfile(info_, None if data is None else io.BytesIO(data))
+    for link, target in ((f"{REPO_NAME}.db", DB_NAME), (f"{REPO_NAME}.files", FILES_NAME)):
+        tmp_link = repo / f".{link}.{secrets.token_hex(4)}.tmp"
+        try:
+            os.symlink(target, tmp_link)
+            os.replace(tmp_link, repo / link)
+        finally:
+            tmp_link.unlink(missing_ok=True)
+    if durable:
+        fsync_dir(repo)
+
+
+def repo_add_entries(paths: Sequence[Path]) -> dict[str, DbEntry]:
+    """Index package files with repo-add, sharded across CPUs. repo-add is Bash and serial per
+    package (bsdtar .PKGINFO read + per-line subshells, sha256sum, full-archive bsdtar -t for the
+    files list), so N independent shard DBs merged in Python scale ~linearly with cores."""
+    if not paths:
+        return {}
+    shards = max(1, min(os.process_cpu_count() or 1, len(paths) // REPO_ADD_MIN_SHARD))
+    work = make_tempdir("dusky-repoadd-")
+
+    def index_shard(i: int) -> dict[str, DbEntry]:
+        db = work / f"s{i}.db.tar.zst"
+        r = run(["repo-add", "--quiet", "--nocolor", db, *paths[i::shards]], capture=True, merge=True)
+        if r.returncode != 0:
+            die(f"repo-add failed (shard {i}):\n{r.stdout[-2000:]}")
+        return read_repo_db(work / f"s{i}.files.tar.zst")
+
+    try:
+        parts = parallel_map(index_shard, list(range(shards)), shards)
+    finally:
+        remove_tree(work)
+    merged: dict[str, DbEntry] = {}
+    for part in parts:
+        for name, entry in part.items():
+            if name in merged:
+                die(f"two files for package {name}: {merged[name].filename} / {entry.filename}")
+            merged[name] = entry
+    return merged
+
+
+def update_repo_db(repo: Path, want: Collection[str], old: dict[str, DbEntry] | None = None,
+                   force_write: bool = False, *, persist: bool = True) -> dict[str, DbEntry]:
+    """Make the repo DB describe exactly `want` (filenames in `repo`). Entries whose filename and
+    size still match are reused; only new files go through repo-add; unchanged DBs are not
+    rewritten at all. With persist=False, return the indexed view without changing the repo."""
+    if old is None:
+        old = load_db_by_filename(repo)
+    keep: dict[str, DbEntry] = {}
+    fresh: list[Path] = []
+    for fn in sorted(want):
+        entry = old.get(fn)
+        path = repo / fn
+        size = file_size(path)
+        if size < 0:
+            die(f"{fn} is missing from {repo}")
+        if entry is not None and size == entry.csize:
+            keep[entry.name] = entry
         else:
-            me = pwd.getpwuid(os.getuid()).pw_name
-            if as_user != me:
-                full = ["sudo", "-n", "-u", as_user, "--"]
-    elif sudo and not euid_root:
-        full = ["sudo", "-n", "--"]
-
-    full.extend(cmd)
-    res = subprocess.run(
-        full,
-        cwd=str(cwd) if cwd else None,
-        env=env,
-        stdin=subprocess.DEVNULL if non_interactive else None,
-        stdout=subprocess.PIPE if capture else None,
-        stderr=(
-            subprocess.STDOUT
-            if (capture and merge_stderr)
-            else (subprocess.PIPE if capture else None)
-        ),
-        text=True,
-        timeout=timeout,
-        shell=False,
-        check=False,
-    )
-    if check and res.returncode != 0:
-        if capture:
-            err_out = res.stdout if merge_stderr else res.stderr
-            console.print(f"[red]Failed: {shlex.join(full)}\n{(err_out or '')[:1000]}[/]")
-        raise subprocess.CalledProcessError(res.returncode, list(full), res.stdout, res.stderr)
-    return res
+            fresh.append(path)
+    if not persist and not fresh:
+        return keep
+    links_ok = repo_db_links_ok(repo) and all((repo / n).is_file() for n in (DB_NAME, FILES_NAME))
+    if not force_write and not fresh and len(keep) == len(old) and links_ok:
+        ok(f"{repo.name} DB unchanged ({len(keep)} packages)")
+        return keep
+    if fresh:
+        t0 = time.perf_counter()
+        for name, entry in repo_add_entries(fresh).items():
+            if name in keep:
+                die(f"two files for package {name}: {keep[name].filename} / {entry.filename}")
+            keep[name] = entry
+        step(f"repo-add indexed {len(fresh)} new file(s) in {time.perf_counter() - t0:.1f}s; "
+             f"reused {len(keep) - len(fresh)} entries")
+    if persist:
+        write_repo_db(repo, keep.values())
+        ok(f"{repo.name} DB written ({len(keep)} packages)")
+    return keep
 
 
-# ==============================================================================
-# Factory helpers (alpm cache, generic makepkg, versions, chunking)
-# ==============================================================================
-def assert_x86_64() -> None:
-    machine = os.uname().machine
-    if machine != "x86_64":
-        die(f"This factory only supports x86_64 (uname -m = {machine})")
+def ensure_repo_db(repo: Path) -> bool:
+    """True if `repo` has a DB afterwards (indexing its newest files when the DB is missing or out of sync)."""
+    old = load_db_by_filename(repo)
+    files = set(newest_files(package_files(repo), versions={fn: e.version for fn, e in old.items()}).values())
+    if not files:
+        return False
+    if (repo / FILES_NAME).is_file():
+        # .files is authoritative. An interruption between the two atomic renames can
+        # leave .db older, and a damaged .db must also be rebuilt from .files.
+        try:
+            db_entries = read_repo_db(repo / DB_NAME)
+            db_matches = {
+                (e.name, e.version, e.filename, e.csize, e.sha256) for e in db_entries.values()
+            } == {(e.name, e.version, e.filename, e.csize, e.sha256) for e in old.values()}
+        except (OSError, tarfile.TarError, FactoryError, ValueError):
+            db_matches = False
+        if (set(old) == files and all(file_size(repo / fn) == e.csize for fn, e in old.items())
+                and db_matches and repo_db_links_ok(repo)):
+            return True
+        warn(f"{repo}: DB out of sync with disk ({len(files)} files on disk, {len(old)} in DB); updating index")
+        update_repo_db(repo, files, old, force_write=True)
+        return True
+    warn(f"{repo}: no {FILES_NAME}; indexing the newest file of every package")
+    update_repo_db(repo, files, {}, force_write=True)
+    return True
 
 
-def prepare_alpm_cache_dir(path: Path) -> None:
-    """Make a pkg cache/repo usable with pacman 7 DownloadUser=alpm when possible."""
-    path.mkdir(parents=True, exist_ok=True)
-    if not path_is_safe_conf_value(path):
-        die(f"Unsafe cache/repo path: {path!r}")
-    try:
-        if path.stat().st_mode & 0o002:
-            die(f"Refusing world-writable repo/cache dir: {path}")
-    except OSError as exc:
-        die(f"Cannot stat {path}: {exc}")
-    gid = get_alpm_gid()
-    try:
-        if gid is not None:
-            os.chown(path, 0, gid)
-            path.chmod(0o2775)
-        else:
-            path.chmod(0o755)
-    except PermissionError as exc:
-        warn(f"alpm perms on {path}: {exc}")
+def prune_repo(repo: Path, keep: Collection[str]) -> None:
+    """Delete package files (and their .sig) not in `keep`, stale .part files and crashed temp files."""
+    keep_all = set(keep) | {f"{fn}.sig" for fn in keep}
+    removed = freed = 0
+    with os.scandir(repo) as it:
+        for entry in it:
+            name = entry.name
+            if name in keep_all or not entry.is_file(follow_symlinks=False):
+                continue
+            base = name.removesuffix(".sig")
+            if (PKGFILE_RE.fullmatch(base) or name.endswith(".part")
+                    or (name.startswith(".") and name.endswith(".tmp"))):
+                freed += entry.stat(follow_symlinks=False).st_size
+                os.unlink(entry.path)
+                removed += 1
+    if removed:
+        ok(f"pruned {removed} file(s) from {repo}, freed {human_bytes(freed)}")
+
+
+def custom_package_names(repo: Path) -> set[str]:
+    manifest = repo / CUSTOM_PACKAGES_FILE
+    if not manifest.is_file():
+        return set()
+    names = set(manifest.read_text(encoding="utf-8").splitlines())
+    if any(not PKGNAME_RE.fullmatch(name) for name in names):
+        die(f"invalid package name in {manifest}")
+    return names
+
+
+# ═══════════════════════════════ pacman helpers ═══════════════════════════════
+type ConfSections = list[tuple[str, list[tuple[str, str]]]]
+
+
+def parse_pacman_conf(text: str) -> ConfSections:
+    """Parse `pacman-conf` output (Includes resolved, $repo/$arch expanded by pacman itself)."""
+    sections: ConfSections = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            sections.append((line[1:-1], []))
+        elif sections:
+            key, _, value = line.partition("=")
+            sections[-1][1].append((key.strip(), value.strip()))
+    return sections
+
+
+@functools.cache
+def host_conf() -> dict[str, list[tuple[str, str]]]:
+    return dict(parse_pacman_conf(run(["pacman-conf"], capture=True, check=True).stdout))
+
+
+def conf_values(items: Iterable[tuple[str, str]], key: str) -> list[str]:
+    return [v for k, v in items if k == key]
+
+
+def pacman_errors(r: subprocess.CompletedProcess[str], limit: int = 1500) -> str:
+    text = f"{r.stderr or ''}\n{r.stdout or ''}"
+    lines = [ln for ln in text.splitlines() if ln.startswith(("error:", "warning:", ":: unable", "::"))]
+    return ("\n".join(lines) or text.strip())[-limit:]
+
+
+def host_pacman(*args: str) -> subprocess.CompletedProcess[str]:
+    """Host transaction (-S/-U): wait for db.lck; retry if another frontend grabbed it first."""
+    r: subprocess.CompletedProcess[str] | None = None
+    for _ in range(3):
+        wait_for_host_pacman_lock(warn)
+        r = run(["pacman", "--noconfirm", "--noprogressbar", "--color", "never", *args],
+                env=os.environ | {"LC_ALL": "C"}, capture=True, merge=True)
+        if r.returncode == 0 or "unable to lock database" not in (r.stdout or ""):
+            return r
+        time.sleep(2)
+    assert r is not None
+    return r
+
+
+@dataclass(frozen=True, slots=True)
+class SyncIndex:
+    names: frozenset[str]
+    provides: frozenset[str]
+    groups: frozenset[str]
+
+    def has(self, name: str) -> bool:
+        return name in self.names or name in self.provides or name in self.groups
+
+
+def load_sync_index(dbs: Iterable[Path]) -> SyncIndex:
+    """names/provides/groups of sync DBs parsed once in-process — replaces one pacman process
+    (full sync-DB load each) per dependency lookup."""
+    names: set[str] = set()
+    provides: set[str] = set()
+    groups: set[str] = set()
+    for db in dbs:
+        with tarfile.open(db, "r|*") as tf:
+            for member in tf:
+                if not member.name.endswith("/desc") or (fh := tf.extractfile(member)) is None:
+                    continue
+                f = desc_fields(fh.read(), _INDEX_KEYS)
+                names.update(f.get("NAME", ()))
+                provides.update(dep_name(p) for p in f.get("PROVIDES", ()))
+                groups.update(f.get("GROUPS", ()))
+    return SyncIndex(frozenset(names), frozenset(provides), frozenset(groups))
+
+
+type Closure = list[tuple[str, str, int]]  # (repo, filename, bytes still to download)
+
+
+def parse_closure(text: str) -> Closure:
+    return [(repo, fn, int(size)) for repo, fn, size in CLOSURE_LINE_RE.findall(text) if PKGFILE_RE.fullmatch(fn)]
+
+
+class IsolatedDB:
+    """Private pacman DBPath (empty local DB => full dependency closures), generated from the
+    host configuration via pacman-conf. Shared by the official and AUR phases."""
+
+    def __init__(self) -> None:
+        self.root = make_tempdir("dusky-isolate-")
+        assert_conf_safe(self.root)
+        for sub in ("sync", "local"):
+            (self.root / sub).mkdir()
+        self.conf = self.root / "pacman.conf"
+        self.repos: list[str] = []
+        self.index = SyncIndex(frozenset(), frozenset(), frozenset())
+        self._local_repo: Path | None = None
+
+    def setup(self) -> None:
+        self._write_conf()
+        self._sync()
+        t0 = time.perf_counter()
+        self.index = load_sync_index(self.root / "sync" / f"{r}.db" for r in self.repos)
+        step(f"sync index: {len(self.index.names)} packages, {len(self.index.provides)} provides "
+             f"({time.perf_counter() - t0:.2f}s)")
+
+    def close(self) -> None:
+        remove_tree(self.root)
+
+    def _write_conf(self) -> None:
+        conf = host_conf()
+        opts = conf.get("options", [])
+        mirrorlist = self.root / "mirrorlist"
+        if HOST_MIRRORLIST.is_file():
+            shutil.copyfile(HOST_MIRRORLIST, mirrorlist)
+        if shutil.which("reflector"):
+            tmp = self.root / "mirrorlist.reflector"
+            r = run(["reflector", "--latest", "20", "--protocol", "https", "--download-timeout", "3",
+                     "--save", tmp], capture=True, merge=True)
+            if r.returncode == 0 and tmp.is_file() and tmp.stat().st_size > 100:
+                os.replace(tmp, mirrorlist)
+                step("isolated mirrorlist: reflector (20 freshest HTTPS mirrors)")
+            else:
+                step("reflector failed; using the host mirrorlist")
+        lines = [
+            "[options]",
+            f"DBPath = {self.root}/",
+            f"LogFile = {self.root}/pacman.log",  # never log isolated operations into the host log
+            f"GPGDir = {(conf_values(opts, 'GPGDir') or ['/etc/pacman.d/gnupg/'])[0]}",
+            "Architecture = x86_64",
+            f"ParallelDownloads = {PARALLEL_DOWNLOADS}",
+        ]
+        for key in ("SigLevel", "LocalFileSigLevel", "RemoteFileSigLevel"):
+            if values := conf_values(opts, key):
+                lines.append(f"{key} = {' '.join(values)}")
+        for name, items in conf.items():
+            if name == "options" or name == REPO_NAME or name.startswith(EXCLUDED_REPO_PREFIXES):
+                continue
+            lines.append(f"[{name}]")
+            lines += [f"{k} = {v}" for k, v in items if k in ("Usage", "SigLevel")]
+            if name in ARCH_REPOS and mirrorlist.is_file():
+                lines.append(f"Include = {mirrorlist}")
+            else:
+                lines += [f"{k} = {v}" for k, v in items if k in ("Server", "CacheServer")]
+            self.repos.append(name)
+        if not ARCH_REPOS.intersection(self.repos):
+            die("host pacman.conf enables no official Arch repository")
+        self.conf.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        step(f"isolated pacman.conf: {self.conf} (repos: {' '.join(self.repos)})")
+
+    def pacman(self, *args: str, capture: bool = True) -> subprocess.CompletedProcess[str]:
+        color = "never" if capture else "auto"
+        return run(["pacman", "--config", self.conf, "--noconfirm", "--color", color, *args],
+                   env=os.environ | {"LC_ALL": "C"}, capture=capture)
+
+    def _sync(self) -> None:
+        for attempt in range(1, SYNC_ATTEMPTS + 1):
+            step(f"syncing isolated DB (attempt {attempt}/{SYNC_ATTEMPTS})")
+            r = self.pacman("-Sy", "--noprogressbar")
+            if r.returncode == 0:
+                ok("isolated DB synced")
+                return
+            warn(f"sync failed: {pacman_errors(r, 500)}")
+            if attempt < SYNC_ATTEMPTS:
+                backoff(attempt)
+        die("isolated DB sync failed — check network/keyring")
+
+    def resolve_names(self, names: Iterable[str]) -> tuple[list[str], list[str]]:
+        official: list[str] = []
+        unresolved: list[str] = []
+        for n in names:
+            (official if self.index.has(n) else unresolved).append(n)
+        return official, unresolved
+
+    @staticmethod
+    def _cache_args(cachedirs: Sequence[Path]) -> list[str]:
+        return [arg for d in cachedirs for arg in ("--cachedir", os.fspath(d))]
+
+    def _closure_raw(self, targets: Sequence[str], cachedirs: Sequence[Path]) -> subprocess.CompletedProcess[str]:
+        # -w sets ALPM_TRANS_FLAG_NOCONFLICTS: resolve dependencies only, like the real download.
+        # One transaction for the whole target list: consistent provider selection, one DB load.
+        return self.pacman("-Swp", "--noprogressbar", "--print-format", "%r %f %s",
+                           *self._cache_args(cachedirs), "--", *targets)
+
+    def closure(self, targets: Sequence[str], cachedirs: Sequence[Path]) -> Closure:
+        r = self._closure_raw(targets, cachedirs)
+        if r.returncode != 0:
+            die(f"dependency resolution failed:\n{pacman_errors(r)}")
+        return parse_closure(r.stdout)
+
+    def closure_tolerant(self, targets: Sequence[str], cachedirs: Sequence[Path]) -> tuple[Closure, list[str]]:
+        """Closure of the satisfiable subset of `targets`; returns (closure, dropped targets)."""
+        remaining = list(targets)
+        dropped: list[str] = []
+        while remaining:
+            r = self._closure_raw(remaining, cachedirs)
+            if r.returncode == 0:
+                return parse_closure(r.stdout), dropped
+            text = f"{r.stderr}\n{r.stdout}"
+            bad = ({m[1] for m in UNSAT_RE.finditer(text)} | {m[1] for m in NOT_FOUND_RE.finditer(text)})
+            bad &= set(remaining)
+            if not bad:  # failure caused by a transitive dependency: probe targets individually
+                bad = {t for t in remaining if self._closure_raw([t], cachedirs).returncode != 0}
+            if not bad:
+                die(f"dependency resolution failed:\n{pacman_errors(r)}")
+            for name in sorted(bad):
+                warn(f"{name}: runtime dependencies unsatisfiable offline — excluded from closure")
+            dropped += sorted(bad)
+            remaining = [t for t in remaining if t not in bad]
+        return [], dropped
+
+    def download(self, targets: Sequence[str], cachedirs: Sequence[Path]) -> None:
+        """pacman -Sw fetches what is missing, then signature/checksum-validates EVERY package of
+        the transaction (cached ones included) before returning 0 — no second verification pass."""
+        for attempt in range(1, DOWNLOAD_ATTEMPTS + 1):
+            info(f"pacman -Sw attempt {attempt}/{DOWNLOAD_ATTEMPTS} ({len(targets)} targets)")
+            r = self.pacman("-Sw", *self._cache_args(cachedirs), "--", *targets, capture=False)
+            if r.returncode == 0:
+                return
+            if attempt < DOWNLOAD_ATTEMPTS:
+                backoff(attempt)
+        die("package download failed after retries")
+
+    def attach_local_repo(self, repo: Path) -> None:
+        """Expose `repo` as [archrepo] without a network sync: its DB is copied into sync/."""
+        assert_conf_safe(repo)
+        shutil.copyfile(repo / DB_NAME, self.root / "sync" / f"{REPO_NAME}.db")
+        if self._local_repo is None:
+            with open(self.conf, "a", encoding="utf-8") as fh:
+                fh.write(f"[{REPO_NAME}]\nSigLevel = Optional TrustAll\nServer = file://{repo}\n")
+            self._local_repo = repo
+        elif self._local_repo != repo:
+            die("isolated DB already has a different local repository attached")
+
+
+# ═══════════════════════════════ master list & official phase ═══════════════════════════════
+def installer_package_targets(source_dir: Path) -> list[str]:
+    """Read installation targets from the installer rather than duplicating its list."""
+    installer = source_dir / "130_chroot_package_installer.sh"
+    result = run(["bash", installer, "--list-packages"], capture=True, check=True)
+    targets = result.stdout.splitlines()
+    if not targets or any(not PKGNAME_RE.fullmatch(name) for name in targets):
+        die(f"{installer}: invalid or empty --list-packages output")
+    return list(dict.fromkeys(targets))
+
+
+def build_master_list(external: Path | None) -> list[str]:
+    seen: set[str] = set()
+    master: list[str] = []
+    table = Table(title="Package Groups", box=box.SIMPLE)
+    table.add_column("Group", style="magenta")
+    table.add_column("Count", style="cyan")
+    table.add_column("Unique", style="green")
+    for group, pkgs in ALL_GROUPS.items():
+        new = 0
+        for p in pkgs:
+            if not PKGNAME_RE.fullmatch(p):
+                warn(f"invalid package name {p!r} in {group}")
+            elif p not in seen:
+                seen.add(p)
+                master.append(p)
+                new += 1
+        table.add_row(group, str(len(pkgs)), str(new))
+    console.print(table)
+    if external is not None and external.is_file():
+        try:
+            added = 0
+            for raw in external.read_text(encoding="utf-8").splitlines():
+                pkg = raw.split("#", 1)[0].strip()
+                if pkg and PKGNAME_RE.fullmatch(pkg) and pkg not in seen:
+                    seen.add(pkg)
+                    master.append(pkg)
+                    added += 1
+            step(f"external list {external}: {added} unique")
+        except (OSError, UnicodeDecodeError) as exc:
+            warn(f"external list unreadable: {exc}")
+    if not master:
+        die("master package list empty")
+    ok(f"master list: {len(master)} unique names")
+    return master
+
+
+def ingest_host_cache_packages(repo: Path, files: Collection[str]) -> int:
+    """If packages needed by the closure are already in the host pacman cache, copy them into repo
+    so pacman -Sw does not redownload them over the internet."""
+    host_caches = [Path(d) for d in conf_values(host_conf().get("options", []), "CacheDir")]
+    if not host_caches:
+        host_caches = [Path("/var/cache/pacman/pkg")]
+    copied = 0
+    for fn in files:
+        if (repo / fn).exists():
+            continue
+        for cache_dir in host_caches:
+            src = cache_dir / fn
+            if src.is_file():
+                try:
+                    with atomic_path(repo / fn) as tmp:
+                        shutil.copy2(src, tmp)
+                    sig = cache_dir / f"{fn}.sig"
+                    if sig.is_file():
+                        with atomic_path(repo / f"{fn}.sig") as tmp:
+                            shutil.copy2(sig, tmp)
+                    copied += 1
+                    break
+                except OSError:
+                    pass
+    if copied:
+        step(f"reused {copied} package(s) from host pacman cache (saved network download)")
+    return copied
+
+
+def official_phase(db: IsolatedDB, master: Sequence[str], repo: Path, user: RealUser) -> None:
+    info("=== OFFICIAL REPO BUILD ===")
+    require_tool("repo-add", "pacman")
+    official, unresolved = db.resolve_names(master)
+    migrated, _ = db.resolve_names(AUR_SEED)
+    official = list(dict.fromkeys([*official, *migrated]))
+    if unresolved:
+        shown = ", ".join(unresolved[:40]) + ("…" if len(unresolved) > 40 else "")
+        warn(f"{len(unresolved)} master names not in official repos (AUR phase candidates): {shown}")
+    if not official:
+        die("no official packages resolved from the master list")
+    assert_conf_safe(repo)
+    repo.mkdir(parents=True, exist_ok=True)
+
+    closure = db.closure(official, [repo])
+    files = {fn for _, fn, _ in closure}
+    if ingest_host_cache_packages(repo, files):
+        closure = db.closure(official, [repo])
+        files = {fn for _, fn, _ in closure}
+    need = sum(size for *_, size in closure)
+    ok(f"closure: {len(files)} packages, {human_bytes(need)} to download")
+    old = load_db_by_filename(repo)
+    # Anything not already indexed (new, resized, or left unvalidated by a crashed run) forces one
+    # pacman -Sw, which signature-validates the entire closure; a fully indexed closure skips it.
+    unindexed = sum(1 for fn in files if (e := old.get(fn)) is None or file_size(repo / fn) != e.csize)
+    if need or unindexed:
+        ensure_disk_space(repo, int(need * 1.35) + (512 << 20), "official package download")
+        db.download(official, [repo])
+    else:
+        step("closure fully cached and indexed: skipping pacman -Sw")
+    update_repo_db(repo, files, old)
+    prune_repo(repo, files)
+    restore_ownership(repo, user)
+
+
+# ═══════════════════════════════════ AUR phase ═══════════════════════════════════
+@dataclass(frozen=True, slots=True)
+class AurPkg:
+    name: str
+    version: str
+    pkgbase: str
+
+
+class AurRpc:
+    """Batched, cached AUR RPC v5 'info' client."""
+
+    def __init__(self) -> None:
+        self._cache: dict[str, AurPkg | None] = {}
+
+    def prefetch(self, names: Iterable[str]) -> None:
+        todo = [n for n in dict.fromkeys(names) if n not in self._cache and PKGNAME_RE.fullmatch(n)]
+        for i in range(0, len(todo), AUR_RPC_BATCH):
+            chunk = todo[i : i + AUR_RPC_BATCH]
+            found: dict[str, AurPkg] = {}
+            for row in self._request(chunk).get("results") or ():
+                name, ver = row.get("Name"), row.get("Version")
+                base = row.get("PackageBase") or name
+                if isinstance(name, str) and isinstance(ver, str) and isinstance(base, str):
+                    found[name] = AurPkg(name, ver, base)
+            for n in chunk:
+                self._cache[n] = found.get(n)
+
+    def get(self, name: str) -> AurPkg | None:
+        if name not in self._cache:
+            self.prefetch([name])
+        return self._cache.get(name)
+
+    @staticmethod
+    def _request(names: Sequence[str]) -> dict:
+        query = urllib.parse.urlencode([("arg[]", n) for n in names])
+        req = urllib.request.Request(f"{AUR_RPC}?{query}", headers={
+            "User-Agent": f"DuskyISO-Factory/{VERSION}", "Accept": "application/json"})
+        last = ""
+        for attempt in range(5):
+            delay = 1.5**attempt
+            try:
+                with urllib.request.urlopen(req, timeout=20) as resp:
+                    raw = resp.read(MAX_RPC_BYTES + 1)
+                if len(raw) > MAX_RPC_BYTES:
+                    raise ValueError("response too large")
+                data = json.loads(raw)
+                if not isinstance(data, dict):
+                    raise ValueError("invalid AUR RPC response")
+                if data.get("type") == "error":
+                    raise ValueError(str(data.get("error")))
+                if not isinstance(data.get("results"), list):
+                    raise ValueError("invalid AUR RPC response")
+                if not all(isinstance(row, dict) for row in data["results"]):
+                    raise ValueError("invalid AUR RPC result")
+                return data
+            except urllib.error.HTTPError as exc:
+                last = f"HTTP {exc.code}"
+                if exc.code == 429:
+                    try:
+                        delay = float(exc.headers.get("Retry-After") or 5)
+                    except ValueError:
+                        delay = 5.0
+            except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
+                last = str(exc)
+            if attempt < 4:
+                time.sleep(max(0.0, min(30.0, delay)) + random.uniform(0, 1))
+        die(f"AUR RPC unreachable: {last}")
+
+
+@dataclass(slots=True)
+class SrcInfo:
+    pkgbase: str = ""
+    pkgnames: list[str] = field(default_factory=list)
+    depends: list[str] = field(default_factory=list)
+    makedepends: list[str] = field(default_factory=list)
+
+
+# checkdepends are irrelevant: makepkg runs with --nocheck and --nodeps
+_SRCINFO_DEPS = {"depends": "depends", "depends_x86_64": "depends",
+                 "makedepends": "makedepends", "makedepends_x86_64": "makedepends"}
+
+
+def parse_srcinfo(text: str) -> SrcInfo:
+    si = SrcInfo()
+    for raw in text.splitlines():
+        key, sep, value = raw.strip().partition(" = ")
+        if not sep or not value:
+            continue
+        if key == "pkgbase":
+            si.pkgbase = value
+        elif key == "pkgname":
+            si.pkgnames.append(value)
+        elif (kind := _SRCINFO_DEPS.get(key)) is not None:
+            getattr(si, kind).append(value)
+    return si
 
 
 def write_factory_makepkg_conf(dest: Path) -> Path:
-    use_mold = check_tool("mold")
+    use_mold = shutil.which("mold") is not None
+    ccache = "ccache" if shutil.which("ccache") else "!ccache"
+    rust_common = (
+        "-C target-cpu=x86-64 -C opt-level=3 "
+        "-C link-arg=-Wl,--as-needed "
+        "-C link-arg=-Wl,-z,relro "
+        "-C link-arg=-Wl,-z,now "
+        "-C link-arg=-Wl,-z,pack-relative-relocs"
+    )
     if use_mold:
-        ld_line = (
-            'LDFLAGS="-Wl,-O1 -Wl,--sort-common -Wl,--as-needed -Wl,-z,relro -Wl,-z,now '
-            '-Wl,-z,pack-relative-relocs -fuse-ld=mold"'
-        )
-        rust = "-C target-cpu=x86-64 -C link-arg=-fuse-ld=mold"
+        ld_line = ('LDFLAGS="-Wl,--as-needed -Wl,-z,relro -Wl,-z,now '
+                   '-Wl,-z,pack-relative-relocs -fuse-ld=mold"')
+        rust = f"{rust_common} -C link-arg=-fuse-ld=mold"
         step("makepkg: mold linker enabled")
     else:
-        ld_line = (
-            'LDFLAGS="-Wl,-O1 -Wl,--sort-common -Wl,--as-needed -Wl,-z,relro -Wl,-z,now '
-            '-Wl,-z,pack-relative-relocs"'
-        )
-        rust = "-C target-cpu=x86-64"
-        step("makepkg: default linker (install mold for faster link)")
-    text = _FACTORY_MAKEPKG_CONF_TEMPLATE.replace("__LDFLAGS_LINE__", ld_line).replace(
-        "__RUSTFLAGS__", rust
-    )
-    dest.parent.mkdir(parents=True, exist_ok=True)
+        ld_line = ('LDFLAGS="-Wl,-O1 -Wl,--sort-common -Wl,--as-needed -Wl,-z,relro -Wl,-z,now '
+                   '-Wl,-z,pack-relative-relocs"')
+        rust = rust_common
+        step("makepkg: default linker (install mold for faster links)")
+    text = (_FACTORY_MAKEPKG_CONF_TEMPLATE.replace("__LDFLAGS_LINE__", ld_line)
+            .replace("__RUSTFLAGS__", rust).replace("__CCACHE__", ccache))
     dest.write_text(text, encoding="utf-8")
     dest.chmod(0o644)
     return dest
 
 
-def makepkg_clean_env(conf: Path, extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
-    """Host -march=native / user CFLAGS must not leak into AUR builds."""
-    env = os.environ.copy()
-    for k in _MAKEPKG_ENV_SCRUB:
-        env.pop(k, None)
-    ncores = str(os.cpu_count() or 4)
-    env["MAKEPKG_CONF"] = str(conf.resolve())
-    env["GOAMD64"] = "v1"
-    env["CI"] = "1"
-    env["CARGO_BUILD_JOBS"] = ncores
-    env["CMAKE_BUILD_PARALLEL_LEVEL"] = ncores
-    env["PACKAGER"] = "Dusky Factory <factory@dusky>"
-    env["GIT_TERMINAL_PROMPT"] = "0"
-    env["GCM_INTERACTIVE"] = "never"
-    if extra:
-        env.update(extra)
-    return env
+def makepkg_env(user: RealUser, **extra: str) -> dict[str, str]:
+    # `makepkg --config X` already skips ~/.makepkg.conf and $XDG_CONFIG_HOME/pacman/makepkg.conf
+    # (libmakepkg sources user overrides only for /etc/makepkg.conf); scrub env overrides too.
+    env = user_env(user)
+    for key in MAKEPKG_ENV_SCRUB:
+        env.pop(key, None)
+    ncpu = str(os.process_cpu_count() or 1)  # affinity/cpuset-aware, like nproc(1)
+    env |= {"GOAMD64": "v1", "CI": "1", "CARGO_BUILD_JOBS": ncpu, "CMAKE_BUILD_PARALLEL_LEVEL": ncpu,
+            "PACKAGER": "Dusky Factory <factory@dusky>"}
+    return env | extra
 
 
-def git_noninteractive_env(extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
-    env = os.environ.copy()
-    env["GIT_TERMINAL_PROMPT"] = "0"
-    env["GCM_INTERACTIVE"] = "never"
-    env.setdefault("GIT_ASKPASS", "/bin/true")
-    if extra:
-        env.update(extra)
-    return env
+class AurBuilder:
+    def __init__(self, db: IsolatedDB, repo: Path, official: Path | None, user: RealUser) -> None:
+        self.db, self.repo, self.official, self.user = db, repo, official, user
+        self.rpc = AurRpc()
+        self.work = make_tempdir("dusky-aur-", owner=user)
+        self.src_root = self._user_dir(self.work / "src")
+        self.logs = self.work / "logs"
+        self.logs.mkdir()
+        self.makepkg_conf = write_factory_makepkg_conf(self.work / "dusky-makepkg.conf")
+        self.index: dict[str, list[tuple[str, str]]] = {}  # pkgname -> [(ver, filename)]
+        metadata = load_db_by_filename(repo)
+        for fn in package_files(repo):
+            name, ver, arch = parse_pkg_filename(fn)  # type: ignore[misc]
+            if arch in ("x86_64", "any"):
+                entry = metadata.get(fn)
+                if entry is not None and file_size(repo / fn) == entry.csize:
+                    ver = entry.version
+                self.index.setdefault(name, []).append((ver, fn))
+        self.clones: dict[str, Path] = {}  # pkgbase -> clone, kept across deferrals
+        self.keep_names: set[str] = set()  # requested packages that belong in the repo
+        self.built = self.skipped = 0
+        self.rebuilt_files: set[str] = set()
+        self.built_bases: set[str] = set()
+        self.failed: list[str] = []
+        self.queue: list[str] = []
 
+    def _user_dir(self, path: Path) -> Path:
+        path.mkdir(parents=True, exist_ok=True)
+        os.chown(path, self.user.uid, self.user.gid)
+        return path
 
-def _chunked(items: Sequence[str], n: int) -> Iterable[List[str]]:
-    for i in range(0, len(items), n):
-        yield list(items[i : i + n])
+    def newest(self, name: str) -> str | None:
+        versions = self.index.get(name)
+        if not versions:
+            return None
+        best = versions[0]
+        for cand in versions[1:]:
+            if vercmp(cand[0], best[0]) > 0:
+                best = cand
+        return best[1]
 
-
-@dataclass(frozen=True)
-class PkgVer:
-    epoch: int
-    pkgver: str
-    pkgrel: str
-
-    @staticmethod
-    def parse_rpc(version: str) -> "PkgVer":
-        rest = version.strip()
-        epoch = 0
-        if ":" in rest:
-            e, rest = rest.split(":", 1)
-            try:
-                epoch = int(e)
-            except ValueError:
-                epoch = 0
-        if "-" not in rest:
-            return PkgVer(epoch, rest, "0")
-        pkgver, pkgrel = rest.rsplit("-", 1)
-        return PkgVer(epoch, pkgver, pkgrel)
-
-
-def parse_pkg_filename(name: str) -> Optional[Tuple[str, str, str, str]]:
-    """(pkgname, pkgver, pkgrel, arch) from a package filename."""
-    m = PKGFILE_RE.match(name)
-    if not m:
-        return None
-    return m.group("name"), m.group("ver"), m.group("rel"), m.group("arch")
-
-
-def ensure_archlinux_keyring(isolated: Optional[IsolatedDB] = None) -> None:
-    step("Ensuring Arch Linux GPG keys are populated")
-    wait_for_pacman_lock()
-    subprocess.run(
-        ["pacman-key", "--populate", "archlinux"],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        shell=False,
-        check=False,
-    )
-
-
-def estimate_download_bytes(isolated: "IsolatedDB", pkgs: Sequence[str]) -> int:
-    """Best-effort; falls back to a safe floor if %s is unsupported."""
-    total = 0
-    parsed_any = False
-    for chunk in _chunked(list(pkgs), PACMAN_SW_CHUNK):
-        r = isolated.pacman("-Sp", "--print-format", "%s", "--", *chunk, capture=True)
-        if r.returncode != 0:
-            continue
-        for line in (r.stdout or "").splitlines():
-            line = ANSI_RE.sub("", line.strip())
-            if line.isdigit():
-                total += int(line)
-                parsed_any = True
-    if not parsed_any or total <= 0:
-        return 8 * 1024**3
-    return int(total * 1.35) + 512 * 1024**2
-
-
-# ==============================================================================
-# Isolated pacman DB
-# ==============================================================================
-@dataclass
-class IsolatedDB:
-    workdir: Path = field(default_factory=lambda: secure_mkdtemp("dusky-isolate-"))
-    db_path: Path = field(init=False)
-    pacman_d: Path = field(init=False)
-    conf_path: Path = field(init=False)
-
-    def __post_init__(self) -> None:
-        if any(c.isspace() for c in str(self.workdir)):
-            die(f"Isolate workdir whitespace: {self.workdir}")
-        self.db_path = self.workdir
-        self.pacman_d = self.workdir / "pacman.d"
-        self.conf_path = self.workdir / "pacman.conf"
-        (self.db_path / "local").mkdir(parents=True, exist_ok=True)
-        (self.db_path / "sync").mkdir(parents=True, exist_ok=True)
-        self.pacman_d.mkdir(parents=True, exist_ok=True)
-        self.db_path.chmod(0o750)
-        gid = get_alpm_gid()
-        if gid is not None:
-            try:
-                os.chown(self.db_path, 0, gid)
-                os.chown(self.db_path / "sync", 0, gid)
-                (self.db_path / "sync").chmod(0o775)
-                os.chown(self.db_path / "local", 0, gid)
-            except PermissionError:
-                pass
-
-    def cleanup(self) -> None:
-        shutil.rmtree(self.workdir, ignore_errors=True)
-
-    @staticmethod
-    def _patch(text: str) -> str:
-        return text.replace("$arch", "x86_64")
-
-    def generate_conf(self) -> None:
-        src = Path("/etc/pacman.conf").read_text(encoding="utf-8")
-        for f in Path("/etc/pacman.d").glob("*mirrorlist*"):
-            if not f.is_file() or f.name.endswith(".pacnew"):
-                continue
-            if "cachyos" in f.name:
-                continue
-            dest = self.pacman_d / f.name
-            txt = f.read_text(encoding="utf-8")
-            txt = self._patch(txt)
-            dest.write_text(txt, encoding="utf-8")
-            dest.chmod(0o644)
-
-        # Optimize mirrorlist with reflector if available
-        if check_tool("reflector"):
-            mfile = self.pacman_d / "mirrorlist"
-            r = subprocess.run(
-                [
-                    "reflector",
-                    "--latest",
-                    "20",
-                    "--protocol",
-                    "https",
-                    "--download-timeout",
-                    "3",
-                    "--save",
-                    str(mfile),
-                ],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                shell=False,
-                check=False,
-            )
-            if r.returncode == 0 and mfile.is_file() and mfile.stat().st_size > 100:
-                step("Isolated mirrorlist optimized via reflector (20 fresh HTTPS mirrors)")
-
-        out: List[str] = []
-        skip = False
-        for line in src.splitlines():
-            s = line.strip()
-            if re.match(r"^#?\s*VerbosePkgLists", s):
-                continue
-            if re.match(r"^#?\s*Color", s):
-                continue
-            if re.match(r"^#?\s*ILoveCandy", s):
-                continue
-            if re.match(r"^#?\s*ParallelDownloads", s):
-                continue
-            if re.match(r"^\s*DownloadUser\b", s):
-                continue
-            if re.match(r"^\s*Architecture\s*=", s):
-                continue
-            if re.match(r"^\s*IgnorePkg\b", s):
-                continue
-            if re.match(r"^\s*IgnoreGroup\b", s):
-                continue
-            if re.match(r"^\s*DBPath\b", s):
-                continue
-            if re.match(r"^\s*LogFile\b", s):
-                continue
-
-            if s == "[options]":
-                out.append(line)
-                out.extend(
-                    [
-                        "Color",
-                        "ILoveCandy",
-                        "VerbosePkgLists",
-                        "ParallelDownloads = 5",
-                        "Architecture = auto",
-                    ]
-                )
-                continue
-
-            if s.startswith("[") and s.endswith("]"):
-                if s.startswith("[cachyos"):
-                    skip = True
-                    continue
-                skip = False
-
-            if skip:
-                continue
-
-            if "Include" in line and "/etc/pacman.d/" in line:
-                line = line.replace("/etc/pacman.d/", f"{self.workdir}/pacman.d/")
-            if re.match(r"^\s*Server\s*=", line) and "$arch" in line:
-                line = line.replace("$arch", "x86_64")
-            out.append(line)
-
-        self.conf_path.write_text("\n".join(out) + "\n", encoding="utf-8")
-        step(f"Isolated conf at {self.conf_path}")
-
-    def pacman(self, *a: str, capture: bool = False, sudo: bool = False) -> subprocess.CompletedProcess[str]:
-        cmd = [
-            "pacman",
-            "--dbpath",
-            str(self.db_path),
-            "--gpgdir",
-            "/etc/pacman.d/gnupg",
-            "--config",
-            str(self.conf_path),
-            "--disable-download-timeout",
-            "--noconfirm",
-            "--color",
-            "auto",
-            *a,
-        ]
-        return run_cmd(cmd, capture=capture, sudo=sudo, check=False, non_interactive=True)
-
-    def sync(self) -> bool:
-        for attempt in range(1, 6):
-            step(f"Syncing DB attempt {attempt}/5")
-            r = self.pacman("-Sy", capture=True, sudo=True)
-            if r.returncode == 0:
-                ok("Sync ok")
-                return True
-            warn(f"Sync failed: {(r.stderr or r.stdout or '')[:500]}")
-            if attempt == 3:
-                r2 = run_cmd(
-                    [
-                        "pacman",
-                        "--dbpath",
-                        str(self.db_path),
-                        "--gpgdir",
-                        "/etc/pacman.d/gnupg",
-                        "--config",
-                        str(self.conf_path),
-                        "--disable-sandbox-filesystem",
-                        "--disable-download-timeout",
-                        "--noconfirm",
-                        "-Sy",
-                    ],
-                    capture=True,
-                    sudo=True,
-                    check=False,
-                    non_interactive=True,
-                )
-                if r2.returncode == 0:
-                    ok("Sync ok fallback")
-                    return True
-            time.sleep(2 + random.uniform(0, 1))
-        return False
-
-
-# ==============================================================================
-# Official repo pipeline
-# ==============================================================================
-def build_master_list(external_path: Optional[Path]) -> List[str]:
-    seen: set[str] = set()
-    master: List[str] = []
-    table = Table(title="Package Groups", box=box.SIMPLE)
-    table.add_column("Group", style="magenta")
-    table.add_column("Count", style="cyan")
-    table.add_column("Unique", style="green")
-
-    for name, pkgs in ALL_GROUPS.items():
-        cnt = len(pkgs)
-        new = 0
-        for p in pkgs:
-            if not PKGNAME_RE.fullmatch(p):
-                warn(f"Invalid package name {p!r} in {name}")
-                continue
-            if p not in seen:
-                seen.add(p)
-                master.append(p)
-                new += 1
-        table.add_row(name, str(cnt), str(new))
-    console.print(table)
-
-    if external_path is not None and external_path.exists():
+    def run(self, seeds: Sequence[str]) -> None:
+        queue = list(dict.fromkeys(seeds))
+        known = set(queue)
+        defers: dict[str, int] = {}
         try:
-            if external_path.is_symlink():
-                warn(f"External list is a symlink: {external_path}")
-            real = external_path.resolve(strict=True)
-            if not real.is_file():
-                warn(f"External list not a file: {real}")
+            self.rpc.prefetch(queue)
+        except FactoryError as exc:
+            warn(f"AUR RPC prefetch failed ({exc}); retrying per package")
+        with Progress(SpinnerColumn(), TextColumn("{task.description}"), BarColumn(), TaskProgressColumn(),
+                      console=console) as prog:
+            task = prog.add_task("AUR builds", total=len(queue))
+            i = 0
+            while i < len(queue):
+                pkg = queue[i]
+                i += 1
+                prog.update(task, description=f"AUR {pkg} ({i}/{len(queue)})", total=len(queue))
+                try:
+                    status, new_deps = self.process(pkg)
+                except Exception as exc:  # one broken package must not stop the queue
+                    err(f"{pkg}: {exc}")
+                    status, new_deps = "failed", []
+                fresh = list(dict.fromkeys(d for d in new_deps if d not in known))
+                known.update(fresh)
+                queue += fresh
+                if fresh:
+                    try:
+                        self.rpc.prefetch(fresh)
+                    except FactoryError as exc:
+                        warn(f"AUR RPC prefetch failed ({exc})")
+                match status:
+                    case "deferred":
+                        defers[pkg] = defers.get(pkg, 0) + 1
+                        if defers[pkg] > MAX_DEFER:
+                            err(f"{pkg}: defer limit exceeded (dependency cycle?)")
+                            status = "failed"
+                        else:
+                            queue.append(pkg)
+                    case "built":
+                        self.built += 1
+                    case "current" | "official":
+                        self.skipped += 1
+                if status == "failed":
+                    self.failed.append(pkg)
+                    if self.newest(pkg):  # keep the last good build rather than shipping nothing
+                        self.keep_names.add(pkg)
+                prog.update(task, completed=i, total=len(queue))
+        self.queue = queue
+        if self.failed:
+            shutil.copytree(self.logs, self.repo / "build_logs", dirs_exist_ok=True)
+            warn(f"AUR build logs retained at {self.repo / 'build_logs'}")
+        remove_tree(self.work)
+
+    def process(self, pkg: str) -> tuple[str, list[str]]:
+        info(f"Processing AUR: {pkg}")
+        meta = self.rpc.get(pkg)
+        if meta is None:
+            if self.db.index.has(pkg):
+                step(f"{pkg} is provided by the official repos; skipping AUR")
+                self.keep_names.add(pkg)
+                return "official", []
+            die("not found on the AUR")
+        if meta.pkgbase in self.built_bases and self.newest(pkg) is not None:
+            self.keep_names.add(pkg)
+            return "current", []
+        if not pkg.endswith(VCS_SUFFIXES) and any(
+                vercmp(ver, meta.version) >= 0 for ver, _ in self.index.get(pkg, ())):
+            step(f"{pkg} already up to date in the repo")
+            self.keep_names.add(pkg)
+            return "current", []
+
+        clone = self._clone(meta.pkgbase)
+        si = parse_srcinfo((clone / ".SRCINFO").read_text(encoding="utf-8"))
+        siblings = {pkg, meta.pkgbase, si.pkgbase, *si.pkgnames}
+        official_deps: list[str] = []
+        aur_deps: list[str] = []
+        for dep in dict.fromkeys(si.depends + si.makedepends):
+            name = dep_name(dep)
+            if name in siblings:
+                continue
+            if self.db.index.has(name):
+                official_deps.append(dep)
+            elif is_aur_candidate(name):
+                aur_deps.append(dep)
             else:
-                st = real.stat()
-                if st.st_mode & 0o002:
-                    die(f"Refusing world-writable external list: {real}")
-                txt = (
-                    real.read_bytes()
-                    .decode("utf-8", errors="strict")
-                    .replace("\r\n", "\n")
-                    .replace("\r", "\n")
-                )
-                ext_cnt = 0
-                for raw in txt.splitlines():
-                    pkg = raw.split("#", 1)[0].strip()
-                    if not pkg or any(c.isspace() for c in pkg):
-                        continue
-                    if not PKGNAME_RE.fullmatch(pkg):
-                        continue
-                    if pkg not in seen:
-                        seen.add(pkg)
-                        master.append(pkg)
-                        ext_cnt += 1
-                step(f"external -> {ext_cnt} unique")
-        except (OSError, UnicodeDecodeError, ValueError) as exc:
-            warn(f"External list fail: {exc}")
-
-    if not master:
-        die("Master package list empty")
-    ok(f"Master: {len(master)} unique")
-    return master
-
-
-def resolve_official_names(
-    isolated: IsolatedDB, names: Sequence[str]
-) -> Tuple[List[str], List[str]]:
-    """Split master names into (resolvable_official, unresolved)."""
-    official: List[str] = []
-    unresolved: List[str] = []
-    seen_o: set[str] = set()
-    seen_u: set[str] = set()
-
-    for chunk in _chunked(list(names), PACMAN_SW_CHUNK):
-        r = isolated.pacman(
-            "-Sp",
-            "--print-format",
-            "%n",
-            "--color",
-            "never",
-            "--",
-            *chunk,
-            capture=True,
-        )
-        found: set[str] = set()
-        if r.returncode == 0:
-            for ln in (r.stdout or "").splitlines():
-                ln = ANSI_RE.sub("", ln.strip())
-                if ln and not ln.lower().startswith("warning"):
-                    found.add(ln)
-
-        for n in chunk:
-            if n in found:
-                if n not in seen_o:
-                    seen_o.add(n)
-                    official.append(n)
-                continue
-            si = isolated.pacman("-Si", "--", n, capture=True)
-            if si.returncode == 0:
-                if n not in seen_o:
-                    seen_o.add(n)
-                    official.append(n)
-            elif n not in seen_u:
-                seen_u.add(n)
-                unresolved.append(n)
-
-    return official, unresolved
-
-
-def generate_whitelist(isolated: IsolatedDB, master: List[str]) -> List[str]:
-    info("Resolving full closure (exact filenames)")
-    if not master:
-        die("Cannot resolve closure of empty master list")
-    empty = secure_mkdtemp("dusky-empty-")
-    try:
-        wl: List[str] = []
-        for chunk in _chunked(master, PACMAN_SW_CHUNK):
-            r = isolated.pacman(
-                "-Sw",
-                "--print",
-                "--print-format",
-                "%f",
-                "--cachedir",
-                str(empty),
-                "--color",
-                "never",
-                "--noprogressbar",
-                "--",
-                *chunk,
-                capture=True,
-            )
-            if r.returncode != 0:
-                die(f"Closure failed: {(r.stderr or r.stdout or '')[:1000]}")
-            for line in (r.stdout or "").splitlines():
-                line = ANSI_RE.sub("", line.strip())
-                if not line or line.lower().startswith(("warning:", "error:", "debug:")):
-                    continue
-                fname = line.split("/")[-1].split("?")[0]
-                if ".pkg.tar." in fname and not fname.endswith(".sig"):
-                    wl.append(fname)
-        if not wl:
-            die("Whitelist empty")
-        wl = sorted(set(wl))
-        ok(f"Closure: {len(wl)} files")
-        return wl
-    finally:
-        shutil.rmtree(empty, ignore_errors=True)
-
-
-def _verify_pkg_archive(pkg: Path) -> bool:
-    if not pkg.is_file() or pkg.stat().st_size == 0:
-        return False
-    name = pkg.name
-    if name.endswith(".zst"):
-        cmd = ["zstd", "-t", "-q", "--", str(pkg)]
-    elif name.endswith(".xz"):
-        cmd = ["xz", "-t", "-q", "--", str(pkg)]
-    else:
-        cmd = ["bsdtar", "-tf", str(pkg)]
-    return (
-        subprocess.run(
-            cmd,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            shell=False,
-            check=False,
-        ).returncode
-        == 0
-    )
-
-
-def verify_package_archives_parallel(
-    packages: Sequence[Path], max_workers: Optional[int] = None
-) -> List[Tuple[Path, str]]:
-    """
-    Validates physical package archives in parallel using multi-threaded stream decompression.
-    Returns a list of (Path, failure_reason) for any corrupted or invalid archives.
-    """
-    if not packages:
-        return []
-
-    workers = max_workers or min(32, (os.cpu_count() or 4) * 2)
-
-    def _check_one(p: Path) -> Tuple[Path, bool, str]:
-        if not p.is_file():
-            return (p, False, "File missing on disk")
-        try:
-            if p.stat().st_size == 0:
-                return (p, False, "Zero-byte file")
-        except OSError as e:
-            return (p, False, f"Stat failed: {e}")
-
-        if not _verify_pkg_archive(p):
-            return (p, False, "Archive decompression / checksum verification failed")
-        return (p, True, "OK")
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
-        results = list(pool.map(_check_one, packages))
-
-    return [(p, reason) for p, is_ok, reason in results if not is_ok]
-
-
-def audit_repo_database_integrity(
-    repo_dir: Path, db_path: Path, max_workers: Optional[int] = None
-) -> List[Tuple[str, str]]:
-    """
-    Full cryptographic audit of a generated pacman repo DB against packages on disk.
-    Extracts %FILENAME%, %SHA256SUM%, and %CSIZE% for every entry and verifies:
-      1. Physical file existence
-      2. Size match
-      3. SHA256 cryptographic match
-      4. Complete archive stream decompression
-    Returns a list of (filename, failure_reason) on any discrepancy.
-    """
-    if not db_path.is_file():
-        return [(db_path.name, "Database file does not exist on disk")]
-
-    db_entries: Dict[str, Dict[str, Any]] = {}
-    try:
-        with tarfile.open(db_path, "r:*") as tar:
-            for member in tar.getmembers():
-                if member.name.endswith("/desc"):
-                    f = tar.extractfile(member)
-                    if not f:
-                        continue
-                    content = f.read().decode("utf-8", errors="ignore")
-                    fn, csum, csize = None, None, None
-                    lines = content.splitlines()
-                    for idx, line in enumerate(lines):
-                        if line == "%FILENAME%":
-                            fn = lines[idx + 1].strip()
-                        elif line == "%SHA256SUM%":
-                            csum = lines[idx + 1].strip()
-                        elif line == "%CSIZE%":
-                            try:
-                                csize = int(lines[idx + 1].strip())
-                            except ValueError:
-                                pass
-                    if fn and csum:
-                        db_entries[fn] = {"sha256": csum, "csize": csize}
-    except Exception as exc:
-        return [(db_path.name, f"Failed to parse database tar archive: {exc}")]
-
-    if not db_entries:
-        return [(db_path.name, "Database contains zero valid package descriptors")]
-
-    workers = max_workers or min(32, (os.cpu_count() or 4) * 2)
-
-    def _verify_entry(fn: str, expected: Dict[str, Any]) -> Tuple[str, bool, str]:
-        pkg_file = repo_dir / fn
-        if not pkg_file.is_file():
-            return (fn, False, "Package referenced in DB does not exist on disk")
-        try:
-            st = pkg_file.stat()
-            if expected.get("csize") is not None and st.st_size != expected["csize"]:
-                return (
-                    fn,
-                    False,
-                    f"Size mismatch: DB={expected['csize']}, Disk={st.st_size}",
-                )
-        except OSError as e:
-            return (fn, False, f"Stat failed: {e}")
-
-        # Cryptographic SHA256 check
-        try:
-            hasher = hashlib.sha256()
-            with open(pkg_file, "rb") as fh:
-                for chunk in iter(lambda: fh.read(1 << 20), b""):
-                    hasher.update(chunk)
-            actual_sha = hasher.hexdigest()
-            if actual_sha.lower() != expected["sha256"].lower():
-                return (
-                    fn,
-                    False,
-                    f"SHA256 mismatch: DB={expected['sha256']}, Disk={actual_sha}",
-                )
-        except Exception as e:
-            return (fn, False, f"Hashing failed: {e}")
-
-        # Stream decompression test
-        if not _verify_pkg_archive(pkg_file):
-            return (fn, False, "Decompression verification failed (zstd/xz/tar)")
-
-        return (fn, True, "OK")
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = [
-            pool.submit(_verify_entry, fn, exp) for fn, exp in db_entries.items()
-        ]
-        results = [f.result() for f in futures]
-
-    return [(fn, reason) for fn, is_ok, reason in results if not is_ok]
-
-
-def _pkgnames_from_pkgfiles(repo_dir: Path) -> Dict[str, List[Path]]:
-    by_name: Dict[str, List[Path]] = {}
-    for f in repo_dir.glob("*.pkg.tar.*"):
-        if f.name.endswith(".sig") or ".part" in f.name:
-            continue
-        parsed = parse_pkg_filename(f.name)
-        pkgname: Optional[str] = parsed[0] if parsed else None
-        if pkgname is None:
-            try:
-                pr = subprocess.run(
-                    ["bsdtar", "-xOqf", str(f), ".PKGINFO"],
-                    stdout=subprocess.PIPE,
-                    text=True,
-                    stderr=subprocess.DEVNULL,
-                    shell=False,
-                    check=False,
-                )
-                m = re.search(r"^pkgname = (.+)$", pr.stdout or "", re.MULTILINE)
-                pkgname = m.group(1).strip() if m else None
-            except OSError:
-                pkgname = None
-        if not pkgname:
-            pkgname = f.name.split("-")[0]
-        by_name.setdefault(pkgname, []).append(f)
-    return by_name
-
-
-def prune_repo_keep_names(repo_dir: Path, keep_names: set[str]) -> None:
-    """Drop pkgs whose pkgname is outside keep_names; keep newest ver per name."""
-    info(f"Pruning {repo_dir} (keep {len(keep_names)} names)")
-    del_c = 0
-    del_b = 0
-    by_name = _pkgnames_from_pkgfiles(repo_dir)
-
-    def _version_order(paths: List[Path]) -> List[Path]:
-        names = [p.name for p in paths]
-        try:
-            pr = subprocess.run(
-                ["sort", "-V"],
-                input="\n".join(names),
-                text=True,
-                capture_output=True,
-                shell=False,
-                check=False,
-            )
-            if pr.returncode == 0 and pr.stdout.strip():
-                order = [ln for ln in pr.stdout.splitlines() if ln.strip()]
-                rank = {n: i for i, n in enumerate(order)}
-                return sorted(paths, key=lambda p: rank.get(p.name, 0))
-        except OSError:
-            pass
-        return sorted(paths, key=lambda p: p.name)
-
-    for pkgname, files in by_name.items():
-        if pkgname not in keep_names:
-            victims = files
-            keep_one: Optional[Path] = None
-        else:
-            ordered = _version_order(files)
-            keep_one = ordered[-1]
-            victims = [p for p in files if p != keep_one]
-
-        for f in victims:
-            try:
-                del_b += f.stat().st_size
-            except OSError:
-                pass
-            step(f"pruned: {f.name}")
-            f.unlink(missing_ok=True)
-            Path(str(f) + ".sig").unlink(missing_ok=True)
-            del_c += 1
-
-    for sig in repo_dir.glob("*.sig"):
-        base_name = sig.name[: -len(".sig")] if sig.name.endswith(".sig") else sig.name
-        if not (repo_dir / base_name).exists():
-            sig.unlink(missing_ok=True)
-
-    if del_c:
-        ok(f"Pruned {del_c} files, freed {human_bytes(del_b)}")
-    else:
-        ok("No orphans")
-
-
-def prune_unneeded(repo_dir: Path, whitelist: List[str]) -> None:
-    """Keep pkgnames represented by the (post-download) filename whitelist."""
-    keep: set[str] = set()
-    for fn in whitelist:
-        parsed = parse_pkg_filename(fn)
-        if parsed:
-            keep.add(parsed[0])
-    if not keep:
-        die("prune_unneeded: empty keep set")
-    prune_repo_keep_names(repo_dir, keep)
-
-
-def download_packages(isolated: IsolatedDB, master: List[str], repo_dir: Path) -> None:
-    info(f"Downloading -> {repo_dir}")
-    if not master:
-        die("Nothing to download")
-    prepare_alpm_cache_dir(repo_dir)
-
-    need = estimate_download_bytes(isolated, master)
-    ensure_disk_space(repo_dir, need, "official package download")
-
-    pending = list(master)
-    for attempt in range(1, 13):
-        info(f"Download attempt {attempt}/12 ({len(pending)} names)")
-        for part in repo_dir.glob("*.part"):
-            part.unlink(missing_ok=True)
-
-        any_fail = False
-        for chunk in _chunked(pending, PACMAN_SW_CHUNK):
-            r = isolated.pacman(
-                "-Sw",
-                "--cachedir",
-                str(repo_dir),
-                "--",
-                *chunk,
-                capture=False,
-                sudo=True,
-            )
-            if r.returncode != 0:
-                any_fail = True
-
-        pkg_candidates = [
-            p
-            for p in repo_dir.glob("*.pkg.tar.*")
-            if not p.name.endswith(".sig") and ".part" not in p.name
-        ]
-        corrupted_list = verify_package_archives_parallel(pkg_candidates)
-        for bad_p, reason in corrupted_list:
-            step(f"Corrupt removed ({reason}): {bad_p.name}")
-            bad_p.unlink(missing_ok=True)
-            Path(str(bad_p) + ".sig").unlink(missing_ok=True)
-        corrupt = len(corrupted_list)
-
-        # Fresh closure from *current* sync DB (avoids stale pre-download whitelist).
-        try:
-            fresh_wl = generate_whitelist(isolated, master)
-        except SystemExit:
-            raise
-        except Exception as exc:  # noqa: BLE001
-            warn(f"Fresh whitelist failed: {exc}")
-            fresh_wl = []
-
-        have = {
-            p.name
-            for p in repo_dir.glob("*.pkg.tar.*")
-            if not p.name.endswith(".sig") and ".part" not in p.name
-        }
-        missing_files = [f for f in fresh_wl if f not in have] if fresh_wl else ["?"]
-
-        if not any_fail and corrupt == 0 and fresh_wl and not missing_files:
-            ok("Download complete")
-            prune_unneeded(repo_dir, fresh_wl)
-            return
-
-        if fresh_wl and missing_files and missing_files != ["?"]:
-            retry_names = sorted(
-                {
-                    parse_pkg_filename(f)[0]
-                    for f in missing_files
-                    if parse_pkg_filename(f)
-                }
-            )
-            pending = retry_names or list(master)
-            warn(
-                f"incomplete: missing_files={len(missing_files)} corrupt={corrupt} "
-                f"retry_names={len(pending)}"
-            )
-        else:
-            pending = list(master)
-            warn(f"Download attempt {attempt} incomplete (fail={any_fail} corrupt={corrupt})")
-
-        time.sleep(min(30.0, (1.5**attempt) + random.uniform(0, 2)))
-    die("Download failed after retries")
-
-
-def detect_repo_add_impl() -> str:
-    p = Path("/usr/bin/repo-add")
-    try:
-        if p.read_bytes()[:4] == b"\x7fELF":
-            return "rust"
-    except OSError:
-        pass
-    return "bash"
-
-
-def generate_repo_db(repo_dir: Path) -> None:
-    info("Generating repo DB")
-    for pat in (f"{REPO_NAME}.db*", f"{REPO_NAME}.files*"):
-        for f in repo_dir.glob(pat):
-            f.unlink(missing_ok=True)
-
-    pkg_paths = [
-        p
-        for p in repo_dir.glob("*.pkg.tar.*")
-        if not p.name.endswith(".sig") and ".part" not in p.name
-    ]
-    if not pkg_paths:
-        die("No packages to index")
-
-    corrupted = verify_package_archives_parallel(pkg_paths)
-    if corrupted:
-        for cp, reason in corrupted:
-            err(f"Corrupt package archive detected in {repo_dir.name} ({reason}): {cp.name}")
-        die(f"Aborting repo DB generation due to {len(corrupted)} corrupt package(s).")
-
-    try:
-        pr = subprocess.run(
-            ["sort", "-V"],
-            input="\n".join(p.name for p in pkg_paths),
-            text=True,
-            capture_output=True,
-            shell=False,
-            check=False,
-        )
-        if pr.returncode == 0 and pr.stdout.strip():
-            order = [ln for ln in pr.stdout.splitlines() if ln.strip()]
-            rank = {n: i for i, n in enumerate(order)}
-            pkg_paths.sort(key=lambda p: rank.get(p.name, 0))
-        else:
-            pkg_paths.sort(key=lambda p: p.name)
-    except OSError:
-        pkg_paths.sort(key=lambda p: p.name)
-
-    pkg_files = [str(p) for p in pkg_paths]
-
-    env = os.environ.copy()
-    env["LC_ALL"] = "C.UTF-8"
-    if detect_repo_add_impl() == "rust":
-        env["RAYON_NUM_THREADS"] = "1"
-
-    token = secrets.token_hex(6)
-    db_tmp = repo_dir / f"{REPO_NAME}-tmp-{token}.db.tar.zst"
-    res = subprocess.run(
-        ["repo-add", "--remove", "--nocolor", str(db_tmp), *pkg_files],
-        env=env,
-        shell=False,
-        check=False,
-    )
-    if res.returncode != 0:
-        for f in repo_dir.glob(f"{REPO_NAME}-tmp-*"):
-            f.unlink(missing_ok=True)
-        die("repo-add failed")
-
-    final_db = repo_dir / f"{REPO_NAME}.db.tar.zst"
-    final_files = repo_dir / f"{REPO_NAME}.files.tar.zst"
-    files_tmp = repo_dir / db_tmp.name.replace(".db.", ".files.")
-
-    if not db_tmp.exists():
-        die("repo-add did not produce DB temp file")
-    fsync_path(db_tmp)
-    os.replace(db_tmp, final_db)
-    fsync_path(final_db)
-
-    if files_tmp.exists():
-        fsync_path(files_tmp)
-        os.replace(files_tmp, final_files)
-        fsync_path(final_files)
-
-    for f in repo_dir.glob(f"{REPO_NAME}-tmp-*"):
-        f.unlink(missing_ok=True)
-
-    for name, target in (("db", final_db), ("files", final_files)):
-        if not target.exists():
-            continue
-        link = repo_dir / f"{REPO_NAME}.{name}"
-        if link.exists() or link.is_symlink():
-            link.unlink()
-        try:
-            link.symlink_to(target.name)
-        except OSError as exc:
-            warn(f"symlink {link.name}: {exc}")
-    fsync_dir(repo_dir)
-
-    # Cryptographic post-flight audit: guarantees DB recorded checksum matches every file on disk
-    info(f"Auditing cryptographic database integrity for {repo_dir.name}...")
-    db_audit_errors = audit_repo_database_integrity(repo_dir, final_db)
-    if db_audit_errors:
-        for fn, reason in db_audit_errors:
-            err(f"DB audit discrepancy ({fn}): {reason}")
-        die(f"Repository database audit failed with {len(db_audit_errors)} error(s).")
-    ok(f"Database created and cryptographically verified ({len(pkg_files)} packages indexed)")
-
-
-# ==============================================================================
-# AUR
-# ==============================================================================
-@dataclass(frozen=True)
-class AURPackageInfo:
-    name: str
-    version: str
-    pkgbase: str
-    depends: Tuple[str, ...] = ()
-    makedepends: Tuple[str, ...] = ()
-
-
-def aur_rpc_info(pkgs: Sequence[str]) -> Dict[str, AURPackageInfo]:
-    """Batch AUR RPC v5/info → {Name: AURPackageInfo}."""
-    out: Dict[str, AURPackageInfo] = {}
-    if not pkgs:
-        return out
-    hdr = {
-        "User-Agent": f"DuskyISO-Builder/{VERSION}",
-        "Accept": "application/json",
-    }
-    for chunk in _chunked(list(pkgs), AUR_RPC_BATCH):
-        q = urllib.parse.urlencode([("arg[]", p) for p in chunk], doseq=True)
-        url = f"{AUR_RPC}?{q}"
-        data: Optional[dict] = None
-        for attempt in range(5):
-            try:
-                req = urllib.request.Request(url, headers=hdr)
-                with urllib.request.urlopen(req, timeout=20) as resp:
-                    status = getattr(resp, "status", 200)
-                    if status == 429:
-                        time.sleep(5 + attempt * 3 + random.uniform(0, 1))
-                        continue
-                    if status != 200:
-                        raise urllib.error.URLError(f"HTTP {status}")
-                    raw = resp.read(MAX_RPC_BYTES)
-                    data = json.loads(raw.decode())
-                break
-            except (
-                urllib.error.URLError,
-                TimeoutError,
-                json.JSONDecodeError,
-                OSError,
-                ValueError,
-            ):
-                time.sleep((1.5**attempt) + random.uniform(0, 1))
-        if not data:
-            continue
-        for row in data.get("results", []):
-            name = row.get("Name")
-            ver = row.get("Version")
-            pkgbase = row.get("PackageBase") or name
-            if isinstance(name, str) and isinstance(ver, str) and isinstance(pkgbase, str):
-                deps = tuple(row.get("Depends") or [])
-                makedeps = tuple(row.get("MakeDepends") or [])
-                out[name] = AURPackageInfo(
-                    name=name,
-                    version=ver,
-                    pkgbase=pkgbase,
-                    depends=deps,
-                    makedepends=makedeps,
-                )
-    return out
-
-
-def aur_get_info(pkg: str) -> Optional[AURPackageInfo]:
-    return aur_rpc_info([pkg]).get(pkg)
-
-
-def aur_get_version(pkg: str) -> Optional[str]:
-    info_obj = aur_get_info(pkg)
-    return info_obj.version if info_obj else None
-
-
-def package_is_current(repo: Path, pkg: str, ver: str) -> bool:
-    """True if repo has name-pkgver-pkgrel-(x86_64|any). Epoch is not in filenames."""
-    if not ver or not repo.is_dir():
-        return False
-    want = PkgVer.parse_rpc(ver)
-    for p in repo.iterdir():
-        if not p.is_file() or p.name.endswith(".sig") or ".part" in p.name:
-            continue
-        parsed = parse_pkg_filename(p.name)
-        if not parsed:
-            continue
-        name, fver, frel, arch = parsed
-        if name != pkg:
-            continue
-        if arch not in {"x86_64", "any"}:
-            continue
-        if fver == want.pkgver and frel == want.pkgrel:
-            return True
-        if pkg.endswith(("-git", "-hg", "-svn", "-bzr")):
-            return True
-    return False
-
-
-def extract_runtime_deps(pkgfile: Path) -> List[str]:
-    try:
-        r = subprocess.run(
-            ["bsdtar", "-xOqf", str(pkgfile), ".PKGINFO"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            shell=False,
-            check=False,
-        )
-        if r.returncode != 0:
-            return []
-        deps: List[str] = []
-        for line in r.stdout.splitlines():
-            if not line.startswith("depend = "):
-                continue
-            dep = line[len("depend = ") :].strip()
-            dep = re.split(r"[<>=]", dep, maxsplit=1)[0].strip()
-            if not dep or dep.startswith("so:") or dep.startswith("pkgconfig("):
-                continue
-            if dep.endswith(".so"):
-                continue
-            if PKGNAME_RE.fullmatch(dep):
-                deps.append(dep)
-        return deps
-    except OSError:
-        return []
-
-
-def parse_srcinfo_text(text: str) -> Tuple[str, List[str], List[str], List[str]]:
-    """Returns (pkgbase, pkgnames, depends, makedepends) bare names."""
-    pkgbase = ""
-    pkgnames: List[str] = []
-    depends: List[str] = []
-    makedepends: List[str] = []
-    for line in text.splitlines():
-        s = line.strip()
-        if s.startswith("pkgbase = "):
-            pkgbase = s[len("pkgbase = ") :].strip()
-        elif s.startswith("pkgname = "):
-            pn = s[len("pkgname = ") :].strip()
-            if pn and PKGNAME_RE.fullmatch(pn):
-                pkgnames.append(pn)
-        elif s.startswith("depends = "):
-            raw = s[len("depends = ") :].strip()
-            dep = re.split(r"[<>=]", raw, maxsplit=1)[0].strip()
-            if dep and PKGNAME_RE.fullmatch(dep):
-                depends.append(dep)
-        elif s.startswith("makedepends = "):
-            raw = s[len("makedepends = ") :].strip()
-            dep = re.split(r"[<>=]", raw, maxsplit=1)[0].strip()
-            if dep and PKGNAME_RE.fullmatch(dep):
-                makedepends.append(dep)
-        elif s.startswith("checkdepends = "):
-            raw = s[len("checkdepends = ") :].strip()
-            dep = re.split(r"[<>=]", raw, maxsplit=1)[0].strip()
-            if dep and PKGNAME_RE.fullmatch(dep):
-                makedepends.append(dep)
-    return pkgbase, pkgnames, depends, makedepends
-
-
-def classify_deps(
-    isolated: IsolatedDB, deps: Sequence[str]
-) -> Tuple[List[str], List[str]]:
-    """→ (official_or_sync, not_in_sync_assume_aur). Uses isolated DB only."""
-    official: List[str] = []
-    aurish: List[str] = []
-    for dep in deps:
-        r = isolated.pacman(
-            "-Sp", "--print-format", "%n", "--color", "never", "--", dep, capture=True
-        )
-        ok_sync = r.returncode == 0 and bool((r.stdout or "").strip())
-        if ok_sync:
-            official.append(dep)
-            continue
-        si = isolated.pacman("-Si", "--", dep, capture=True)
-        if si.returncode == 0:
-            official.append(dep)
-        else:
-            aurish.append(dep)
-    return official, aurish
-
-
-def pkg_installed(name: str) -> bool:
-    return (
-        subprocess.run(
-            ["pacman", "-Q", "--", name],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            shell=False,
-            check=False,
-        ).returncode
-        == 0
-    )
-
-
-def find_repo_pkg_files(repo: Path, pkgname: str) -> List[Path]:
-    out: List[Path] = []
-    if not repo.is_dir():
-        return out
-    for p in repo.glob("*.pkg.tar.*"):
-        if p.name.endswith(".sig") or ".part" in p.name:
-            continue
-        parsed = parse_pkg_filename(p.name)
-        if parsed and parsed[0] == pkgname:
-            out.append(p)
-    return out
-
-
-
-
-
-def download_official_deps(
-    isolated: IsolatedDB,
-    official: Optional[Path],
-    aur_repo: Path,
-    deps: List[str],
-    aur_queue: List[str],
-    aur_known: set[str],
-) -> None:
-    if not deps:
-        return
-    prepare_alpm_cache_dir(aur_repo)
-    official_list, aurish = classify_deps(isolated, deps)
-    for dep in aurish:
-        if dep not in aur_known:
-            step(f"AUR dep queued: {dep}")
-            aur_known.add(dep)
-            aur_queue.append(dep)
-    if not official_list:
-        return
-
-    cache_args: List[str] = ["--cachedir", str(aur_repo)]
-    if official is not None and official.exists():
-        cache_args += ["--cachedir", str(official)]
-
-    for _ in range(6):
-        ok_all = True
-        for chunk in _chunked(official_list, PACMAN_SW_CHUNK):
-            r = isolated.pacman("-Sw", *cache_args, "--", *chunk, capture=True, sudo=True)
-            if r.returncode != 0:
-                ok_all = False
-        if ok_all:
-            ok(f"Official deps fetched: {', '.join(official_list)}")
-            return
-        time.sleep(2 + random.uniform(0, 1))
-    warn(f"Official deps incomplete: {', '.join(official_list)}")
-
-
-def build_aur_package(
-    pkg: str,
-    aur_repo: Path,
-    official_repo: Optional[Path],
-    isolated: IsolatedDB,
-    clone_base: Path,
-    real_user: str,
-    aur_queue: List[str],
-    aur_known: set[str],
-    makepkg_conf: Path,
-) -> Tuple[bool, bool, bool]:
-    """
-    Returns (success, skipped, deferred).
-    deferred=True → caller re-appends pkg (AUR deps not ready); not a hard fail.
-    """
-    info(f"Processing AUR: {pkg}")
-    if not PKGNAME_RE.fullmatch(pkg):
-        err(f"Invalid AUR pkg name: {pkg}")
-        return False, False, False
-
-    info_obj = aur_get_info(pkg)
-    if not info_obj:
-        r = isolated.pacman("-Si", "--", pkg, capture=True)
-        if r.returncode == 0:
-            step(f"{pkg} is in official repos; skipping AUR")
-            return True, True, False
-        err(f"{pkg} not found on AUR")
-        return False, False, False
-
-    ver = info_obj.version
-    pkgbase = info_obj.pkgbase or pkg
-
-    if package_is_current(aur_repo, pkg, ver):
-        step(f"{pkg}-{ver} already present in ISO repo")
-        return True, True, False
-
-    clone_root = clone_base / f"clone_{pkgbase}"
-    if clone_root.exists():
-        shutil.rmtree(clone_root, ignore_errors=True)
-    clone_root.mkdir(parents=True)
-    if os.geteuid() == 0:
-        subprocess.run(
-            ["chown", "-R", "-h", "--no-dereference", f"{real_user}:", str(clone_root)],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            shell=False,
-            check=False,
-        )
-
-    target_dir = clone_root / pkgbase
-    git_env = git_noninteractive_env()
-    cloned = False
-    last_clone_err = ""
-    for _ in range(6):
-        if target_dir.exists():
-            shutil.rmtree(target_dir, ignore_errors=True)
-        r = run_cmd(
-            [
-                "git",
-                "clone",
-                "--depth",
-                "1",
-                f"https://aur.archlinux.org/{pkgbase}.git",
-                str(target_dir),
-            ],
-            as_user=real_user,
-            env=git_env,
-            capture=True,
-            check=False,
-        )
-        last_clone_err = (r.stderr or r.stdout or "").strip()
-        if r.returncode == 0:
-            cloned = True
-            break
-        time.sleep(2)
-    if not cloned:
-        console.print(f"[bold red][XX] Clone failed {pkg} (pkgbase={pkgbase}): {last_clone_err}[/]")
-        shutil.rmtree(clone_root, ignore_errors=True)
-        return False, False, False
-
-    if not (target_dir / "PKGBUILD").exists():
-        err(f"PKGBUILD missing {pkg} in {pkgbase}.git")
-        shutil.rmtree(clone_root, ignore_errors=True)
-        return False, False, False
-
-    if os.geteuid() == 0:
-        subprocess.run(
-            ["chown", "-R", "-h", "--no-dereference", f"{real_user}:", str(clone_root)],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            shell=False,
-            check=False,
-        )
-
-    # --- Pre-build deps from .SRCINFO ---
-    env_info = makepkg_clean_env(makepkg_conf)
-    ps = run_cmd(
-        ["makepkg", "--config", str(makepkg_conf), "--printsrcinfo"],
-        as_user=real_user,
-        env=env_info,
-        cwd=target_dir,
-        capture=True,
-        merge_stderr=True,
-        check=False,
-        timeout=120,
-    )
-    pre_deps: List[str] = []
-    sibling_pkgnames: set[str] = {pkg, pkgbase}
-    if ps.returncode == 0 and ps.stdout:
-        src_pkgbase, src_pkgnames, d_list, m_list = parse_srcinfo_text(ps.stdout)
-        sibling_pkgnames.update(src_pkgnames)
-        if src_pkgbase:
-            sibling_pkgnames.add(src_pkgbase)
-        pre_deps = list(dict.fromkeys([*d_list, *m_list]))
-    else:
-        warn(f"{pkg}: makepkg --printsrcinfo failed")
-
-    if pre_deps:
-        download_official_deps(
-            isolated, official_repo, aur_repo, pre_deps, aur_queue, aur_known
-        )
-        official_deps, aurish = classify_deps(isolated, pre_deps)
-        blocked: List[str] = []
-        aur_files_to_install: List[Path] = []
-        for dep in aurish:
-            if dep in sibling_pkgnames:
-                continue
-            if pkg_installed(dep):
-                continue
-            files = find_repo_pkg_files(aur_repo, dep)
-            if files:
-                aur_files_to_install.append(files[0])
-                continue
-            # Need it built first
-            if dep not in aur_known:
-                aur_known.add(dep)
-                aur_queue.append(dep)
-            blocked.append(dep)
-
+                warn(f"{pkg}: dependency {dep!r} not resolvable (ignored)")
+        queued = [dep_name(d) for d in aur_deps]
+
+        unsatisfied: set[str] = set()
+        if deps := official_deps + aur_deps:  # one `pacman -T` for all deps (versions/provides aware)
+            r = run(["pacman", "-T", "--", *deps], capture=True)
+            if r.returncode not in (0, 127):
+                die(f"host dependency check failed:\n{pacman_errors(r)}")
+            unsatisfied = {ln.strip() for ln in (r.stdout or "").splitlines() if ln.strip()}
+        blocked: list[str] = []
+        aur_files: list[Path] = []
+        for dep in aur_deps:
+            if dep in unsatisfied:
+                name = dep_name(dep)
+                fn = self.newest(name)
+                versions = {filename: version for version, filename in self.index.get(name, ())}
+                if fn is not None and version_satisfies(versions[fn], dep):
+                    aur_files.append(self.repo / fn)
+                else:
+                    blocked.append(name)
+        if dead := [b for b in blocked if b in self.failed]:
+            die(f"AUR dependency failed: {', '.join(dead)}")  # don't spin through MAX_DEFER revisits
         if blocked:
-            step(f"{pkg}: defer — waiting for AUR deps: {', '.join(blocked)}")
-            shutil.rmtree(clone_root, ignore_errors=True)
-            return False, False, True
+            step(f"{pkg}: deferred until AUR deps are built: {', '.join(blocked)}")
+            return "deferred", queued
 
-        # Install any already-built AUR packages needed on the host
-        if aur_files_to_install:
-            step(f"Installing built AUR dependency packages: {', '.join(f.name for f in aur_files_to_install)}")
-            subprocess.run(
-                ["pacman", "-U", "--needed", "--noconfirm", *[str(f) for f in aur_files_to_install]],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                shell=False,
-                check=False,
-            )
+        if need := [d for d in official_deps if d in unsatisfied]:
+            step(f"installing host build deps: {' '.join(need)}")
+            caches = [a for d in conf_values(host_conf().get("options", []), "CacheDir") for a in ("--cachedir", d)]
+            if self.official is not None:
+                caches += ["--cachedir", os.fspath(self.official)]  # reuse freshly mirrored files
+            r = host_pacman("-S", "--needed", "--asdeps", *caches, "--", *need)
+            if r.returncode != 0:
+                die(f"host build-dependency install failed:\n{pacman_errors(r)}")
+        if aur_files:
+            step(f"installing AUR build deps: {' '.join(f.name for f in aur_files)}")
+            r = host_pacman("-U", "--needed", "--asdeps", "--", *map(os.fspath, aur_files))
+            if r.returncode != 0:
+                die(f"AUR build-dependency install failed:\n{pacman_errors(r)}")
 
-        # Install missing official dependencies on host
-        if official_deps:
-            t_res = subprocess.run(
-                ["pacman", "-T", "--", *official_deps],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                text=True,
-                shell=False,
-                check=False,
-            )
-            missing_official = [
-                line.strip()
-                for line in (t_res.stdout or "").splitlines()
-                if line.strip() and PKGNAME_RE.fullmatch(line.strip())
-            ]
-            if missing_official:
-                step(f"Installing missing build dependencies on host: {', '.join(missing_official)}")
-                cache_dirs: List[str] = ["--cachedir", str(aur_repo)]
-                if official_repo is not None and official_repo.exists():
-                    cache_dirs += ["--cachedir", str(official_repo)]
-                inst_res = subprocess.run(
-                    ["pacman", "-S", "--needed", "--noconfirm", *cache_dirs, *missing_official],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    shell=False,
-                    check=False,
-                )
-                if inst_res.returncode != 0:
-                    warn(f"Failed to install host build deps ({', '.join(missing_official)}): {inst_res.stdout[:500]}")
+        if deps and unsatisfied:
+            r = run(["pacman", "-T", "--", *deps], capture=True)
+            if r.returncode != 0:
+                die(f"build dependencies remain unsatisfied:\n{pacman_errors(r)}")
 
-    build_work = clone_base / f"work_{pkgbase}"
-    src_dest = build_work / "src"
-    pkgdest = build_work / "pkgdest"
-    for d in (build_work, src_dest, pkgdest):
-        d.mkdir(parents=True, exist_ok=True)
+        self._publish(self._build(meta.pkgbase, clone))
+        self.built_bases.add(meta.pkgbase)
+        self.keep_names.add(pkg)
+        remove_tree(self.clones.pop(meta.pkgbase))
+        return "built", queued
 
-    if os.geteuid() == 0:
-        subprocess.run(
-            ["chown", "-R", "-h", "--no-dereference", f"{real_user}:", str(build_work)],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            shell=False,
-            check=False,
-        )
+    def _clone(self, pkgbase: str) -> Path:
+        if (cached := self.clones.get(pkgbase)) is not None:
+            return cached
+        dest = self.src_root / pkgbase
+        detail = ""
+        for attempt in range(1, CLONE_ATTEMPTS + 1):
+            remove_tree(dest)
+            try:
+                r = run(["git", "clone", "--quiet", "--depth", "1", "--no-tags",
+                         f"https://aur.archlinux.org/{pkgbase}.git", dest],
+                        user=self.user, env=user_env(self.user), cwd=self.src_root,
+                        capture=True, merge=True, timeout=CLONE_TIMEOUT_S)
+                if r.returncode == 0:
+                    break
+                detail = (r.stdout or "").strip()[-500:]
+            except subprocess.TimeoutExpired:
+                detail = f"timed out after {CLONE_TIMEOUT_S}s"
+            if attempt < CLONE_ATTEMPTS:
+                backoff(attempt)
+        else:
+            die(f"git clone failed for {pkgbase}: {detail}")
+        if not (dest / "PKGBUILD").is_file() or not (dest / ".SRCINFO").is_file():
+            die(f"{pkgbase}.git has no PKGBUILD/.SRCINFO")
+        self.clones[pkgbase] = dest
+        return dest
 
-    env = makepkg_clean_env(
-        makepkg_conf,
-        {
-            "PKGDEST": str(pkgdest),
-            "BUILDDIR": str(build_work),
-            "SRCDEST": str(src_dest),
-            "GRADLE_OPTS": "-Dorg.gradle.daemon=false -Dorg.gradle.console=plain",
-            "GRADLE_USER_HOME": str(build_work / ".gradle"),
-        },
-    )
-
-    success = False
-    last_out = ""
-    for attempt in range(1, 7):
-        try:
-            r = run_cmd(
-                ["makepkg", "--config", str(makepkg_conf), "--nodeps", "--noconfirm", "--skippgpcheck", "-C"],
-                as_user=real_user,
-                env=env,
-                cwd=target_dir,
-                capture=True,
-                merge_stderr=True,
-                check=False,
-                timeout=3600,
-            )
-            last_out = r.stdout or ""
+    def _build(self, pkgbase: str, clone: Path) -> list[Path]:
+        build = self._user_dir(self.work / f"build-{pkgbase}")
+        pkgdest = self._user_dir(build / "pkgdest")
+        srcdest = self._user_dir(build / "sources")
+        log = self.logs / f"{pkgbase}.log"
+        env = makepkg_env(self.user, PKGDEST=str(pkgdest), BUILDDIR=str(build), SRCDEST=str(srcdest),
+                          GRADLE_OPTS="-Dorg.gradle.daemon=false -Dorg.gradle.console=plain",
+                          GRADLE_USER_HOME=str(build / ".gradle"))
+        base = ["makepkg", "--config", self.makepkg_conf, "--nodeps", "--nocheck", "--noconfirm", "--skippgpcheck"]
+        step(f"makepkg {pkgbase} (log: {log})")
+        # Only the network part is retried; a compile failure is deterministic.
+        for attempt in range(1, SOURCE_ATTEMPTS + 1):
+            r = run([*base, "--verifysource"], user=self.user, env=env, cwd=clone, log=log, timeout=BUILD_TIMEOUT_S)
             if r.returncode == 0:
-                success = True
                 break
-        except subprocess.TimeoutExpired:
-            err(f"Timeout {pkg}")
-            shutil.rmtree(clone_root, ignore_errors=True)
-            shutil.rmtree(build_work, ignore_errors=True)
-            return False, False, False
-        time.sleep(2)
+            if attempt < SOURCE_ATTEMPTS:
+                backoff(attempt)
+        else:
+            die(f"source download/verification failed; tail of {log}:\n{tail_text(log)}")
+        r = run([*base, "--cleanbuild"], user=self.user, env=env, cwd=clone, log=log, timeout=BUILD_TIMEOUT_S)
+        if r.returncode != 0:
+            die(f"makepkg failed (exit {r.returncode}); tail of {log}:\n{tail_text(log)}")
+        built = sorted(p for p in pkgdest.iterdir() if PKGFILE_RE.fullmatch(p.name))
+        if not built:
+            die("makepkg produced no package")
+        return built
 
-    if not success:
-        console.print(f"[red]Build log {pkg}:\n{last_out[-3000:]}[/]")
-        shutil.rmtree(clone_root, ignore_errors=True)
-        shutil.rmtree(build_work, ignore_errors=True)
-        return False, False, False
-
-    built = [p for p in pkgdest.glob("*.pkg.tar.*") if not p.name.endswith(".sig")]
-    if not built:
-        err(f"No package produced for {pkg}")
-        shutil.rmtree(clone_root, ignore_errors=True)
-        shutil.rmtree(build_work, ignore_errors=True)
-        return False, False, False
-
-    published: List[Path] = []
-    for bf in built:
-        if not _verify_pkg_archive(bf):
-            err(f"Built archive failed verification: {bf.name}")
-            shutil.rmtree(clone_root, ignore_errors=True)
-            shutil.rmtree(build_work, ignore_errors=True)
-            return False, False, False
-        prepare_alpm_cache_dir(aur_repo)
-        tmp = aur_repo / f".tmp.{bf.name}.{secrets.token_hex(4)}"
-        shutil.copy2(str(bf), str(tmp))
-        fsync_path(tmp)
-        final = aur_repo / bf.name
-        os.replace(tmp, final)
-        fsync_dir(aur_repo)
-        ok(f"Built: {final.name}")
-        published.append(final)
-        deps = extract_runtime_deps(final)
-        if deps:
-            download_official_deps(
-                isolated, official_repo, aur_repo, deps, aur_queue, aur_known
-            )
-
-    shutil.rmtree(clone_root, ignore_errors=True)
-    shutil.rmtree(build_work, ignore_errors=True)
-    return True, False, False
+    def _publish(self, built: Sequence[Path]) -> None:
+        for bf in built:
+            name, _, _ = parse_pkg_filename(bf.name)  # type: ignore[misc]
+            ver = package_version(bf)
+            with atomic_path(self.repo / bf.name) as tmp:
+                shutil.copyfile(bf, tmp)  # copy_file_range/sendfile: no userspace buffers
+            (self.repo / f"{bf.name}.sig").unlink(missing_ok=True)
+            self.rebuilt_files.add(bf.name)
+            self.index.setdefault(name, []).append((ver, bf.name))
+            self.keep_names.add(name)
+            ok(f"built: {bf.name}")
+        fsync_dir(self.repo)
+        remove_tree(built[0].parent.parent)  # build-<pkgbase>
 
 
-def aur_prune_and_db(
-    aur_repo: Path,
-    isolated: IsolatedDB,
-    aur_targets: Sequence[str],
-) -> None:
-    info("Pruning old AUR versions (keep 1) + rebuild DB")
-    if check_tool("paccache"):
-        run_cmd(
-            ["paccache", "-r", "-k", "1", "-c", str(aur_repo)],
-            sudo=True,
-            check=False,
-        )
-    generate_repo_db(aur_repo)
-
-    conf_txt = isolated.conf_path.read_text(encoding="utf-8")
-    if f"[{REPO_NAME}]" not in conf_txt:
-        if not path_is_safe_conf_value(aur_repo):
-            die(f"Unsafe AUR repo path for pacman Server: {aur_repo!r}")
-        with open(isolated.conf_path, "a", encoding="utf-8") as fh:
-            fh.write(
-                f"\n[{REPO_NAME}]\n"
-                f"SigLevel = Optional TrustAll\n"
-                f"Server = file://{aur_repo}\n"
-            )
-        isolated.sync()
-
-    if not aur_targets:
-        restore_ownership(aur_repo)
+def finalize_aur_repo(db: IsolatedDB, repo: Path, official: Path | None, keep_names: set[str], user: RealUser,
+                      rebuilt_files: Collection[str] = ()) -> None:
+    """Runtime closure of the kept AUR packages -> fetch missing official deps -> prune -> DB."""
+    info("Finalizing AUR repo (runtime closure, prune, DB)")
+    old = load_db_by_filename(repo)
+    # VCS pkgver can stay unchanged while its contents change. Even equal-sized replacements
+    # must go through repo-add again to refresh checksums and runtime dependencies.
+    versions = {fn: entry.version for fn, entry in old.items()}
+    for fn in rebuilt_files:
+        old.pop(fn, None)
+        versions[fn] = package_version(repo / fn)
+    newest = newest_files(package_files(repo), versions=versions)
+    aur_names = {n for n in newest if n not in db.index.names}  # official deps kept here are re-resolved
+    if not keep_names:
+        warn("no AUR phase packages to retain")
         return
-
-    r = isolated.pacman("-Sp", "--print-format", "%n", "--", *aur_targets, capture=True)
-    if r.returncode != 0:
-        warn("AUR orphan resolve via -Sp failed; skipping orphan prune")
-        restore_ownership(aur_repo)
-        return
-
-    wl = {
-        ln.strip()
-        for ln in (r.stdout or "").splitlines()
-        if ln.strip() and not ln.lower().startswith("warning")
-    }
-    targets_set = set(aur_targets)
-    dc = 0
-    for f in aur_repo.glob("*.pkg.tar.*"):
-        if f.name.endswith(".sig"):
-            continue
-        pkgname: Optional[str] = None
-        try:
-            pr = subprocess.run(
-                ["bsdtar", "-xOqf", str(f), ".PKGINFO"],
-                stdout=subprocess.PIPE,
-                text=True,
-                stderr=subprocess.DEVNULL,
-                shell=False,
-                check=False,
-            )
-            m = re.search(r"^pkgname = (.+)$", pr.stdout, re.MULTILINE)
-            if m:
-                pkgname = m.group(1).strip()
-        except OSError:
-            pkgname = None
-        if pkgname is None:
-            pm = PKGFILE_RE.match(f.name)
-            pkgname = pm.group("name") if pm else f.name.split("-")[0]
-        if pkgname not in wl and pkgname not in targets_set:
-            step(f"orphan removed: {pkgname} ({f.name})")
-            f.unlink(missing_ok=True)
-            Path(str(f) + ".sig").unlink(missing_ok=True)
-            dc += 1
-    if dc:
-        generate_repo_db(aur_repo)
-    restore_ownership(aur_repo)
+    indexed = update_repo_db(repo, {newest[n] for n in aur_names}, old)  # interim DB: AUR-built packages only
+    old.update((e.filename, e) for e in indexed.values())
+    db.attach_local_repo(repo)
+    cachedirs = [repo] + ([official] if official is not None else [])
+    targets = sorted(keep_names)
+    closure, dropped = db.closure_tolerant(targets, cachedirs)
+    needed = {fn for _, fn, sz in closure if sz > 0}
+    if needed and ingest_host_cache_packages(repo, needed):
+        closure, dropped = db.closure_tolerant(targets, cachedirs)
+    keep = {newest[n] for n in dropped if n in newest}
+    for repo_name, fn, _ in closure:
+        if repo_name == REPO_NAME or official is None or not (official / fn).is_file():
+            keep.add(fn)
+    if sum(size for *_, size in closure):
+        ensure_disk_space(repo, 2 << 30, "AUR runtime dependencies")
+        db.download([t for t in targets if t not in dropped], cachedirs)
+    update_repo_db(repo, keep, old, force_write=True)
+    prune_repo(repo, keep)
+    restore_ownership(repo, user)
 
 
-# ==============================================================================
-# ISO
-# ==============================================================================
-@dataclass
-class ISOConfig:
+def aur_phase(db: IsolatedDB, master: Sequence[str], repo: Path, official: Path, user: RealUser) -> None:
+    info("=== AUR REPO BUILD ===")
+    for tool, hint in (("git", "git"), ("makepkg", "pacman"), ("gcc", "base-devel"), ("make", "base-devel")):
+        require_tool(tool, hint)
+    assert_conf_safe(repo)
+    repo.mkdir(parents=True, exist_ok=True)
+    ensure_disk_space(repo, 2 << 30, "AUR builds")
+    _, unresolved = db.resolve_names(master)
+    seeds = [*AUR_SEED, *(n for n in unresolved if is_aur_candidate(n))]
+    builder = AurBuilder(db, repo, official if official.is_dir() else None, user)
+    builder.run(seeds)
+    builder.keep_names.update(custom_package_names(repo) & builder.index.keys())
+    finalize_aur_repo(db, repo, builder.official, builder.keep_names, user, builder.rebuilt_files)
+
+    table = Table(title="AUR Summary", box=box.ROUNDED)
+    table.add_column("Metric", style="cyan")
+    table.add_column("Value", style="green")
+    for metric, value in (("Built", builder.built), ("Skipped", builder.skipped),
+                          ("Failed", len(builder.failed)), ("Queue final", len(builder.queue))):
+        table.add_row(metric, str(value))
+    console.print(table)
+    if builder.failed:
+        err(f"failed: {', '.join(builder.failed)}")
+        if hard := sorted(set(builder.failed) & REQUIRED_AUR):
+            die(f"required AUR package(s) failed: {', '.join(hard)}")
+
+
+# ═══════════════════════════════════ ISO phase ═══════════════════════════════════
+@dataclass(frozen=True, slots=True)
+class IsoConfig:
     workspace: Path
-    profile_dir: Path
-    work_dir: Path
-    out_dir: Path
     source_dir: Path
     official_repo: Path
-    aur_repo: Optional[Path]
+    aur_repo: Path | None
     final_dest: Path
+    rebuild_local: bool = False
+
+    @property
+    def profile_dir(self) -> Path:
+        return self.workspace / "profile"
+
+    @property
+    def work_dir(self) -> Path:
+        return self.workspace / "work"
+
+    @property
+    def out_dir(self) -> Path:
+        return self.workspace / "out"
+
+    @property
+    def staging(self) -> Path:
+        return self.workspace / "iso_repo"
 
 
-def _umount_tree(path: Path) -> None:
-    try:
-        out = subprocess.run(
-            ["findmnt", "-R", str(path)],
-            capture_output=True,
-            text=True,
-            shell=False,
-            check=False,
-        )
-        if out.returncode == 0 and out.stdout.strip():
-            warn(f"Unmounting binds under {path}")
-            subprocess.run(
-                ["umount", "-R", str(path)],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                shell=False,
-                check=False,
-            )
-    except OSError:
-        pass
-
-
-def setup_clean_room(cfg: ISOConfig) -> None:
+def setup_clean_room(cfg: IsoConfig) -> None:
     info("Clean room")
-    cfg.final_dest.mkdir(parents=True, exist_ok=True)
-    for old_file in cfg.final_dest.glob("dusky_*"):
-        if old_file.is_file() and (old_file.name.endswith(".iso") or old_file.name.endswith(".sha256")):
-            step(f"Removing old build artifact: {old_file.name}")
-            old_file.unlink(missing_ok=True)
-
-    if cfg.workspace.exists():
-        _umount_tree(cfg.workspace)
-        shutil.rmtree(cfg.workspace)
-    cfg.workspace.mkdir(parents=True)
-    cfg.workspace.chmod(0o700)
-
-    src = Path("/usr/share/archiso/configs/releng")
-    if not src.is_dir():
-        die("archiso releng not found — install archiso (no baseline fallback)")
-    shutil.copytree(src, cfg.profile_dir, symlinks=True)
-    _patch_profiledef_compression(cfg.profile_dir / "profiledef.sh")
-    ok("Clean room ready")
+    if not RELENG.is_dir():
+        die("archiso releng profile not found — install archiso")
+    remove_tree(cfg.workspace, strict=True)
+    cfg.workspace.mkdir(parents=True, mode=0o700)
+    shutil.copytree(RELENG, cfg.profile_dir, symlinks=True)
+    patch_profiledef_compression(cfg.profile_dir / "profiledef.sh")
+    ok("clean room ready")
 
 
-def _patch_profiledef_compression(profiledef: Path) -> None:
-    """Best-effort higher squashfs compression; no-op if layout unknown."""
+def patch_profiledef_compression(profiledef: Path) -> None:
     if not profiledef.is_file():
         return
     txt = profiledef.read_text(encoding="utf-8")
     new_opts = "airootfs_image_tool_options=('-comp' 'zstd' '-b' '1M' '-Xcompression-level' '19')"
-    if "airootfs_image_tool_options=" in txt:
-        new = re.sub(r"airootfs_image_tool_options=\([^)]*\)", new_opts, txt)
-        if new != txt:
-            profiledef.write_text(new, encoding="utf-8")
-            step("profiledef: set airootfs_image_tool_options=('-comp' 'zstd' '-b' '1M' '-Xcompression-level' '19')")
-            return
-    step(
-        "profiledef: compression left upstream "
-        "(check archiso profiledef.sh manually if you want smaller ISOs)"
-    )
+    new = re.sub(r"airootfs_image_tool_options=\([^)]*\)", new_opts, txt)
+    if new != txt:
+        profiledef.write_text(new, encoding="utf-8")
+        step(f"profiledef: {new_opts}")
+    else:
+        step("profiledef: compression left upstream (no airootfs_image_tool_options found)")
 
 
-def stage_payloads(cfg: ISOConfig) -> None:
+def stage_payloads(cfg: IsoConfig) -> None:
     info("Staging payloads")
-    airootfs_install = cfg.profile_dir / "airootfs" / "root" / "arch_install"
-    airootfs_install.mkdir(parents=True, exist_ok=True)
-    if cfg.source_dir.exists():
-        for item in cfg.source_dir.iterdir():
-            if item.name in {".git", ".gitignore"}:
-                continue
-            dest = airootfs_install / item.name
-            if item.is_dir():
-                shutil.copytree(item, dest, symlinks=True, dirs_exist_ok=True)
-            else:
-                shutil.copy2(item, dest)
-
-    installer = airootfs_install / "000_dusky_arch_install.sh"
-    if cfg.source_dir.exists() and not installer.is_file():
-        warn(f"Expected installer missing: {installer}")
-
-    # Union releng + asset list (dedupe). inject_dotfiles still strips grml-zsh-config.
+    if not cfg.source_dir.is_dir():
+        die(f"installer payload directory missing: {cfg.source_dir}")
+    dest = cfg.profile_dir / "airootfs" / "root" / "arch_install"
+    dest.mkdir(parents=True, exist_ok=True)
+    for item in cfg.source_dir.iterdir():
+        if item.name in {".git", ".gitignore"}:
+            continue
+        if item.is_dir():
+            shutil.copytree(item, dest / item.name, symlinks=True, dirs_exist_ok=True)
+        else:
+            shutil.copy2(item, dest / item.name)
+    if not (dest / "000_dusky_arch_install.sh").is_file():
+        die(f"expected installer missing: {dest / '000_dusky_arch_install.sh'}")
     releng_pkg = cfg.profile_dir / "packages.x86_64"
     asset_pkg = cfg.source_dir / "assets" / "iso_temp_packages" / "packages.x86_64"
-    seen: set[str] = set()
-    out: List[str] = []
-
-    def consume(text: str) -> None:
-        for ln in text.splitlines():
-            s = ln.strip()
-            if not s or s.startswith("#"):
-                continue
-            if s not in seen:
-                seen.add(s)
-                out.append(s)
-
-    if releng_pkg.is_file():
-        consume(releng_pkg.read_text(encoding="utf-8"))
-    if asset_pkg.is_file():
-        consume(asset_pkg.read_text(encoding="utf-8"))
+    source = asset_pkg if asset_pkg.is_file() else releng_pkg
+    out = list(dict.fromkeys(s for ln in source.read_text(encoding="utf-8").splitlines()
+                             if (s := ln.strip()) and not s.startswith("#")))
     if not out:
-        die("packages.x86_64 empty after union")
+        die("packages.x86_64 empty")
     releng_pkg.write_text("\n".join(out) + "\n", encoding="utf-8")
-    ok(f"Payloads staged ({len(out)} packages.x86_64 entries)")
+    ok(f"payloads staged ({len(out)} packages.x86_64 entries)")
 
 
-def configure_live_hooks(cfg: ISOConfig) -> None:
+def configure_live_hooks(cfg: IsoConfig) -> None:
     info("Live hooks")
+    # archiso mounts its own ISO and SquashFS. systemd's optical GPT autodiscovery
+    # otherwise tries to attach the UEFI boot medium as a root disk and fails.
+    rules = cfg.profile_dir / "airootfs" / "etc" / "udev" / "rules.d"
+    rules.mkdir(parents=True, exist_ok=True)
+    (rules / "98-dusky-live-optical.rules").write_text(
+        'SUBSYSTEM=="block", ENV{ID_CDROM}=="1", ENV{ID_FS_TYPE}=="iso9660", '
+        'ENV{ID_PART_GPT_AUTO_ROOT_DISK_NEEDS_LOOP}="0"\n', encoding="utf-8",
+    )
     script = cfg.profile_dir / "airootfs" / "root" / ".automated_script.sh"
-    # Live installer UX password — not a hardened appliance image.
     script.write_text(
         "#!/usr/bin/env bash\n"
         'if [[ "$(tty)" == "/dev/tty1" ]]; then\n'
@@ -2428,1012 +2059,738 @@ def configure_live_hooks(cfg: ISOConfig) -> None:
         encoding="utf-8",
     )
     script.chmod(0o755)
-    ok("Live hooks")
+    ok("live hooks")
 
 
-def inject_dotfiles(cfg: ISOConfig) -> None:
+def inject_dotfiles(cfg: IsoConfig) -> None:
     info("Injecting dotfiles")
     skel = cfg.profile_dir / "airootfs" / "etc" / "skel"
-    if skel.exists():
-        shutil.rmtree(skel)
+    remove_tree(skel, strict=True)
     skel.mkdir(parents=True)
-
     profiledef = cfg.profile_dir / "profiledef.sh"
-    if profiledef.is_file():
-        txt = profiledef.read_text(encoding="utf-8")
-        txt = re.sub(
-            r"# --- DUSKY PERMISSIONS START ---.*?# --- DUSKY PERMISSIONS END ---\n?",
-            "",
-            txt,
-            flags=re.DOTALL,
-        )
-        profiledef.write_text(txt, encoding="utf-8")
-
+    if not profiledef.is_file():
+        die("profiledef.sh missing after clean room setup")
+    txt = re.sub(r"# --- DUSKY PERMISSIONS START ---.*?# --- DUSKY PERMISSIONS END ---\n?", "",
+                 profiledef.read_text(encoding="utf-8"), flags=re.DOTALL)
     pkg_file = cfg.profile_dir / "packages.x86_64"
     if pkg_file.is_file():
-        ptxt = pkg_file.read_text(encoding="utf-8")
-        ptxt = re.sub(r"^\s*grml-zsh-config\s*$", "", ptxt, flags=re.MULTILINE)
+        ptxt = re.sub(r"^\s*grml-zsh-config\s*$", "", pkg_file.read_text(encoding="utf-8"), flags=re.MULTILINE)
         pkg_file.write_text(ptxt, encoding="utf-8")
 
-    tmp_dot = secure_mkdtemp("dusky-dots-")
+    tmp = make_tempdir("dusky-dots-")
+    repo = tmp / "dusky"
+    git_env = os.environ | {"GIT_TERMINAL_PROMPT": "0", "GCM_INTERACTIVE": "never", "GIT_ASKPASS": "/bin/true"}
     try:
+        detail = ""
+        for attempt in range(1, CLONE_ATTEMPTS + 1):
+            remove_tree(repo)
+            try:
+                r = run(["git", "clone", "--quiet", "--depth", "1", "https://github.com/dusklinux/dusky", repo],
+                        env=git_env, capture=True, merge=True, timeout=CLONE_TIMEOUT_S)
+                if r.returncode == 0:
+                    break
+                detail = (r.stdout or "").strip()[-500:]
+            except subprocess.TimeoutExpired:
+                detail = f"timed out after {CLONE_TIMEOUT_S}s"
+            if attempt < CLONE_ATTEMPTS:
+                backoff(attempt)
+        else:
+            die(f"git clone dusky failed: {detail}")
         pin = os.environ.get("DUSKY_DOTFILES_PIN", "").strip()
         expect_sha = os.environ.get("DUSKY_DOTFILES_SHA", "").strip().lower()
-        target_repo = tmp_dot / "dusky"
-        git_env = git_noninteractive_env()
-        for attempt in range(1, 4):
-            if target_repo.exists():
-                shutil.rmtree(target_repo, ignore_errors=True)
-            r = subprocess.run(
-                [
-                    "git",
-                    "clone",
-                    "--depth",
-                    "1",
-                    "https://github.com/dusklinux/dusky",
-                    str(target_repo),
-                ],
-                env=git_env,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                shell=False,
-                check=False,
-            )
-            if r.returncode == 0:
-                break
-            if attempt == 3:
-                die("Git clone dusky failed")
-            time.sleep(2)
-
         if pin:
-            subprocess.run(
-                ["git", "-C", str(target_repo), "fetch", "--depth", "1", "origin", pin],
-                env=git_env,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                shell=False,
-                check=False,
-            )
-            chk = subprocess.run(
-                ["git", "-C", str(target_repo), "checkout", pin],
-                env=git_env,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                shell=False,
-                check=False,
-            )
-            if chk.returncode != 0:
-                die(f"DUSKY_DOTFILES_PIN checkout failed: {pin}")
-
-        head = subprocess.run(
-            ["git", "-C", str(target_repo), "rev-parse", "HEAD"],
-            env=git_env,
-            capture_output=True,
-            text=True,
-            shell=False,
-            check=False,
-        )
-        head_sha = (head.stdout or "").strip().lower()
-        if expect_sha and head_sha and not (
-            head_sha == expect_sha or head_sha.startswith(expect_sha)
-        ):
-            die(f"Dotfiles SHA mismatch: got {head_sha}, expected {expect_sha}")
+            run(["git", "-C", repo, "fetch", "--quiet", "--depth", "1", "origin", pin],
+                env=git_env, capture=True, check=True, timeout=CLONE_TIMEOUT_S)
+            run(["git", "-C", repo, "checkout", "--quiet", "--detach", "FETCH_HEAD"],
+                env=git_env, capture=True, check=True)
+        head_sha = run(["git", "-C", repo, "rev-parse", "HEAD"], env=git_env,
+                       capture=True, check=True).stdout.strip().lower()
+        if expect_sha and not head_sha.startswith(expect_sha):
+            die(f"dotfiles SHA mismatch: got {head_sha}, expected {expect_sha}")
         if head_sha:
-            step(f"Dotfiles HEAD {head_sha[:12]}")
+            step(f"dotfiles HEAD {head_sha[:12]}")
 
-        for item in target_repo.iterdir():
+        repo_real = repo.resolve()
+        for item in repo.iterdir():
             if item.name == ".git":
                 continue
-            if item.is_symlink():
+            if item.is_symlink():  # a top-level link may point outside the checkout (host files!)
                 try:
-                    tgt = item.resolve(strict=True)
-                    if not tgt.is_relative_to(target_repo.resolve()):
-                        warn(f"Skipping symlink escape: {item}")
+                    if not item.resolve(strict=True).is_relative_to(repo_real):
+                        warn(f"skipping symlink escaping the checkout: {item.name}")
                         continue
                 except OSError:
-                    warn(f"Skipping dangling symlink: {item}")
+                    warn(f"skipping dangling symlink: {item.name}")
                     continue
-            dest = skel / item.name
             if item.is_dir():
-                shutil.copytree(
-                    item,
-                    dest,
-                    symlinks=False,
-                    dirs_exist_ok=True,
-                    ignore_dangling_symlinks=True,
-                )
+                shutil.copytree(item, skel / item.name, symlinks=False, dirs_exist_ok=True,
+                                ignore_dangling_symlinks=True)
             else:
-                shutil.copy2(item, dest)
+                shutil.copy2(item, skel / item.name)
 
-        marker = "# --- AUTOMATED ISO INJECTION: EDITOR & YAZI WRAPPER ---"
-        yazi_fn = (
-            "\ny() {\n"
-            '  local tmp\n'
-            '  tmp="$(mktemp -p "${XDG_RUNTIME_DIR:-/tmp}" -t "yazi-cwd.XXXXXX")"\n'
-            '  yazi "$@" --cwd-file="$tmp"\n'
-            '  if cwd="$(cat -- "$tmp")" && [ -n "$cwd" ] && [ "$cwd" != "$PWD" ]; then\n'
-            '    builtin cd -- "$cwd"\n'
-            "  fi\n"
-            '  rm -f -- "$tmp"\n'
-            "}\n"
-        )
-        for rc_target in (skel, cfg.profile_dir / "airootfs" / "root"):
-            rc_target.mkdir(parents=True, exist_ok=True)
-            for rc_name in (".bashrc", ".zshrc"):
-                rc_path = rc_target / rc_name
-                existing = rc_path.read_text(encoding="utf-8") if rc_path.exists() else ""
-                if marker in existing:
-                    continue
-                with open(rc_path, "a", encoding="utf-8") as fh:
-                    fh.write("\n" + marker + "\n")
-                    fh.write("export EDITOR='nvim'\nexport VISUAL='nvim'\n")
-                    fh.write(yazi_fn)
-
-        hypr_src = cfg.source_dir / "assets" / "hyprland" / "hyprland.lua"
-        if hypr_src.is_file():
-            hypr_dst_dir = skel / ".config" / "hypr"
-            hypr_dst_dir.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(hypr_src, hypr_dst_dir / "hyprland.lua")
-
-        if not profiledef.is_file():
-            die("profiledef.sh missing after clean room setup")
-        with open(profiledef, "a", encoding="utf-8") as pf:
-            pf.write("\n# --- DUSKY PERMISSIONS START ---\n")
-            rootfs = cfg.profile_dir / "airootfs"
-            for exec_file in skel.rglob("*"):
-                if exec_file.is_file() and not exec_file.is_symlink() and os.access(exec_file, os.X_OK):
-                    rel = "/" + str(exec_file.relative_to(rootfs))
-                    rel_esc = (
-                        rel.replace("\\", "\\\\")
-                        .replace('"', '\\"')
-                        .replace("`", "\\`")
-                        .replace("$", "\\$")
-                    )
-                    pf.write(f'file_permissions+=(["{rel_esc}"]="0:0:0755")\n')
-            pf.write("# --- DUSKY PERMISSIONS END ---\n")
-        ok("Dotfiles injected")
+        # Keep Git metadata alongside the flattened work tree. useradd copies
+        # this into ~/dusky, so offline installations have a usable bare repo.
+        bare = skel / "dusky"
+        run(["git", "clone", "--quiet", "--bare", "--no-hardlinks", repo, bare],
+            env=git_env, capture=True, check=True)
+        run(["git", "--git-dir", bare, "remote", "set-url", "origin", "https://github.com/dusklinux/dusky"],
+            env=git_env, capture=True, check=True)
+        run(["git", "--git-dir", bare, "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"],
+            env=git_env, capture=True, check=True)
     finally:
-        shutil.rmtree(tmp_dot, ignore_errors=True)
+        remove_tree(tmp)
+
+    marker = "# --- AUTOMATED ISO INJECTION: EDITOR & YAZI WRAPPER ---"
+    yazi_fn = (
+        "\ny() {\n"
+        "  local tmp cwd\n"
+        '  tmp="$(mktemp -p "${XDG_RUNTIME_DIR:-/tmp}" "yazi-cwd.XXXXXX")" || return\n'
+        '  yazi "$@" --cwd-file="$tmp"\n'
+        '  if cwd="$(cat -- "$tmp")" && [ -n "$cwd" ] && [ "$cwd" != "$PWD" ]; then\n'
+        '    builtin cd -- "$cwd"\n'
+        "  fi\n"
+        '  rm -f -- "$tmp"\n'
+        "}\n"
+    )
+    for rc_dir in (skel, cfg.profile_dir / "airootfs" / "root"):
+        rc_dir.mkdir(parents=True, exist_ok=True)
+        for rc_name in (".bashrc", ".zshrc"):
+            rc_path = rc_dir / rc_name
+            if rc_path.exists() and marker in rc_path.read_text(encoding="utf-8"):
+                continue
+            with open(rc_path, "a", encoding="utf-8") as fh:
+                fh.write(f"\n{marker}\nexport EDITOR='nvim'\nexport VISUAL='nvim'\n{yazi_fn}")
+
+    hypr_src = cfg.source_dir / "assets" / "hyprland" / "hyprland.lua"
+    if hypr_src.is_file():
+        (skel / ".config" / "hypr").mkdir(parents=True, exist_ok=True)
+        shutil.copy2(hypr_src, skel / ".config" / "hypr" / "hyprland.lua")
+
+    # mkarchiso copies airootfs with --no-preserve=mode: executables need file_permissions entries
+    rootfs = cfg.profile_dir / "airootfs"
+    perms: list[str] = []
+    for dirpath, _dirs, files in os.walk(skel):
+        for name in files:
+            path = Path(dirpath, name)
+            st = path.lstat()
+            if not path.is_symlink() and st.st_mode & 0o111:
+                rel = "/" + os.fspath(path.relative_to(rootfs))
+                esc = rel.replace("\\", "\\\\").replace('"', '\\"').replace("`", "\\`").replace("$", "\\$")
+                perms.append(f'file_permissions+=(["{esc}"]="0:0:0755")\n')
+    profiledef.write_text(txt + "\n# --- DUSKY PERMISSIONS START ---\n" + "".join(sorted(perms))
+                          + "# --- DUSKY PERMISSIONS END ---\n", encoding="utf-8")
+    ok(f"dotfiles injected ({len(perms)} executable(s) registered)")
 
 
-def configure_iso_pacman_conf(cfg: ISOConfig) -> None:
+def tree_digest(root: Path, *, permissions: bool = True) -> str:
+    """Hash the tree as copytree(symlinks=False) sees it; ignore timestamps and ownership."""
+    digest = hashlib.sha256()
+
+    def visit(path: Path, relative: Path, ancestors: frozenset[Path]) -> None:
+        resolved = path.resolve(strict=True)
+        st = path.stat()
+        digest.update(os.fsencode(relative) + b"\0")
+        if permissions:
+            digest.update(f"{st.st_mode & 0o7777:o}\0".encode())
+        if path.is_dir():
+            if resolved in ancestors:
+                die(f"cyclic source directory link: {path}")
+            digest.update(b"dir\0")
+            for child in sorted(path.iterdir()):
+                visit(child, relative / child.name, ancestors | {resolved})
+        elif path.is_file():
+            digest.update(b"file\0")
+            with path.open("rb") as fh:
+                digest.update(hashlib.file_digest(fh, "sha256").digest())
+        else:
+            die(f"unsupported build input: {path}")
+
+    visit(root, Path("."), frozenset())
+    return digest.hexdigest()
+
+
+def load_custom_builds(repo: Path | None) -> dict[str, dict[str, str]]:
+    """A missing or damaged cache record requires a rebuild, never unproven reuse."""
+    if repo is None or not (repo / CUSTOM_BUILDS_FILE).is_file():
+        return {}
+    try:
+        data = json.loads((repo / CUSTOM_BUILDS_FILE).read_text(encoding="utf-8"))
+        if not isinstance(data, dict) or any(
+            not isinstance(name, str) or not PKGNAME_RE.fullmatch(name)
+            or not isinstance(record, dict)
+            or not all(isinstance(record.get(key), str) for key in ("fingerprint", "filename", "sha256"))
+            for name, record in data.items()
+        ):
+            raise ValueError("invalid build cache records")
+        return data
+    except (OSError, ValueError) as exc:
+        warn(f"custom build cache unreadable ({exc}); rebuilding local packages")
+        return {}
+
+
+def build_local_packages(cfg: IsoConfig, user: RealUser) -> None:
+    """Reuse verified builds with matching inputs; build only missing or changed recipes."""
+    skel = cfg.profile_dir / "airootfs" / "etc" / "skel"
+    recipes_dir = skel / "user_scripts" / "arch_iso_scripts" / "offline_iso" / "iso_maker" / "python" / "dusky_packages_compile"
+    local_dir = cfg.source_dir / "iso_maker" / "python" / "dusky_packages_compile"
+    local_recipes = sorted(p for p in local_dir.iterdir() if p.is_dir() and (p / "recipe.toml").is_file()) \
+        if local_dir.is_dir() else []
+    recipes = sorted(p for p in recipes_dir.iterdir() if p.is_dir() and (p / "recipe.toml").is_file()) \
+        if recipes_dir.is_dir() else []
+    if [p.name for p in local_recipes] != [p.name for p in recipes]:
+        die("local package recipes differ from the injected Git checkout; commit and push the recipes")
+    for local, staged in zip(local_recipes, recipes, strict=True):
+        # Git does not preserve arbitrary local permissions or directory modes.
+        if tree_digest(local, permissions=False) != tree_digest(staged, permissions=False):
+            die(f"{local.name}: recipe files differ from the injected Git checkout; commit and push them")
+    names: list[str] = []
+    artifacts: list[tuple[str, str]] = []
+    cache = load_custom_builds(cfg.aur_repo)
+    cached_entries = load_db_by_filename(cfg.aur_repo) if cfg.aur_repo is not None else {}
+    reused: dict[str, DbEntry] = {}
+    fingerprints: dict[str, str] = {}
+    config: Path | None = None
+    if recipes:
+        if user.is_root:
+            die("local ISO packages require a non-root invoking user; run via sudo from your user account")
+        require_tool("makepkg", "pacman")
+        require_tool("repo-add", "pacman")
+        info(f"Preparing {len(recipes)} local ISO recipe(s)")
+        config = write_factory_makepkg_conf(cfg.workspace / "local-makepkg.conf")
+    repo = cfg.workspace / "local_repo"
+    for recipe in recipes:
+        if not (recipe / "PKGBUILD").is_file():
+            die(f"{recipe}: recipe.toml requires a PKGBUILD")
+        try:
+            spec = tomllib.loads((recipe / "recipe.toml").read_text(encoding="utf-8"))
+            name = spec["package"]
+            source_rel = Path(spec["source"])
+            tools = spec.get("tools", [])
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            die(f"{recipe}: invalid recipe.toml ({exc})")
+        if (not isinstance(name, str) or not PKGNAME_RE.fullmatch(name)
+                or name in names or not isinstance(tools, list)
+                or not all(isinstance(tool, str) and re.fullmatch(r"[A-Za-z0-9._+-]+", tool) for tool in tools)
+                or source_rel.is_absolute() or ".." in source_rel.parts):
+            die(f"{recipe}: invalid package name, tools, or source path")
+        source = (skel / source_rel).resolve()
+        if not source.is_dir() or not source.is_relative_to(skel.resolve()):
+            die(f"{recipe}: source {source_rel} is missing from the ISO dotfiles checkout")
+
+        assert config is not None
+        fingerprint = hashlib.sha256(
+            b"dusky-local-build-v1\0" + bytes.fromhex(tree_digest(recipe))
+            + bytes.fromhex(tree_digest(source)) + config.read_bytes()
+        ).hexdigest()
+        fingerprints[name] = fingerprint
+        record = cache.get(name, {})
+        entry = cached_entries.get(record.get("filename", ""))
+        if (not cfg.rebuild_local and record.get("fingerprint") == fingerprint and entry is not None
+                and entry.name == name and record.get("sha256") == entry.sha256
+                and (parsed := parse_pkg_filename(entry.filename)) is not None
+                and parsed[2] in ("x86_64", "any")):
+            assert cfg.aur_repo is not None
+            repo.mkdir(exist_ok=True)
+            dest = repo / entry.filename
+            problem = _copy_verified_one(cfg.aur_repo / entry.filename, dest, entry)
+            if problem is None:
+                reused[entry.filename] = entry
+                names.append(name)
+                artifacts.append((name, entry.filename))
+                ok(f"reused local ISO package: {entry.filename} (inputs unchanged)")
+                continue
+            dest.unlink(missing_ok=True)
+            warn(f"cached {name} failed verification ({problem}); rebuilding")
+        step(f"{name}: " + ("forced rebuild" if cfg.rebuild_local else "inputs changed or no verified build cached"))
+        for tool in tools:
+            require_tool(tool, f"required by {name}")
+        work = make_tempdir(f"dusky-package-{name}-", owner=user)
+        shutil.copytree(source, work / "source", symlinks=False)
+        shutil.copytree(recipe, work / "recipe", symlinks=False)
+        for sub in ("packages", "build", "cargo-target"):
+            (work / sub).mkdir()
+        build_config = work / "makepkg.conf"
+        shutil.copyfile(config, build_config)
+        restore_ownership(work, user)
+        env = makepkg_env(
+            user, DUSKY_PACKAGE_SOURCE=str(work / "source"), PKGDEST=str(work / "packages"),
+            BUILDDIR=str(work / "build"), CARGO_TARGET_DIR=str(work / "cargo-target"),
+        )
+        log = work / "build.log"
+        step(f"makepkg {name} (log: {log})")
+        try:
+            result = run(
+                ["makepkg", "--config", build_config, "--nodeps", "--nocheck", "--noconfirm", "--skippgpcheck", "--cleanbuild"],
+                user=user, env=env, cwd=work / "recipe", log=log, timeout=BUILD_TIMEOUT_S,
+            )
+        except subprocess.TimeoutExpired:
+            warn(f"makepkg {name} timed out after {BUILD_TIMEOUT_S}s")
+            result = subprocess.CompletedProcess(["makepkg"], 124)
+        if result.returncode != 0:
+            logs = cfg.final_dest / "build_logs"
+            logs.mkdir(parents=True, exist_ok=True)
+            saved_log = logs / f"{name}.log"
+            shutil.copyfile(log, saved_log)
+            die(f"makepkg {name} failed (exit {result.returncode}); log: {saved_log}\n{tail_text(log)}")
+        built = [p for p in (work / "packages").iterdir()
+                 if (parsed := parse_pkg_filename(p.name)) is not None and parsed[0] == name
+                 and parsed[2] in ("x86_64", "any") and p.is_file()]
+        if len(built) != 1:
+            die(f"{recipe}: expected one x86_64/any package named {name}, found {len(built)}")
+        repo.mkdir(exist_ok=True)
+        with atomic_path(repo / built[0].name) as tmp:
+            shutil.copyfile(built[0], tmp)
+        names.append(name)
+        artifacts.append((name, built[0].name))
+        ok(f"local ISO package: {built[0].name}")
+        remove_tree(work)
+
+    manifest = cfg.profile_dir / "airootfs" / "root" / "arch_install" / "compiled_packages.txt"
+    manifest.write_text("".join(f"{name}\t{filename}\n" for name, filename in artifacts), encoding="utf-8")
+    if names:
+        entries = update_repo_db(repo, set(package_files(repo)), reused)
+        records = {name: {"fingerprint": fingerprints[name], "filename": entry.filename,
+                          "sha256": entry.sha256} for name, entry in entries.items()
+                   if entry.filename not in reused}
+        (repo / CUSTOM_BUILDS_FILE).write_text(json.dumps(records, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def publish_local_packages(cfg: IsoConfig, user: RealUser) -> None:
+    """Persist verified custom builds and their current metadata in the configured AUR repo."""
+    local = cfg.workspace / "local_repo"
+    if not (local / FILES_NAME).is_file():
+        return
+    if cfg.aur_repo is None:
+        die("custom packages require an AUR repository destination")
+    repo = cfg.aur_repo.resolve()
+    assert_conf_safe(repo)
+    repo.mkdir(parents=True, exist_ok=True)
+    entries = read_repo_db(local / FILES_NAME)
+    old = load_db_by_filename(repo)
+    builds = load_custom_builds(local)
+    cache = load_custom_builds(repo)
+    # Fresh builds are always published, including byte-identical repairs of corrupt archives.
+    changed = [e for e in entries.values() if e.name in builds or (previous := old.get(e.filename)) is None
+               or previous.sha256 != e.sha256 or file_size(repo / e.filename) != e.csize]
+    if not changed and all(cache.get(name) == record for name, record in builds.items()):
+        step("custom package repository already current; skipping publication")
+        return
+    ensure_disk_space(repo, sum(e.csize for e in changed), "custom package publication")
+    names = custom_package_names(repo) | entries.keys()
+    # Record retention before copying so an interrupted publication cannot cause a subsequent
+    # AUR-only run to prune an already published custom build.
+    with atomic_path(repo / CUSTOM_PACKAGES_FILE) as tmp:
+        tmp.write_text("".join(f"{name}\n" for name in sorted(names)), encoding="utf-8")
+    fsync_dir(repo)
+    for entry in changed:
+        with atomic_path(repo / entry.filename) as tmp:
+            shutil.copyfile(local / entry.filename, tmp)
+        # These builds are unsigned; an old detached signature must not survive replacement.
+        (repo / f"{entry.filename}.sig").unlink(missing_ok=True)
+        old[entry.filename] = entry  # fresh metadata, even for equal-sized same-version rebuilds
+    winners = newest_files(package_files(repo), versions={fn: e.version for fn, e in old.items()})
+    winners.update((name, e.filename) for name, e in entries.items())
+    update_repo_db(repo, set(winners.values()), old, force_write=True)
+    # Remove only superseded custom versions, after the new index is durable.
+    for fn in package_files(repo):
+        if (parsed := parse_pkg_filename(fn)) is not None and parsed[0] in entries and fn != winners[parsed[0]]:
+            (repo / fn).unlink()
+            (repo / f"{fn}.sig").unlink(missing_ok=True)
+    # Commit provenance only after the archives and repository index are durable.
+    cache.update(builds)
+    with atomic_path(repo / CUSTOM_BUILDS_FILE) as tmp:
+        tmp.write_text(json.dumps(cache, sort_keys=True) + "\n", encoding="utf-8")
+    fsync_dir(repo)
+    restore_ownership(repo, user)
+    ok(f"published {len(changed)} custom package(s) to {repo}")
+
+
+_copy_buf = threading.local()
+
+
+def _copy_verified_one(src: Path, dst: Path, entry: DbEntry) -> str | None:
+    """Copy src->dst hashing in the same pass (one read of the source). The source's page cache
+    is dropped afterwards: a multi-GB one-shot read must not evict RAM a zram workspace needs."""
+    buf: bytearray | None = getattr(_copy_buf, "buf", None)
+    if buf is None:
+        buf = _copy_buf.buf = bytearray(COPY_CHUNK)
+    view = memoryview(buf)
+    digest = hashlib.sha256()
+    try:
+        with open(src, "rb", buffering=0) as fin:
+            st = os.fstat(fin.fileno())
+            if st.st_size != entry.csize:
+                return f"{src.name}: size {st.st_size} != DB {entry.csize}"
+            os.posix_fadvise(fin.fileno(), 0, 0, os.POSIX_FADV_SEQUENTIAL)
+            fd = os.open(dst, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, 0o644)
+            try:
+                while n := fin.readinto(buf):
+                    chunk = view[:n]
+                    digest.update(chunk)  # releases the GIL: threads hash in parallel
+                    while chunk:
+                        chunk = chunk[os.write(fd, chunk):]
+                os.utime(fd, ns=(st.st_atime_ns, st.st_mtime_ns))
+            finally:
+                os.close(fd)
+            os.posix_fadvise(fin.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)
+    except OSError as exc:
+        return f"{src.name}: {exc}"
+    if digest.hexdigest() != entry.sha256:
+        return f"{src.name}: SHA256 mismatch (DB {entry.sha256}, disk {digest.hexdigest()})"
+    return None
+
+
+def stage_iso_repo(cfg: IsoConfig) -> dict[str, DbEntry]:
+    """Merge official, AUR, and locally compiled packages; copy each winner
+    once into the workspace with inline SHA256 verification against its DB, write the merged DB
+    from those entries (no repo-add, no re-hash) and check the result is self-contained."""
+    info("Staging merged offline repository (verified single-pass copy)")
+    merged: dict[str, tuple[DbEntry, Path]] = {
+        n: (e, cfg.official_repo) for n, e in read_repo_db(cfg.official_repo / FILES_NAME).items()}
+    local_repo = cfg.workspace / "local_repo"
+    local_entries = read_repo_db(local_repo / FILES_NAME) if (local_repo / FILES_NAME).is_file() else {}
+    custom_names = custom_package_names(cfg.aur_repo) if cfg.aur_repo is not None else set()
+    if cfg.aur_repo is not None:
+        # Local recipes have already repaired their own archives in the workspace.
+        # Do not parse a broken persistent custom archive before its replacement is
+        # dependency-checked; publication follows the verified merged staging step.
+        excluded = custom_names & local_entries.keys()
+        aur_metadata = load_db_by_filename(cfg.aur_repo)
+        wanted = {fn for name, fn in newest_files(
+            package_files(cfg.aur_repo), versions={fn: e.version for fn, e in aur_metadata.items()}
+        ).items() if name not in excluded}
+        aur_entries = update_repo_db(cfg.aur_repo, wanted, aur_metadata, persist=False)
+        for name, entry in aur_entries.items():
+            cur = merged.get(name)
+            if cur is None or vercmp(entry.version, cur[0].version) > 0:
+                if cur is not None:
+                    warn(f"{name}: AUR repo {entry.version} supersedes official {cur[0].version}")
+                merged[name] = (entry, cfg.aur_repo)
+    for name, entry in local_entries.items():
+        if name in merged and (name not in custom_names or merged[name][1] != cfg.aur_repo):
+            die(f"local ISO package {name} conflicts with an official or AUR package")
+        merged[name] = (entry, local_repo)
+    if not merged:
+        die("merged ISO repository is empty")
+    total = sum(e.csize for e, _ in merged.values())
+    ensure_disk_space(cfg.workspace, max(12 << 30, int(total * 2.5) + (4 << 30)), "ISO workspace")
+    cfg.staging.mkdir(mode=0o755)
+
+    items = list(merged.values())
+    t0 = time.perf_counter()
+    errors = [e for e in parallel_map(lambda it: _copy_verified_one(it[1] / it[0].filename,
+                                                                    cfg.staging / it[0].filename, it[0]),
+                                      items, min(8, os.process_cpu_count() or 1)) if e]
+    if errors:
+        for msg in errors[:50]:
+            err(msg)
+        die(f"{len(errors)} package(s) failed verification — rerun the repo phase(s)")
+    dt = time.perf_counter() - t0
+    step(f"copied+verified {len(items)} packages, {human_bytes(total)} in {dt:.1f}s "
+         f"({human_bytes(int(total / max(dt, 1e-6)))}/s)")
+    write_repo_db(cfg.staging, (e for e, _ in items), durable=False)  # consumed in-run: no fsync
+    verify_repo_closure(cfg.staging, list(dict.fromkeys([*merged, *installer_package_targets(cfg.source_dir)])))
+    ok(f"ISO repository staged: {len(items)} packages + DB")
+    return {n: e for n, (e, _) in merged.items()}
+
+
+def verify_repo_closure(repo: Path, names: Sequence[str]) -> None:
+    """Every package in the ISO repo must be installable from the ISO repo alone."""
+    tmp = make_tempdir("dusky-closure-")
+    try:
+        for sub in ("sync", "local"):
+            (tmp / sub).mkdir()
+        shutil.copyfile(repo / DB_NAME, tmp / "sync" / f"{REPO_NAME}.db")
+        conf = tmp / "pacman.conf"
+        conf.write_text(f"[options]\nDBPath = {tmp}/\nLogFile = {tmp}/pacman.log\nArchitecture = x86_64\n"
+                        f"SigLevel = Never\n\n[{REPO_NAME}]\nServer = file://{repo}\n", encoding="utf-8")
+        r = run(["pacman", "--config", conf, "--noconfirm", "--color", "never", "-Swp", "--print-format", "%n",
+                 "--cachedir", tmp, "--", *sorted(names)], capture=True)
+        if r.returncode == 0:
+            ok("ISO repository contains installer targets and is dependency-closed")
+        else:
+            die(f"ISO repository has missing installer targets or dependencies; rebuild the official/AUR repositories before generating the ISO:\n"
+                f"{pacman_errors(r)}")
+    finally:
+        remove_tree(tmp)
+
+
+def configure_iso_pacman_conf(cfg: IsoConfig) -> None:
+    """Use workspace storage for new live-package downloads, and reuse staged and host caches
+    in place. A RAM workspace therefore keeps these downloads off persistent storage."""
     info("Patching profile pacman.conf")
-    if not path_is_safe_conf_value(cfg.official_repo):
-        die(f"Unsafe official repo path: {cfg.official_repo!r}")
-    if cfg.aur_repo is not None and not path_is_safe_conf_value(cfg.aur_repo):
-        die(f"Unsafe AUR repo path: {cfg.aur_repo!r}")
-
-    prepare_alpm_cache_dir(cfg.official_repo)
-    if cfg.aur_repo is not None and cfg.aur_repo.exists():
-        prepare_alpm_cache_dir(cfg.aur_repo)
-
+    assert_conf_safe(cfg.staging)
     pc = cfg.profile_dir / "pacman.conf"
     if not pc.is_file():
         die("profile pacman.conf missing")
-    txt = pc.read_text(encoding="utf-8")
-    txt = re.sub(r"^\s*DownloadUser\b.*\n", "", txt, flags=re.MULTILINE)
-    lines = txt.splitlines()
-    out: List[str] = []
-    for line in lines:
+    cache = cfg.workspace / "pacman_cache"
+    cache.mkdir(exist_ok=True)
+    host_caches = conf_values(host_conf().get("options", []), "CacheDir") or ["/var/cache/pacman/pkg/"]
+    drop = re.compile(r"^#?\s*(Color|ILoveCandy|VerbosePkgLists|ParallelDownloads|DownloadUser|CacheDir)\b")
+    out: list[str] = []
+    section = ""
+    for line in pc.read_text(encoding="utf-8").splitlines():
         s = line.strip()
-        if re.match(r"^#?\s*Color\b", s):
-            continue
-        if re.match(r"^#?\s*ILoveCandy\b", s):
-            continue
-        if re.match(r"^#?\s*VerbosePkgLists\b", s):
-            continue
-        if re.match(r"^#?\s*ParallelDownloads\b", s):
-            continue
-        if s == "[options]":
+        if s.startswith("[") and s.endswith("]"):
+            section = s[1:-1]
+            if section == "core":
+                out += [f"[{REPO_NAME}]", "SigLevel = Optional TrustAll", f"Server = file://{cfg.staging}", ""]
             out.append(line)
-            out.extend(["Color", "ILoveCandy", "VerbosePkgLists", "ParallelDownloads = 5"])
-            out.append(f"CacheDir = {cfg.official_repo}")
-            if cfg.aur_repo is not None and cfg.aur_repo.exists():
-                out.append(f"CacheDir = {cfg.aur_repo}")
-            out.append("CacheDir = /var/cache/pacman/pkg")
+            if section == "options":
+                out += ["Color", "ILoveCandy", "VerbosePkgLists", f"ParallelDownloads = {PARALLEL_DOWNLOADS}",
+                        f"CacheDir = {cache}/", f"CacheDir = {cfg.staging}/"]
+                out += [f"CacheDir = {path}" for path in host_caches]
             continue
-        if s == "[core]":
-            # Add offline repository section before [core] so local cached packages take top precedence
-            out.append(f"[{REPO_NAME}]")
-            out.append("SigLevel = Optional TrustAll")
-            out.append(f"Server = file://{cfg.official_repo}")
-            if cfg.aur_repo is not None and cfg.aur_repo.exists():
-                out.append(f"Server = file://{cfg.aur_repo}")
-            out.append("")
-            out.append(line)
+        if section == "options" and drop.match(s):
             continue
         out.append(line)
-
-    final_txt = "\n".join(out)
-    pc.write_text(final_txt + "\n", encoding="utf-8")
-
-    build_d = cfg.profile_dir / "pacman.d"
-    build_d.mkdir(exist_ok=True)
-    for f in Path("/etc/pacman.d").glob("*mirrorlist*"):
-        if f.name.endswith(".pacnew") or not f.is_file():
-            continue
-        if "cachyos" in f.name:
-            continue
-        dest = build_d / f.name
-        if dest.exists():
-            continue
-        t = f.read_text(encoding="utf-8")
-        if f.name == "mirrorlist":
-            t = t.replace("$arch", "x86_64")
-        dest.write_text(t, encoding="utf-8")
+    if f"[{REPO_NAME}]" not in out:
+        die("profile pacman.conf has no [core] section to anchor the offline repository")
+    pc.write_text("\n".join(out) + "\n", encoding="utf-8")
     ok("pacman.conf patched")
 
 
-def merge_repos_for_iso(
-    official: Path, aur: Optional[Path], staging: Path
-) -> None:
-    """
-    Host-side merge into one directory + repo-add DB.
-    Official wins on basename collision. Same layout you inject today.
-    """
-    info("Merging offline repos for ISO (host-side)")
-    if staging.exists():
-        shutil.rmtree(staging)
-    staging.mkdir(parents=True)
-
-    def copy_tree_pkgs(src: Path, *, label: str, skip_existing: bool) -> None:
-        if not src.is_dir():
-            return
-        for p in src.glob("*.pkg.tar.*"):
-            if p.name.endswith(".sig") or ".part" in p.name:
-                continue
-            dest = staging / p.name
-            if dest.exists() and skip_existing:
-                warn(f"ISO repo collision ({label} skipped, official kept): {p.name}")
-                continue
-            shutil.copy2(p, dest)
-
-    copy_tree_pkgs(official, label="official", skip_existing=False)
-    if aur is not None and aur.is_dir():
-        copy_tree_pkgs(aur, label="aur", skip_existing=True)
-
-    pkgs = [
-        p
-        for p in staging.glob("*.pkg.tar.*")
-        if not p.name.endswith(".sig") and ".part" not in p.name
-    ]
-    if not pkgs:
-        die("Merged ISO repo has zero packages")
-
-    corrupt_pkgs = verify_package_archives_parallel(pkgs)
-    if corrupt_pkgs:
-        for cp, reason in corrupt_pkgs:
-            err(f"Corrupt package archive in staging ({reason}): {cp.name}")
-        die(f"Aborting ISO build: {len(corrupt_pkgs)} corrupt package(s) found in staging repository.")
-
-    keep_names: set[str] = set()
-    for p in pkgs:
-        parsed = parse_pkg_filename(p.name)
-        if parsed:
-            keep_names.add(parsed[0])
-    prune_repo_keep_names(staging, keep_names)
-    fsync_dir(staging)
-    generate_repo_db(staging)
-    n = len(
-        [
-            p
-            for p in staging.glob("*.pkg.tar.*")
-            if not p.name.endswith(".sig") and ".part" not in p.name
-        ]
-    )
-    ok(f"ISO staging repo ready ({n} packages + DB)")
-
-
-def sanitize_and_validate_iso_packages(cfg: ISOConfig, staging_repo: Path) -> None:
+def sanitize_live_packages(cfg: IsoConfig, entries: dict[str, DbEntry]) -> None:
     pkg_file = cfg.profile_dir / "packages.x86_64"
     if not pkg_file.is_file():
         return
-
-    info("Sanitizing and validating ISO live environment packages (packages.x86_64)")
-
-    # 1. Available in staging repo
-    staging_pkgs: set[str] = set()
-    for p in staging_repo.glob("*.pkg.tar.*"):
-        if p.name.endswith(".sig") or ".part" in p.name:
-            continue
-        parsed = parse_pkg_filename(p.name)
-        if parsed:
-            staging_pkgs.add(parsed[0])
-
-    # 2. Available in official sync DBs
-    sync_pkgs: set[str] = set()
+    info("Validating live-environment packages (packages.x86_64)")
+    universe = set(entries) | {p for e in entries.values() for p in e.provides}
+    profile_repos = run(["pacman-conf", "--config", cfg.profile_dir / "pacman.conf", "--repo-list"],
+                        capture=True, check=True).stdout.split()
+    # Validate against the same repositories mkarchiso will use, rather than stale host DBs.
+    db = IsolatedDB()
     try:
-        pr = subprocess.run(
-            ["pacman", "-Slq"],
-            capture_output=True,
-            text=True,
-            shell=False,
-            check=False,
-        )
-        if pr.returncode == 0:
-            sync_pkgs = {ln.strip() for ln in pr.stdout.splitlines() if ln.strip()}
-    except Exception as exc:
-        warn(f"Query sync DB failed: {exc}")
-
-    available_universe = staging_pkgs | sync_pkgs
-
-    ALIASES = {
-        "broadcom-wl": "broadcom-wl-dkms",
-    }
-
-    lines = pkg_file.read_text(encoding="utf-8").splitlines()
-    sanitized: List[str] = []
-    seen: set[str] = set()
-
-    for line in lines:
+        text = (cfg.profile_dir / "pacman.conf").read_text(encoding="utf-8")
+        text = text.replace("[options]", f"[options]\nDBPath = {db.root}/\nLogFile = {db.root}/pacman.log", 1)
+        db.conf.write_text(text, encoding="utf-8")
+        db._sync()
+        idx = load_sync_index(db.root / "sync" / f"{r}.db" for r in profile_repos if r != REPO_NAME)
+    finally:
+        db.close()
+    universe |= idx.names | idx.provides | idx.groups
+    sanitized: list[str] = []
+    for line in pkg_file.read_text(encoding="utf-8").splitlines():
         pkg = line.strip()
         if not pkg or pkg.startswith("#"):
             continue
-
-        if pkg in ALIASES:
-            target = ALIASES[pkg]
-            if target in available_universe or not available_universe:
-                step(f"Auto-mapped obsolete live package: '{pkg}' -> '{target}'")
-                pkg = target
-
-        if available_universe and pkg not in available_universe:
-            warn(
-                f"Excluding unavailable package '{pkg}' from packages.x86_64 "
-                f"to prevent mkarchiso resolution failure"
-            )
+        if (target := LIVE_PKG_ALIASES.get(pkg)) is not None and target in universe:
+            step(f"mapped obsolete live package {pkg} -> {target}")
+            pkg = target
+        if pkg not in universe:
+            warn(f"excluding unavailable package {pkg!r} from packages.x86_64")
             continue
-
-        if pkg not in seen:
-            seen.add(pkg)
-            sanitized.append(pkg)
-
+        sanitized.append(pkg)
+    sanitized = list(dict.fromkeys(sanitized))
     if not sanitized:
-        die("Sanitization resulted in empty packages.x86_64")
-
+        die("sanitization left packages.x86_64 empty")
+    if "linux" in sanitized and any(p.endswith("-dkms") for p in sanitized):
+        if "linux-headers" not in universe:
+            die("live DKMS packages require linux-headers, but it is unavailable")
+        if "linux-headers" not in sanitized:
+            sanitized.append("linux-headers")
+            step("added linux-headers for live DKMS modules")
     pkg_file.write_text("\n".join(sanitized) + "\n", encoding="utf-8")
-    ok(f"ISO live packages sanitized ({len(sanitized)} packages)")
+    ok(f"live packages validated ({len(sanitized)})")
 
 
-def build_iso_image(cfg: ISOConfig) -> Path:
+def build_iso_image(cfg: IsoConfig, user: RealUser) -> tuple[Path, str]:
     info("Building ISO")
-    final_name = f"dusky_{datetime.now().strftime('%m_%y')}.iso"
-    final_path = cfg.final_dest / final_name
-    final_sha = cfg.final_dest / f"{final_path.stem}_iso.sha256"
-    for f in (final_path, final_sha):
-        if f.exists() or f.is_symlink():
-            step(f"Removing existing: {f.name}")
-            try:
-                f.unlink()
-            except OSError:
-                subprocess.run(["rm", "-f", "--", str(f)], shell=False, check=False)
-
-    mk_src = Path("/usr/bin/mkarchiso")
-    if not mk_src.is_file():
-        die("mkarchiso missing")
-    mk_custom = cfg.workspace / f"mkarchiso_dusky_{secrets.token_hex(6)}"
-    shutil.copy2(mk_src, mk_custom)
-    mk_custom.chmod(0o755)
-
-    staging = cfg.workspace / "iso_repo_staging"
-    merge_repos_for_iso(
-        cfg.official_repo,
-        cfg.aur_repo if cfg.aur_repo is not None and cfg.aur_repo.exists() else None,
-        staging,
-    )
-    sanitize_and_validate_iso_packages(cfg, staging)
-    stage_q = shlex.quote(str(staging.resolve()))
-
-    inj_lines = [
-        '    _msg_info ">>> INJECTING OFFLINE REPOS INTO ISO <<<"',
-        '    local isofs_dir="${isofs_dir:?}"',
-        '    local install_dir="${install_dir:?}"',
-        '    local repo_target="${isofs_dir}/${install_dir}/repo"',
-        '    mkdir -p "${repo_target}"',
-        f'    if ! rsync -a {stage_q}/ "${{repo_target}}/"; then',
-        f'      if ! cp -a {stage_q}/. "${{repo_target}}/"; then',
-        '        echo "[ERR] Failed to copy offline repo into ISO" >&2',
-        "        return 1",
-        "      fi",
-        "    fi",
-        "    sync",
-        "    shopt -s nullglob",
-        '    local pkgs=( "${repo_target}/"*.pkg.tar.* )',
-        '    local dbs=( "${repo_target}/"*.db.tar.* )',
-        '    if (( ${#pkgs[@]} < 1 )); then',
-        '      echo "[ERR] No packages in offline repo" >&2',
-        "      return 1",
-        "    fi",
-        '    if (( ${#dbs[@]} < 1 )); then',
-        '      echo "[ERR] No repo database in offline repo" >&2',
-        "      return 1",
-        "    fi",
-        '    _msg_info ">>> VERIFYING INJECTED REPOSITORY ARCHIVES <<<"',
-        '    for _pkg in "${pkgs[@]}"; do',
-        '      [[ "${_pkg}" == *.sig ]] && continue',
-        '      if [[ "${_pkg}" == *.zst ]]; then',
-        '        zstd -t -q "${_pkg}" </dev/null &>/dev/null || { echo "[ERR] Corrupted ZST package detected inside ISO repo: ${_pkg##*/}" >&2; return 1; }',
-        '      elif [[ "${_pkg}" == *.xz ]]; then',
-        '        xz -t -q "${_pkg}" </dev/null &>/dev/null || { echo "[ERR] Corrupted XZ package detected inside ISO repo: ${_pkg##*/}" >&2; return 1; }',
-        '      fi',
-        '    done',
-        "    sync",
-        "    shopt -u nullglob",
-    ]
-    injection = "\n".join(inj_lines)
-
-    content = mk_custom.read_text(encoding="utf-8")
+    require_tool("mkarchiso", "archiso")
+    mk_text = Path(shutil.which("mkarchiso")).read_text(encoding="utf-8")
     marker = "_build_iso_image() {"
-    count = content.count(marker)
-    if count != 1:
-        die(
-            f"mkarchiso: expected exactly one {marker!r}, found {count}. "
-            "archiso layout changed — update injection."
-        )
-    content = content.replace(marker, marker + "\n" + injection, 1)
+    if (count := mk_text.count(marker)) != 1:
+        die(f"mkarchiso: expected exactly one {marker!r}, found {count}; archiso layout changed")
+    mk = cfg.workspace / "mkarchiso"
+    hook = MKARCHISO_HOOK.replace("@STAGING@", shlex.quote(os.fspath(cfg.staging)))
+    mk.write_text(mk_text.replace(marker, f"{marker}\n{hook}", 1), encoding="utf-8")
+    mk.chmod(0o755)
 
-    # Patch mkarchiso _make_pacman_conf to emit each CacheDir on its own line
-    pacman_conf_fix = r'''_make_pacman_conf() {
-    _msg_info "Copying custom pacman.conf to work directory..."
-    local _pconf="${work_dir}/${buildmode}.pacman.conf"
-    pacman-conf --config "${pacman_conf}" \
-        | sed '/CacheDir/d;/DBPath/d;/HookDir/d;/LogFile/d;/RootDir/d' > "${_pconf}"
-    local _cd
-    while IFS= read -r _cd; do
-        [[ -n "${_cd}" ]] && sed -i "/\[options\]/a CacheDir = ${_cd}" "${_pconf}"
-    done < <(pacman-conf --config "${pacman_conf}" CacheDir)
-    sed -i "/\[options\]/a HookDir = ${pacstrap_dir}/etc/pacman.d/hooks/" "${_pconf}"
-}'''
-    if "_make_pacman_conf() {" in content:
-        content = re.sub(
-            r"_make_pacman_conf\(\) \{.*?\n\}",
-            pacman_conf_fix,
-            content,
-            flags=re.DOTALL,
-        )
-
-    mk_custom.write_text(content, encoding="utf-8")
-
-    for d in (cfg.work_dir, cfg.out_dir):
-        if d.exists():
-            _umount_tree(d)
-            shutil.rmtree(d)
-
-    prepare_alpm_cache_dir(cfg.official_repo)
-    if cfg.aur_repo is not None and cfg.aur_repo.exists():
-        prepare_alpm_cache_dir(cfg.aur_repo)
-
-    repo_bytes = 0
-    for root in (cfg.official_repo, cfg.aur_repo):
-        if root is None or not root.is_dir():
-            continue
-        for f in root.glob("*.pkg.tar.*"):
-            if f.is_file() and not f.name.endswith(".sig"):
-                try:
-                    repo_bytes += f.stat().st_size
-                except OSError:
-                    pass
-    ensure_disk_space(
-        cfg.workspace,
-        max(12 * 1024**3, int(repo_bytes * 2.5) + 4 * 1024**3),
-        "ISO workspace",
-    )
-
-    cmd = [
-        str(mk_custom),
-        "-v",
-        "-m",
-        "iso",
-        "-w",
-        str(cfg.work_dir),
-        "-o",
-        str(cfg.out_dir),
-        str(cfg.profile_dir),
-    ]
-    info(f"Running mkarchiso: {shlex.join(cmd)}")
-    r = subprocess.run(cmd, shell=False, check=False)
-    if r.returncode != 0:
+    cmd = [mk, "-v", "-r", "-m", "iso", "-w", cfg.work_dir, "-o", cfg.out_dir, cfg.profile_dir]
+    info(f"Running mkarchiso: {shlex.join(map(os.fspath, cmd))}")
+    if run(cmd).returncode != 0:
         die("mkarchiso failed")
+    isos = sorted(cfg.out_dir.glob("*.iso"))
+    if not isos:
+        die("mkarchiso produced no ISO")
 
-    iso_files = sorted(cfg.out_dir.glob("*.iso"))
-    if not iso_files:
-        die("No ISO produced")
     cfg.final_dest.mkdir(parents=True, exist_ok=True)
-    shutil.move(str(iso_files[0]), str(final_path))
-    fsync_path(final_path)
-
-    sha = hashlib.sha256()
-    with open(final_path, "rb") as fh:
-        for chunk in iter(lambda: fh.read(1 << 20), b""):
-            sha.update(chunk)
-    digest = sha.hexdigest()
-    final_sha.write_text(f"{digest}  {final_path.name}\n", encoding="utf-8")
-    fsync_path(final_sha)
-
-    uid, gid = validate_sudo_ids()
-    if uid is not None and gid is not None:
-        for f in (final_path, final_sha):
-            try:
-                os.chown(f, uid, gid)
-            except OSError:
-                pass
-
-    ok(f"ISO built: {final_path} ({human_bytes(final_path.stat().st_size)})")
-    return final_path
+    final = cfg.final_dest / f"dusky_{datetime.now():%m_%y}.iso"
+    sha_path = final.with_name(f"{final.stem}_iso.sha256")
+    with atomic_path(final) as tmp_iso:  # previous ISO survives until the new one is complete
+        shutil.move(isos[0], tmp_iso)  # rename(2) when the workspace shares the filesystem
+        with open(tmp_iso, "rb") as fh:
+            digest = hashlib.file_digest(fh, "sha256").hexdigest()
+    drop_page_cache(final)
+    with atomic_path(sha_path) as tmp_sha:
+        tmp_sha.write_text(f"{digest}  {final.name}\n", encoding="utf-8")
+    fsync_dir(cfg.final_dest)
+    for path in (final, sha_path):
+        os.chown(path, user.uid, user.gid)
+    for old in cfg.final_dest.glob("dusky_*"):  # only now that the replacement is durable
+        if old not in (final, sha_path) and old.is_file() and old.name.endswith((".iso", "_iso.sha256")):
+            step(f"removing previous build artifact: {old.name}")
+            old.unlink(missing_ok=True)
+    ok(f"ISO built: {final} ({human_bytes(final.stat().st_size)})")
+    return final, digest
 
 
-# ==============================================================================
-# Prompts / main
-# ==============================================================================
+def iso_phase(cfg: IsoConfig, user: RealUser) -> tuple[Path, str]:
+    info("=== ISO BUILD ===")
+    for tool in ("mkarchiso", "git"):
+        require_tool(tool)
+    workspace = cfg.workspace.resolve()
+    for path in (cfg.source_dir, cfg.official_repo, cfg.aur_repo, cfg.final_dest):
+        if path is not None and path.resolve().is_relative_to(workspace):
+            die(f"ISO workspace would delete an input or output directory: {path}")
+    if workspace.is_relative_to(cfg.source_dir.resolve()):
+        die("ISO workspace cannot be inside the installer payload directory")
+    if not cfg.official_repo.is_dir():
+        die(f"official repo missing at {cfg.official_repo} — build it first")
+    assert_conf_safe(cfg.official_repo)
+    if not ensure_repo_db(cfg.official_repo):
+        die(f"{cfg.official_repo} holds no packages — run the official phase first")
+    if cfg.aur_repo is not None:
+        assert_conf_safe(cfg.aur_repo)
+    try:
+        setup_clean_room(cfg)
+        stage_payloads(cfg)
+        configure_live_hooks(cfg)
+        inject_dotfiles(cfg)
+        build_local_packages(cfg, user)
+        entries = stage_iso_repo(cfg)
+        publish_local_packages(cfg, user)
+        if cfg.aur_repo is not None:
+            ensure_repo_db(cfg.aur_repo)  # custom repairs are durable now; also index manual additions
+        configure_iso_pacman_conf(cfg)
+        sanitize_live_packages(cfg, entries)
+        return build_iso_image(cfg, user)
+    finally:
+        remove_tree(cfg.workspace)
+
+
+# ═══════════════════════════════════ UI ═══════════════════════════════════
 def prompt_action() -> str:
-    console.print(
-        Align.center(
-            Panel(
-                "[bold cyan]󰏖 Dusky Arch ISO & Repo Factory[/]",
-                style="cyan",
-                box=box.ROUNDED,
-                expand=False,
-            )
-        )
-    )
-    table = Table(
-        box=box.ROUNDED,
-        show_header=True,
-        header_style="bold bright_white",
-        title="[bold yellow]Select Build Pipeline[/]",
-        title_justify="center",
-    )
-    table.add_column("No", style="bold yellow", justify="center", width=4)
-    table.add_column("Category", style="bold white", width=14)
-    table.add_column("Pipeline Action", style="white")
-    table.add_column("Scope", style="dim")
-
-    table.add_row(
-        "1",
-        "[bold cyan]Pacman + ISO[/]",
-        "[bold cyan]Pacman Repo[/] + [bold green]ISO[/] [bold yellow](Default)[/]",
-        "Download official packages + generate ISO",
-    )
-    table.add_row(
-        "2",
-        "[bold magenta]AUR + ISO[/]",
-        "[bold magenta]AUR Repo[/] + [bold green]ISO[/]",
-        "Compile AUR packages + generate ISO",
-    )
-    table.add_row(
-        "3",
-        "[bold green]Full ISO[/]",
-        "[bold cyan]Pacman[/] + [bold magenta]AUR[/] + [bold green]ISO[/]",
-        "Complete end-to-end factory build",
-    )
-    table.add_row(
-        "4",
-        "[bold blue]ISO Only[/]",
-        "[bold green]Build ISO[/] only",
-        "Assemble ISO from existing offline repos",
-    )
-    table.add_section()
-    table.add_row(
-        "5",
-        "[bold cyan]Repo Only[/]",
-        "Download [bold cyan]Pacman Repo[/] (no ISO)",
-        "Sync & cache official repository",
-    )
-    table.add_row(
-        "6",
-        "[bold magenta]Repo Only[/]",
-        "Build [bold magenta]AUR Repo[/] (no ISO)",
-        "Compile & index AUR packages",
-    )
-    table.add_row(
-        "7",
-        "[bold purple]Repos Only[/]",
-        "Both Repos ([bold cyan]Pacman[/] + [bold magenta]AUR[/], no ISO)",
-        "Prepare all offline repos without ISO",
-    )
+    table = Table(title=f"Dusky Arch ISO Factory {VERSION}", box=box.ROUNDED)
+    table.add_column("#", style="bold cyan", justify="right")
+    table.add_column("Action", style="magenta")
+    table.add_column("Builds")
+    names = list(ACTIONS)
+    for i, name in enumerate(names, 1):
+        table.add_row(str(i), name, ACTION_HELP[name])
     console.print(table)
-    c = Prompt.ask("Enter choice", choices=["1", "2", "3", "4", "5", "6", "7"], default="1")
-    return {
-        "1": "official_iso",
-        "2": "aur_iso",
-        "3": "full",
-        "4": "iso",
-        "5": "official",
-        "6": "aur",
-        "7": "both",
-    }[c]
+    choice = Prompt.ask("Select action", choices=[str(i) for i in range(1, len(names) + 1)], default="1")
+    return names[int(choice) - 1]
 
 
 def prompt_path(msg: str, default: Path) -> Path:
-    console.print(f"[cyan]{msg}[/] (default: [bold]{default}[/])")
-    inp = Prompt.ask("Path", default=str(default))
-    p = Path(inp).expanduser()
-    try:
-        return p.resolve()
-    except OSError:
-        return p.absolute()
+    console.print(f"[cyan]{escape(msg)}[/] (default: [bold]{escape(str(default))}[/])")
+    return Path(Prompt.ask("Path", default=str(default))).expanduser().resolve()
 
 
-def main() -> None:
-    import argparse
-
-    parser = argparse.ArgumentParser(add_help=False)
-    parser.add_argument(
-        "--action",
-        choices=["official", "aur", "both", "iso", "full", "official_iso", "aur_iso"],
-    )
-    parser.add_argument("--official-repo", type=Path)
-    parser.add_argument("--aur-repo", type=Path)
-    parser.add_argument("--workspace", type=Path)
-    parser.add_argument("--source-dir", type=Path)
-    parser.add_argument("--auto", action="store_true")
-    parser.add_argument("-h", "--help", action="store_true")
-    args = parser.parse_args()
-    if args.help:
-        print(_HELP)
-        raise SystemExit(0)
-
-    atexit.register(_run_cleanups)
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        try:
-            signal.signal(sig, _signal_exit)
-        except (ValueError, OSError):
-            pass
-
-    check_is_arch()
-    assert_x86_64()
+# ═══════════════════════════════════ main ═══════════════════════════════════
+def main(args: argparse.Namespace) -> None:
+    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, _on_signal)
+    atexit.register(run_cleanups)
+    if os.geteuid() != 0:
+        die("must run as root (bootstrap re-exec failed)")
     acquire_factory_lock()
 
-    if args.action:
-        action = args.action
-    elif args.auto or not sys.stdin.isatty():
-        action = "official_iso"
+    interactive = not args.auto and sys.stdin.isatty()
+    action = args.action or (prompt_action() if interactive else "official_iso")
+    do_official, do_aur, do_iso = ACTIONS[action]
+    user = real_user()
+    step(f"action: {action}   real user: {user.name}   home: {user.home}")
+    if do_aur and user.is_root:
+        die("no non-root invoking user (SUDO_USER/login) — makepkg cannot run as root; "
+            "run via sudo from your user account")
+
+    official_repo = (args.official_repo or DEFAULT_OFFICIAL).expanduser()
+    aur_repo = (args.aur_repo or DEFAULT_AUR).expanduser()
+    source_dir = (args.source_dir or user.home / "user_scripts" / "arch_iso_scripts" / "offline_iso").expanduser()
+    if interactive and do_official:
+        official_repo = prompt_path("Official repo path", official_repo)
+    if interactive and do_aur:
+        aur_repo = prompt_path("AUR repo path", aur_repo)
+    official_repo, aur_repo, source_dir = (p.resolve() for p in (official_repo, aur_repo, source_dir))
+
+    if official_repo == aur_repo:
+        die("official and AUR repositories must use different directories (their pruning rules differ)")
+
+    zram = ZRAM_CANDIDATE.is_mount()
+    workspace_base: Path | None = args.workspace
+    if do_iso and workspace_base is None:
+        use_zram = zram and (not interactive or Confirm.ask(
+            f"Detected {ZRAM_CANDIDATE} mounted — use it for the workspace?", default=True))
+        workspace_base = ZRAM_CANDIDATE if use_zram else Path("/tmp")
+
+    start = time.monotonic()
+    iso: tuple[Path, str] | None = None
+    db: IsolatedDB | None = None
+    try:
+        if do_official or do_aur:
+            external = source_dir / "assets" / "iso_temp_packages" / "packages.x86_64"
+            master = list(dict.fromkeys([*build_master_list(external), *installer_package_targets(source_dir)]))
+            db = IsolatedDB()
+            db.setup()
+            if do_official:
+                official_phase(db, master, official_repo, user)
+            if do_aur:
+                aur_phase(db, master, aur_repo, official_repo, user)
+    finally:
+        if db is not None:
+            db.close()
+    if do_iso:
+        assert workspace_base is not None
+        cfg = IsoConfig(
+            workspace=workspace_base.expanduser().resolve() / "dusky_iso",
+            source_dir=source_dir,
+            official_repo=official_repo,
+            aur_repo=aur_repo,
+            rebuild_local=args.rebuild_local,
+            final_dest=(args.output_dir or (ZRAM_CANDIDATE if zram else user.home / "dusky_isos"))
+                       .expanduser().resolve(),
+        )
+        iso = iso_phase(cfg, user)
+
+    elapsed = format_duration(time.monotonic() - start)
+    if iso is not None:
+        path, digest = iso
+        size = human_bytes(path.stat().st_size)
+        console.print(Panel(f"[bold green]SUCCESS[/]\nISO: {escape(str(path))}\nSize: {size}\n"
+                            f"SHA256: {digest}\nTime: {elapsed}", style="green", box=box.DOUBLE))
+        notify("Dusky Factory", f"ISO build complete in {elapsed}: {path.name}\nSize: {size}\nSHA256: {digest}")
     else:
-        action = prompt_action()
+        where = {"official": f"\nLocation: {official_repo}", "aur": f"\nLocation: {aur_repo}"}.get(action, "")
+        ok(f"'{action}' complete (took {elapsed})")
+        notify("Dusky Factory", f"'{action}' complete in {elapsed}!{where}")
 
-    real_user, real_home = get_real_user()
-    step(f"Real user: {real_user}  home: {real_home}")
-    if real_user == "root" and action in {"aur", "both", "full", "aur_iso"}:
-        warn("No non-root SUDO_USER/login user — makepkg via runuser to root is invalid")
-        die("Invoke with: sudo -u youruser sudo python3 ...  OR export SUDO_USER")
 
-    default_official = Path("/srv/offline-repo/official")
-    default_aur = Path("/srv/offline-repo/aur")
-    default_source = real_home / "user_scripts" / "arch_iso_scripts" / "offline_iso"
-    official_repo = (args.official_repo or default_official).expanduser()
-    aur_repo = (args.aur_repo or default_aur).expanduser()
-    source_dir = (args.source_dir or default_source).expanduser()
-    external_pkg_list = source_dir / "assets" / "iso_temp_packages" / "packages.x86_64"
-
-    if not args.auto and sys.stdin.isatty():
-        if action in {"official", "both", "full", "official_iso"}:
-            official_repo = prompt_path("Official repo path", official_repo)
-        if action in {"aur", "both", "full", "aur_iso"}:
-            aur_repo = prompt_path("AUR repo path", aur_repo)
-
+def entry(args: argparse.Namespace) -> int:
     try:
-        official_repo = official_repo.resolve()
-    except OSError:
-        official_repo = official_repo.absolute()
-    try:
-        aur_repo = aur_repo.resolve()
-    except OSError:
-        aur_repo = aur_repo.absolute()
-    try:
-        source_dir = source_dir.resolve()
-    except OSError:
-        source_dir = source_dir.absolute()
-
-    workspace_base: Optional[Path] = args.workspace
-    if action in {"iso", "full", "official_iso", "aur_iso"} and workspace_base is None:
-        if ZRAM_CANDIDATE.exists() and is_mountpoint(ZRAM_CANDIDATE):
-            if not args.auto and sys.stdin.isatty():
-                use_z = Confirm.ask(
-                    f"Detected {ZRAM_CANDIDATE} mounted — use for speed?", default=True
-                )
-                workspace_base = ZRAM_CANDIDATE if use_z else Path("/tmp")
-            else:
-                workspace_base = ZRAM_CANDIDATE
-        else:
-            workspace_base = Path("/tmp")
-    if workspace_base is not None:
-        workspace_base = workspace_base.expanduser()
-        try:
-            workspace_base = workspace_base.resolve()
-        except OSError:
-            workspace_base = workspace_base.absolute()
-
-    ensure_sudo_cached()
-
-    try:
-        start_time = time.monotonic()
-        # ----- Official -----
-        if action in {"official", "both", "full", "official_iso"}:
-            info("=== OFFICIAL REPO BUILD ===")
-            for t in ("pacman", "repo-add", "bsdtar", "zstd", "xz"):
-                if not check_tool(t):
-                    die(f"Missing tool: {t}")
-            master = build_master_list(
-                external_pkg_list if external_pkg_list.exists() else None
-            )
-            isolated = IsolatedDB()
-            try:
-                isolated.generate_conf()
-                ensure_archlinux_keyring(isolated)
-                if not isolated.sync():
-                    die("Sync failed — check network/keyring")
-                official_names, maybe_aur = resolve_official_names(isolated, master)
-                if maybe_aur:
-                    warn(
-                        f"{len(maybe_aur)} master names not in official sync "
-                        f"(fix or add to AUR_SEED): {', '.join(maybe_aur[:40])}"
-                        + ("…" if len(maybe_aur) > 40 else "")
-                    )
-                if not official_names:
-                    die("No official packages resolved from master list")
-                download_packages(isolated, official_names, official_repo)
-                # download_packages already pruned against fresh whitelist
-                if check_tool("paccache"):
-                    run_cmd(
-                        ["paccache", "-r", "-k", "1", "-c", str(official_repo)],
-                        sudo=True,
-                        check=False,
-                    )
-                generate_repo_db(official_repo)
-                restore_ownership(official_repo)
-                # Stash for AUR phase when action includes AUR
-                os.environ["DUSKY_UNRESOLVED_OFFICIAL"] = " ".join(maybe_aur)
-            finally:
-                isolated.cleanup()
-
-        # ----- AUR -----
-        if action in {"aur", "both", "full", "aur_iso"}:
-            info("=== AUR REPO BUILD ===")
-            if os.geteuid() == 0:
-                warn("Running as root — makepkg/git via runuser as " + real_user)
-            for t in ("git", "makepkg", "bsdtar", "gcc", "make"):
-                if not check_tool(t):
-                    die(f"Missing tool: {t} (install base-devel)")
-
-            isolated_aur = IsolatedDB()
-            try:
-                isolated_aur.generate_conf()
-                if not isolated_aur.sync():
-                    die("AUR isolated sync failed")
-                aur_repo.mkdir(parents=True, exist_ok=True)
-                ensure_disk_space(aur_repo, 2 * 1024**3, "AUR builds")
-
-                uid, gid = validate_sudo_ids()
-                if os.geteuid() == 0 and uid is not None and gid is not None:
-                    subprocess.run(
-                        [
-                            "chown",
-                            "-R",
-                            "-h",
-                            "--no-dereference",
-                            f"{uid}:{gid}",
-                            str(aur_repo),
-                        ],
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                        shell=False,
-                        check=False,
-                    )
-
-                clone_base = secure_mkdtemp("aur-factory-")
-                if os.geteuid() == 0 and uid is not None and gid is not None:
-                    subprocess.run(
-                        [
-                            "chown",
-                            "-R",
-                            "-h",
-                            "--no-dereference",
-                            f"{uid}:{gid}",
-                            str(clone_base),
-                        ],
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                        shell=False,
-                        check=False,
-                    )
-
-                makepkg_conf_path = clone_base / "dusky-makepkg.conf"
-                write_factory_makepkg_conf(makepkg_conf_path)
-                if os.geteuid() == 0 and uid is not None:
-                    try:
-                        os.chown(makepkg_conf_path, uid, gid if gid is not None else -1)
-                    except OSError:
-                        pass
-
-                extra_unresolved = [
-                    p
-                    for p in os.environ.get("DUSKY_UNRESOLVED_OFFICIAL", "").split()
-                    if PKGNAME_RE.fullmatch(p)
-                ]
-                aur_queue: List[str] = list(dict.fromkeys([*AUR_SEED, *extra_unresolved]))
-                aur_known: set[str] = set(aur_queue)
-                built = skipped = 0
-                failed: List[str] = []
-                deferred_rounds: Dict[str, int] = {}
-                i = 0
-                max_defer = 50
-
-                prepare_alpm_cache_dir(aur_repo)
-
-                with Progress(
-                    SpinnerColumn(),
-                    TextColumn("{task.description}"),
-                    BarColumn(),
-                    TaskProgressColumn(),
-                    console=console,
-                ) as prog:
-                    task_id = prog.add_task("AUR builds", total=max(len(aur_queue), 1))
-                    while i < len(aur_queue):
-                        pkg = aur_queue[i]
-                        prog.update(
-                            task_id,
-                            description=f"Building {pkg} ({i + 1}/{len(aur_queue)})",
-                            total=len(aur_queue),
-                        )
-                        try:
-                            ok_flag, was_skip, deferred = build_aur_package(
-                                pkg,
-                                aur_repo,
-                                official_repo if official_repo.exists() else None,
-                                isolated_aur,
-                                clone_base,
-                                real_user,
-                                aur_queue,
-                                aur_known,
-                                makepkg_conf_path,
-                            )
-                            if deferred:
-                                n = deferred_rounds.get(pkg, 0) + 1
-                                deferred_rounds[pkg] = n
-                                if n > max_defer:
-                                    err(f"Defer limit exceeded for {pkg}")
-                                    failed.append(pkg)
-                                else:
-                                    aur_queue.append(pkg)
-                            elif ok_flag:
-                                if was_skip:
-                                    skipped += 1
-                                else:
-                                    built += 1
-                            else:
-                                failed.append(pkg)
-                        except Exception as exc:  # noqa: BLE001 — per-pkg isolation
-                            err(f"Exception {pkg}: {exc}")
-                            failed.append(pkg)
-                        i += 1
-                        prog.update(task_id, completed=i, total=len(aur_queue))
-
-                shutil.rmtree(clone_base, ignore_errors=True)
-                aur_prune_and_db(aur_repo, isolated_aur, aur_queue)
-
-                table = Table(title="AUR Summary", box=box.ROUNDED)
-                table.add_column("Metric", style="cyan")
-                table.add_column("Value", style="green")
-                table.add_row("Built", str(built))
-                table.add_row("Skipped", str(skipped))
-                table.add_row("Failed", str(len(failed)))
-                table.add_row("Queue final", str(len(aur_queue)))
-                console.print(table)
-                if failed:
-                    console.print(f"[red]Failed: {', '.join(failed)}[/]")
-                    hard = sorted(set(failed) & set(REQUIRED_AUR))
-                    if hard:
-                        die(f"Required AUR package(s) failed: {', '.join(hard)}")
-            finally:
-                isolated_aur.cleanup()
-
-        # ----- ISO -----
-        if action in {"iso", "full", "official_iso", "aur_iso"}:
-            info("=== ISO BUILD ===")
-            if os.geteuid() != 0:
-                die("ISO build requires root")
-            for t in ("mkarchiso", "git", "rsync"):
-                if not check_tool(t):
-                    die(f"Missing tool: {t}")
-            if workspace_base is None:
-                die("Internal error: workspace_base unset")
-            if not official_repo.is_dir():
-                die(f"Official repo missing at {official_repo} — build it first")
-
-            workspace = workspace_base / "dusky_iso"
-            final_dest = (
-                ZRAM_CANDIDATE
-                if ZRAM_CANDIDATE.exists() and is_mountpoint(ZRAM_CANDIDATE)
-                else (real_home / "dusky_isos")
-            )
-            cfg = ISOConfig(
-                workspace=workspace,
-                profile_dir=workspace / "profile",
-                work_dir=workspace / "work",
-                out_dir=workspace / "out",
-                source_dir=source_dir,
-                official_repo=official_repo,
-                aur_repo=aur_repo if aur_repo.is_dir() else None,
-                final_dest=final_dest,
-            )
-            try:
-                setup_clean_room(cfg)
-                stage_payloads(cfg)
-                configure_live_hooks(cfg)
-                inject_dotfiles(cfg)
-                configure_iso_pacman_conf(cfg)
-                iso_path = build_iso_image(cfg)
-                sha_path = iso_path.with_name(f"{iso_path.stem}_iso.sha256")
-                sha_full = "?"
-                if sha_path.is_file():
-                    parts = sha_path.read_text(encoding="utf-8").split()
-                    if parts:
-                        sha_full = parts[0]
-                elapsed_str = format_duration(time.monotonic() - start_time)
-                console.print(
-                    Panel(
-                        f"[bold green]SUCCESS[/]\n"
-                        f"ISO: {iso_path}\n"
-                        f"Size: {human_bytes(iso_path.stat().st_size)}\n"
-                        f"SHA256: {sha_full}\n"
-                        f"Time: {elapsed_str}",
-                        style="green",
-                        box=box.DOUBLE,
-                    )
-                )
-            finally:
-                if workspace.exists() and (
-                    str(workspace).startswith("/tmp/")
-                    or str(workspace).startswith(str(ZRAM_CANDIDATE))
-                    or workspace.name == "dusky_iso"
-                    or workspace.name.startswith("dusky_iso")
-                ):
-                    _umount_tree(workspace)
-                    shutil.rmtree(workspace, ignore_errors=True)
-
-        # Action-specific success notification & summary
-        elapsed_str = format_duration(time.monotonic() - start_time)
-        if "iso_path" in locals():
-            send_notification(
-                "Dusky Factory",
-                f"ISO build complete in {elapsed_str}: {iso_path.name}\nSize: {human_bytes(iso_path.stat().st_size)}\nSHA256: {sha_full}",
-                icon="dialog-information",
-            )
-        elif action == "official":
-            ok(f"Official Pacman repo download complete! (took {elapsed_str})")
-            send_notification(
-                "Dusky Factory",
-                f"Official Pacman repo download complete in {elapsed_str}!\nLocation: {official_repo}",
-                icon="dialog-information",
-            )
-        elif action == "aur":
-            ok(f"AUR repo build complete! (took {elapsed_str})")
-            send_notification(
-                "Dusky Factory",
-                f"AUR repo build complete in {elapsed_str}!\nLocation: {aur_repo}",
-                icon="dialog-information",
-            )
-        elif action == "both":
-            ok(f"Official & AUR repos build complete! (took {elapsed_str})")
-            send_notification(
-                "Dusky Factory",
-                f"Official & AUR repos build complete in {elapsed_str}!",
-                icon="dialog-information",
-            )
-        else:
-            ok(f"Operation '{action}' completed! (took {elapsed_str})")
-            send_notification(
-                "Dusky Factory",
-                f"Operation '{action}' completed in {elapsed_str}!",
-                icon="dialog-information",
-            )
-
+        main(args)
+        return 0
+    except FactoryError as exc:
+        err(str(exc))
+        notify("Dusky Factory", f"Failed: {exc}", icon="dialog-error")
+        return 1
     except KeyboardInterrupt:
-        die("Cancelled by user (Ctrl+C)")
-    except SystemExit:
-        raise
-    except Exception as exc:
-        die(f"Unhandled exception: {exc}")
+        err("cancelled (SIGINT); child process groups terminated")
+        notify("Dusky Factory", "Process interrupted (SIGINT)", icon="dialog-warning")
+        return 130
+    except Interrupted as exc:
+        err(f"terminated by signal {exc.signum}; child process groups terminated")
+        notify("Dusky Factory", f"Process interrupted (signal {exc.signum})", icon="dialog-warning")
+        return 128 + exc.signum
+    except Exception:
+        console.print_exception()
+        notify("Dusky Factory", "Failed: unhandled exception (see terminal)", icon="dialog-error")
+        return 1
+    finally:
+        terminate_children()
+        run_cleanups()
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(entry(ARGS))

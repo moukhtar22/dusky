@@ -10,10 +10,10 @@ Dusky Kokoro TTS v5
 Process model
 -------------
 * One asyncio event loop owns ALL mutable state (jobs, player, timers, sockets).
-  Nothing outside the loop thread touches it, so there are no locks anywhere.
-* Exactly one "engine" thread (a 1-worker ThreadPoolExecutor) owns ONNX Runtime
-  and espeak-ng. Both are only ever called from that thread: that is the only
-  way to make the espeak-ng C library safe and model unload deterministic.
+  Text preparation runs outside the loop; worker lifecycle and I/O are serialized.
+* A separate synthesis process owns ONNX Runtime and espeak-ng. One caller
+  uses the runtime at a time. Unloading exits this process to release the
+  driver context as well as the model arena.
 * mpv is a per-utterance child process: raw float32 PCM goes in through stdin,
   control (pause / quit / observe) goes through a socketpair passed as
   --input-ipc-client=fd://N. mpv exits by itself when that socket closes, so a
@@ -48,6 +48,9 @@ import html
 import json
 import logging
 import logging.handlers
+import math
+import subprocess
+import tempfile
 import os
 import re
 import shutil
@@ -65,10 +68,10 @@ from collections.abc import Callable, Iterable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, fields
 from pathlib import Path
-from typing import Any, Final, Literal, NoReturn
+from typing import Any, Final, Literal, NoReturn, get_type_hints, get_origin, get_args
 from urllib.parse import urlsplit
 
-VERSION: Final = "5.0.0"
+VERSION: Final = "5.1.1"
 PROTOCOL: Final = 1
 APP_NAME: Final = "dusky-kokoro"
 APP_DIR: Final = Path(__file__).resolve().parent
@@ -76,7 +79,7 @@ SAMPLE_RATE: Final = 24_000
 BYTES_PER_SAMPLE: Final = 4  # float32 little-endian PCM
 TERMINAL_EVENTS: Final = frozenset({"finished", "cancelled", "error", "deduplicated"})
 CLIENT_ENV_KEYS: Final = (
-    "WAYLAND_DISPLAY", "DISPLAY", "XAUTHORITY", "XDG_SESSION_TYPE", "XDG_CURRENT_DESKTOP",
+    "WAYLAND_DISPLAY", "XDG_SESSION_TYPE", "XDG_CURRENT_DESKTOP",
     "DBUS_SESSION_BUS_ADDRESS", "PULSE_SERVER", "PIPEWIRE_REMOTE",
 )
 MODEL_FILES: Final[dict[str, str]] = {
@@ -89,11 +92,11 @@ VOICES_FILENAME: Final = "voices-v1.0.bin"
 EP_NAMES: Final[dict[str, str]] = {
     "cuda": "CUDAExecutionProvider",
     "tensorrt": "TensorrtExecutionProvider",
-    "rocm": "ROCmExecutionProvider",
+    "migraphx": "MIGraphXExecutionProvider",
     "openvino": "OpenVINOExecutionProvider",
     "cpu": "CPUExecutionProvider",
 }
-GPU_KINDS: Final = frozenset({"cuda", "tensorrt", "rocm"})
+GPU_KINDS: Final = frozenset({"cuda", "tensorrt", "migraphx"})
 # Kokoro voice prefix -> espeak-ng language code used by kokoro-onnx (Mandarin is "cmn", not "zh").
 LANG_BY_PREFIX: Final[dict[str, str]] = {
     "a": "en-us", "b": "en-gb", "j": "ja", "z": "cmn", "e": "es",
@@ -111,7 +114,7 @@ VOICE_1_WEIGHT = 0.4
 VOICE_2 = "af_bella"
 SPEED = 1.0
 MPV_SPEED = 1.0
-MODEL_PRECISION = "fp16"
+MODEL_PRECISION = "auto"
 SAMPLE_RATE = 24000
 STRIP_SPECIAL_CHARS = True
 ALLOWED_PUNCTUATION = frozenset({".", ",", "!", "?", ";", ":", "'", "%", "-"})
@@ -120,7 +123,6 @@ IDLE_TIMEOUT = 10.0
 DEDUP_WINDOW = 2.0
 QUEUE_SIZE = 5
 
-PID_FILE: Final = Path("/tmp/dusky_kokoro.pid")
 
 
 log = logging.getLogger("dusky")
@@ -139,6 +141,10 @@ class ConfigError(DuskyError):
 
 class EngineError(DuskyError):
     pass
+
+
+class InferenceError(EngineError):
+    """The model returned unusable audio."""
 
 
 class VoiceError(DuskyError):
@@ -193,12 +199,14 @@ def default_config_path() -> Path:
 # =============================================================================
 @dataclass(slots=True, frozen=True, kw_only=True)
 class EngineConfig:
-    provider: str = "auto"                 # auto | cuda | tensorrt | rocm | openvino | cpu
+    provider: str = "auto"                 # auto | cuda | tensorrt | migraphx | openvino | cpu
     precision: str = "auto"                # auto | f32 | fp16 | fp16-gpu | int8
     models_dir: str = ""
     voices_file: str = ""
     device_id: int = 0
     gpu_mem_limit_mb: int = 2048
+    cudnn_conv_use_max_workspace: bool = False
+    worker_start_timeout_s: float = 120.0
     arena_extend_strategy: str = "kSameAsRequested"
     cudnn_conv_algo_search: str = "HEURISTIC"
     cuda_lib_dirs: tuple[str, ...] = ()
@@ -261,7 +269,7 @@ class PlaybackConfig:
     audio_device: str = ""
     volume: int = 100
     cache_max_mb: int = 512
-    use_user_mpv_config: bool = False
+    use_user_mpv_config: bool = True
     extra_args: tuple[str, ...] = ()
     prefetch_segments: int = 4
     write_stall_timeout_s: float = 0.0
@@ -312,7 +320,7 @@ _SECTIONS: Final[dict[str, type]] = {
     "archive": ArchiveConfig, "daemon": DaemonConfig, "logging": LoggingConfig,
 }
 _CHOICES: Final[dict[tuple[str, str], tuple[Any, ...]]] = {
-    ("engine", "provider"): ("auto", "cuda", "tensorrt", "rocm", "openvino", "cpu"),
+    ("engine", "provider"): ("auto", "cuda", "tensorrt", "migraphx", "openvino", "cpu"),
     ("engine", "precision"): ("auto", *MODEL_FILES),
     ("engine", "arena_extend_strategy"): ("kSameAsRequested", "kNextPowerOfTwo"),
     ("engine", "cudnn_conv_algo_search"): ("HEURISTIC", "DEFAULT", "EXHAUSTIVE"),
@@ -331,12 +339,14 @@ DEFAULT_CONFIG_TOML: Final = """# Dusky Kokoro TTS - configuration (TOML)
 # Apply changes with:  trigger.sh --reload   (or: systemctl --user restart dusky-kokoro)
 
 [engine]
-provider = "auto"          # auto | cuda | tensorrt | rocm | openvino | cpu
-precision = "auto"         # auto | f32 | fp16 | fp16-gpu | int8  (auto: fp16-gpu on CUDA/ROCm, f32 elsewhere)
+provider = "auto"          # auto | cuda | tensorrt | migraphx | openvino | cpu
+precision = "auto"         # auto | f32 | fp16 | fp16-gpu | int8  (auto: tested fp16-gpu on CPU/CUDA; f32 on OpenVINO)
 models_dir = ""            # "" = <install dir>/models
 voices_file = ""           # "" = <models_dir>/voices-v1.0.bin
 device_id = 0
-gpu_mem_limit_mb = 2048    # arena cap for CUDA/ROCm (0 = unlimited)
+gpu_mem_limit_mb = 2048    # provider arena cap, NOT total VRAM (0 = unlimited)
+cudnn_conv_use_max_workspace = false # cap cuDNN workspace to 32 MiB; true may need several GiB
+worker_start_timeout_s = 120.0
 arena_extend_strategy = "kSameAsRequested"   # or kNextPowerOfTwo
 cudnn_conv_algo_search = "HEURISTIC"         # HEURISTIC | DEFAULT | EXHAUSTIVE (exhaustive re-searches per new shape)
 cuda_lib_dirs = []         # explicit dirs for onnxruntime.preload_dlls(); [] = NVIDIA pip wheels inside the venv
@@ -347,7 +357,7 @@ tensorrt_cache_dir = ""    # "" = ~/.cache/dusky-kokoro/tensorrt
 tensorrt_profile_min = "input_ids:1x2,style:1x256,speed:1"
 tensorrt_profile_opt = "input_ids:1x160,style:1x256,speed:1"
 tensorrt_profile_max = "input_ids:1x512,style:1x256,speed:1"
-intra_op_threads = 0       # 0 = every schedulable core (CPU provider); GPU providers use 2
+intra_op_threads = 0       # 0 = up to 8 available CPUs; GPU providers use 2
 allow_spinning = true
 graph_optimization = "all" # all | extended | basic | disabled
 require_accelerator = false   # true: refuse to run on the CPU when a GPU provider was requested
@@ -396,7 +406,7 @@ window_title = "Kokoro TTS"
 audio_device = ""          # mpv --audio-device (list with: mpv --audio-device=help)
 volume = 100
 cache_max_mb = 512         # mpv demuxer cache: generation may run this far ahead of playback
-use_user_mpv_config = false
+use_user_mpv_config = true
 extra_args = []
 prefetch_segments = 4      # synthesized segments buffered ahead of the player
 write_stall_timeout_s = 0.0   # abort if mpv stops consuming audio for this long (0 = never)
@@ -428,12 +438,27 @@ ort_verbose = false        # ONNX Runtime verbose session logs
 
 def _build_section(cls: type, data: dict[str, Any], where: str) -> Any:
     valid = {f.name: f for f in fields(cls)}
+    hints = get_type_hints(cls)
     kwargs: dict[str, Any] = {}
     for key, value in data.items():
         if key not in valid:
             raise ConfigError(f"{where}: unknown key '{key}' (valid keys: {', '.join(sorted(valid))})")
         if isinstance(value, list):
             value = tuple(value)
+        hint = hints[key]
+        origin = get_origin(hint)
+        expected = origin or hint
+        valid_type = (type(value) in (int, float) and math.isfinite(value)) if expected is float else isinstance(value, expected)
+        if expected is int:
+            valid_type = type(value) is int
+        if not valid_type:
+            raise ConfigError(f"{where}: {key} must be {expected.__name__}")
+        if origin is tuple:
+            element_type = get_args(hint)[0]
+            if not all(isinstance(v, element_type) for v in value):
+                raise ConfigError(f"{where}: {key} must contain {element_type.__name__} values")
+        if origin is dict and not all(isinstance(k, str) and isinstance(v, str) for k, v in value.items()):
+            raise ConfigError(f"{where}: {key} must map strings to strings")
         kwargs[key] = value
     try:
         return cls(**kwargs)
@@ -442,6 +467,19 @@ def _build_section(cls: type, data: dict[str, Any], where: str) -> Any:
 
 
 def _validate(cfg: Config) -> None:
+    for section in fields(cfg):
+        obj = getattr(cfg, section.name)
+        for f in fields(obj):
+            value = getattr(obj, f.name)
+            if type(value) in (int, float) and (not math.isfinite(value) or value < 0):
+                raise ConfigError(f"[{section.name}] {f.name} must be finite and >= 0")
+    for key in ("target_segment_chars", "max_segment_chars", "first_segment_max_chars"):
+        if getattr(cfg.text, key) < 3:
+            raise ConfigError(f"[text] {key} must be >= 3")
+    if cfg.engine.worker_start_timeout_s <= 0 or cfg.daemon.request_timeout_s <= 0:
+        raise ConfigError("worker_start_timeout_s and request_timeout_s must be > 0")
+    if cfg.daemon.max_request_bytes < 1024 or cfg.playback.cache_max_mb < 1:
+        raise ConfigError("max_request_bytes must be >= 1024 and cache_max_mb must be >= 1")
     for (section, key), allowed in _CHOICES.items():
         value = getattr(getattr(cfg, section), key)
         if value not in allowed:
@@ -580,8 +618,6 @@ def resolve_paths(cfg: Config, config_file: Path, socket_override: str | None = 
         expand(cfg.daemon.socket_path) if cfg.daemon.socket_path else default_socket_path())
     if cfg.archive.dir:
         archive_dir = expand(cfg.archive.dir)
-    elif Path("/mnt/zram1").is_dir() and os.access("/mnt/zram1", os.W_OK):
-        archive_dir = Path("/mnt/zram1/kokoro_audio")
     else:
         archive_dir = cache / "audio"
 
@@ -654,12 +690,11 @@ _SYMBOL_WORDS_EN: Final = {
 }
 _KEEP_PUNCT: Final = frozenset(".,!?;:'\"()-/%&+=\u00b0\u00bf\u00a1\u3002\uff0c\uff01\uff1f\uff1b\uff1a\u3001\uff05")
 
-_RE_FENCE_BLOCK = re.compile(r"^[ \t]{0,3}(\x60{3,}|~{3,})[^\n]*\n(.*?)^[ \t]{0,3}\1[ \t]*$", re.M | re.S)
-_RE_FENCE_LINE = re.compile(r"^[ \t]{0,3}(?:\x60{3,}|~{3,})[^\n]*$", re.M)
+_RE_FENCE_LINE = re.compile(r"^[ \t]{0,3}(\x60{3,}|~{3,})([^\n]*)$")
 _RE_INLINE_CODE = re.compile(r"\x60([^\x60\n]{1,300})\x60")
-_RE_IMAGE = re.compile(r"!\[([^\]]*)\]\([^)]*\)")
-_RE_LINK = re.compile(r"\[([^\]]+)\]\((?:[^)\s]+)(?:\s+\"[^\"]*\")?\)")
-_RE_REF_LINK = re.compile(r"\[([^\]]+)\]\[[^\]]*\]")
+_RE_IMAGE = re.compile(r"!\[([^\[\]]*)\]\([^)]*\)")
+_RE_LINK = re.compile(r"\[([^\[\]]+)\]\((?:[^)\s]+)(?:\s+\"[^\"]*\")?\)")
+_RE_REF_LINK = re.compile(r"\[([^\[\]]+)\]\[[^\[\]]*\]")
 _RE_AUTOLINK = re.compile(r"<(https?://[^>\s]+)>")
 _RE_HTML_TAG = re.compile(r"</?[A-Za-z][^<>]{0,120}>")
 _RE_HEADER = re.compile(r"^[ \t]{0,3}#{1,6}[ \t]+(.+?)[ \t#]*$", re.M)
@@ -723,16 +758,33 @@ def _ensure_terminal(unit: str) -> str:
     return unit if unit[-1] in ".!?:;\u3002\uff01\uff1f\uff1b\uff1a" else unit + "."
 
 
+def strip_fenced_code(text: str, read_code: bool) -> str:
+    # A line scan handles unmatched fences in linear time. A closing fence may
+    # be longer than its opener; an unclosed block extends to the document end.
+    out: list[str] = []
+    opener = ""
+    for line in text.splitlines(keepends=True):
+        match = _RE_FENCE_LINE.match(line.rstrip("\n"))
+        if not opener:
+            if match and not (match[1][0] == "`" and "`" in match[2]):
+                opener = match[1]
+                out.append("\n\n")
+            else:
+                out.append(line)
+        elif match and match[1][0] == opener[0] and len(match[1]) >= len(opener) and not match[2].strip():
+            opener = ""
+            out.append("\n\n")
+        elif read_code:
+            out.append(line)
+    return "".join(out)
+
+
 def normalize_text(text: str, cfg: TextConfig, lang: str = "en-us") -> list[list[str]]:
     """Return paragraphs, each a list of 'units' (line-level sentence groups)."""
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     text = unicodedata.normalize("NFC", text).translate(_ZERO_WIDTH)
     text = html.unescape(text)
-    if cfg.read_code_blocks:
-        text = _RE_FENCE_BLOCK.sub(lambda m: "\n\n" + m.group(2) + "\n\n", text)
-    else:
-        text = _RE_FENCE_BLOCK.sub("\n\n", text)
-    text = _RE_FENCE_LINE.sub("", text)
+    text = strip_fenced_code(text, cfg.read_code_blocks)
     text = _RE_TABLE_SEP.sub("", text)
     text = _RE_TABLE_ROW.sub(lambda m: ", ".join(c.strip() for c in m.group(1).split("|") if c.strip()), text)
     text = _RE_HEADER.sub(lambda m: "\n\n" + m.group(1) + "\n\n", text)
@@ -896,16 +948,22 @@ def _find_cut(text: str, limit: int) -> int:
 
 
 def split_long(text: str, limit: int) -> list[str]:
+    # Scan each character once; repeatedly measuring/slicing the entire tail is
+    # quadratic for books with long paragraphs or no sentence punctuation.
     parts: list[str] = []
-    while wlen(text) > limit:
-        cut = _find_cut(text, limit)
-        head, text = text[:cut].strip(), text[cut:].strip()
+    start = 0
+    while start < len(text):
+        end, weight = start, 0
+        while end < len(text) and weight + _weight(text[end]) <= limit:
+            weight += _weight(text[end])
+            end += 1
+        if end < len(text):
+            cut = _find_cut(text[start:end], limit)
+            end = start + cut
+        head = text[start:end].strip()
         if head:
             parts.append(head)
-        if not text:
-            break
-    if text:
-        parts.append(text)
+        start = end
     return parts
 
 
@@ -944,6 +1002,11 @@ def segment_text(paragraphs: list[list[str]], cfg: TextConfig) -> list[Segment]:
             head, rest = pieces[0], " ".join(pieces[1:])
             segments[0:1] = [Segment(head, 60), Segment(rest, first.pause_ms)]
     return segments
+
+
+def prepare_text(text: str, cfg: TextConfig, lang: str) -> tuple[list[list[str]], list[Segment]]:
+    paragraphs = normalize_text(text, cfg, lang)
+    return paragraphs, segment_text(paragraphs, cfg)
 
 
 def split_phonemes(phonemes: str, limit: int) -> list[str]:
@@ -1020,12 +1083,25 @@ def extract_text_from_file(file_path: Path | str) -> str:
         import html
         try:
             with zipfile.ZipFile(path, "r") as z:
-                candidates = [
-                    n for n in z.namelist()
-                    if n.lower().endswith((".xhtml", ".html", ".htm"))
+                import posixpath
+                import xml.etree.ElementTree as ET
+                from urllib.parse import unquote
+                container = ET.fromstring(z.read("META-INF/container.xml"))
+                rootfile = container.find(".//{*}rootfile")
+                if rootfile is None:
+                    raise ValueError("EPUB has no package document")
+                opf_name = rootfile.attrib["full-path"]
+                package = ET.fromstring(z.read(opf_name))
+                manifest = {
+                    item.attrib["id"]: item.attrib["href"]
+                    for item in package.findall("./{*}manifest/{*}item")
+                    if item.attrib.get("media-type") == "application/xhtml+xml"
+                }
+                files_to_read = [
+                    posixpath.normpath(posixpath.join(posixpath.dirname(opf_name), unquote(manifest[item.attrib["idref"]].split("#", 1)[0])))
+                    for item in package.findall("./{*}spine/{*}itemref")
+                    if item.attrib.get("linear", "yes") != "no" and item.attrib.get("idref") in manifest
                 ]
-                chapters = [c for c in candidates if not any(x in c.lower() for x in ("toc", "nav", "cover"))]
-                files_to_read = chapters if chapters else candidates
 
                 parts: list[str] = []
                 for name in files_to_read:
@@ -1039,8 +1115,8 @@ def extract_text_from_file(file_path: Path | str) -> str:
                         cleaned = re.sub(r"\n\s*\n", "\n\n", cleaned).strip()
                         if cleaned:
                             parts.append(cleaned)
-                    except Exception:
-                        continue
+                    except (KeyError, OSError) as exc:
+                        raise ValueError(f"Could not read chapter {name}: {exc}") from exc
                 text = "\n\n".join(parts).strip()
                 if text:
                     return text
@@ -1087,6 +1163,8 @@ class VoiceBank:
 
     def reset(self, path: Path) -> None:
         self.path = path
+        if self._npz is not None:
+            self._npz.close()
         self._npz = None
         self._cache.clear()
 
@@ -1105,13 +1183,14 @@ class VoiceBank:
                 w = float(weight) if weight.strip() else 1.0
             except ValueError as exc:
                 raise VoiceError(f"invalid weight '{weight}' for voice '{name}'") from exc
-            if w <= 0:
+            if not math.isfinite(w) or w <= 0:
                 raise VoiceError(f"weight for voice '{name}' must be > 0")
             parts.append((name, w))
         if not parts:
             raise VoiceError("empty voice spec")
-        total = sum(w for _, w in parts)
-        return [(n, w / total) for n, w in parts]
+        scale = max(w for _, w in parts)
+        total = sum(w / scale for _, w in parts)
+        return [(n, (w / scale) / total) for n, w in parts]
 
     @staticmethod
     def lang_for(spec: str, configured: str = "auto") -> str:
@@ -1124,7 +1203,7 @@ class VoiceBank:
         """Weighted linear blend of style tensors (engine thread only)."""
         import numpy as np
         parts = self.parse_spec(spec)
-        key = ",".join(f"{n}:{w:.4f}" for n, w in parts)
+        key = ",".join(f"{n}:{w!r}" for n, w in parts)
         if key in self._cache:
             return self._cache[key]
         npz = self._open()
@@ -1159,7 +1238,12 @@ class _SessionProxy:
         self.run_options = run_options
 
     def run(self, output_names: Any, input_feed: Any, run_options: Any = None) -> Any:
-        return self._inner.run(output_names, input_feed, run_options or self.run_options)
+        outputs = self._inner.run(output_names, input_feed, run_options or self.run_options)
+        if output_names is None:
+            import numpy as np
+            if not outputs or np.asarray(outputs[0]).size == 0 or not np.isfinite(outputs[0]).all():
+                raise InferenceError("model produced empty or non-finite audio")
+        return outputs
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._inner, name)
@@ -1180,13 +1264,11 @@ class EngineStats:
 
 def provider_chain(requested: str, available: Sequence[str]) -> list[str]:
     if requested == "auto":
-        return [k for k in ("cuda", "rocm", "openvino") if EP_NAMES[k] in available] + ["cpu"]
+        return [k for k in ("cuda", "migraphx", "openvino") if EP_NAMES[k] in available] + ["cpu"]
     if requested == "cpu":
         return ["cpu"]
     if EP_NAMES[requested] not in available:
-        raise EngineError(
-            f"{EP_NAMES[requested]} is not present in this onnxruntime build (available: {list(available)}). "
-            "Re-run kokoro_installer.sh with the matching --hw mode.")
+        return ["cpu"]
     return [requested, "cpu"]
 
 
@@ -1201,7 +1283,7 @@ def choose_model(precision: str, kind: str, models_dir: Path) -> tuple[str, Path
             present = [k for k, f in MODEL_FILES.items() if (models_dir / f).is_file()]
             raise EngineError(f"model for precision '{precision}' missing at {path}; present: {present or 'none'}")
         return precision, path
-    order = ("fp16-gpu", "f32", "fp16", "int8") if kind in GPU_KINDS else ("f32", "fp16", "int8", "fp16-gpu")
+    order = ("fp16-gpu", "f32", "int8", "fp16") if kind in GPU_KINDS or kind == "cpu" else ("f32", "fp16-gpu", "int8", "fp16")
     for candidate in order:
         path = models_dir / MODEL_FILES[candidate]
         if path.is_file():
@@ -1223,6 +1305,8 @@ class Engine:
         self._run_options: Any = None
         self._cuda_preloaded = False
         self._load_lock = asyncio.Lock()
+        self._io_lock = asyncio.Lock()
+        self._reaping: set[asyncio.Task[Any]] = set()
         self.reload_pending = False
         self.last_used = time.monotonic()
         self.active_kind = "none"
@@ -1259,59 +1343,84 @@ class Engine:
                     await self.run(self._load_sync)
             else:
                 if self.reload_pending and self.loaded:
-                    await self.unload("configuration reload")
+                    await self._unload_worker("configuration reload")
                 self.reload_pending = False
                 if not self.loaded:
+                    await self._unload_worker("restart failed worker")
                     script_path = str(Path(__file__).resolve())
-                    self._worker_proc = await asyncio.create_subprocess_exec(
+                    await asyncio.gather(*self._reaping, return_exceptions=True)
+                    proc = await asyncio.create_subprocess_exec(
                         sys.executable, "-u", script_path, "synth-worker",
                         "--config", str(self.paths.config_file),
                         stdin=asyncio.subprocess.PIPE,
                         stdout=asyncio.subprocess.PIPE,
                         stderr=None,
                     )
-                    assert self._worker_proc.stdout is not None
-                    line = await self._worker_proc.stdout.readline()
-                    if not line:
-                        raise EngineError("synthesis worker failed to start")
+                    self._worker_proc = proc
                     try:
-                        ready = json.loads(line.decode("utf-8"))
-                    except Exception as exc:
-                        raise EngineError(f"malformed ready signal from synthesis worker: {exc}") from exc
-                    if not ready.get("ok"):
-                        raise EngineError(f"synthesis worker error: {ready.get('error')}")
+                        async with asyncio.timeout(self.cfg.engine.worker_start_timeout_s):
+                            assert proc.stdin is not None and proc.stdout is not None
+                            proc.stdin.write(json.dumps({
+                                "config": dataclasses.asdict(self.cfg),
+                                "models_dir": str(self.paths.models_dir), "voices_file": str(self.paths.voices_file),
+                            }).encode() + b"\n")
+                            await proc.stdin.drain()
+                            line = await proc.stdout.readline()
+                            if not line:
+                                raise EngineError("synthesis worker failed to start (see daemon logs)")
+                            try:
+                                ready = json.loads(line)
+                            except (ValueError, UnicodeError) as exc:
+                                raise EngineError(f"malformed ready signal from synthesis worker: {exc}") from exc
+                            if not isinstance(ready, dict) or not ready.get("ok"):
+                                error = ready.get("error") if isinstance(ready, dict) else "invalid ready object"
+                                raise EngineError(f"synthesis worker error: {error}")
+                    except BaseException as exc:
+                        await self._unload_worker("worker startup failed")
+                        if isinstance(exc, (ConnectionError, TimeoutError)):
+                            raise EngineError(f"synthesis worker startup failed: {type(exc).__name__}") from exc
+                        raise
                     self.active_providers = ready.get("providers", [])
                     self.active_kind = ready.get("kind", "none")
                     self.model_precision = ready.get("precision", "none")
                     self.model_path = Path(ready["model"]) if ready.get("model") else None
+                    self.degraded = ready.get("degraded", False)
+                    self.warnings.extend(ready.get("warnings", []))
+                    self.stats.loads += 1
+                    self.stats.last_load_s = ready.get("load_s", 0.0)
                     self._loaded = True
                     log.info("Synthesis worker ready (pid %d); engine=%s; providers=%s",
-                             self._worker_proc.pid, self.active_kind, self.active_providers)
+                             proc.pid, self.active_kind, self.active_providers)
         self.touch()
+
+    async def _unload_worker(self, reason: str) -> None:
+        proc, self._worker_proc = self._worker_proc, None
+        self._loaded = False
+        if proc is not None:
+            if proc.stdin is not None:
+                proc.stdin.close()
+            if proc.returncode is None:
+                with contextlib.suppress(ProcessLookupError):
+                    proc.terminate()
+            try:
+                async with asyncio.timeout(2.0):
+                    await proc.wait()
+            except TimeoutError:
+                with contextlib.suppress(ProcessLookupError):
+                    proc.kill()
+                await proc.wait()
+        self.active_kind = "none"
+        self.active_providers = []
+        log.info("Synthesis worker exited (%s)", reason)
 
     async def unload(self, reason: str) -> None:
         async with self._load_lock:
-            if self.is_worker:
-                if self._kokoro is not None:
-                    await self.run(self._unload_sync, reason)
-            else:
-                if self._worker_proc is not None:
-                    proc = self._worker_proc
-                    self._worker_proc = None
-                    if proc.returncode is None:
-                        try:
-                            if proc.stdin and not proc.stdin.is_closing():
-                                proc.stdin.write(b'{"cmd": "quit"}\n')
-                                await proc.stdin.drain()
-                            await asyncio.wait_for(proc.wait(), timeout=2.0)
-                        except Exception:
-                            proc.kill()
-                            with contextlib.suppress(Exception):
-                                await proc.wait()
-                    self._loaded = False
-                    self.active_kind = "none"
-                    self.active_providers = []
-                    log.info("Synthesis worker process exited (%s). Discrete GPU resources fully freed by kernel.", reason)
+            async with self._io_lock:
+                if self.is_worker:
+                    if self._kokoro is not None:
+                        await self.run(self._unload_sync, reason)
+                else:
+                    await self._unload_worker(reason)
 
     async def synthesize(self, text: str, voice_spec: Any, speed: float, lang: str, pause_ms: int) -> bytes:
         if self.is_worker:
@@ -1320,26 +1429,35 @@ class Engine:
 
         if not self.loaded:
             await self.ensure_loaded()
-        assert self._worker_proc is not None and self._worker_proc.stdin is not None and self._worker_proc.stdout is not None
-        vspec = voice_spec if isinstance(voice_spec, str) else self.cfg.voice.spec
-        req = json.dumps({
-            "cmd": "synth", "text": text, "voice": vspec, "speed": speed, "lang": lang, "pause_ms": pause_ms
-        }) + "\n"
-        t0 = time.perf_counter()
-        self._worker_proc.stdin.write(req.encode("utf-8"))
-        await self._worker_proc.stdin.drain()
-
-        header = await self._worker_proc.stdout.readexactly(4)
-        (length,) = struct.unpack("<I", header)
-        if length == 0:
-            raise EngineError("synthesis worker failed to produce audio segment")
-        pcm = await self._worker_proc.stdout.readexactly(length)
-        elapsed = time.perf_counter() - t0
-        self.stats.segments += 1
-        self.stats.synth_s += elapsed
-        self.stats.audio_s += len(pcm) / (BYTES_PER_SAMPLE * SAMPLE_RATE)
-        self.touch()
-        return pcm
+        async with self._io_lock:
+            proc = self._worker_proc
+            if proc is None or proc.stdin is None or proc.stdout is None:
+                raise EngineError("synthesis worker is not running")
+            req = json.dumps({"cmd": "synth", "text": text, "voice": voice_spec,
+                              "speed": speed, "lang": lang, "pause_ms": pause_ms}) + "\n"
+            t0 = time.perf_counter()
+            try:
+                proc.stdin.write(req.encode("utf-8"))
+                await proc.stdin.drain()
+                (length,) = struct.unpack("<I", await proc.stdout.readexactly(4))
+                state = json.loads(await proc.stdout.readexactly(length))
+                self.active_kind = state["kind"]
+                self.active_providers = state["providers"]
+                self.degraded = state["degraded"]
+                self.model_precision = state["precision"]
+                self.model_path = Path(state["model"])
+                if state.get("error"):
+                    raise EngineError(state["error"])
+                pcm = await proc.stdout.readexactly(state["pcm_bytes"])
+            except (ConnectionError, asyncio.IncompleteReadError) as exc:
+                await self._unload_worker("worker pipe closed")
+                raise EngineError("synthesis worker exited during synthesis (see daemon logs)") from exc
+            elapsed = time.perf_counter() - t0
+            self.stats.segments += 1
+            self.stats.synth_s += elapsed
+            self.stats.audio_s += len(pcm) / (BYTES_PER_SAMPLE * SAMPLE_RATE)
+            self.touch()
+            return pcm
 
     def interrupt(self) -> None:
         """Abort the in-flight ONNX run."""
@@ -1348,9 +1466,24 @@ class Engine:
                 self._run_options.terminate = True
         else:
             if self._worker_proc is not None and self._worker_proc.returncode is None:
-                self._worker_proc.terminate()
-                self._worker_proc = None
+                proc, self._worker_proc = self._worker_proc, None
                 self._loaded = False
+                task = asyncio.create_task(self._reap_interrupted(proc))
+                self._reaping.add(task)
+                task.add_done_callback(self._reaping.discard)
+
+    async def _reap_interrupted(self, proc: asyncio.subprocess.Process) -> None:
+        if proc.stdin is not None:
+            proc.stdin.close()
+        with contextlib.suppress(ProcessLookupError):
+            proc.terminate()
+        try:
+            async with asyncio.timeout(2.0):
+                await proc.wait()
+        except TimeoutError:
+            with contextlib.suppress(ProcessLookupError):
+                proc.kill()
+            await proc.wait()
 
     def pop_warnings(self) -> list[str]:
         out, self.warnings = self.warnings, []
@@ -1359,6 +1492,7 @@ class Engine:
     async def shutdown(self) -> None:
         with contextlib.suppress(Exception):
             await self.unload("shutdown")
+        await asyncio.gather(*self._reaping, return_exceptions=True)
         if self._executor is not None:
             self._executor.shutdown(wait=True, cancel_futures=True)
 
@@ -1380,7 +1514,7 @@ class Engine:
         cuda_opts: dict[str, Any] = {
             "arena_extend_strategy": e.arena_extend_strategy,
             "cudnn_conv_algo_search": e.cudnn_conv_algo_search,
-            "cudnn_conv_use_max_workspace": "1",
+            "cudnn_conv_use_max_workspace": "1" if e.cudnn_conv_use_max_workspace else "0",
             "do_copy_in_default_stream": "1",
         }
         if e.device_id != 0:
@@ -1400,39 +1534,36 @@ class Engine:
                     "trt_engine_cache_path": str(cache),
                     "trt_timing_cache_enable": "1",
                     "trt_timing_cache_path": str(cache),
-                    "trt_max_workspace_size": str(2 << 30),
+                    "trt_max_workspace_size": str(min(e.gpu_mem_limit_mb or 2048, 512) << 20),
                     "trt_profile_min_shapes": e.tensorrt_profile_min,
                     "trt_profile_opt_shapes": e.tensorrt_profile_opt,
                     "trt_profile_max_shapes": e.tensorrt_profile_max,
                 }
                 return [("TensorrtExecutionProvider", trt_opts), ("CUDAExecutionProvider", cuda_opts), "CPUExecutionProvider"]
-            case "rocm":
-                rocm_opts: dict[str, Any] = {
-                    "device_id": str(e.device_id),
-                    "arena_extend_strategy": e.arena_extend_strategy,
-                    "do_copy_in_default_stream": "1",
-                    "miopen_conv_exhaustive_search": "0",
-                    "tunable_op_enable": "0",
-                }
+            case "migraphx":
+                opts = {"device_id": str(e.device_id), "migraphx_fp16_enable": "1"}
                 if limit:
-                    rocm_opts["gpu_mem_limit"] = limit
-                return [("ROCmExecutionProvider", rocm_opts), "CPUExecutionProvider"]
+                    opts["migraphx_mem_limit"] = limit
+                return [("MIGraphXExecutionProvider", opts), "CPUExecutionProvider"]
             case "openvino":
                 cache = self.paths.openvino_cache
                 cache.mkdir(parents=True, exist_ok=True)
-                ov_opts = {
-                    "device_type": e.openvino_device,
-                    "precision": e.openvino_precision,
-                    "cache_dir": str(cache),
-                    "num_of_threads": str(self._cpu_threads()),
-                }
+                device = e.openvino_device.split(":", 1)[0].split(".", 1)[0]
+                props = {"CACHE_DIR": str(cache), "PERFORMANCE_HINT": "LATENCY"}
+                if e.openvino_precision == "ACCURACY":
+                    props["EXECUTION_MODE_HINT"] = "ACCURACY"
+                elif device in ("GPU", "NPU", "CPU"):
+                    props["INFERENCE_PRECISION_HINT"] = "f32" if device == "CPU" or e.openvino_precision == "FP32" else "f16"
+                if device == "CPU":
+                    props["INFERENCE_NUM_THREADS"] = str(self._cpu_threads())
+                ov_opts = {"device_type": e.openvino_device, "load_config": json.dumps({device: props})}
                 return [("OpenVINOExecutionProvider", ov_opts), "CPUExecutionProvider"]
             case _:
                 return ["CPUExecutionProvider"]
 
     def _cpu_threads(self) -> int:
         configured = self.cfg.engine.intra_op_threads
-        return configured if configured > 0 else (os.process_cpu_count() or 4)
+        return configured if configured > 0 else min(8, os.process_cpu_count() or 4)
 
     def _session_options(self, kind: str, ort: Any) -> Any:
         e = self.cfg.engine
@@ -1444,9 +1575,9 @@ class Engine:
             "disabled": ort.GraphOptimizationLevel.ORT_DISABLE_ALL,
         }[e.graph_optimization]
         so.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
-        so.enable_mem_pattern = False   # sequence lengths never repeat: patterns cost memory, save nothing
+        so.enable_mem_pattern = False   # avoid retaining allocation patterns for many dynamic token lengths
         so.enable_cpu_mem_arena = True
-        so.intra_op_num_threads = 2 if kind in GPU_KINDS else self._cpu_threads()
+        so.intra_op_num_threads = min(2, os.process_cpu_count() or 1) if kind in GPU_KINDS else self._cpu_threads()
         so.inter_op_num_threads = 1
         so.log_severity_level = 0 if self.cfg.logging.ort_verbose else 3
         so.add_session_config_entry("session.intra_op.allow_spinning", "1" if e.allow_spinning else "0")
@@ -1467,13 +1598,19 @@ class Engine:
         e = self.cfg.engine
         t0 = time.perf_counter()
         available = list(ort.get_available_providers())
+        if e.require_accelerator and (e.provider == "cpu" or
+                (e.provider != "auto" and EP_NAMES[e.provider] not in available) or
+                (e.provider == "auto" and not any(EP_NAMES[k] in available for k in ("cuda", "migraphx", "openvino")))):
+            raise EngineError("requested accelerator is unavailable in this ONNX Runtime build")
         chain = provider_chain(e.provider, available)
         precision, model_path = choose_model(e.precision, chain[0], self.paths.models_dir)
         log.info("Loading Kokoro via %s (onnxruntime %s, available: %s)", " > ".join(chain), ort.__version__, available)
 
         session = None
         kind = "cpu"
-        self.degraded = False
+        self.degraded = e.provider not in ("cpu", "auto") and chain == ["cpu"]
+        if self.degraded:
+            self.warnings.append(f"{EP_NAMES[e.provider]} unavailable; using CPU")
         last_error: Exception | None = None
         for kind in chain:
             try:
@@ -1492,6 +1629,8 @@ class Engine:
                     log.warning("%s - continuing on %s", msg, active[0])
                     self.warnings.append(msg)
                     self.degraded = True
+                    session = None
+                    continue
                 break
             except Exception as exc:
                 last_error = exc
@@ -1521,6 +1660,7 @@ class Engine:
         self.stats.last_load_s = time.perf_counter() - t0
         log.info("Model ready in %.2fs; providers=%s; threads=%d", self.stats.last_load_s,
                  self.active_providers, self._cpu_threads())
+        session.disable_fallback()
         if e.warmup:
             try:
                 vec = self.voices.resolve(self.cfg.voice.spec)
@@ -1528,10 +1668,29 @@ class Engine:
                 self._synth_sync("Ready.", vec, 1.0, VoiceBank.lang_for(self.cfg.voice.spec, self.cfg.voice.lang), 0)
                 log.info("Warm-up run took %.0f ms", (time.perf_counter() - t1) * 1000)
             except Exception as exc:
-                log.warning("warm-up failed (continuing): %s", exc)
+                if kind != "cpu" and not e.require_accelerator:
+                    self.fallback_to_cpu(exc)
+                else:
+                    self._unload_sync("warmup failed")
+                    raise EngineError(f"warmup failed: {exc}") from exc
         self.touch()
 
+    def fallback_to_cpu(self, error: Exception) -> None:
+        if self.active_kind == "cpu" or self.cfg.engine.require_accelerator:
+            raise error
+        msg = f"accelerator synthesis failed ({error}); continuing on CPU"
+        log.warning("%s", msg)
+        self._unload_sync("CPU fallback")
+        self.cfg = dataclasses.replace(self.cfg, engine=dataclasses.replace(
+            self.cfg.engine, provider="cpu", precision="auto", warmup=False))
+        self._load_sync()
+        self.degraded = True
+        self.warnings.append(msg)
+
     def _unload_sync(self, reason: str) -> None:
+        if self._kokoro is not None:
+            self._kokoro.voices.close()
+        self.voices.reset(self.voices.path)
         self._kokoro = None
         self._session = None
         self._run_options = None
@@ -1557,7 +1716,12 @@ class Engine:
         for piece in split_phonemes(phonemes, self.cfg.text.max_phonemes):
             audio, _sr = kokoro.create(piece, voice=voice_vec, speed=speed, lang=lang,
                                        is_phonemes=True, trim=self.cfg.text.trim_silence)
-            parts.append(np.asarray(audio, dtype=np.float32).reshape(-1))
+            if _sr != SAMPLE_RATE:
+                raise EngineError(f"unexpected sample rate {_sr}")
+            samples = np.asarray(audio, dtype=np.float32).reshape(-1)
+            if samples.size == 0 or not np.isfinite(samples).all():
+                raise EngineError("model produced empty or non-finite audio")
+            parts.append(samples)
         if pause_ms > 0:
             parts.append(np.zeros(SAMPLE_RATE * pause_ms // 1000, dtype=np.float32))
         pcm = np.concatenate(parts) if parts else np.zeros(0, dtype=np.float32)
@@ -1588,7 +1752,9 @@ class ArchiveWriter:
     def create(cls, directory: Path, slug: str, bit_depth: int) -> "ArchiveWriter":
         directory.mkdir(parents=True, exist_ok=True)
         stamp = time.strftime("%Y%m%d-%H%M%S")
-        return cls(directory / f"{stamp}_{slug}.wav", bit_depth)
+        fd, name = tempfile.mkstemp(prefix=f"{stamp}_{slug}_", suffix=".wav", dir=directory)
+        os.close(fd)
+        return cls(Path(name), bit_depth)
 
     def write(self, pcm_f32: bytes) -> None:
         import numpy as np
@@ -1602,8 +1768,12 @@ class ArchiveWriter:
         self.frames += len(samples)
 
     def close(self, discard: bool = False, max_files: int = 0) -> None:
-        with contextlib.suppress(Exception):
+        try:
             self._wf.close()
+        except (OSError, wave.Error, struct.error):
+            with contextlib.suppress(OSError):
+                self.path.unlink(missing_ok=True)
+            raise
         if discard or self.frames == 0:
             self.path.unlink(missing_ok=True)
             return
@@ -1651,11 +1821,7 @@ class MpvPlayer:
         ]
         if c.window:
             cmd += ["--force-window=yes", f"--geometry={c.window_geometry}", f"--title={c.window_title}: {self.title}",
-                    "--x11-name=kokoro", "--wayland-app-id=kokoro", "--osd-level=1"]
-            if "WAYLAND_DISPLAY" in self.env:
-                cmd.append("--gpu-context=wayland")
-            elif "DISPLAY" in self.env:
-                cmd.append("--gpu-context=x11egl")
+                    "--wayland-app-id=kokoro", "--osd-level=1", "--gpu-context=wayland"]
         else:
             cmd += ["--force-window=no", "--vo=null"]
         if c.audio_device:
@@ -1922,7 +2088,7 @@ class Daemon:
         self.paths = paths
         self.voices = VoiceBank(paths.voices_file)
         self.engine = Engine(cfg, paths, self.voices)
-        self.jobs: asyncio.Queue[Job] = asyncio.Queue(maxsize=cfg.daemon.max_queue)
+        self.jobs: asyncio.Queue[Job] = asyncio.Queue()
         self.server: asyncio.base_events.Server | None = None
         self.current: Job | None = None
         self.last_job: Job | None = None
@@ -1942,6 +2108,7 @@ class Daemon:
         self._last_digest_at = 0.0
         self._notified_degraded = False
         self._job_counter = 0
+        self._prepare_generation = 0
         self.is_synthesizing = False
 
     # ---- lifecycle ------------------------------------------------------------
@@ -1964,7 +2131,7 @@ class Daemon:
         self._worker_task = asyncio.create_task(self._worker(), name="worker")
         self._idle_task = asyncio.create_task(self._idle_ticker(), name="idle-ticker")
         with contextlib.suppress(OSError):
-            PID_FILE.write_text(f"{os.getpid()}\n")
+            self.paths.socket.with_name("daemon.pid").write_text(f"{os.getpid()}\n")
         sd_notify("READY=1\nSTATUS=Idle (model not loaded)")
         log.info("Dusky Kokoro %s ready (pid %d, python %s, free-threading=%s)", VERSION, os.getpid(),
                  sys.version.split()[0], "on" if not sys._is_gil_enabled() else "off")
@@ -1996,7 +2163,7 @@ class Daemon:
     async def _graceful_shutdown(self) -> None:
         sd_notify("STOPPING=1")
         with contextlib.suppress(OSError):
-            PID_FILE.unlink(missing_ok=True)
+            self.paths.socket.with_name("daemon.pid").unlink(missing_ok=True)
         if self.server is not None:
             self.server.close()
         for task in list(self._client_tasks):
@@ -2051,12 +2218,6 @@ class Daemon:
     def _player_env(self, job_env: dict[str, str]) -> dict[str, str]:
         env = os.environ.copy()
         env.update({k: v for k, v in job_env.items() if k in CLIENT_ENV_KEYS and isinstance(v, str)})
-        # Force mpv to render on the integrated GPU (Mesa/Intel/AMD) rather than the discrete NVIDIA GPU.
-        # This prevents mpv from holding open /dev/nvidia* and locking the discrete GPU in D0 power state!
-        if Path("/usr/share/glvnd/egl_vendor.d/50_mesa.json").exists():
-            env["__EGL_VENDOR_LIBRARY_FILENAMES"] = "/usr/share/glvnd/egl_vendor.d/50_mesa.json"
-        env["DRI_PRIME"] = "0"
-        env["CUDA_VISIBLE_DEVICES"] = ""
         return env
 
     # ---- control connections ---------------------------------------------------
@@ -2122,6 +2283,9 @@ class Daemon:
             case "pause":
                 await self._send(writer, await self._cmd_pause())
             case "unload":
+                self.stop_all("unload command")
+                if self._job_task is not None:
+                    await asyncio.gather(self._job_task, return_exceptions=True)
                 await self.engine.unload("unload command")
                 self._set_status("Idle (model not loaded)")
                 await self._send(writer, {"ok": True, "event": "unloaded"})
@@ -2163,11 +2327,17 @@ class Daemon:
         if mode not in ("interrupt", "enqueue"):
             await self._send(writer, {"ok": False, "error": f"invalid mode {mode!r}"})
             return
+        if mode == "enqueue" and self.jobs.qsize() >= cfg.daemon.max_queue:
+            await self._send(writer, {"ok": False, "error": f"queue full ({cfg.daemon.max_queue})"})
+            return
         voice_spec = str(req.get("voice") or cfg.voice.spec)
         try:
             VoiceBank.parse_spec(voice_spec)
-            speed = float(req.get("speed") or cfg.voice.speed)
-        except (VoiceError, ValueError) as exc:
+            raw_speed = req.get("speed")
+            if isinstance(raw_speed, bool):
+                raise ValueError("speed must be a number")
+            speed = cfg.voice.speed if raw_speed is None else float(raw_speed)
+        except (VoiceError, ValueError, TypeError) as exc:
             await self._send(writer, {"ok": False, "error": str(exc)})
             return
         if not 0.5 <= speed <= 2.0:
@@ -2177,19 +2347,21 @@ class Daemon:
         wait = str(req.get("wait") or "accepted")
         raw_env = req.get("env") if isinstance(req.get("env"), dict) else {}
 
-        paragraphs = normalize_text(text, cfg.text, lang)
-        segments = segment_text(paragraphs, cfg.text)
+        generation = self._prepare_generation
+        paragraphs, segments = await asyncio.to_thread(prepare_text, text, cfg.text, lang)
+        if generation != self._prepare_generation:
+            await self._send(writer, {"ok": True, "event": "cancelled", "reason": "superseded during text preparation"})
+            return
         if not segments:
             await self._send(writer, {"ok": False, "error": "nothing readable after normalisation"})
             return
         flat = flatten_paragraphs(paragraphs)
-        digest = hashlib.blake2b(flat.encode(), digest_size=16).hexdigest()
+        digest = hashlib.blake2b(json.dumps([flat, voice_spec, speed, lang], ensure_ascii=False).encode(), digest_size=16).hexdigest()
         now = time.monotonic()
         if digest == self._last_digest and now - self._last_digest_at < cfg.daemon.dedup_window_s:
             self._last_digest_at = now
             await self._send(writer, {"ok": True, "event": "deduplicated", "window_s": cfg.daemon.dedup_window_s})
             return
-        self._last_digest, self._last_digest_at = digest, now
 
         self._job_counter += 1
         job = Job(
@@ -2200,7 +2372,7 @@ class Daemon:
         )
         if mode == "interrupt":
             self.stop_all("superseded by a new request")
-        if self.jobs.full():
+        if self.jobs.qsize() >= cfg.daemon.max_queue:
             await self._send(writer, {"ok": False, "error": f"queue full ({cfg.daemon.max_queue})"})
             return
         events: asyncio.Queue[dict[str, Any]] | None = None
@@ -2209,6 +2381,7 @@ class Daemon:
             job.subscribers.append(events)
         queued_ahead = self.jobs.qsize() + (1 if self.current else 0)
         self.jobs.put_nowait(job)
+        self._last_digest, self._last_digest_at = digest, now
         self.jobs_total += 1
         self.last_activity = now
         log.info("job %s accepted: %d chars, %d segments, voice=%s, lang=%s, mode=%s, client=%s",
@@ -2270,7 +2443,8 @@ class Daemon:
         except ConfigError as exc:
             log.error("config reload failed: %s", exc)
             return {"ok": False, "error": str(exc)}
-        engine_changed = new_cfg.engine != self.cfg.engine or new_cfg.logging.ort_verbose != self.cfg.logging.ort_verbose
+        engine_changed = (new_cfg.engine != self.cfg.engine or new_cfg.text != self.cfg.text
+                          or new_cfg.voice != self.cfg.voice or new_cfg.logging.ort_verbose != self.cfg.logging.ort_verbose)
         self.cfg = new_cfg
         self.paths = resolve_paths(new_cfg, self.paths.config_file, str(self.paths.socket))
         self.engine.cfg = new_cfg
@@ -2287,6 +2461,7 @@ class Daemon:
 
     # ---- job control ------------------------------------------------------------
     def stop_all(self, reason: str) -> int:
+        self._prepare_generation += 1
         flushed = self._clear_queue(reason)
         job = self.current
         if job is not None and self._job_task is not None and not self._job_task.done() and not job.cancelling:
@@ -2307,6 +2482,7 @@ class Daemon:
             job.cancel_reason = reason
             job.state = "cancelled"
             self._emit(job, "cancelled", reason=reason)
+            self.jobs.task_done()
             flushed += 1
         return flushed
 
@@ -2325,6 +2501,7 @@ class Daemon:
                 return
             if job.cancel_reason:
                 self._emit(job, "cancelled", reason=job.cancel_reason)
+                self.jobs.task_done()
                 continue
             self.current = job
             self._job_task = asyncio.create_task(self._run_job(job), name=f"job-{job.id}")
@@ -2336,6 +2513,7 @@ class Daemon:
                 self.current = None
                 self._job_task = None
                 self.last_job = job
+                self.jobs.task_done()
                 self.last_activity = time.monotonic()
                 self._set_status("Idle (model loaded)" if self.engine.loaded else "Idle (model not loaded)")
 
@@ -2384,7 +2562,7 @@ class Daemon:
                     archive = await asyncio.to_thread(ArchiveWriter.create, self.paths.archive_dir, job.title, cfg.archive.bit_depth)
                 except OSError as exc:
                     log.warning("archive disabled for this job: %s", exc)
-            max_prefetch = max(cfg.playback.prefetch_segments, 512)
+            max_prefetch = cfg.playback.prefetch_segments
             chunks: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=max_prefetch)
             self.is_synthesizing = True
             producer = asyncio.create_task(self._produce(job, job.voice_spec, chunks), name=f"synth-{job.id}")
@@ -2400,7 +2578,13 @@ class Daemon:
                         log.info("job %s first audio after %d ms", job.id, job.ttfa_ms or 0)
                     await player.write(pcm)
                     if archive is not None:
-                        archive.write(pcm)
+                        try:
+                            await asyncio.to_thread(archive.write, pcm)
+                        except (OSError, wave.Error, struct.error) as exc:
+                            log.warning("archive failed; continuing playback: %s", exc)
+                            with contextlib.suppress(OSError, wave.Error, struct.error):
+                                await asyncio.to_thread(archive.close, True)
+                            archive = None
                 await producer
             finally:
                 self.is_synthesizing = False
@@ -2413,7 +2597,9 @@ class Daemon:
                 await self.engine.unload("synthesis complete (model_idle_timeout_s = 0)")
 
             await player.end_input()
-            await player.wait()
+            rc = await player.wait()
+            if rc != 0 or player.end_reason == "error":
+                player._raise_closed()
             if player.end_reason == "quit":
                 outcome = "cancelled"
                 job.cancel_reason = "player closed by user"
@@ -2442,7 +2628,11 @@ class Daemon:
             if player is not None:
                 await player.stop()
             if archive is not None:
-                await asyncio.to_thread(archive.close, outcome == "error", cfg.archive.max_files)
+                try:
+                    await asyncio.to_thread(archive.close, outcome == "error", cfg.archive.max_files)
+                except (OSError, wave.Error, struct.error) as exc:
+                    log.warning("archive finalization failed: %s", exc)
+                    archive = None
             job.finished_at = time.monotonic()
             job.state = outcome
             job.player = None
@@ -2462,7 +2652,7 @@ class Daemon:
         while True:
             await asyncio.sleep(1.0)
             now = time.monotonic()
-            engine_busy = self.is_synthesizing or not self.jobs.empty()
+            engine_busy = (self.current is not None and self.current.state in ("loading", "synthesizing")) or self.is_synthesizing or not self.jobs.empty()
             if self.engine.loaded and not engine_busy and now - self.engine.last_used > self.cfg.engine.model_idle_timeout_s:
                 await self.engine.unload(f"idle for {self.cfg.engine.model_idle_timeout_s:.0f}s")
                 if self.current is not None:
@@ -2520,6 +2710,8 @@ def client_request(socket_path: Path, payload: dict[str, Any], *, timeout: float
             return last
     except (FileNotFoundError, ConnectionRefusedError) as exc:
         raise ClientError(f"daemon not reachable at {socket_path} ({exc.strerror or exc})", 2) from exc
+    except (BrokenPipeError, ConnectionResetError) as exc:
+        raise ClientError(f"daemon connection closed: {exc}", 3) from exc
     except TimeoutError as exc:
         raise ClientError(f"timed out after {timeout:.0f}s waiting for the daemon", 4) from exc
 
@@ -2551,7 +2743,19 @@ def _print_message(message: dict[str, Any], fmt: str) -> None:
 
 
 def run_client(args: argparse.Namespace) -> int:
-    socket_path = Path(args.socket) if args.socket else default_socket_path()
+    override = args.socket or os.environ.get("DUSKY_SOCKET")
+    if override:
+        socket_path = Path(os.path.expandvars(override)).expanduser()
+    else:
+        config_file = Path(args.config) if args.config else default_config_path()
+        # Control commands need only the transport path. They must still work
+        # when other settings fail validation so users can reload or stop.
+        try:
+            data = tomllib.loads(config_file.read_text(encoding="utf-8")) if config_file.is_file() else {}
+            configured = data.get("daemon", {}).get("socket_path", "")
+            socket_path = Path(os.path.expandvars(configured)).expanduser() if configured else default_socket_path()
+        except (OSError, tomllib.TOMLDecodeError, TypeError, AttributeError) as exc:
+            raise ConfigError(f"{config_file}: cannot resolve control socket: {exc}") from exc
     payload: dict[str, Any] = {"cmd": args.command, "client": "cli", "protocol": PROTOCOL}
     stream = False
     match args.command:
@@ -2564,8 +2768,12 @@ def run_client(args: argparse.Namespace) -> int:
                     return 66
             elif (args.text is not None or getattr(args, "text_flag", None) is not None) and not args.stdin:
                 candidate = args.text if args.text is not None else args.text_flag
-                cand_path = Path(candidate).expanduser() if candidate else None
-                if cand_path and cand_path.is_file():
+                cand_path = Path(candidate).expanduser() if candidate and args.text is not None else None
+                try:
+                    is_file = cand_path is not None and cand_path.is_file()
+                except OSError:
+                    is_file = False
+                if is_file:
                     try:
                         text = extract_text_from_file(cand_path)
                     except Exception as exc:
@@ -2643,7 +2851,7 @@ def run_doctor(args: argparse.Namespace) -> int:
     else:
         ok = False
         row("voices", f"missing: {paths.voices_file}")
-    for tool in ("mpv", "notify-send", "wl-paste", "xclip", "xsel", "systemctl"):
+    for tool in (cfg.playback.mpv_binary, "notify-send", "wl-paste", "pdftotext", "systemctl"):
         row(f"tool {tool}", shutil.which(tool) or "-")
     for key in ("HSA_OVERRIDE_GFX_VERSION", "MIOPEN_FIND_MODE", "CUDA_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES", "ONNX_PROVIDER"):
         if key in os.environ:
@@ -2680,7 +2888,8 @@ def run_doctor(args: argparse.Namespace) -> int:
         ok = False
         row("runtime", f"IMPORT FAILED: {type(exc).__name__}: {exc}")
     if args.synth:
-        return run_synth(args, cfg=cfg, config_file=config_file)
+        synth_result = run_synth(args, cfg=cfg, config_file=config_file)
+        return synth_result if ok else 1
     print("  result             " + ("OK" if ok else "PROBLEMS FOUND"))
     return 0 if ok else 1
 
@@ -2694,8 +2903,10 @@ def run_synth(args: argparse.Namespace, cfg: Config | None = None, config_file: 
                          "and this sentence exists to measure the real-time factor of the engine.")
     voice_spec = args.voice or cfg.voice.spec
     lang = args.lang or VoiceBank.lang_for(voice_spec, cfg.voice.lang)
-    speed = args.speed or cfg.voice.speed
-    engine = Engine(cfg, paths, VoiceBank(paths.voices_file))
+    speed = cfg.voice.speed if args.speed is None else args.speed
+    if not 0.5 <= speed <= 2.0:
+        raise ConfigError("speed must be within 0.5 .. 2.0")
+    engine = Engine(cfg, paths, VoiceBank(paths.voices_file), is_worker=True)
     report: dict[str, Any] = {"provider_requested": cfg.engine.provider, "voice": voice_spec, "lang": lang, "speed": speed}
     try:
         t0 = time.perf_counter()
@@ -2707,21 +2918,21 @@ def run_synth(args: argparse.Namespace, cfg: Config | None = None, config_file: 
         vec = engine.voices.resolve(voice_spec)
         segments = segment_text(normalize_text(text, cfg.text, lang), cfg.text)
         report["segments"] = len(segments)
-        chunks: list[bytes] = []
+        out = Path(args.out) if args.out else Path(tempfile.gettempdir()) / f"dusky-kokoro-synth-{os.getpid()}.wav"
+        writer = ArchiveWriter(out, cfg.archive.bit_depth)
+        audio_bytes = 0
         t1 = time.perf_counter()
         first_ms: float | None = None
         for seg in segments:
-            chunks.append(engine._synth_sync(seg.text, vec, speed, lang, seg.pause_ms))
+            pcm = engine._synth_sync(seg.text, vec, speed, lang, seg.pause_ms)
+            writer.write(pcm)
+            audio_bytes += len(pcm)
             if first_ms is None:
                 first_ms = (time.perf_counter() - t1) * 1000
         synth_s = time.perf_counter() - t1
-        audio_s = sum(len(c) for c in chunks) / (BYTES_PER_SAMPLE * SAMPLE_RATE)
+        audio_s = audio_bytes / (BYTES_PER_SAMPLE * SAMPLE_RATE)
         report.update({"first_segment_ms": round(first_ms or 0, 1), "synth_s": round(synth_s, 3),
                        "audio_s": round(audio_s, 3), "rtf": round(synth_s / audio_s, 4) if audio_s else None})
-        out = Path(args.out) if args.out else Path("/tmp") / f"dusky-kokoro-synth-{os.getpid()}.wav"
-        writer = ArchiveWriter(out, cfg.archive.bit_depth)
-        for c in chunks:
-            writer.write(c)
         writer.close()
         report["wav"] = str(out)
         a = engine._synth_sync("Testing the playback speed control of this engine.", vec, 1.0, lang, 0)
@@ -2738,9 +2949,13 @@ def run_synth(args: argparse.Namespace, cfg: Config | None = None, config_file: 
     finally:
         with contextlib.suppress(Exception):
             engine._unload_sync("synth done")
-        engine._executor.shutdown(wait=False, cancel_futures=True)
+        if "writer" in locals():
+            with contextlib.suppress(OSError, wave.Error, struct.error):
+                writer.close(discard="error" in report)
+        if engine._executor is not None:
+            engine._executor.shutdown(wait=False, cancel_futures=True)
     print(json.dumps(report, indent=2))
-    return 0
+    return 0 if report.get("model_speed_effective") and report.get("audio_s", 0) > 0 else 1
 
 
 def run_voices(args: argparse.Namespace) -> int:
@@ -2874,109 +3089,64 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _get_cuda_vram_used_mb() -> float | None:
-    try:
-        import ctypes
-        nvml = ctypes.CDLL("libnvidia-ml.so.1")
-        nvml.nvmlInit_v2()
-        handle = ctypes.c_void_p()
-        if nvml.nvmlDeviceGetHandleByIndex_v2(0, ctypes.byref(handle)) == 0:
-            class nvmlMemory_t(ctypes.Structure):
-                _fields_ = [
-                    ("total", ctypes.c_ulonglong),
-                    ("free", ctypes.c_ulonglong),
-                    ("used", ctypes.c_ulonglong),
-                ]
-            mem = nvmlMemory_t()
-            if nvml.nvmlDeviceGetMemoryInfo(handle, ctypes.byref(mem)) == 0:
-                used_mb = mem.used / (1024 * 1024)
-                nvml.nvmlShutdown()
-                return used_mb
-        nvml.nvmlShutdown()
-    except Exception:
-        pass
-    return None
-
-
 def run_synth_worker(args: argparse.Namespace) -> int:
-    cfg, config_file = _cli_config(args)
+    # stdout is a framed binary transport; all library logs belong on stderr.
+    setup_logging(LoggingConfig(), os.environ.get("DUSKY_LOG_LEVEL"))
+    initial = json.loads(sys.stdin.buffer.readline())
+    cfg = Config(**{name: _build_section(_SECTIONS[name], data, name)
+                    for name, data in initial["config"].items()})
+    _validate(cfg)
+    cfg = dataclasses.replace(cfg, engine=dataclasses.replace(
+        cfg.engine, models_dir=initial["models_dir"], voices_file=initial["voices_file"]))
     _apply_engine_env(cfg)
+    config_file = Path(args.config) if args.config else default_config_path()
     paths = resolve_paths(cfg, config_file)
     voices = VoiceBank(paths.voices_file)
     engine = Engine(cfg, paths, voices, is_worker=True)
     try:
         engine._load_sync()
     except Exception as exc:
-        sys.stdout.buffer.write(json.dumps({"ok": False, "error": str(exc)}).encode("utf-8") + b"\n")
-        sys.stdout.buffer.flush()
+        print(json.dumps({"ok": False, "error": str(exc)}), flush=True)
         return 1
-
-    ready = {
-        "ok": True,
-        "providers": engine.active_providers,
-        "kind": engine.active_kind,
-        "precision": engine.model_precision,
-        "model": engine.model_path.name if engine.model_path else "",
-    }
-    sys.stdout.buffer.write(json.dumps(ready).encode("utf-8") + b"\n")
-    sys.stdout.buffer.flush()
-
-    consecutive_high_vram = 0
-    while True:
-        line = sys.stdin.buffer.readline()
-        if not line:
-            break
-        try:
-            req = json.loads(line.decode("utf-8"))
-        except ValueError:
-            continue
-        cmd = req.get("cmd")
-        if cmd == "synth":
-            text = req["text"]
-            voice_spec = req.get("voice", cfg.voice.spec)
-            speed = float(req.get("speed", 1.0))
-            lang = req.get("lang", "en-us")
-            pause_ms = int(req.get("pause_ms", 0))
+    print(json.dumps({"ok": True, "providers": engine.active_providers,
+                      "kind": engine.active_kind, "precision": engine.model_precision,
+                      "model": str(engine.model_path), "degraded": engine.degraded,
+                      "warnings": engine.pop_warnings(), "load_s": engine.stats.last_load_s}), flush=True)
+    try:
+        while line := sys.stdin.buffer.readline():
+            req = json.loads(line)
+            if req.get("cmd") == "quit":
+                break
+            pcm = b""
+            error = None
             try:
-                vec = voices.resolve(voice_spec)
+                vec = voices.resolve(req["voice"])
                 try:
-                    pcm = engine._synth_sync(text, vec, speed, lang, pause_ms)
+                    pcm = engine._synth_sync(req["text"], vec, req["speed"], req["lang"], req["pause_ms"])
                 except Exception as exc:
-                    err_str = str(exc).lower()
-                    if "out of memory" in err_str or "cuda" in err_str or "allocation" in err_str:
-                        log.warning("CUDA memory pressure during synthesis (%s) - re-baselining session and retrying segment...", exc)
-                        engine._unload_sync("CUDA OOM recovery")
-                        engine._load_sync()
-                        pcm = engine._synth_sync(text, vec, speed, lang, pause_ms)
-                    else:
+                    if (engine.active_kind == "cpu" or cfg.engine.require_accelerator
+                            or not (type(exc).__module__.startswith("onnxruntime") or isinstance(exc, InferenceError))):
                         raise
-
-                header = struct.pack("<I", len(pcm))
-                sys.stdout.buffer.write(header + pcm)
-                sys.stdout.buffer.flush()
-
-                # Intelligent VRAM hysteresis guard:
-                # Occasional spikes up to 1.95 GB are completely safe and allowed for long paragraphs.
-                # Only if memory is sustained above the limit across 3 consecutive segments do we re-baseline.
-                vram_limit = cfg.engine.gpu_mem_limit_mb if (0 < cfg.engine.gpu_mem_limit_mb < 1950) else 1950
-                vram_used = _get_cuda_vram_used_mb()
-                if vram_used is not None and vram_used >= vram_limit:
-                    consecutive_high_vram += 1
-                    if consecutive_high_vram >= 3:
-                        log.info("VRAM sustained high (%.1f MB >= %d MB across 3 segments) - re-baselining ONNX session", vram_used, vram_limit)
-                        engine._unload_sync("VRAM sustained high guard")
-                        engine._load_sync()
-                        consecutive_high_vram = 0
-                else:
-                    consecutive_high_vram = 0
+                    # Retry on the CPU once; repeated GPU reloads cannot free the
+                    # driver's context or make an unsupported card work.
+                    engine.fallback_to_cpu(exc)
+                    vec = voices.resolve(req["voice"])
+                    pcm = engine._synth_sync(req["text"], vec, req["speed"], req["lang"], req["pause_ms"])
+                if not pcm:
+                    raise EngineError("no audio produced for segment")
             except Exception as exc:
-                log.error("worker synth error: %s", exc)
-                sys.stdout.buffer.write(struct.pack("<I", 0))
-                sys.stdout.buffer.flush()
-        elif cmd in ("quit", "unload"):
-            break
-
-    engine._unload_sync("worker shutdown")
+                log.exception("worker synthesis failed")
+                error = f"{type(exc).__name__}: {exc}"
+            state = json.dumps({"pcm_bytes": len(pcm), "error": error,
+                                "kind": engine.active_kind, "providers": engine.active_providers,
+                                "degraded": engine.degraded, "precision": engine.model_precision,
+                                "model": str(engine.model_path)}).encode()
+            sys.stdout.buffer.write(struct.pack("<I", len(state)))
+            sys.stdout.buffer.write(state)
+            sys.stdout.buffer.write(pcm)
+            sys.stdout.buffer.flush()
+    finally:
+        engine._unload_sync("worker shutdown")
     return 0
 
 

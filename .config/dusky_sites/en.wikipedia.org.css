@@ -1,0 +1,35 @@
+@-moz-document domain("en.wikipedia.org") {
+    /* >>> dusky:picks - managed by the Visual Picker, one rule per line */
+    div.mw-page-container { background-color: var(--background) !important; color: var(--on_background) !important; border-color: var(--outline_variant) !important; } /* dusky key=sel%1Fdiv.mw-page-container%1Fbg | bg: background */
+    header.vector-header.mw-header.no-font-mode-scale { background-color: var(--surface_container_lowest) !important; color: var(--on_surface) !important; border-color: var(--outline_variant) !important; } /* dusky key=sel%1Fheader.vector-header.mw-header.no-font-mode-scale%1Fbg | bg: surface_container_lowest */
+    #mp-topbanner { background-color: var(--background) !important; color: var(--on_background) !important; border-color: var(--outline_variant) !important; } /* dusky key=sel%1F%23mp-topbanner%1Fbg | bg: background */
+    div.MainPageBG.mp-box { background-color: var(--background) !important; color: var(--on_background) !important; border-color: var(--outline_variant) !important; } /* dusky key=sel%1Fdiv.MainPageBG.mp-box%1Fbg | bg: background */
+    span { color: var(--inverse_surface) !important; } /* dusky key=sel%1Fspan%1Ftext | text: inverse_surface */
+    a { color: var(--primary) !important; } /* dusky key=sel%1Fa%1Ftext | text: primary */
+    div.cbnnr-close { background-color: var(--on_surface_variant) !important; } /* dusky key=sel%1Fdiv.cbnnr-close%1Fbg | bg: on_surface_variant */
+    h2.mp-h2.mw-html-heading { background-color: var(--surface_container_lowest) !important; color: var(--on_surface) !important; border-color: var(--outline_variant) !important; } /* dusky key=sel%1Fh2.mp-h2.mw-html-heading%1Fbg | bg: surface_container_lowest */
+    table.infobox.vevent { background-color: var(--surface_container_highest) !important; color: var(--on_surface) !important; border-color: var(--outline_variant) !important; } /* dusky key=sel%1Ftable.infobox.vevent%1Fbg | bg: surface_container_highest */
+    figure.mw-default-size { background-color: var(--surface_container_highest) !important; color: var(--on_surface) !important; border-color: var(--outline_variant) !important; } /* dusky key=sel%1Ffigure.mw-default-size%1Fbg | bg: surface_container_highest */
+    th { background-color: var(--surface_container_high) !important; color: var(--on_surface) !important; border-color: var(--outline_variant) !important; } /* dusky key=sel%1Fth%1Fbg | bg: surface_container_high */
+    #vector-main-menu-dropdown { background-color: var(--surface_container_lowest) !important; color: var(--on_surface) !important; border-color: var(--outline_variant) !important; } /* dusky key=sel%1F%23vector-main-menu-dropdown%1Fbg | bg: surface_container_lowest */
+    div.vector-dropdown-content { background-color: var(--surface_container_lowest) !important; color: var(--on_surface) !important; border-color: var(--outline_variant) !important; } /* dusky key=sel%1Fdiv.vector-dropdown-content%1Fbg | bg: surface_container_lowest */
+    div.hlist.noprint { background-color: var(--surface_container_lowest) !important; color: var(--on_surface) !important; border-color: var(--outline_variant) !important; } /* dusky key=sel%1Fdiv.hlist.noprint%1Fbg | bg: surface_container_lowest */
+    #mwEA { background-color: var(--surface) !important; color: var(--on_surface) !important; border-color: var(--outline_variant) !important; } /* dusky key=sel%1F%23mwEA%1Fbg | bg: surface */
+    #contents-footer { background-color: var(--background) !important; color: var(--on_background) !important; border-color: var(--outline_variant) !important; } /* dusky key=sel%1F%23contents-footer%1Fbg | bg: background */
+    #catlinks { background-color: var(--surface_container_lowest) !important; color: var(--on_surface) !important; border-color: var(--outline_variant) !important; } /* dusky key=sel%1F%23catlinks%1Fbg | bg: surface_container_lowest */
+    span.mw-ui-button { background-color: var(--surface_container_lowest) !important; color: var(--on_surface) !important; border-color: var(--outline_variant) !important; } /* dusky key=sel%1Fspan.mw-ui-button%1Fbg | bg: surface_container_lowest */
+    td { background-color: var(--surface_variant) !important; color: var(--on_surface) !important; border-color: var(--outline_variant) !important; } /* dusky key=sel%1Ftd%1Fbg | bg: surface_variant */
+    div.navbox { background-color: var(--surface_container) !important; color: var(--on_surface) !important; border-color: var(--outline_variant) !important; } /* dusky key=sel%1Fdiv.navbox%1Fbg | bg: surface_container */
+    li { color: var(--on_surface) !important; } /* dusky key=sel%1Fli%1Ftext | text: on_surface */
+    img.mw-logo-wordmark { background-color: var(--tertiary) !important; color: var(--on_tertiary) !important; border-color: var(--outline_variant) !important; } /* dusky key=sel%1Fimg.mw-logo-wordmark%1Fbg | bg: tertiary */
+    #mwAQ > div.contentsPage.contentsPage--topic > div.contentsPage__title { background-color: var(--background) !important; color: var(--on_background) !important; border-color: var(--outline_variant) !important; } /* dusky key=sel%1F%23mwAQ%20%3E%20div.contentsPage.contentsPage--topic%20%3E%20div.contentsPage__title%1Fbg | bg: background */
+    div.contentsPage__intro { background-color: var(--surface) !important; color: var(--on_surface) !important; border-color: var(--outline_variant) !important; } /* dusky key=sel%1Fdiv.contentsPage__intro%1Fbg | bg: surface */
+    #mwAQ > div.contentsPage.contentsPage--topic { background-color: var(--surface) !important; color: var(--on_surface) !important; border-color: var(--outline_variant) !important; } /* dusky key=sel%1F%23mwAQ%20%3E%20div.contentsPage.contentsPage--topic%1Fbg | bg: surface */
+    div.contentsPage__heading { background-color: var(--inverse_on_surface) !important; } /* dusky key=sel%1Fdiv.contentsPage__heading%1Fbg | bg: inverse_on_surface */
+    div.contentsPage__section { background-color: var(--inverse_on_surface) !important; } /* dusky key=sel%1Fdiv.contentsPage__section%1Fbg | bg: inverse_on_surface */
+    div.mwe-popups-container { background-color: var(--surface_container_highest) !important; color: var(--on_surface) !important; border-color: var(--outline_variant) !important; } /* dusky key=sel%1Fdiv.mwe-popups-container%1Fbg | bg: surface_container_highest */
+    #mwDA { background-color: var(--surface_container) !important; color: var(--on_surface) !important; border-color: var(--outline_variant) !important; } /* dusky key=sel%1F%23mwDA%1Fbg | bg: surface_container */
+    figcaption { background-color: var(--surface) !important; color: var(--on_surface) !important; border-color: var(--outline_variant) !important; } /* dusky key=sel%1Ffigcaption%1Fbg | bg: surface */
+    table { background-color: var(--background) !important; color: var(--on_background) !important; border-color: var(--outline_variant) !important; } /* dusky key=sel%1Ftable%1Fbg | bg: background */
+    /* <<< dusky:picks */
+}

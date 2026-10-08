@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#d: Show notifications when USB devices are plugged in
+#d: Play sounds when USB devices are connected or disconnected
 
 set -euo pipefail
 
@@ -8,22 +8,19 @@ readonly GREEN=$'\033[0;32m'
 readonly BLUE=$'\033[0;34m'
 readonly NC=$'\033[0m'
 
-log_info()    { printf "${BLUE}[INFO]${NC} %s\n" "$1"; }
-log_success() { printf "${GREEN}[OK]${NC} %s\n" "$1"; }
-log_error()   { printf "${RED}[ERROR]${NC} %s\n" "$1" >&2; }
+log_info()    { printf '%s[INFO]%s %s\n' "$BLUE" "$NC" "$1"; }
+log_success() { printf '%s[OK]%s %s\n' "$GREEN" "$NC" "$1"; }
+log_error()   { printf '%s[ERROR]%s %s\n' "$RED" "$NC" "$1" >&2; }
+
+SCRIPT_PATH=$(realpath -- "${BASH_SOURCE[0]}")
+readonly SCRIPT_PATH
 
 if [[ $EUID -ne 0 ]]; then
     log_info "Elevating to root..."
-    exec sudo bash "$0" "$@"
+    exec sudo /usr/bin/bash "$SCRIPT_PATH" "$@"
 fi
 
-if [[ -z "${SUDO_USER:-}" ]]; then
-    log_error "Cannot determine original user. Run without sudo."
-    exit 1
-fi
-
-readonly USER_HOME=$(getent passwd "$SUDO_USER" | cut -d: -f6)
-readonly SOURCE_SCRIPT="${USER_HOME}/user_scripts/external/usb_sound.sh"
+readonly SOURCE_SCRIPT="${SCRIPT_PATH%/*}/../../external/usb_sound.sh"
 readonly TARGET_BIN="/usr/local/bin/usb_sound.sh"
 readonly UDEV_RULE_FILE="/etc/udev/rules.d/90-usb-sound.rules"
 
@@ -35,20 +32,27 @@ if [[ ! -f "$SOURCE_SCRIPT" ]]; then
     exit 1
 fi
 
-# Step 1: Physical installation with strict ownership
+# Validate before modifying the installed files.
+bash -n "$SOURCE_SCRIPT"
+RULE_DIR=$(mktemp --directory)
+readonly RULE_DIR
+trap 'rm -rf -- "$RULE_DIR"' EXIT
+printf '%s\n' "$UDEV_RULE_CONTENT" > "$RULE_DIR/90-usb-sound.rules"
+udevadm verify "$RULE_DIR/90-usb-sound.rules"
+
+# Install explicit permissions independent of the caller's umask.
 log_info "Installing payload to system binaries..."
-install -m 755 -o root -g root "$SOURCE_SCRIPT" "$TARGET_BIN"
+install -C -D -T -m 755 -o root -g root "$SOURCE_SCRIPT" "$TARGET_BIN"
 log_success "Installed to $TARGET_BIN"
 
 # Step 2: Udev rules
 log_info "Deploying udev rules..."
-printf '%s\n' "$UDEV_RULE_CONTENT" > "$UDEV_RULE_FILE"
+install -C -D -T -m 644 -o root -g root "$RULE_DIR/90-usb-sound.rules" "$UDEV_RULE_FILE"
 log_success "Udev rules deployed to $UDEV_RULE_FILE"
 
 # Step 3: Daemon reload
 log_info "Reloading systemd-udevd state..."
-udevadm control --reload-rules
-udevadm trigger --subsystem-match=usb --action=add || true
+udevadm control --reload
 log_success "Udev subsystem reloaded and active for future hotplug events"
 
 log_success "Setup complete. System is configured."

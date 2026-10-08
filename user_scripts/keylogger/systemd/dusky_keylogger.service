@@ -13,12 +13,11 @@ WatchdogSec=30
 User=$USER
 Group=input
 SupplementaryGroups=input
-Environment=HOME=$HOME
-Environment=DUSKY_KEYLOGGER_DATA_DIR=$DATA_DIR
+Environment="HOME=$HOME"
 Environment=PYTHONUNBUFFERED=1
 Environment=PYTHONSAFEPATH=1
-ExecStart=$VENV_PYTHON -m dusky_keylogger daemon
-WorkingDirectory=$DATA_DIR
+ExecStart="$VENV_PYTHON" -m dusky_keylogger daemon
+WorkingDirectory=$CONFIG_DIR
 Restart=on-failure
 RestartSec=3
 TimeoutStartSec=15
@@ -36,7 +35,7 @@ PrivateTmp=true
 PrivateNetwork=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=$DATA_DIR $CONFIG_DIR
+ReadWritePaths="$DATA_DIR" "$CONFIG_DIR"
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectKernelLogs=true

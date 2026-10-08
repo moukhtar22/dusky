@@ -54,56 +54,19 @@ from rich.table import Table
 from rich.text import Text
 
 # ---------------------------------------------------------------------------
-# Local imports with fallback (installed vs. direct script run)
+# Installed package and direct script invocation share the same imports.
 # ---------------------------------------------------------------------------
-try:
-    from .daemon import default_data_dir  # type: ignore
-    from .stats import card_totals, hourly_series, summarize, period_range  # type: ignore
-    from .storage import KeyStore  # type: ignore
-    from . import keycodes as kc  # type: ignore
-except ImportError:
-    import pathlib as _pl
-    import importlib.util as _ilu  # type: ignore
-
-    _here = _pl.Path(__file__).parent.resolve()
-    # Ensure package parent ( .../keylogger ) is on sys.path so `dusky_keylogger` is importable
-    for _candidate in (_here.parent, _here.parent.parent, _here):
-        _cand_s = str(_candidate)
-        if _cand_s not in sys.path:
-            sys.path.insert(0, _cand_s)
-    # Pre-load the package itself so `from . import __version__` inside daemon works when
-    # this file is executed as `python dashboard_tui.py` (no parent package).
-    if "dusky_keylogger" not in sys.modules:
-        try:
-            _pkg_spec = _ilu.spec_from_file_location(
-                "dusky_keylogger", _here / "__init__.py", submodule_search_locations=[str(_here)]
-            )
-            if _pkg_spec and _pkg_spec.loader:
-                _pkg_mod = _ilu.module_from_spec(_pkg_spec)
-                sys.modules["dusky_keylogger"] = _pkg_mod
-                _pkg_spec.loader.exec_module(_pkg_mod)  # type: ignore[attr-defined]
-        except Exception:
-            pass
-    try:
-        from dusky_keylogger.daemon import default_data_dir  # type: ignore
-        from dusky_keylogger.stats import card_totals, hourly_series, summarize, period_range  # type: ignore
-        from dusky_keylogger.storage import KeyStore  # type: ignore
-        from dusky_keylogger import keycodes as kc  # type: ignore
-    except ImportError:
-        # Last-ditch: sibling directory imports (bare checkout without package wrapper)
-        # At this point sys.path already contains _here, so `import daemon` will find it,
-        # but daemon itself does `from . import __version__` which now resolves because
-        # we pre-loaded dusky_keylogger package above.
-        try:
-            from dusky_keylogger.daemon import default_data_dir  # type: ignore
-            from dusky_keylogger.stats import card_totals, hourly_series, summarize, period_range  # type: ignore
-            from dusky_keylogger.storage import KeyStore  # type: ignore
-            from dusky_keylogger import keycodes as kc  # type: ignore
-        except ImportError:
-            from daemon import default_data_dir  # type: ignore
-            from stats import card_totals, hourly_series, summarize, period_range  # type: ignore
-            from storage import KeyStore  # type: ignore
-            import keycodes as kc  # type: ignore
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from dusky_keylogger.daemon import default_data_dir
+    from dusky_keylogger.stats import card_totals, hourly_series, summarize, period_range
+    from dusky_keylogger.storage import KeyStore
+    from dusky_keylogger import keycodes as kc
+else:
+    from .daemon import default_data_dir
+    from .stats import card_totals, hourly_series, summarize, period_range
+    from .storage import KeyStore
+    from . import keycodes as kc
 
 # ---------------------------------------------------------------------------
 # Theme / paths — never hardcode username, always Path.home() / expanduser
@@ -453,7 +416,7 @@ def _get_cycled_period(cur: str, step: int = 1) -> str:
 # ~4 fps; without this, large databases re-scan per frame (measured ~1s/frame
 # for summarize and ~3s for transcript rebuilds on 380k rows).
 # ---------------------------------------------------------------------------
-_QUERY_CACHE: dict[tuple[str, tuple], tuple[int, Any]] = {}
+_QUERY_CACHE: dict[tuple[str, tuple], tuple[tuple, Any]] = {}
 
 
 def _cached(store: Any, key: tuple, compute: Any) -> Any:
@@ -461,7 +424,7 @@ def _cached(store: Any, key: tuple, compute: Any) -> Any:
     if store is None:
         return compute()
     try:
-        ver = store.max_id()
+        ver = (store.max_id(), datetime.now().date())
     except Exception:
         return compute()
     ck = (str(getattr(store, "path", "")), key)
@@ -478,13 +441,19 @@ def _cached(store: Any, key: tuple, compute: Any) -> Any:
 def _transcript_line_count(store: Any, period: str) -> int:
     """Efficient native-Python transcript line count (single DB scan).
 
-    Mirrors render_transcript_panel's entry logic but only counts lines:
-    one per ENTER + trailing buffer. Used for auto-follow and scroll clamping
-    without rebuilding full entries list. Returns at least 1 for empty state.
-    Cached per (store, period); invalidated when new events are written.
+    Reuse the rendered transcript snapshot for auto-follow and scroll clamping.
+    Returns at least 1 for empty state; invalidated when new events are written.
     """
-    entries = _cached(store, ("transcript_entries", period), lambda: _transcript_entries(store, period))
+    entries, _ = _transcript_snapshot(store, period)
     return max(1, len(entries))
+
+
+def _transcript_snapshot(store: Any, period: str) -> tuple[list[tuple[str, str]], int]:
+    """Cache lines and their character count as one consistent snapshot."""
+    def compute():
+        entries = _transcript_entries(store, period)
+        return entries, sum(len(text) for _, text in entries)
+    return _cached(store, ("transcript_snapshot", period), compute)
 
 
 def _transcript_entries(store: Any, period: str) -> list[tuple[str, str]]:
@@ -815,23 +784,20 @@ def render_transcript_panel(
     fg = colors.get("fg", "#efe0d5")
     accent = colors.get("accent", "#ffb779")
     muted = colors.get("muted", "#a08c7a")
-    entries = _cached(
-        store, ("transcript_entries", period), lambda: _transcript_entries(store, period)
-    )
+    entries, chars = _transcript_snapshot(store, period)
     # New → old: reverse so newest at top (user request) — lazy load as scroll
-    entries = list(reversed(entries))
     total_lines = len(entries)
     height = max(3, height)
     max_scroll = max(0, total_lines - height)
     scroll = max(0, min(scroll, max_scroll))
-    window = entries[scroll : scroll + height]
+    end = total_lines - scroll
+    window = list(reversed(entries[max(0, end - height):end]))
     tbl = Table(box=None, expand=True, show_header=True, header_style=f"bold {accent}", pad_edge=False)
     tbl.add_column("#", style=f"{muted}", width=3, justify="right", no_wrap=True)
     tbl.add_column("Time", style=f"{colors.get('warning', '#e3c0a5')}", width=8, justify="center", no_wrap=True)
     tbl.add_column("Text", style=f"{fg}", ratio=1, overflow="fold", no_wrap=False)
     for idx, (t_str, line) in enumerate(window, start=scroll + 1):
         display = line if len(line) < 500 else line[:500] + " …"
-        display = display.replace("[", "\\[")
         is_even = (idx % 2 == 0)
         row_bg = f" on {colors.get('cursor_bg', '#2a221c')}" if is_even else ""
         tbl.add_row(
@@ -843,7 +809,7 @@ def render_transcript_panel(
     for _ in range(height - len(window)):
         tbl.add_row("", "", "")
     indicator = f"  [{scroll+1}-{min(scroll+height, total_lines)}/{total_lines}  ↕ j/k PgUp/PgDn Wheel • live]" if total_lines > height else f"  [{total_lines} lines • live]"
-    subtitle = f"[dim {muted}]Transcript {PERIOD_LABELS.get(period, period)}{indicator} — {sum(len(t) for _, t in entries):,} chars[/]"
+    subtitle = f"[dim {muted}]Transcript {PERIOD_LABELS.get(period, period)}{indicator} — {chars:,} chars[/]"
     return Panel(tbl, title=f"[bold {accent}]Transcript — Live[/]", subtitle=subtitle, border_style=f"{accent}", expand=True)
 
 
@@ -1043,7 +1009,7 @@ def _build_layout_impl(
             # Create dummy in-memory? Use temp
             store = None  # type: ignore
 
-    # Gather stats safely — request ALL keys (1000) for complete, scrollable Keys view
+    # Gather aggregates only for views that display them.
     try:
         current_stats = (
             _cached(
@@ -1051,7 +1017,7 @@ def _build_layout_impl(
                 ("stats", period),
                 lambda: summarize(store, period, limit_keys=1000),  # type: ignore[arg-type]
             )
-            if store is not None
+            if store is not None and view in {"overview", "keys", "chars"}
             else None
         )
     except Exception as e:
@@ -1060,7 +1026,7 @@ def _build_layout_impl(
     try:
         cards = (
             _cached(store, ("cards",), lambda: card_totals(store))  # type: ignore[arg-type]
-            if store is not None
+            if store is not None and view == "overview"
             else {p: 0 for p in PERIOD_LIST}
         )
     except Exception as e:
@@ -1073,7 +1039,7 @@ def _build_layout_impl(
 
         @dataclass
         class _Empty:
-            period: str = period
+            period: str = ""
             total_keys: int = 0
             printable: int = 0
             backspace: int = 0
@@ -1096,16 +1062,17 @@ def _build_layout_impl(
             @property
             def backspace_ratio(self) -> float: return 0.0
 
-        current_stats = _Empty()
+        current_stats = _Empty(period=period)
 
     # Header: title + subtitle with period hint
     header = Text(overflow="ellipsis", no_wrap=True)
     header.append(" 󰌌 Dusky Keylogger ", style=f"bold {accent}")
     header.append(f"({PERIOD_LABELS.get(period, period)}", style=f"bold {warning}")
     header.append(")", style=f"bold {warning}")
-    header.append("  Total: ", style=f"{fg}")
-    header.append(f"{current_stats.total_keys:,}", style=f"bold {success}")
-    header.append(" keys", style=f"{fg}")
+    if view in {"overview", "keys", "chars"}:
+        header.append("  Total: ", style=f"{fg}")
+        header.append(f"{current_stats.total_keys:,}", style=f"bold {success}")
+        header.append(" keys", style=f"{fg}")
     header.append("  DB: ", style=f"{muted}")
     try:
         db_name = store.path.name if store and hasattr(store, "path") else "keys.db"  # type: ignore
@@ -1549,18 +1516,6 @@ def run_live_dashboard(store_path: str | Path | None = None) -> None:
             log_error(f"live.update: {e}\n{traceback.format_exc()}")
 
     try:
-        # Transcript: new at top, so initial scroll 0 already shows newest (no jump needed)
-        try:
-            if cache.store is not None:
-                content_height = max(8, console.height - 8)
-                th_init = max(6, content_height - 2)
-                init_total = _transcript_line_count(cache.store, period)
-                _prev_transcript_total = init_total
-                _prev_transcript_period = period
-                _prev_transcript_th = th_init
-                # Keep at top (newest) for live tail — no auto-jump to bottom
-        except Exception as e:
-            log_error(f"transcript init {e}")
         panel = build_panel()
         with Live(
             panel,
@@ -1590,9 +1545,10 @@ def run_live_dashboard(store_path: str | Path | None = None) -> None:
                     except OSError as e:
                         log_error(f"os.read: {e}")
                         chunk = b""
-                    if chunk:
-                        input_buf.extend(chunk)
-                        got_keys = True
+                    if not chunk:
+                        break
+                    input_buf.extend(chunk)
+                    got_keys = True
 
                 # Standalone ESC timeout (user pressed Esc alone)
                 if not got_keys and input_buf == b"\x1b":
@@ -1707,7 +1663,7 @@ def run_live_dashboard(store_path: str | Path | None = None) -> None:
                     data_ver = cache.store.max_id() if cache.store is not None else 0  # type: ignore[union-attr]
                 except Exception:
                     data_ver = -1
-                frame_sig = (data_ver, period, view, console.height, cache.colors_ts)
+                frame_sig = (data_ver, datetime.now().date(), period, view, console.width, console.height, cache.colors_ts)
                 if not got_keys and frame_sig == last_frame_sig and (
                     time.monotonic() - last_push_at) < 2.0:
                     continue
@@ -1805,4 +1761,3 @@ def main(store_path: str | Path | None = None) -> None:
 
 if __name__ == "__main__":
     main()
-

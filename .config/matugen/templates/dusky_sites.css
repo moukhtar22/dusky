@@ -1,9 +1,17 @@
+/* Internal Firefox documents only; the native host reads the declarations. */
+@-moz-document regexp("about:(?!blank(?:[?#]|$)|srcdoc(?:[?#]|$)).*"), url("chrome://global/content/print.html"), url("chrome://global/content/commonDialog.xhtml"), url("chrome://browser/content/places/places.xhtml"), url-prefix("chrome://devtools/content/") {
 :root {
+<* if {{ is_dark_mode }} *>
+    --dusky-palette-color-scheme: dark;
+<* else *>
+    --dusky-palette-color-scheme: light;
+<* endif *>
 <* for name, value in colors *>
-    --{{name}}: {{value.default.hex}};
+    --dusky-palette-{{name}}: {{value.default.hex}};
 <* endfor *>
 
 <* for name, value in colors *>
-    --{{name}}_rgb: {{value.default.red}} {{value.default.green}} {{value.default.blue}};
+    --dusky-palette-{{name}}_rgb: {{value.default.red}} {{value.default.green}} {{value.default.blue}};
 <* endfor *>
+}
 }

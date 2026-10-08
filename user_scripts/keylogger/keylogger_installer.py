@@ -7,7 +7,7 @@ Automates setup on Arch Linux (systemd):
   2. Adds the invoking user to the input group if they are missing
      (required to read /dev/input/event*).
   3. Creates an isolated venv at ~/contained_apps/uv/dusky_key_logger/
-     (prefers uv with CPython 3.14, else venv+pip on the same interpreter)
+     (prefers uv with the installed system Python, else venv+pip on the same interpreter)
      and installs the package with its dependencies from pyproject.toml.
   4. Renders and installs dusky_keylogger.service so the daemon can run
      in the background and be turned on/off with systemctl.
@@ -25,13 +25,13 @@ Usage:
 """
 
 import argparse
-import getpass
 import os
 import pwd
 import shlex
 import shutil
 import sqlite3
 import string
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -48,7 +48,7 @@ C_CYAN = "\033[1;36m"
 C_DIM = "\033[2m"
 C_RESET = "\033[0m"
 
-REQUIRED_PYTHON = (3, 14)
+REQUIRED_PYTHON = (3, 14, 7)
 
 
 def log(msg: str) -> None:
@@ -91,12 +91,28 @@ def run(
 
 def original_user() -> tuple[str, str]:
     """Return (username, home_dir) of the user who invoked the installer."""
-    user = os.environ.get("SUDO_USER") or getpass.getuser()
-    try:
-        home = pwd.getpwnam(user).pw_dir
-    except KeyError:
-        home = str(Path.home())
-    return user, home
+    record = pwd.getpwnam(os.environ["SUDO_USER"]) if os.environ.get("SUDO_USER") else pwd.getpwuid(os.getuid())
+    return record.pw_name, record.pw_dir
+
+
+def owner_spec(user: str) -> str:
+    record = pwd.getpwnam(user)
+    return f"{record.pw_uid}:{record.pw_gid}"
+
+
+def ensure_user_directory(path: Path, user: str, mode: int = 0o700) -> None:
+    """Own newly created parents, without changing shared existing parents."""
+    missing = []
+    current = path
+    while not current.exists():
+        missing.append(current)
+        current = current.parent
+    record = pwd.getpwnam(user)
+    for directory in reversed(missing):
+        directory.mkdir(mode=mode)
+        os.chown(directory, record.pw_uid, record.pw_gid)
+    path.chmod(mode)
+    os.chown(path, record.pw_uid, record.pw_gid)
 
 
 def venv_dir(home: str) -> Path:
@@ -114,13 +130,13 @@ def system_python() -> str:
     return shutil.which("python3") or "python3"
 
 
-def python_version(exe: str = sys.executable) -> tuple[int, int] | None:
+def python_version(exe: str = sys.executable) -> tuple[int, int, int] | None:
     try:
         proc = subprocess.run(
             [
                 exe,
                 "-c",
-                "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')",
+                "import sys; print('.'.join(map(str, sys.version_info[:3])))",
             ],
             capture_output=True,
             text=True,
@@ -128,14 +144,14 @@ def python_version(exe: str = sys.executable) -> tuple[int, int] | None:
         if proc.returncode != 0:
             return None
         parts = proc.stdout.strip().split(".")
-        if len(parts) < 2:
+        if len(parts) != 3:
             return None
-        return int(parts[0]), int(parts[1])
+        return tuple(map(int, parts))
     except Exception:
         return None
 
 
-def version_str(ver: tuple[int, int] | None) -> str:
+def version_str(ver: tuple[int, int, int] | None) -> str:
     return ".".join(map(str, ver)) if ver else "unknown"
 
 
@@ -188,9 +204,11 @@ def cmd_status(_args: argparse.Namespace) -> int:
             shown_legacy = True
     if db.exists():
         try:
-            conn = sqlite3.connect(f"file:{db.as_posix()}?mode=ro", uri=True)
-            total = conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
-            conn.close()
+            conn = sqlite3.connect(db.absolute().as_uri() + "?mode=ro", uri=True)
+            try:
+                total = conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+            finally:
+                conn.close()
             label = f"{db} -- {int(total):,} events"
             if shown_legacy:
                 label += f"  {C_YELLOW}(legacy path; canonical is {new_data}){C_RESET}"
@@ -237,8 +255,8 @@ def cmd_dry_run(_args: argparse.Namespace) -> int:
         )
     else:
         print(f"  2. Add user '{user}' to the 'input' group (usermod -aG input).")
-    print(f"  3. Create venv at {venv_dir(home)} (uv --python 3.14, else venv+pip).")
-    print("  4. Install package + deps from pyproject.toml (evdev, rich).")
+    print(f"  3. Create venv at {venv_dir(home)} (uv using system Python, else venv+pip).")
+    print("  4. Install package + deps from pyproject.toml (evdev, rich)" + (" using offline sources." if _args.offline else "."))
     print(f"  5. Install systemd service {SERVICE_FILE}.")
     if _args.enable:
         print("  6. systemctl enable --now dusky_keylogger")
@@ -268,7 +286,14 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
     _ensure_root_for_uninstall(args)
     user, home = original_user()
     step("Stopping and disabling service...")
-    run(["systemctl", "stop", SERVICE_NAME], check=False)
+    stopped = run(["systemctl", "stop", SERVICE_NAME], check=False, capture=True)
+    if stopped.returncode != 0:
+        state = run(
+            ["systemctl", "show", "--property=LoadState", "--value", SERVICE_NAME],
+            check=False, capture=True,
+        )
+        if state.returncode != 0 or state.stdout.strip() != "not-found":
+            fail(f"Could not stop {SERVICE_NAME}; uninstall aborted.\n{stopped.stderr}")
     run(["systemctl", "disable", SERVICE_NAME], check=False)
     if SERVICE_FILE.exists():
         try:
@@ -305,21 +330,21 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 
 
-def build_venv(user: str, home: str) -> str:
+def build_venv(user: str, home: str, *, offline: bool = False) -> str:
     venv = venv_dir(home)
-    venv.parent.mkdir(parents=True, exist_ok=True)
+    ensure_user_directory(venv.parent, user)
     step(f"Creating virtual environment at {venv}...")
     if not venv.exists():
         created = False
         if has_uv():
             proc = subprocess.run(
-                ["uv", "venv", str(venv), "--python", "3.14"],
+                ["uv", "venv", str(venv), "--python", system_python(), "--no-python-downloads"],
                 capture_output=True,
                 text=True,
             )
             created = proc.returncode == 0
             if not created:
-                warn(f"uv venv --python 3.14 failed:\n{proc.stderr.strip()}")
+                warn(f"uv venv using system Python failed:\n{proc.stderr.strip()}")
         if not created:
             ver = python_version(system_python())
             if not ver or ver < REQUIRED_PYTHON:
@@ -336,13 +361,18 @@ def build_venv(user: str, home: str) -> str:
 
     step("Installing Dusky Keylogger + dependencies from pyproject.toml...")
     if has_uv():
-        run(["uv", "pip", "install", "--python", str(venv_py), "-e", str(INSTALL_DIR)])
+        command = ["uv", "pip", "install", "--python", str(venv_py), "-e", str(INSTALL_DIR)]
+        if offline:
+            command.append("--offline")
+        run(command)
     else:
-        run([str(venv_py), "-m", "pip", "install", "--upgrade", "pip"])
-        run([str(venv_py), "-m", "pip", "install", "-e", str(INSTALL_DIR)])
+        command = [str(venv_py), "-m", "pip", "install", "-e", str(INSTALL_DIR)]
+        if offline:
+            command.append("--no-index")
+        run(command)
     ok("Package installed")
 
-    run(["chown", "-R", f"{user}:{user}", str(venv)], check=False)
+    run(["chown", "-R", owner_spec(user), str(venv)])
     return str(venv_py)
 
 
@@ -351,7 +381,7 @@ def install_service(venv_py: str, user: str, home: str) -> None:
         fail(f"Service file missing: {SERVICE_SRC}")
     data_dir = f"{home}/.config/dusky/settings/keylogger/data"
     # Canonical config dir (writable under ProtectSystem=strict so the daemon
-    # can auto-create/backfill config.json inside its sandbox).
+    # can auto-create config.json inside its sandbox).
     config_dir = f"{home}/.config/dusky/settings/keylogger"
     raw_content = SERVICE_SRC.read_text(encoding="utf-8")
     if "$" in raw_content:
@@ -392,91 +422,42 @@ def cmd_install(args: argparse.Namespace) -> int:
 
     ver = python_version(system_python())
     if not ver or ver < REQUIRED_PYTHON:
-        if not has_uv():
-            fail(
-                f"Python >= {'.'.join(map(str, REQUIRED_PYTHON))} required "
-                f"(found {ver}). Install python>=3.14 or uv."
-            )
-        warn(
-            f"System Python is {ver}; uv will provision CPython 3.14 for the venv."
-        )
-    else:
-        ok(f"Python {'.'.join(map(str, ver))}")
+        fail(f"System Python >= {version_str(REQUIRED_PYTHON)} required (found {version_str(ver)}).")
+    ok(f"Python {version_str(ver)}")
 
     if user_in_group(user, "input"):
         ok(f"User '{user}' is already in the 'input' group")
     else:
         step(f"Adding user '{user}' to the 'input' group...")
         run(["usermod", "-aG", "input", user])
-        warn(
-            f"User '{user}' added to 'input' group -- a LOGOUT/LOGIN is required "
-            "for the change to take effect (or reboot)."
-        )
+        warn(f"User '{user}' added to 'input'. Foreground use needs logout/login; the system service receives the group immediately.")
 
-    # New canonical persistent data dir (per user request) + legacy for migration
-    new_data_dir = Path(home) / ".config" / "dusky" / "settings" / "keylogger" / "data"
-    new_data_dir.mkdir(parents=True, exist_ok=True)
-    try:
-        os.chmod(new_data_dir, 0o700)
-        for p in [new_data_dir, new_data_dir.parent, new_data_dir.parent.parent, new_data_dir.parent.parent.parent]:
+    new_config = Path(home) / ".config/dusky/settings/keylogger"
+    new_data_dir = new_config / "data"
+    ensure_user_directory(new_data_dir, user)
+    # Repair existing application-owned files, using the user's real primary GID.
+    run(["chown", "-R", owner_spec(user), str(new_config)])
+    from dusky_keylogger.daemon import DEFAULT_CONFIG
+    cfg_file = new_config / "config.json"
+    old_cfg = Path(home) / ".config/dusky-keylogger/config.json"
+    if not cfg_file.exists():
+        defaults = dict(DEFAULT_CONFIG)
+        if old_cfg.exists():
             try:
-                os.chmod(p, 0o700)
-            except OSError:
-                pass
-    except OSError:
-        pass
-    # Legacy XDG data dir for migration (keep for existing installs)
-    old_data_dir = Path(home) / ".local" / "share" / "dusky-keylogger"
-    old_data_dir.mkdir(parents=True, exist_ok=True)
-    try:
-        os.chmod(old_data_dir, 0o700)
-    except OSError:
-        pass
-    # Legacy config dir (for backward compat) and new canonical dusky/settings/keylogger
-    old_config = Path(home) / ".config" / "dusky-keylogger"
-    old_config.mkdir(parents=True, exist_ok=True)
-    try:
-        os.chmod(old_config, 0o700)
-    except OSError:
-        pass
-    new_config = Path(home) / ".config" / "dusky" / "settings" / "keylogger"
-    new_config.mkdir(parents=True, exist_ok=True)
-    try:
-        os.chmod(new_config, 0o700)
-        # Also ensure parents are 0700 (dusky/settings)
-        for p in [new_config, new_config.parent, new_config.parent.parent]:
-            try:
-                os.chmod(p, 0o700)
-            except OSError:
-                pass
-    except OSError:
-        pass
-    run(["chown", "-R", f"{user}:{user}", str(new_data_dir)], check=False)
-    run(["chown", "-R", f"{user}:{user}", str(old_data_dir)], check=False)
-    run(["chown", "-R", f"{user}:{user}", str(old_config)], check=False)
-    run(["chown", "-R", f"{user}:{user}", str(new_config)], check=False)
-    # Ensure new canonical config file exists with defaults if fresh install
-    try:
-        cfg_file = new_config / "config.json"
-        if not cfg_file.exists() and not (old_config / "config.json").exists():
-            import json as _json
+                loaded = json.loads(old_cfg.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as exc:
+                fail(f"Could not read legacy config {old_cfg}: {exc}")
+            if not isinstance(loaded, dict):
+                fail(f"Legacy config is not a JSON object: {old_cfg}")
+            defaults.update(loaded)
+        fd = os.open(cfg_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(defaults, fh, indent=2)
+            fh.write("\n")
+        record = pwd.getpwnam(user)
+        os.chown(cfg_file, record.pw_uid, record.pw_gid)
 
-            defaults = {
-                "flush_interval": 0.5,
-                "log_level": "info",
-                "data_dir": "~/.config/dusky/settings/keylogger/data",
-                "transcript_dir": "/tmp",
-                "transcript_format": "text",
-                "persistent_enabled": True,
-                "ephemeral_enabled": True,
-            }
-            cfg_file.write_text(_json.dumps(defaults, indent=2) + "\n", encoding="utf-8")
-            os.chmod(cfg_file, 0o600)
-            run(["chown", f"{user}:{user}", str(cfg_file)], check=False)
-    except OSError:
-        pass
-
-    venv_py = build_venv(user, home)
+    venv_py = build_venv(user, home, offline=args.offline)
     install_service(venv_py, user, home)
 
     if args.enable:
@@ -498,10 +479,6 @@ def cmd_install(args: argparse.Namespace) -> int:
     print(
         f"    {venv_dir(home) / 'bin' / 'python'} -m dusky_keylogger stats --period week"
     )
-    if args.enable and not user_in_group(user, "input"):
-        warn(
-            "A logout/login (or reboot) is needed before the daemon can read /dev/input."
-        )
     return 0
 
 
@@ -512,6 +489,7 @@ def cmd_install(args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Install Dusky Keylogger")
+    parser.add_argument("--offline", action="store_true", help="Install from uv cache or pip local sources without network access")
     parser.add_argument(
         "--enable", action="store_true", help="Also enable + start the systemd service"
     )

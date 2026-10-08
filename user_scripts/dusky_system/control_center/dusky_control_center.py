@@ -1,36 +1,23 @@
 #!/usr/bin/env python3
 """
-Dusky Control Center (Production Build)
-
-A GTK4/Libadwaita configuration launcher for the Dusky Dotfiles.
-Fully UWSM-compliant for Arch Linux/Hyprland environments.
-
-Validated Production Improvements:
-- Match/Case Structural Pattern Matching for hyper-fast config validation.
-- Extensive domain widgets: Colors, Secrets, Keybinds, Paths, and Multi-line text.
-- Error UI: Config structure/type errors are surfaced via Adw.StatusPage.
-- Grid Isolation: Malformed grid cards fallback to error rows without breaking the FlowBox.
-- Hot Reload: Reload requests are coalesced; failed rebuilds roll back UI/CSS.
-- Search Performance: Directory generators are cached per loaded config.
-- Resource Safety: CSS provider lifecycle is fully guarded against leaks.
-- UX: Hot reload preserves selection; search restore behavior is deterministic.
+Dusky Control Center: a GTK4/Libadwaita launcher for Dusky settings.
 """
 
 from __future__ import annotations
 
-import gc
 import logging
-import subprocess
+import re
+import shlex
+import signal
 import sys
 import threading
 import traceback
 from collections.abc import Callable, Iterator
-from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
+from functools import lru_cache
 from pathlib import Path
 from typing import (
-    TYPE_CHECKING,
     Any,
     Final,
     Literal,
@@ -43,6 +30,19 @@ from typing import (
 # =============================================================================
 # Safe check to prevent systemd service restart loops when running headless
 import os
+if "--validate" in sys.argv:
+    from lib.config_schema import validate_file
+
+    try:
+        position = sys.argv.index("--validate")
+        config_file = Path(sys.argv[position + 1]) if position + 1 < len(sys.argv) else Path(__file__).with_name("dusky_config.toml")
+        validate_file(config_file)
+    except (OSError, UnicodeError, ValueError, TypeError) as error:
+        sys.stderr.write(f"dusky-control-center: invalid config: {error}\n")
+        sys.exit(2)
+    print(f"Valid configuration: {config_file}")
+    sys.exit(0)
+
 if not os.environ.get("WAYLAND_DISPLAY") and not os.environ.get("DISPLAY"):
     sys.stderr.write("dusky-control-center: error: WAYLAND_DISPLAY and DISPLAY are not set. Cannot run GUI application.\n")
     sys.exit(5)
@@ -83,15 +83,19 @@ _setup_cache()
 # =============================================================================
 # IMPORTS & PRE-FLIGHT
 # =============================================================================
+try:
+    import gi
+    gi.require_version("Gtk", "4.0")
+    gi.require_version("Adw", "1")
+    gi.require_version("GLibUnix", "2.0")
+except (ImportError, ValueError) as error:
+    sys.exit(f"dusky-control-center: GTK4/libadwaita Python bindings unavailable: {error}")
+
 import lib.utility as utility
+from lib.config_schema import validate_config
 
 utility.preflight_check()
-
-import gi
-
-gi.require_version("Gtk", "4.0")
-gi.require_version("Adw", "1")
-from gi.repository import Adw, Gdk, Gio, GLib, Gtk, Pango
+from gi.repository import Adw, Gdk, Gio, GLib, GLibUnix, Gtk, Pango
 
 import lib.rows as rows
 
@@ -241,6 +245,7 @@ class RowContext(TypedDict):
     toast_overlay: Adw.ToastOverlay | None
     nav_view: Adw.NavigationView | None
     builder_func: Callable[..., Adw.NavigationPage] | None
+    row_builder: Callable[..., Adw.PreferencesRow] | None
     path: list[str]
 
 
@@ -261,6 +266,14 @@ class SearchHit:
     nav_path: tuple[str, ...]
     unique_id: str
     score: int = 0
+    key: str = ""
+    breadcrumb: str = ""
+
+
+@lru_cache(maxsize=2048)
+def _normalize_search_text(text: str) -> tuple[str, str, tuple[str, ...]]:
+    folded = text.casefold()
+    return folded, "".join(char for char in folded if char.isalnum()), tuple(folded.split())
 
 
 def _fuzzy_subsequence(needle: str, haystack: str) -> bool:
@@ -306,6 +319,8 @@ class DuskyControlCenter(Adw.Application):
         self._reload_queued = False
         self._directory_generator_cache: dict[int, tuple[ConfigItem, ...]] = {}
         self._file_generator_cache: dict[int, tuple[ConfigItem, ...]] = {}
+        self._search_index: tuple[SearchHit, ...] | None = None
+        self._first_search_result: Adw.ActionRow | None = None
 
     def _init_widget_refs(self) -> None:
         """Initialize or reset all widget references to None."""
@@ -331,13 +346,17 @@ class DuskyControlCenter(Adw.Application):
         Adw.StyleManager.get_default().set_color_scheme(Adw.ColorScheme.DEFAULT)
 
         self.hold()
+        GLibUnix.signal_add(GLib.PRIORITY_DEFAULT, signal.SIGTERM, lambda *_: self.quit())
 
         result = self._load_config_and_css_sync()
         self._state.config = result["config"]
         self._state.css_content = result["css"]
         self._state.config_error = result["error"]
 
-        self._apply_css()
+        try:
+            self._apply_css()
+        except ValueError as error:
+            log.error("%s", error)
         self._build_ui()
 
         if self._window:
@@ -352,17 +371,21 @@ class DuskyControlCenter(Adw.Application):
         if self._window:
             if self._window.get_visible():
                 self._window.set_visible(False)
-                self._cancel_debounce()
-                gc.collect()
             else:
                 self._window.present()
 
     def do_shutdown(self) -> None:
         """Cleanup resources on application exit."""
         self._cancel_debounce()
+        if self._window:
+            self._window.destroy()
+        utility.flush_settings()
         self._remove_css_provider()
         self._directory_generator_cache.clear()
         self._file_generator_cache.clear()
+        self._search_index = None
+        self._first_search_result = None
+        _normalize_search_text.cache_clear()
         Adw.Application.do_shutdown(self)
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -397,7 +420,12 @@ class DuskyControlCenter(Adw.Application):
             ConfigLoadResult with config, css, success status, and any error message.
         """
         config, config_error = self._do_load_config()
-        css = self._do_load_css()
+        try:
+            css = self._do_load_css()
+        except (OSError, UnicodeError) as error:
+            log.warning("Cannot load CSS: %s", error)
+            css = ""
+            config_error = config_error or f"CSS read error: {error}"
 
         return {
             "success": config_error is None,
@@ -405,52 +433,6 @@ class DuskyControlCenter(Adw.Application):
             "css": css,
             "error": config_error,
         }
-
-    def _validate_config_node(self, value: Any, where: str, seen: set[int] | None = None) -> None:
-        """Deep validation utilizing blazing-fast structural pattern matching."""
-        if seen is None:
-            seen = set()
-            
-        vid = id(value)
-        if vid in seen:
-            raise ValueError(f"{where} contains a recursive reference")
-        seen.add(vid)
-
-        try:
-            match value:
-                case dict():
-                    for key, val in value.items():
-                        match key, val:
-                            case "item_template", dict():
-                                self._validate_config_node(val, f"{where}.{key}", seen)
-                            case "properties", dict():
-                                pass
-                            case "properties" | "item_template", _:
-                                raise TypeError(f"{where}.{key} must be a dictionary")
-                            case "layout" | "items", list() as lst:
-                                lst_id = id(lst)
-                                if lst_id in seen:
-                                    raise ValueError(f"{where}.{key} contains a recursive reference")
-                                seen.add(lst_id)
-                                try:
-                                    for i, child in enumerate(lst):
-                                        self._validate_config_node(child, f"{where}.{key}[{i}]", seen)
-                                finally:
-                                    seen.remove(lst_id)
-                            case "layout" | "items", _:
-                                raise TypeError(f"{where}.{key} must be a list")
-                            case "on_press" | "on_toggle" | "on_change" | "on_action", dict() | None:
-                                pass
-                            case "on_press" | "on_toggle" | "on_change" | "on_action", _:
-                                raise TypeError(f"{where}.{key} must be a dictionary or null")
-                            case "value", dict() | str() | None:
-                                pass
-                            case "value", _:
-                                raise TypeError(f"{where}.value must be a dictionary, string, or null")
-                case _:
-                    raise TypeError(f"{where} must be a dictionary")
-        finally:
-            seen.remove(vid)
 
     def _do_load_config(self) -> tuple[AppConfig, str | None]:
         """
@@ -464,16 +446,8 @@ class DuskyControlCenter(Adw.Application):
         try:
             loaded = utility.load_config(config_path)
             match loaded:
-                case {"pages": list() as pages}:
-                    for idx, page in enumerate(pages):
-                        match page:
-                            case {"title": title_val}:
-                                page["title"] = str(title_val)
-                                self._validate_config_node(page, f"pages[{idx}]")
-                            case dict():
-                                return {"pages": []}, f"Page {idx} missing required 'title' key"
-                            case _:
-                                return {"pages": []}, f"Page {idx} is not a dictionary"
+                case {"pages": list()}:
+                    validate_config(loaded)
                     return loaded, None # type: ignore
                 case {"pages": _}:
                     return {"pages": []}, "'pages' must be a list"
@@ -490,7 +464,7 @@ class DuskyControlCenter(Adw.Application):
 
     def _do_load_css(self) -> str:
         """
-        Safely load the CSS stylesheet.
+        Load CSS. A missing optional stylesheet is empty; other read errors fail reload.
 
         Returns:
             CSS content string, or empty string on failure.
@@ -500,12 +474,6 @@ class DuskyControlCenter(Adw.Application):
             return css_path.read_text(encoding="utf-8")
         except FileNotFoundError:
             log.info("No custom CSS file found at: %s", css_path)
-            return ""
-        except UnicodeDecodeError as e:
-            log.warning("CSS file is not valid UTF-8: %s (%s)", css_path, e)
-            return ""
-        except OSError as e:
-            log.warning("Failed to read CSS file: %s", e)
             return ""
 
     def _apply_css(self) -> None:
@@ -521,11 +489,19 @@ class DuskyControlCenter(Adw.Application):
             return
 
         provider = Gtk.CssProvider()
+        errors: list[str] = []
+        def on_parse_error(_provider, _section, error):
+            if error.domain == "gtk-css-parser-error-quark":
+                errors.append(error.message)
+        provider.connect("parsing-error", on_parse_error)
         try:
             provider.load_from_string(self._state.css_content)
         except GLib.Error as e:
             log.error("CSS parsing failed: %s", e.message)
             return
+
+        if errors:
+            raise ValueError("CSS parsing failed: " + "; ".join(errors))
 
         old_provider = self._css_provider
         old_display = self._display
@@ -561,6 +537,7 @@ class DuskyControlCenter(Adw.Application):
             "toast_overlay": self._toast_overlay,
             "nav_view": nav_view,
             "builder_func": builder_func,
+            "row_builder": self._build_item_row,
             "path": path or [],
         }
 
@@ -607,8 +584,6 @@ class DuskyControlCenter(Adw.Application):
         Hide window and suspend all background activity to achieve zero-CPU idle.
         """
         window.set_visible(False)
-        self._cancel_debounce()
-        gc.collect()
         return True
 
     def _on_key_pressed(
@@ -667,7 +642,9 @@ class DuskyControlCenter(Adw.Application):
         log.info("Hot Reload Initiated...")
 
         current_page = self._get_current_page_index()
-        old_config = deepcopy(self._state.config)
+        old_pages = self._state.config.get("pages", [])
+        current_page_id = old_pages[current_page].get("id") if current_page is not None and current_page < len(old_pages) else None
+        old_config = self._state.config
         old_css = self._state.css_content
         old_error = self._state.config_error
 
@@ -688,11 +665,15 @@ class DuskyControlCenter(Adw.Application):
             try:
                 if error is not None:
                     log.error("Reload thread error: %s", error, exc_info=True)
-                    self._toast("Reload Failed: Internal error", 3)
+                    self._toast(f"Reload Failed: {error}", 4)
                     return
 
                 if result is None:
                     self._toast("Reload Failed: No result", 3)
+                    return
+
+                if not result["success"]:
+                    self._toast(f"Reload Failed: {result['error']}", 4)
                     return
 
                 self._state.config = result["config"]
@@ -700,7 +681,9 @@ class DuskyControlCenter(Adw.Application):
                 self._state.config_error = result["error"]
 
                 self._apply_css()
-                self._clear_and_rebuild_ui(current_page)
+                new_pages = self._state.config.get("pages", [])
+                restore_index = next((i for i, page in enumerate(new_pages) if page.get("id") == current_page_id), current_page)
+                self._clear_and_rebuild_ui(restore_index)
 
                 if result["error"]:
                     self._toast(f"Config Error: {result['error'][:50]}...", 4)
@@ -763,9 +746,12 @@ class DuskyControlCenter(Adw.Application):
         """
         Clear existing UI elements and rebuild from current config.
         """
-        self._cancel_debounce()
+        self._deactivate_search()
         self._directory_generator_cache.clear()
         self._file_generator_cache.clear()
+        self._search_index = None
+        self._first_search_result = None
+        _normalize_search_text.cache_clear()
         self._state.last_visible_page = None
 
         self._search_page = None
@@ -806,8 +792,16 @@ class DuskyControlCenter(Adw.Application):
 
     def _highlight_widget_by_id(self, parent: Gtk.Widget, unique_id: str) -> Literal[False]:
         """Find the widget by its ID, auto-scroll to it, and trigger a visual pulse."""
+        visible = self._stack.get_visible_child() if self._stack is not None else None
+        if not parent.get_mapped() or not isinstance(visible, Adw.NavigationView) or visible.get_visible_page() is not parent:
+            return GLib.SOURCE_REMOVE
         widget = self._find_widget_by_name(parent, unique_id)
         if widget:
+            ancestor = widget.get_parent()
+            while ancestor is not None:
+                if isinstance(ancestor, Adw.ExpanderRow):
+                    ancestor.set_expanded(True)
+                ancestor = ancestor.get_parent()
             widget.grab_focus()
             widget.add_css_class("highlight-pulse")
             GLib.timeout_add(
@@ -900,6 +894,12 @@ class DuskyControlCenter(Adw.Application):
         if src_id > 0:
             self._state.debounce_source_id = src_id
 
+    def _on_search_activate(self, entry: Gtk.SearchEntry) -> None:
+        self._cancel_debounce()
+        self._execute_search(entry.get_text())
+        if self._first_search_result is not None:
+            self._first_search_result.grab_focus()
+
     def _execute_search(self, query: str) -> Literal[False]:
         """
         Execute the search and populate results.
@@ -915,6 +915,8 @@ class DuskyControlCenter(Adw.Application):
 
         if not normalized_query:
             self._reset_search_results("Search Results")
+            if self._state.last_visible_page:
+                self._stack.set_visible_child_name(self._state.last_visible_page)
             return GLib.SOURCE_REMOVE
 
         if self._state.last_visible_page is None:
@@ -930,6 +932,7 @@ class DuskyControlCenter(Adw.Application):
 
     def _reset_search_results(self, title: str) -> None:
         """Reset the search results group with a new title."""
+        self._first_search_result = None
         if self._search_page is None:
             return
 
@@ -961,7 +964,10 @@ class DuskyControlCenter(Adw.Application):
 
         kept = hits[:SEARCH_MAX_RESULTS]
         for hit in kept:
-            self._search_results_group.add(self._build_search_result_row(hit))
+            row = self._build_search_result_row(hit)
+            self._search_results_group.add(row)
+            if self._first_search_result is None:
+                self._first_search_result = row
 
         if len(hits) > SEARCH_MAX_RESULTS:
             overflow_row = Adw.ActionRow(
@@ -982,9 +988,10 @@ class DuskyControlCenter(Adw.Application):
 
     def _build_search_result_row(self, hit: SearchHit) -> Adw.ActionRow:
         """Build a clickable row that navigates to the matched item's location."""
+        subtitle = f"{hit.breadcrumb} • {hit.description}" if hit.description else hit.breadcrumb
         row = Adw.ActionRow(
-            title=GLib.markup_escape_text(hit.title),
-            subtitle=GLib.markup_escape_text(hit.description)
+            title=GLib.markup_escape_text(hit.title or "Unnamed"),
+            subtitle=GLib.markup_escape_text(subtitle),
         )
         row.add_css_class("action-row")
         row.set_activatable(True)
@@ -1093,6 +1100,17 @@ class DuskyControlCenter(Adw.Application):
         if not query:
             return
 
+        if self._search_index is None:
+            self._search_index = tuple(self._build_search_index())
+
+        for hit in self._search_index:
+            score = self._score_search_match(query, hit.title, hit.description, hit.key)
+            if score > 0:
+                yield replace(hit, score=score)
+
+    def _build_search_index(self) -> Iterator[SearchHit]:
+        """Keep generated item identities aligned with the current UI generation."""
+
         for page_idx, page in enumerate(self._state.config.get("pages", [])):
             if not isinstance(page, dict):
                 continue
@@ -1101,18 +1119,16 @@ class DuskyControlCenter(Adw.Application):
             layout = page.get("layout", [])
 
             if isinstance(layout, list):
-                yield from self._iter_layout_hits(
+                yield from self._iter_layout_search_entries(
                     layout,
-                    query,
                     page_title,
                     page_idx,
                     (page_title,),
                 )
 
-    def _iter_layout_hits(
+    def _iter_layout_search_entries(
         self,
         layout: list[ConfigSection],
-        query: str,
         breadcrumb: str,
         page_idx: int,
         nav_path: tuple[str, ...],
@@ -1124,14 +1140,13 @@ class DuskyControlCenter(Adw.Application):
             items = section.get("items")
             if isinstance(items, list):
                 for item in items:
-                    yield from self._iter_item_hits(item, query, breadcrumb, page_idx, nav_path)
+                    yield from self._iter_item_search_entries(item, breadcrumb, page_idx, nav_path)
             else:
-                yield from self._iter_item_hits(section, query, breadcrumb, page_idx, nav_path)
+                yield from self._iter_item_search_entries(section, breadcrumb, page_idx, nav_path)
 
-    def _iter_item_hits(
+    def _iter_item_search_entries(
         self,
         item: Any,
-        query: str,
         breadcrumb: str,
         page_idx: int,
         nav_path: tuple[str, ...],
@@ -1146,12 +1161,12 @@ class DuskyControlCenter(Adw.Application):
 
         if item_type == ItemType.DIRECTORY_GENERATOR:
             for gen_item in self._process_directory_generator(item):
-                yield from self._iter_item_hits(gen_item, query, breadcrumb, page_idx, nav_path)
+                yield from self._iter_item_search_entries(gen_item, breadcrumb, page_idx, nav_path)
             return
 
         if item_type == ItemType.FILE_GENERATOR:
             for gen_item in self._process_file_generator(item):
-                yield from self._iter_item_hits(gen_item, query, breadcrumb, page_idx, nav_path)
+                yield from self._iter_item_search_entries(gen_item, breadcrumb, page_idx, nav_path)
             return
 
         title = str(props.get("title", "")).strip()
@@ -1159,26 +1174,24 @@ class DuskyControlCenter(Adw.Application):
 
         unique_id = self._generate_widget_id(item)
 
-        score = self._score_search_match(query, title, desc)
-        if score > 0:
-            yield SearchHit(
-                title=title or "Unnamed",
-                description=f"{breadcrumb} • {desc}" if desc else breadcrumb,
-                icon_name=self._extract_icon_name(props),
-                page_idx=page_idx,
-                nav_path=nav_path,
-                unique_id=unique_id,
-                score=score,
-            )
+        yield SearchHit(
+            title=title,
+            description=desc,
+            icon_name=self._extract_icon_name(props),
+            page_idx=page_idx,
+            nav_path=nav_path,
+            unique_id=unique_id,
+            key=str(props.get("key", "")),
+            breadcrumb=breadcrumb,
+        )
 
         if item_type == ItemType.NAVIGATION:
             sub_title = title or "Submenu"
             sub_layout = item.get("layout")
             if isinstance(sub_layout, list):
                 next_path = (*nav_path, sub_title)
-                yield from self._iter_layout_hits(
+                yield from self._iter_layout_search_entries(
                     sub_layout,
-                    query,
                     f"{breadcrumb} › {sub_title}",
                     page_idx,
                     next_path,
@@ -1190,31 +1203,31 @@ class DuskyControlCenter(Adw.Application):
             if isinstance(sub_items, list):
                 next_breadcrumb = f"{breadcrumb} › {sub_title}"
                 for child in sub_items:
-                    yield from self._iter_item_hits(
+                    yield from self._iter_item_search_entries(
                         child,
-                        query,
                         next_breadcrumb,
                         page_idx,
                         nav_path,
                     )
 
     @staticmethod
-    def _score_search_match(query: str, title: str, desc: str) -> int:
+    def _score_search_match(query: str, title: str, desc: str, key: str = "") -> int:
         """
         Rank a config item against a search query.
 
         Returns a non-negative relevance score (0 == no match). Substring and
         word-prefix matches outrank fuzzy subsequences, and title matches
-        always outrank description matches. Typo-tolerant fuzzy matching lets
-        users find settings without needing the exact spelling.
+        outrank key and description matches. Multiple words can match across
+        fields in any order; fuzzy subsequences support abbreviated queries.
         """
-        q = query.casefold()
+        q = " ".join(query.casefold().split())
         if not q:
             return 0
-        t = title.casefold()
-        d = desc.casefold()
+        t, t_clean, title_words = _normalize_search_text(title)
+        d, d_clean, desc_words = _normalize_search_text(desc)
+        _, q_clean, terms = _normalize_search_text(q)
 
-        # Fuzzy subsequence is typo-tolerant but noisy for very short queries;
+        # Fuzzy subsequences are noisy for very short queries;
         # only apply it once the user has typed enough to disambiguate.
         allow_fuzzy = len(q) >= 3
 
@@ -1226,11 +1239,11 @@ class DuskyControlCenter(Adw.Application):
         if q in t:
             return 800
 
-        # Alphanumeric normalized matching (e.g., "wifi" <-> "Wi-Fi", "lockscreen" <-> "Lock Screen")
-        q_clean = "".join(c for c in q if c.isalnum())
-        t_clean = "".join(c for c in t if c.isalnum())
-        d_clean = "".join(c for c in d if c.isalnum())
+        if len(terms) > 1:
+            scores = [DuskyControlCenter._score_search_match(term, title, desc, key) for term in terms]
+            return sum(scores) // len(scores) - 25 if all(scores) else 0
 
+        # Alphanumeric normalized matching (e.g., "wifi" <-> "Wi-Fi", "lockscreen" <-> "Lock Screen")
         if q_clean and t_clean == q_clean:
             return 950
         if q_clean and t_clean.startswith(q_clean):
@@ -1238,17 +1251,20 @@ class DuskyControlCenter(Adw.Application):
         if q_clean and q_clean in t_clean:
             return 750
 
-        if any(word.startswith(q) for word in t.split()):
+        if any(word.startswith(q) for word in title_words):
             return 500
         if allow_fuzzy and _fuzzy_subsequence(q, t):
             return 300
+
+        if q in key.casefold():
+            return 250
 
         # Description matches are weaker but still useful.
         if q in d:
             return 200
         if q_clean and q_clean in d_clean:
             return 175
-        if any(word.startswith(q) for word in d.split()):
+        if any(word.startswith(q) for word in desc_words):
             return 150
         if allow_fuzzy and _fuzzy_subsequence(q, d):
             return 100
@@ -1278,7 +1294,10 @@ class DuskyControlCenter(Adw.Application):
 
         self._search_bar = Gtk.SearchBar()
         self._search_entry = Gtk.SearchEntry(placeholder_text="Find setting...")
-        self._search_entry.connect("search-changed", self._on_search_changed)
+        # Gtk's search-changed signal already delays input; use our one debounce.
+        self._search_entry.connect("changed", self._on_search_changed)
+        self._search_entry.connect("activate", self._on_search_activate)
+        self._search_entry.connect("stop-search", lambda _entry: self._deactivate_search())
         self._search_bar.set_child(self._search_entry)
         self._search_bar.connect_entry(self._search_entry)
         view.add_top_bar(self._search_bar)
@@ -1325,6 +1344,12 @@ class DuskyControlCenter(Adw.Application):
         if self._stack:
             if child := self._stack.get_child_by_name(page_name):
                 if isinstance(child, Adw.NavigationView):
+                    if child.get_visible_page() is None:
+                        idx = int(page_name.removeprefix(PAGE_PREFIX))
+                        config = self._state.config["pages"][idx]
+                        title = str(config.get("title", "Untitled"))
+                        ctx = self._get_context(child, self._build_nav_page, [title])
+                        child.add(self._build_nav_page(title, config.get("layout", []), ctx, root_tag=root_tag))
                     child.pop_to_tag(root_tag)
 
             self._stack.set_visible_child_name(page_name)
@@ -1347,8 +1372,6 @@ class DuskyControlCenter(Adw.Application):
         for idx, page in enumerate(pages):
             title = str(page.get("title", "Untitled"))
             icon = str(page.get("icon", ICON_DEFAULT))
-            root_tag = f"root_{idx}"
-
             row = self._create_sidebar_row(title, icon)
 
             if self._sidebar_list:
@@ -1359,15 +1382,6 @@ class DuskyControlCenter(Adw.Application):
                     target_row = row
 
             nav = Adw.NavigationView()
-
-            ctx = self._get_context(
-                nav_view=nav,
-                builder_func=self._build_nav_page,
-                path=[title],
-            )
-
-            root = self._build_nav_page(title, page.get("layout", []), ctx, root_tag=root_tag)
-            nav.add(root)
 
             if self._stack:
                 self._stack.add_named(nav, f"{PAGE_PREFIX}{idx}")
@@ -1762,14 +1776,14 @@ class DuskyControlCenter(Adw.Application):
     def _inject_variables(self, item: Any, vars: dict[str, str]) -> Any:
         """Recursively replace variables in strings."""
         if isinstance(item, str):
-            res = item
-            for k, v in vars.items():
-                res = res.replace(f"{{{k}}}", v)
-            return res
+            return re.sub(r"\{(name|filename|path|name_pretty|relpath|subdir)\}", lambda match: vars[match.group(1)], item)
         if isinstance(item, list):
             return [self._inject_variables(x, vars) for x in item]
         if isinstance(item, dict):
-            return {k: self._inject_variables(v, vars) for k, v in item.items()}
+            return {
+                k: self._inject_variables(v, {name: shlex.quote(value) for name, value in vars.items()} if k == "state_command" else vars)
+                for k, v in item.items()
+            }
         return item
 
     def _build_item_row(

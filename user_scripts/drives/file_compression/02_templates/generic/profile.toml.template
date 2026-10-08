@@ -2,15 +2,17 @@
 # For compression: 03_tools/profiles/<name>.toml  | For games: ~/user_scripts/gaming/runner/profiles/<id>.toml
 
 # --- Compression Profile (mkdwarfs) — used by actions.sh / mkdwarfs_auto.sh ---
-# level: 0-9 (7=balanced zstd22 64M, 3=fast lz4, 9=max lzma). See mkdwarfs --long-help table.
+# level: 0-9 (7=balanced, 3=fast, 9=max lzma). See mkdwarfs --long-help table.
 level = 7
 block_size_bits = 24          # 20=1M, 24=16M, 26=64M — larger = better ratio, more RAM
 order = "nilsimsa"            # none/path/similarity/nilsimsa — similarity groups similar files
 # categorize: pcmaudio (flac for wav), incompressible (null for .pak/.zip), binary, fits, hotness
 # categorize = "pcmaudio,incompressible"
-# no_create_timestamp = false # true = bit-identical (no time)
+# no_create_timestamp = false # Omit creation time; also omit history for reproducible builds
 # no_history = false
-# num_workers = 0             # 0=auto (nproc), 1=deterministic
+# num_workers = 1             # Omit for automatic; 1 fixes the worker count
+# num_segmenter_workers = 1   # Fix explicitly for reproducibility with categories
+# set_time = 0                # Optional fixed Unix timestamp for all image entries
 
 # --- Game Runner Profile (master_runner.py) — extends preset, defines mount + launch ---
 # extends = "base_wine_dxvk"  # base_native / base_unity_native / base_unreal_engine_5 / base_wine_dxvk

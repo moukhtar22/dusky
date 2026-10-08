@@ -604,7 +604,7 @@ def _refresh_caches(apps_dir: Path, icon_dir: Path, *, sudo: bool = False) -> No
             ["sudo", *cmd] if sudo else cmd, capture_output=True,
         )
     if shutil.which("gtk-update-icon-cache"):
-        cmd = ["gtk-update-icon-cache", "-f", "-q", str(icon_dir / "hicolor")]
+        cmd = ["gtk-update-icon-cache", "-f", "-q", "-t", str(icon_dir / "hicolor")]
         subprocess.run(
             ["sudo", *cmd] if sudo else cmd, capture_output=True,
         )
@@ -624,22 +624,14 @@ def _install_icon(archive: Path, icon_dir: Path) -> bool:
         mode=0o644,
         sudo=_needs_sudo(dest),
     )
+    # Do NOT write an index.theme in user hicolor dir; doing so shadows the system
+    # /usr/share/icons/hicolor/index.theme and breaks GTK fallback icon resolution.
     index = icon_dir / "hicolor" / "index.theme"
-    if not index.exists():
-        _ensure_dir(index.parent)
-        _write_file(
-            index,
-            "[Icon Theme]\n"
-            "Name=Hicolor\n"
-            "Comment=Fallback icon theme\n"
-            f"Directories={ICON_SIZE}/apps\n"
-            "\n"
-            f"[{ICON_SIZE}/apps]\n"
-            "Size=128\n"
-            "Context=Applications\n",
-            mode=0o644,
-            sudo=_needs_sudo(index),
-        )
+    if index.is_file() or index.is_symlink():
+        try:
+            index.unlink()
+        except OSError:
+            pass
     return True
 
 

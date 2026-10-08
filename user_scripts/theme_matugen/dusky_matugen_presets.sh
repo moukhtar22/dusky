@@ -40,7 +40,7 @@ declare -ri ADJUST_THRESHOLD=38
 
 # Minimum terminal dimensions
 declare -ri MIN_COLS=82
-declare -ri MIN_ROWS=24
+declare -ri MIN_ROWS=27
 
 # UI Row Calculations
 # Structure: 1:Top border, 2:Title, 3:Status 1, 4:Status 2, 5:Tabs, 6:Bottom border
@@ -159,6 +159,7 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+trap 'exit 129' HUP
 
 strip_ansi() {
     local v="$1"
@@ -291,10 +292,10 @@ register_items() {
 
     # --- TAB 7: THEME ---
     register 7 "» Apply Settings «" "ACTION_APPLY_SETTINGS"
-    register 7 "Scheme Type"       "type|cycle|scheme-fidelity;scheme-content;scheme-fruit-salad;scheme-vibrant;scheme-rainbow;scheme-neutral;scheme-tonal-spot;scheme-expressive;scheme-monochrome;disable"
+    register 7 "Scheme Type"       "type|cycle|scheme-fidelity;scheme-content;scheme-fruit-salad;scheme-vibrant;scheme-rainbow;scheme-neutral;scheme-tonal-spot;scheme-expressive;scheme-monochrome;scheme-smart;disable"
     register 7 "Mode"              "mode|cycle|dark;light"
     register 7 "Contrast"          "contrast|cycle|0;-1.0;-0.8;-0.6;-0.4;-0.2;0.2;0.4;0.6;0.8;1.0;disable"
-    register 7 "Color Index"       "index|cycle|0;1;2;3;4"
+    register 7 "Color Index"       "index|cycle|0;1;2;3"
     register 7 "Base16 Backend"    "base16|cycle|disable;wal"
 
     # --- TAB 8: ANIMATION ---
@@ -366,6 +367,7 @@ save_favorites() {
         return 1
     }
 
+    _TMPFILE="$tmpfile"
     printf '# Dusky Matugen Favorites\n' > "$tmpfile"
     printf '# Format: Label|#HEXCODE\n' >> "$tmpfile"
 
@@ -379,8 +381,8 @@ save_favorites() {
         done
     fi
 
-    cat "$tmpfile" > "$FAVORITES_FILE"
-    rm -f "$tmpfile"
+    mv -fT -- "$tmpfile" "$FAVORITES_FILE"
+    _TMPFILE=""
 
     rebuild_fav_lookup
 }
@@ -507,13 +509,21 @@ load_state() {
     [[ "${USE_STATE_FILE}" != "true" ]] && return 0
     [[ ! -f "${STATE_FILE}" ]] && return 0
 
-    local key value
-    while IFS='=' read -r key value; do
-        [[ -z "${key}" || "${key}" == \#* ]] && continue
-
-        value="${value//$'\n'/}"
-        value="${value//\"/}"
-        value="${value//\'/}"
+    local key value line
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        line="${line#"${line%%[![:space:]]*}"}"
+        line="${line%"${line##*[![:space:]]}"}"
+        [[ -z "$line" || "$line" == \#* || "$line" != *=* ]] && continue
+        key="${line%%=*}"
+        key="${key%"${key##*[![:space:]]}"}"
+        value="${line#*=}"
+        value="${value#"${value%%[![:space:]]*}"}"
+        if [[ ${#value} -ge 2 ]] && {
+            [[ "${value:0:1}" == '"' && "${value: -1}" == '"' ]] ||
+            [[ "${value:0:1}" == "'" && "${value: -1}" == "'" ]];
+        }; then
+            value="${value:1:-1}"
+        fi
 
         case "${key}" in
             THEME_MODE)         [[ -n "${value}" ]] && SETTINGS["mode"]="${value}" ;;
@@ -553,6 +563,7 @@ save_state() {
         return 1
     }
 
+    _TMPFILE="$tmpfile"
     # Extract preserving state managed purely by theme_ctl
     local current_state=""
     if [[ -f "${STATE_FILE}" ]]; then
@@ -567,8 +578,8 @@ save_state() {
     
     printf 'LAST_APPLIED_HEX=%s\n' "${LAST_APPLIED_HEX}" >> "${tmpfile}"
 
-    cat "$tmpfile" > "$STATE_FILE"
-    rm -f "$tmpfile"
+    mv -fT -- "$tmpfile" "$STATE_FILE"
+    _TMPFILE=""
 }
 
 # =============================================================================
@@ -578,10 +589,6 @@ save_state() {
 apply_matugen() {
     local hex="${1^^}"
     
-    # Update local tracking UI
-    LAST_APPLIED_HEX="${hex}"
-    save_state
-
     # Execute synchronously mapping strictly to theme_ctl schema
     local -a cmd=("${THEME_CTL}" "set" "--no-wall" "--no-regen" \
         "--mode" "${SETTINGS["mode"]}" \
@@ -602,6 +609,8 @@ apply_matugen() {
         # Proceed with enforcing solid background color extraction
         local -a color_cmd=("${THEME_CTL}" "color" "${hex}")
         if "${color_cmd[@]}" >/dev/null 2>&1; then
+            LAST_APPLIED_HEX="${hex}"
+            save_state
             LAST_STATUS_MSG="${C_GREEN}✓ Applied via theme_ctl: ${hex}${C_RESET}"
         else
             LAST_STATUS_MSG="${C_RED}✗ theme_ctl failed to generate color: ${hex}${C_RESET}"
@@ -635,7 +644,7 @@ validate_hex() {
 }
 
 validate_rgb_component() {
-    [[ -n "${1:-}" && $1 =~ ^[0-9]+$ ]] && (( 10#$1 >= 0 && 10#$1 <= 255 ))
+    [[ -n "${1:-}" && $1 =~ ^[0-9]{1,3}$ ]] && (( 10#$1 >= 0 && 10#$1 <= 255 ))
 }
 
 modify_setting() {
@@ -723,11 +732,11 @@ trigger_action() {
             fi
             ;;
         ACTION_INPUT_RGB)
-            local rgb_str="" r="" g="" b=""
+            local rgb_str="" r="" g="" b="" extra=""
             prompt_input "Enter RGB (e.g. 255 0 0):" rgb_str
-            read -r r g b _ <<< "${rgb_str}"
+            read -r r g b extra <<< "${rgb_str}"
 
-            if validate_rgb_component "${r:-}" \
+            if [[ -z "$extra" ]] && validate_rgb_component "${r:-}" \
                 && validate_rgb_component "${g:-}" \
                 && validate_rgb_component "${b:-}"; then
                 local hex
@@ -1099,11 +1108,11 @@ handle_mouse() {
 
     local field1 field2 field3
     IFS=';' read -r field1 field2 field3 <<< "$body"
-    [[ ! "$field1" =~ ^[0-9]+$ ]] && return 0
-    [[ ! "$field2" =~ ^[0-9]+$ ]] && return 0
-    [[ ! "$field3" =~ ^[0-9]+$ ]] && return 0
+    [[ ! "$field1" =~ ^[0-9]{1,6}$ ]] && return 0
+    [[ ! "$field2" =~ ^[0-9]{1,6}$ ]] && return 0
+    [[ ! "$field3" =~ ^[0-9]{1,6}$ ]] && return 0
 
-    button=$field1; x=$field2; y=$field3
+    button=$((10#$field1)); x=$((10#$field2)); y=$((10#$field3))
 
     if (( button == 64 )); then navigate -1; return 0; fi
     if (( button == 65 )); then navigate 1; return 0; fi
@@ -1231,18 +1240,19 @@ main() {
         exit 1
     fi
 
-    if [[ ! -t 0 ]]; then
+    if [[ ! -t 0 || ! -t 1 ]]; then
         log_err "TTY required. Cannot run non-interactively."
         exit 1
     fi
 
-    local _dep
-    for _dep in matugen; do
-        if ! command -v "$_dep" &>/dev/null; then
-            log_err "Required dependency not found: ${_dep}"
-            exit 1
-        fi
-    done
+    if [[ ! -x "$THEME_CTL" ]]; then
+        log_err "Theme controller is not executable: $THEME_CTL"
+        exit 1
+    fi
+    if ! command -v matugen &>/dev/null; then
+        log_err "Required dependency not found: matugen"
+        exit 1
+    fi
 
     local -i term_cols term_rows
     term_cols=$(tput cols 2>/dev/null) || term_cols=80

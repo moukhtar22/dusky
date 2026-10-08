@@ -19,8 +19,6 @@ sudo auto-elevation for system service via systemd engine (AUTH_REQUIRED).
 """
 
 import sys
-import os
-import json
 from pathlib import Path
 
 _DUSKY_TUI_ROOT = Path.home() / "user_scripts" / "dusky_tui"
@@ -29,103 +27,28 @@ if str(_DUSKY_TUI_ROOT) not in sys.path:
 
 from python.frontend.core_types import ConfigItem
 
-# ---------------------------------------------------------------------------
-# Intelligent bootstrap: ensure persistent config dir/file exists (fresh install)
-# and migrate legacy path if present. No hardcoded username (Path.home()),
-# auto-creates with 0700/0600, atomic. Also backfills missing keys for updates.
-# ---------------------------------------------------------------------------
-def _ensure_keylogger_config() -> None:
-    try:
-        new_path = Path.home() / ".config" / "dusky" / "settings" / "keylogger" / "config.json"
-        old_path = Path.home() / ".config" / "dusky-keylogger" / "config.json"
-        defaults = {
-            "flush_interval": 0.5,
-            "log_level": "info",
-            "data_dir": "~/.config/dusky/settings/keylogger/data",
-            "transcript_dir": "/tmp",
-            "transcript_format": "text",
-            "persistent_enabled": True,
-            "ephemeral_enabled": True,
-        }
-        # If new exists, ensure perms and backfill missing keys (for updates)
-        if new_path.exists():
-            try:
-                os.chmod(new_path.parent, 0o700)
-                os.chmod(new_path, 0o600)
-                for p in [new_path.parent, new_path.parent.parent, new_path.parent.parent.parent]:
-                    try:
-                        os.chmod(p, 0o700)
-                    except OSError:
-                        pass
-            except OSError:
-                pass
-            try:
-                data = json.loads(new_path.read_text(encoding="utf-8"))
-                if isinstance(data, dict):
-                    missing = {k: v for k, v in defaults.items() if k not in data}
-                    if missing:
-                        data.update(missing)
-                        tmp = new_path.with_suffix(".tmp")
-                        tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-                        tmp.chmod(0o600)
-                        tmp.rename(new_path)
-            except Exception:
-                pass
-            return
-        # Fresh install: neither exists -> create new with defaults
-        new_path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            os.chmod(new_path.parent, 0o700)
-            for p in [new_path.parent, new_path.parent.parent, new_path.parent.parent.parent]:
-                try:
-                    os.chmod(p, 0o700)
-                except OSError:
-                    pass
-        except OSError:
-            pass
-        if old_path.exists():
-            # Migrate old -> new (copy, keep old for backward compat), then backfill
-            try:
-                data = json.loads(old_path.read_text(encoding="utf-8"))
-                if not isinstance(data, dict):
-                    data = {}
-                # Backfill missing defaults
-                for k, v in defaults.items():
-                    if k not in data:
-                        data[k] = v
-                tmp = new_path.with_suffix(".tmp")
-                tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-                tmp.chmod(0o600)
-                tmp.rename(new_path)
-                return
-            except Exception:
-                pass
-            # Fallback: raw copy if JSON invalid
-            try:
-                data = old_path.read_text(encoding="utf-8")
-                json.loads(data)
-                tmp = new_path.with_suffix(".tmp")
-                tmp.write_text(data, encoding="utf-8")
-                tmp.chmod(0o600)
-                tmp.rename(new_path)
-                return
-            except Exception:
-                pass
-        tmp = new_path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(defaults, indent=2) + "\n", encoding="utf-8")
-        tmp.chmod(0o600)
-        tmp.rename(new_path)
-    except Exception:
-        pass
+# The TUI router loads this file by path, outside this package directory.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+# Share configuration defaults/path resolution with the daemon and CLI.
+from dusky_keylogger.daemon import default_config_path, load_config
+import shlex
+
+load_config()
 
 
-_ensure_keylogger_config()
+def _maintenance_action(command: str) -> str:
+    venv_python = Path.home() / "contained_apps/uv/dusky_key_logger/bin/python"
+    python = str(venv_python) if venv_python.is_file() else sys.executable
+    script = Path(__file__).resolve().parent / "dusky_keylogger/maintenance.py"
+    action = shlex.join([python, str(script), command])
+    shell = action + '; result=$?; read -r -p "Press Enter to close..."; exit "$result"'
+    return shlex.join(["bash", "-c", shell])
 
 # =============================================================================
 # 1. CORE APPLICATION ROUTING
 # =============================================================================
 ENGINE_TYPE = "json"
-TARGET_FILE = "~/.config/dusky/settings/keylogger/config.json"
+TARGET_FILE = str(default_config_path())
 APP_TITLE = "Dusky Keylogger"
 DEFAULT_MODE = "auto"
 THEME_FILE = "~/.config/matugen/generated/dusky_tui.json"
@@ -187,7 +110,7 @@ SCHEMA = {
             type_="bool",
             default=True,
             group="Persistence",
-            extended_help="**Persistent Logging**\n\nMaster toggle for SQLite WAL logging.\n- **ON** (default): every physical key press is classified and persisted to `data_dir/keys.db` (WAL, survives reboot, `0600`).\n- **OFF**: daemon runs but discards keystrokes (ephemeral transcripts still work if enabled). Useful for privacy pauses.\n\nThe DB contains literals you typed — keep `data_dir` `0700`.",
+            extended_help="**Persistent Logging**\n\nMaster toggle for SQLite WAL logging.\n- **ON** (default): every physical key press is classified and persisted to `data_dir/keys.db` (WAL, survives reboot, `0600`).\n- **OFF**: daemon discards new keystrokes; exports can still read existing history. Useful for privacy pauses.\n\nThe DB contains literals you typed — keep `data_dir` `0700`.",
             popup_message="Persistent logging toggled. Restart daemon to apply if running.",
         ),
         ConfigItem(
@@ -203,7 +126,7 @@ SCHEMA = {
                 "Persistent (survives reboot, auto-created, 0700) — the only persistent location",
             ],
             group="Persistence",
-            extended_help="**Data Directory**\n\nWhere `keys.db` (WAL) lives. Persistent — survives reboot, mode `0700/0600`. Supports `~` and `$HOME` expansion, no hardcoded username.\n- Default `~/.config/dusky/settings/keylogger/data` (per user request — only persistent location).\n- If relative, resolved via `Path.home()`.\n- Auto-created on fresh install if missing (daemon `init_db` + TUI `mkdir -p`).\n- Override via env `DUSKY_KEYLOGGER_DATA_DIR` (highest priority).\n\n⚠️ Moving this after install does NOT migrate old DB — manually `cp` it.",
+            extended_help="**Data Directory**\n\nWhere `keys.db` (WAL) lives. Persistent — survives reboot, mode `0700/0600`. Supports `~` and `$HOME` expansion, no hardcoded username.\n- Default `~/.config/dusky/settings/keylogger/data` (per user request — only persistent location).\n- If relative, resolved via `Path.home()`.\n- Auto-created on fresh install if missing (daemon `init_db` + TUI `mkdir -p`).\n- Override via env `DUSKY_KEYLOGGER_DATA_DIR` (highest priority).\n\nChanging the path does not move existing history. Stop the daemon before copying the DB; custom paths outside the default config tree also need a systemd `ReadWritePaths` override.",
             popup_message="Data dir changed. New DB will be created there on next daemon start. Old DB remains at previous location.",
         ),
         ConfigItem(
@@ -223,19 +146,19 @@ SCHEMA = {
             key="action_ensure_persistent_dir",
             scope="DEFAULT",
             type_="action",
-            default="bash -c 'set -e; d=$(python3 -c \"from pathlib import Path; import json, os; p=Path.home()/\".config/dusky/settings/keylogger/config.json\"; print(json.load(open(p))[\"data_dir\"]) if p.exists() else print(str(Path.home()/\".config/dusky/settings/keylogger/data\"))\" 2>/dev/null || echo \"$HOME/.config/dusky/settings/keylogger/data\"); d=$(eval echo \"$d\"); mkdir -p \"$d\"; chmod 0700 \"$d\"; ls -ld \"$d\"; echo \"Persistent dir ready: $d (0700)\"; read -p \"Press Enter to close...\"'",
+            default=_maintenance_action('ensure-data'),
             group="Maintenance",
-            extended_help="**Ensure Persistent Dir**\n\nIdempotently creates the persistent data directory (`mkdir -p`) and tightens to `0700`. Safe on fresh install (dir missing) and existing installs.\n\nUses no hardcoded username (`$HOME`/`Path.home()`).\n\nShows `ls -ld` result for verification.",
+            extended_help="**Ensure Persistent Dir**\n\nCreates a missing persistent data directory with mode `0700` and preserves permissions of existing directories.\n\nUses no hardcoded username (`$HOME`/`Path.home()`).\n\nShows the resolved path and permissions for verification.",
         ),
         ConfigItem(
             label="Purge Persistent DB (Danger)",
             key="action_purge_db",
             scope="DEFAULT",
             type_="action",
-            default="bash -c 'set -e; db=$(python3 -c \"from pathlib import Path; import json; p=Path.home()/\".config/dusky/settings/keylogger/config.json\"; d=json.load(open(p)).get(\"data_dir\",\"~/.config/dusky/settings/keylogger/data\") if p.exists() else \"~/.config/dusky/settings/keylogger/data\"; print((Path(d).expanduser()/\"keys.db\").resolve())\"); echo \"About to DELETE persistent DB: $db and -wal/-shm\"; ls -lh \"$db\"* 2>/dev/null || echo \"No DB yet\"; read -p \"Type YES to confirm purge: \" ans; if [ \"$ans\" = \"YES\" ]; then rm -f \"$db\" \"$db-wal\" \"$db-shm\"; echo \"Purged.\"; else echo \"Aborted.\"; fi; read -p \"Press Enter...\"'",
+            default=_maintenance_action('purge'),
             group="Maintenance",
             confirm_message="Permanently delete persistent keystroke DB (keys.db + WAL/SHM)? This cannot be undone and erases all stats.",
-            extended_help="**Purge DB**\n\nDeletes `keys.db` + `-wal`/`-shm` in the configured `data_dir`. Persistent — manual delete only (not on reboot). Requires typing `YES`.\n\nUse after testing with `seed` data.",
+            extended_help="**Purge DB**\n\nStops the system service, then deletes `keys.db` + `-wal`/`-shm` in the configured `data_dir`. Stop any foreground daemon first. The service stays stopped; restart it when ready.\n\nUse after testing with `seed` data.",
             force_interactive=True,
         ),
     ],
@@ -277,16 +200,16 @@ SCHEMA = {
             default="text",
             options=["text", "markdown"],
             group="Ephemeral",
-            extended_help="**Transcript Format**\n\nDefault format for `dusky text` when `--format` not given.\n- **text**: raw joined chars (⌫ for backspace, \\n for Enter, \\t for Tab).\n- **markdown**: header + metadata (`Period`, `Range`, `Generated`, `Characters`, note about ephemeral vs persistent) + ````text` code fence (escapes ````). File extension `.md` vs `.txt`.\n\nOverride via `DUSKY_TRANSCRIPT_FORMAT` env or `--format` CLI (CLI wins).\n\nChange takes effect immediately for next transcript.",
+            extended_help="**Transcript Format**\n\nDefault format for `dusky text` when `--format` not given.\n- **text**: raw joined chars (⌫ for backspace, \\n for Enter, \\t for Tab).\n- **markdown**: header + metadata (`Period`, `Range`, `Generated`, `Characters`, note about ephemeral vs persistent) + ````text` code fence (chooses a fence longer than any recorded backtick run). File extension `.md` vs `.txt`.\n\nOverride via `DUSKY_TRANSCRIPT_FORMAT` env or `--format` CLI (CLI wins).\n\nChange takes effect immediately for next transcript.",
         ),
         ConfigItem(
             label="Ensure Ephemeral Dir",
             key="action_ensure_ephemeral_dir",
             scope="DEFAULT",
             type_="action",
-            default="bash -c 'set -e; d=$(python3 -c \"from pathlib import Path; import json, os; p=Path.home()/\".config/dusky/settings/keylogger/config.json\"; print((json.load(open(p)).get(\"transcript_dir\",\"/tmp\") if p.exists() else \"/tmp\"))\" 2>/dev/null || echo \"/tmp\"); d=$(eval echo \"$d\"); if [ ! -d \"$d\" ]; then echo \"Creating ephemeral dir: $d\"; mkdir -p \"$d\" 2>/dev/null || sudo -p \"[sudo] mkdir $d: \" mkdir -p \"$d\"; fi; chmod 0700 \"$d\" 2>/dev/null || sudo chmod 0700 \"$d\" 2>/dev/null || chmod 1777 \"$d\" 2>/dev/null || true; ls -ld \"$d\"; echo \"Ephemeral dir ready (auto-created on fresh install if needed)\"; read -p \"Press Enter...\"'",
+            default=_maintenance_action('ensure-transcripts'),
             group="Maintenance",
-            extended_help="**Ensure Ephemeral Dir**\n\nCreates the configured `transcript_dir` if missing (fresh install). Tries `mkdir -p` as user, falls back to `sudo` if needed (e.g., `/temp` at `/`). Sets `0700` (or `1777` for `/tmp`/`/temp` roots). Shows `ls -ld`.",
+            extended_help="**Ensure Ephemeral Dir**\n\nCreates the configured `transcript_dir` if missing (fresh install). Creates directories as your user with mode `0700`; existing directory permissions are preserved, including `/tmp` mode `1777`.",
             force_interactive=True,
         ),
         ConfigItem(
@@ -294,7 +217,7 @@ SCHEMA = {
             key="action_clear_ephemeral",
             scope="DEFAULT",
             type_="action",
-            default="bash -c 'set -e; d=$(python3 -c \"from pathlib import Path; import json; p=Path.home()/\".config/dusky/settings/keylogger/config.json\"; print((json.load(open(p)).get(\"transcript_dir\",\"/tmp\") if p.exists() else \"/tmp\"))\" 2>/dev/null || echo \"/tmp\"); d=$(eval echo \"$d\"); echo \"Ephemeral dir: $d\"; ls -lh \"$d\"/dusky-typed* 2>/dev/null || echo \"No transcripts yet\"; read -p \"Delete all dusky-typed* in $d? [y/N]: \" ans; if [ \"$ans\" = \"y\" ]; then rm -f \"$d\"/dusky-typed*; echo \"Cleared. Persistent DB untouched.\"; else echo \"Aborted.\"; fi; read -p \"Press Enter...\"'",
+            default=_maintenance_action('clear-transcripts'),
             group="Maintenance",
             confirm_message="Delete all ephemeral transcripts (dusky-typed* in transcript_dir)? Persistent DB will NOT be touched.",
             extended_help="**Clear Ephemeral**\n\nDeletes `dusky-typed-*.[txt|md]` in the configured `transcript_dir` (default `/tmp`). Simulates reboot clear. Persistent `keys.db` in `data_dir` is NOT touched (survives reboot).",
@@ -324,7 +247,7 @@ SCHEMA = {
             default="info",
             options=["debug", "info", "warning", "error"],
             group="Daemon",
-            extended_help="**Log Level**\n\nDaemon verbosity for `journalctl -u dusky_keylogger` and `data_dir/logs/daemon.log` (rotating 5 MiB ×3).\n- **debug**: per-key, per-device, inotify, hydrate.\n- **info** (default): start/stop, device discovery, SYN_DROPPED.\n- **warning/error**: quieter.\n\nRequires daemon restart to apply (`systemctl restart dusky_keylogger` or toggle service off/on).",
+            extended_help="**Log Level**\n\nDaemon verbosity for `journalctl -u dusky_keylogger` and `data_dir/logs/daemon.log` (rotating 5 MiB ×3).\n- **debug**: device discovery, inotify, and hydration diagnostics.\n- **info** (default): start/stop, device discovery, SYN_DROPPED.\n- **warning/error**: quieter.\n\nRequires daemon restart to apply (`systemctl restart dusky_keylogger` or toggle service off/on).",
         ),
         ConfigItem(
             label="Restart Service",
@@ -362,9 +285,9 @@ SCHEMA = {
             key="action_check_input_group",
             scope="DEFAULT",
             type_="action",
-            default="bash -c 'set -e; echo \"User: $USER (real: $(id -un))\"; echo \"Groups: $(id -nG)\"; if id -nG | grep -qw input; then echo \"✓ Already in input group\"; else echo \"✗ NOT in input group — run: sudo usermod -aG input $USER && logout/login\"; read -p \"Add now? [y/N]: \" ans; if [ \"$ans\" = \"y\" ]; then sudo -p \"[sudo] Add to input: \" usermod -aG input \"$USER\"; echo \"Added — logout/login required.\"; fi; fi; read -p \"Press Enter...\"'",
+            default=_maintenance_action('input-group'),
             group="Diagnostics",
-            extended_help="**Input Group**\n\n`/dev/input/event*` is `crw-rw---- root:input`. Daemon needs `input` group (`Group=input` in service). This checks `id -nG` and offers `sudo usermod -aG input $USER` (needs sudo, auto-elevates, then logout/login).",
+            extended_help="**Input Group**\n\n`/dev/input/event*` is `crw-rw---- root:input`. Daemon needs `input` group (`Group=input` in service). This checks account and current-session groups and adds missing membership with `sudo usermod -aG input` (needs sudo, auto-elevates, then logout/login).",
             force_interactive=True,
         ),
         ConfigItem(
@@ -472,7 +395,7 @@ SCHEMA = {
                 "DEFAULT.ephemeral_enabled": False,
             },
             confirm_message="Pause both persistent and ephemeral logging?",
-            extended_help="**Privacy Pause**\n\nDisables both `persistent_enabled` and `ephemeral_enabled`. Daemon will drop keystrokes (no DB write). Transcripts still possible with explicit `--out` but default dir generation skipped. Re-enable via Balanced or Full.",
+            extended_help="**Privacy Pause**\n\nRestart the daemon after applying. Disables both `persistent_enabled` and `ephemeral_enabled`. Daemon will drop keystrokes (no DB write). Transcripts still possible with explicit `--out` but default dir generation skipped. Re-enable via Balanced or Full.",
         ),
         ConfigItem(
             label="Balanced (Default)",
@@ -506,10 +429,10 @@ SCHEMA = {
                 "DEFAULT.log_level": "debug",
                 "DEFAULT.transcript_format": "markdown",
             },
-            extended_help="**Verbose**\n\nLowest latency (`0.05s`), `debug` logs (per-key), `markdown` transcripts. More I/O — use for testing.",
+            extended_help="**Verbose**\n\nLowest latency (`0.05s`), `debug` diagnostic logs, `markdown` transcripts. More I/O — use for testing.",
         ),
         ConfigItem(
-            label="Ephemeral Only",
+            label="Export Existing History",
             key="preset_ephemeral_only",
             scope="DEFAULT",
             type_="preset",
@@ -521,8 +444,8 @@ SCHEMA = {
                 "DEFAULT.transcript_dir": "/tmp",
                 "DEFAULT.transcript_format": "text",
             },
-            confirm_message="Switch to ephemeral-only? Persistent DB logging will pause (existing DB retained).",
-            extended_help="**Ephemeral Only**\n\nDisables persistent DB (`persistent_enabled=False`), keeps ephemeral transcripts (`/tmp`, `text`). Existing `keys.db` retained but no new writes until you re-enable.",
+            confirm_message="Pause new collection and allow exports of existing history? Persistent DB logging will pause (existing DB retained).",
+            extended_help="**Export Existing History**\n\nDisables new collection (`persistent_enabled=False`), exports existing DB history as transcripts (`/tmp`, `text`). Existing `keys.db` retained but no new writes until you re-enable.",
         ),
         ConfigItem(
             label="Reset to Defaults",

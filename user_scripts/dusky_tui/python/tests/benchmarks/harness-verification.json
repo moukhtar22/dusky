@@ -1,0 +1,2047 @@
+{
+  "date": "2026-09-28",
+  "purpose": "Functional verification of the handoff harness, not an 8 W comparison or replacement baseline. Observed package constraints 0/1 were 90/115 W; cache state was uncontrolled.",
+  "collector_failure_check": "Intentional worker collector exception was reported and the parent exited nonzero.",
+  "reports": {
+    "smoke": {
+      "format_version": 2,
+      "label": "",
+      "runs": 1,
+      "stats": {
+        "launcher_enter_ms": {
+          "median": 100.179919,
+          "mean": 100.179919,
+          "min": 100.179919,
+          "max": 100.179919
+        },
+        "app_run_enter_ms": {
+          "median": 308.716069,
+          "mean": 308.716069,
+          "min": 308.716069,
+          "max": 308.716069
+        },
+        "app_mount_enter_ms": {
+          "median": 386.290459,
+          "mean": 386.290459,
+          "min": 386.290459,
+          "max": 386.290459
+        },
+        "app_mount_return_ms": {
+          "median": 388.443537,
+          "mean": 388.443537,
+          "min": 388.443537,
+          "max": 388.443537
+        },
+        "first_compositor_callback_ms": {
+          "median": 489.25917,
+          "mean": 489.25917,
+          "min": 489.25917,
+          "max": 489.25917
+        },
+        "first_after_refresh_ms": {
+          "median": 549.352764,
+          "mean": 549.352764,
+          "min": 549.352764,
+          "max": 549.352764
+        },
+        "active_data_refresh_ms": {
+          "median": 550.36694,
+          "mean": 550.36694,
+          "min": 550.36694,
+          "max": 550.36694
+        },
+        "boot_refresh_ms": {
+          "median": 584.629446,
+          "mean": 584.629446,
+          "min": 584.629446,
+          "max": 584.629446
+        },
+        "viewport_width": {
+          "median": 120,
+          "mean": 120,
+          "min": 120,
+          "max": 120
+        },
+        "viewport_height": {
+          "median": 40,
+          "mean": 40,
+          "min": 40,
+          "max": 40
+        },
+        "widgets_at_boot": {
+          "median": 47,
+          "mean": 47,
+          "min": 47,
+          "max": 47
+        },
+        "custom_widgets_at_boot": {
+          "median": 0,
+          "mean": 0,
+          "min": 0,
+          "max": 0
+        },
+        "observation_end_ms": {
+          "median": 1479.751929,
+          "mean": 1479.751929,
+          "min": 1479.751929,
+          "max": 1479.751929
+        },
+        "launcher_return_ms": {
+          "median": 1488.038208,
+          "mean": 1488.038208,
+          "min": 1488.038208,
+          "max": 1488.038208
+        },
+        "startup_factory_count": {
+          "median": 0,
+          "mean": 0,
+          "min": 0,
+          "max": 0
+        },
+        "startup_factory_inclusive_ms": {
+          "median": 0,
+          "mean": 0,
+          "min": 0,
+          "max": 0
+        },
+        "startup_collector_count": {
+          "median": 0,
+          "mean": 0,
+          "min": 0,
+          "max": 0
+        },
+        "startup_collector_inclusive_ms": {
+          "median": 0,
+          "mean": 0,
+          "min": 0,
+          "max": 0
+        },
+        "startup_command_count": {
+          "median": 0,
+          "mean": 0,
+          "min": 0,
+          "max": 0
+        },
+        "startup_command_inclusive_ms": {
+          "median": 0,
+          "mean": 0,
+          "min": 0,
+          "max": 0
+        },
+        "startup_compose_step_count": {
+          "median": 13,
+          "mean": 13,
+          "min": 13,
+          "max": 13
+        },
+        "startup_compose_step_inclusive_ms": {
+          "median": 1.921772,
+          "mean": 1.921772,
+          "min": 1.921772,
+          "max": 1.921772
+        },
+        "max_rss_kib": {
+          "median": 54188,
+          "mean": 54188,
+          "min": 54188,
+          "max": 54188
+        },
+        "process_cpu_ms": {
+          "median": 812.346763,
+          "mean": 812.346763,
+          "min": 812.346763,
+          "max": 812.346763
+        }
+      },
+      "records": [
+        {
+          "metrics": {
+            "launcher_enter_ms": 100.179919,
+            "app_run_enter_ms": 308.716069,
+            "app_mount_enter_ms": 386.290459,
+            "app_mount_return_ms": 388.443537,
+            "first_compositor_callback_ms": 489.25917,
+            "first_after_refresh_ms": 549.352764,
+            "active_data_refresh_ms": 550.36694,
+            "boot_refresh_ms": 584.629446,
+            "viewport_width": 120,
+            "viewport_height": 40,
+            "widgets_at_boot": 47,
+            "custom_widgets_at_boot": 0,
+            "observation_end_ms": 1479.751929,
+            "launcher_return_ms": 1488.038208,
+            "startup_factory_count": 0,
+            "startup_factory_inclusive_ms": 0,
+            "startup_collector_count": 0,
+            "startup_collector_inclusive_ms": 0,
+            "startup_command_count": 0,
+            "startup_command_inclusive_ms": 0,
+            "startup_compose_step_count": 13,
+            "startup_compose_step_inclusive_ms": 1.921772,
+            "max_rss_kib": 54188,
+            "process_cpu_ms": 812.346763
+          },
+          "spans": [
+            {
+              "kind": "import_inclusive",
+              "name": "dusky_schema_fixture",
+              "phase": "startup",
+              "start_ms": 110.350915,
+              "duration_ms": 17.580273,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "import_inclusive",
+              "name": "textual",
+              "phase": "startup",
+              "start_ms": 130.261325,
+              "duration_ms": 47.187594,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "import_inclusive",
+              "name": "textual.app",
+              "phase": "startup",
+              "start_ms": 177.531427,
+              "duration_ms": 74.413803,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "import_inclusive",
+              "name": "python.frontend.ui",
+              "phase": "startup",
+              "start_ms": 128.114049,
+              "duration_ms": 174.419928,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "method",
+              "name": "__init__",
+              "phase": "startup",
+              "start_ms": 302.595371,
+              "duration_ms": 6.107027,
+              "thread": "MainThread",
+              "argument": null
+            },
+            {
+              "kind": "compose_step",
+              "name": "compose",
+              "phase": "startup",
+              "start_ms": 325.967596,
+              "duration_ms": 0.189554,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "compose_step",
+              "name": "compose",
+              "phase": "startup",
+              "start_ms": 326.16647,
+              "duration_ms": 0.348955,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "compose_step",
+              "name": "compose",
+              "phase": "startup",
+              "start_ms": 326.524641,
+              "duration_ms": 0.052807,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "compose_step",
+              "name": "compose",
+              "phase": "startup",
+              "start_ms": 326.581721,
+              "duration_ms": 0.043566,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "compose_step",
+              "name": "compose",
+              "phase": "startup",
+              "start_ms": 326.628605,
+              "duration_ms": 0.262757,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "compose_step",
+              "name": "compose",
+              "phase": "startup",
+              "start_ms": 326.896406,
+              "duration_ms": 0.093598,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "compose_step",
+              "name": "compose",
+              "phase": "startup",
+              "start_ms": 326.993687,
+              "duration_ms": 0.159143,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "compose_step",
+              "name": "compose",
+              "phase": "startup",
+              "start_ms": 327.156851,
+              "duration_ms": 0.090986,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "compose_step",
+              "name": "compose",
+              "phase": "startup",
+              "start_ms": 327.251856,
+              "duration_ms": 0.339369,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "compose_step",
+              "name": "compose",
+              "phase": "startup",
+              "start_ms": 327.595959,
+              "duration_ms": 0.091915,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "compose_step",
+              "name": "compose",
+              "phase": "startup",
+              "start_ms": 327.691593,
+              "duration_ms": 0.191516,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "compose_step",
+              "name": "compose",
+              "phase": "startup",
+              "start_ms": 327.887384,
+              "duration_ms": 0.049373,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "compose_step",
+              "name": "compose",
+              "phase": "startup",
+              "start_ms": 327.942443,
+              "duration_ms": 0.008233,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "display",
+              "name": "compositor",
+              "phase": "startup",
+              "start_ms": 489.252791,
+              "duration_ms": 0.012209,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "display",
+              "name": "compositor",
+              "phase": "startup",
+              "start_ms": 497.513911,
+              "duration_ms": 0.009306,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "display",
+              "name": "compositor",
+              "phase": "startup",
+              "start_ms": 502.093373,
+              "duration_ms": 0.006107,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "method",
+              "name": "_populate_option_list",
+              "phase": "startup",
+              "start_ms": 508.971615,
+              "duration_ms": 0.738236,
+              "thread": "MainThread",
+              "argument": "0"
+            },
+            {
+              "kind": "method",
+              "name": "_load_one_engine_sync",
+              "phase": "startup",
+              "start_ms": 507.661923,
+              "duration_ms": 8.553195,
+              "thread": "asyncio_0",
+              "argument": "('ini', '/tmp/dusky-benchmark-fixture-6gz_8wb8/settings.ini')"
+            },
+            {
+              "kind": "method",
+              "name": "_populate_option_list",
+              "phase": "startup",
+              "start_ms": 516.539041,
+              "duration_ms": 0.336646,
+              "thread": "MainThread",
+              "argument": "0"
+            },
+            {
+              "kind": "display",
+              "name": "compositor",
+              "phase": "startup",
+              "start_ms": 546.028107,
+              "duration_ms": 0.009115,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "display",
+              "name": "compositor",
+              "phase": "startup",
+              "start_ms": 548.263712,
+              "duration_ms": 0.006792,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "display",
+              "name": "compositor",
+              "phase": "startup",
+              "start_ms": 583.691425,
+              "duration_ms": 0.007437,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "method",
+              "name": "_populate_option_list",
+              "phase": "startup",
+              "start_ms": 583.97084,
+              "duration_ms": 0.334288,
+              "thread": "MainThread",
+              "argument": "1"
+            },
+            {
+              "kind": "display",
+              "name": "compositor",
+              "phase": "tab_1_first_visit",
+              "start_ms": 1092.086813,
+              "duration_ms": 0.008674,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "display",
+              "name": "compositor",
+              "phase": "tab_1_first_visit",
+              "start_ms": 1129.61983,
+              "duration_ms": 0.009223,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "display",
+              "name": "compositor",
+              "phase": "tab_1_first_visit",
+              "start_ms": 1131.837997,
+              "duration_ms": 0.005953,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "display",
+              "name": "compositor",
+              "phase": "tab_1_first_visit",
+              "start_ms": 1168.478701,
+              "duration_ms": 0.008994,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "display",
+              "name": "compositor",
+              "phase": "tab_1_first_visit",
+              "start_ms": 1192.772842,
+              "duration_ms": 0.011186,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "display",
+              "name": "compositor",
+              "phase": "tab_1_first_visit",
+              "start_ms": 1195.262053,
+              "duration_ms": 0.007636,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "display",
+              "name": "compositor",
+              "phase": "tab_1_revisit",
+              "start_ms": 1202.347903,
+              "duration_ms": 0.008084,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "display",
+              "name": "compositor",
+              "phase": "tab_1_revisit",
+              "start_ms": 1226.573725,
+              "duration_ms": 0.009677,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "display",
+              "name": "compositor",
+              "phase": "tab_1_revisit",
+              "start_ms": 1228.889483,
+              "duration_ms": 0.007184,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "display",
+              "name": "compositor",
+              "phase": "tab_1_revisit",
+              "start_ms": 1233.779302,
+              "duration_ms": 0.006962,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "display",
+              "name": "compositor",
+              "phase": "tab_1_revisit",
+              "start_ms": 1259.086286,
+              "duration_ms": 0.011336,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "display",
+              "name": "compositor",
+              "phase": "tab_1_revisit",
+              "start_ms": 1261.511721,
+              "duration_ms": 0.006917,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "display",
+              "name": "compositor",
+              "phase": "tab_2_first_visit",
+              "start_ms": 1270.299411,
+              "duration_ms": 0.007683,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "method",
+              "name": "_populate_option_list",
+              "phase": "tab_2_first_visit",
+              "start_ms": 1299.676544,
+              "duration_ms": 0.074236,
+              "thread": "MainThread",
+              "argument": "2"
+            },
+            {
+              "kind": "display",
+              "name": "compositor",
+              "phase": "tab_2_first_visit",
+              "start_ms": 1343.641531,
+              "duration_ms": 0.010978,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "display",
+              "name": "compositor",
+              "phase": "tab_2_first_visit",
+              "start_ms": 1345.793268,
+              "duration_ms": 0.006432,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "display",
+              "name": "compositor",
+              "phase": "tab_2_first_visit",
+              "start_ms": 1349.753385,
+              "duration_ms": 0.007347,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "collector",
+              "name": "custom-view-2",
+              "phase": "tab_2_first_visit",
+              "start_ms": 1304.822124,
+              "duration_ms": 50.092675,
+              "thread": "asyncio_0"
+            },
+            {
+              "kind": "factory",
+              "name": "custom-view-2",
+              "phase": "tab_2_first_visit",
+              "start_ms": 1355.150957,
+              "duration_ms": 0.052487,
+              "thread": "MainThread",
+              "ancestor_display": true
+            },
+            {
+              "kind": "display",
+              "name": "compositor",
+              "phase": "tab_2_first_visit",
+              "start_ms": 1365.434397,
+              "duration_ms": 0.009199,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "display",
+              "name": "compositor",
+              "phase": "tab_2_first_visit",
+              "start_ms": 1394.843129,
+              "duration_ms": 0.009195,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "display",
+              "name": "compositor",
+              "phase": "tab_2_first_visit",
+              "start_ms": 1397.121326,
+              "duration_ms": 0.006469,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "display",
+              "name": "compositor",
+              "phase": "tab_2_revisit",
+              "start_ms": 1441.585545,
+              "duration_ms": 0.010561,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "display",
+              "name": "compositor",
+              "phase": "tab_2_revisit",
+              "start_ms": 1443.803887,
+              "duration_ms": 0.007224,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "display",
+              "name": "compositor",
+              "phase": "tab_2_revisit",
+              "start_ms": 1449.652454,
+              "duration_ms": 0.008352,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "display",
+              "name": "compositor",
+              "phase": "tab_2_revisit",
+              "start_ms": 1476.171549,
+              "duration_ms": 0.010965,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "display",
+              "name": "compositor",
+              "phase": "tab_2_revisit",
+              "start_ms": 1478.492158,
+              "duration_ms": 0.006547,
+              "thread": "MainThread"
+            }
+          ],
+          "switches": [
+            {
+              "tab": 1,
+              "visit": "first_visit",
+              "warmed_before": true,
+              "children_before": 1,
+              "retained_content_before": false,
+              "dirty_collector_before": false,
+              "duration_ms": 81.706716
+            },
+            {
+              "tab": 1,
+              "visit": "revisit",
+              "warmed_before": true,
+              "children_before": 1,
+              "retained_content_before": false,
+              "dirty_collector_before": false,
+              "duration_ms": 37.604467
+            },
+            {
+              "tab": 2,
+              "visit": "first_visit",
+              "warmed_before": false,
+              "children_before": 1,
+              "retained_content_before": false,
+              "dirty_collector_before": false,
+              "duration_ms": 102.902562
+            },
+            {
+              "tab": 2,
+              "visit": "revisit",
+              "warmed_before": true,
+              "children_before": 1,
+              "retained_content_before": true,
+              "dirty_collector_before": false,
+              "duration_ms": 47.078252
+            }
+          ],
+          "errors": [],
+          "environment": {
+            "python": "3.14.7 (main, Aug 10 2026, 07:46:56) [GCC 16.1.1 20260728]",
+            "executable": "/usr/bin/python3",
+            "textual": "8.2.8",
+            "kernel": "7.3.0-rc4-dusky-battery",
+            "uid": 1000,
+            "home": "/home/dusk",
+            "gil_enabled": true,
+            "cpu_count": 14,
+            "affinity": [
+              0,
+              1,
+              2,
+              3,
+              4,
+              5,
+              6,
+              7,
+              8,
+              9,
+              10,
+              11,
+              12,
+              13
+            ],
+            "term": "xterm-kitty",
+            "term_program": null,
+            "mode": "headless",
+            "size": [
+              120,
+              40
+            ],
+            "pycache_prefix": "/home/dusk/.cache/dusky_tui",
+            "power_limits_uw": {
+              "/sys/devices/virtual/powercap/intel-rapl/intel-rapl:0/constraint_2_power_limit_uw": 215000000,
+              "/sys/devices/virtual/powercap/intel-rapl/intel-rapl:0/constraint_1_power_limit_uw": 115000000,
+              "/sys/devices/virtual/powercap/intel-rapl/intel-rapl:0/constraint_0_power_limit_uw": 90000000,
+              "/sys/devices/virtual/powercap/intel-rapl/intel-rapl:0/intel-rapl:0:0/constraint_0_power_limit_uw": 0,
+              "/sys/devices/virtual/powercap/intel-rapl/intel-rapl:0/intel-rapl:0:1/constraint_0_power_limit_uw": 0,
+              "/sys/devices/virtual/powercap/intel-rapl-mmio/intel-rapl-mmio:0/constraint_2_power_limit_uw": 215000000,
+              "/sys/devices/virtual/powercap/intel-rapl-mmio/intel-rapl-mmio:0/constraint_1_power_limit_uw": 115000000,
+              "/sys/devices/virtual/powercap/intel-rapl-mmio/intel-rapl-mmio:0/constraint_0_power_limit_uw": 90000000
+            },
+            "source_sha256": {
+              "/home/dusk/user_scripts/dusky_tui/python/tests/benchmarks/benchmark_startup.py": "b9387af13180e1be65cf4474a21c418fef74bc1a1c606c6dbb98f47cd16e8186",
+              "/home/dusk/user_scripts/dusky_tui/python/main/main.py": "1c10ba654a40465c521bc6dba699da9df3b70fcd838a4b20bbdcb93448f8a764",
+              "/home/dusk/user_scripts/dusky_tui/python/tests/benchmarks/fixture.py": "4b597413bbe2514e244c3bb212bbf72a19c943e41b1341c455a860f035cacd1b",
+              "/home/dusk/user_scripts/dusky_tui/python/frontend/ui.py": "01eec4cdc4a29c4082807ad023056e0f7b0f534943ee88a0a8a9095bbe2c959b",
+              "/home/dusk/user_scripts/dusky_tui/python/frontend/core_types.py": "8ec1073f4e8cf58a8e596a13d264d416a73283c5266352d6abb91e872a83ad82",
+              "/home/dusk/user_scripts/dusky_tui/python/engines/ini.py": "c5cd0da289ee8236ae27c4c7713cbb8a7f9a7722442f2062086335d1b30db4bb"
+            },
+            "sync_output_detected": false
+          },
+          "schema": "/home/dusk/user_scripts/dusky_tui/python/tests/benchmarks/fixture.py",
+          "launcher": "/home/dusk/user_scripts/dusky_tui/python/main/main.py",
+          "stderr": ""
+        }
+      ],
+      "caveats": [
+        "Fresh interpreters; filesystem and bytecode caches are uncontrolled, not cold disk.",
+        "Timestamp milestones overlap: do not add them or inclusive diagnostic spans.",
+        "Headless callbacks do not measure terminal output or optical presentation.",
+        "Driver flush return is not terminal/compositor presentation acknowledgement.",
+        "Active data refresh is a readiness proxy, not proven input-to-pixel TTI.",
+        "First visit may already be warmed; see per-switch metadata.",
+        "CPU/RSS include observation, switches and shutdown."
+      ]
+    },
+    "ufw": {
+      "format_version": 2,
+      "label": "Handoff harness verification; current power configuration",
+      "runs": 1,
+      "stats": {
+        "launcher_enter_ms": {
+          "median": 98.445529,
+          "mean": 98.445529,
+          "min": 98.445529,
+          "max": 98.445529
+        },
+        "app_run_enter_ms": {
+          "median": 307.528777,
+          "mean": 307.528777,
+          "min": 307.528777,
+          "max": 307.528777
+        },
+        "app_mount_enter_ms": {
+          "median": 423.942034,
+          "mean": 423.942034,
+          "min": 423.942034,
+          "max": 423.942034
+        },
+        "app_mount_return_ms": {
+          "median": 425.262798,
+          "mean": 425.262798,
+          "min": 425.262798,
+          "max": 425.262798
+        },
+        "first_compositor_callback_ms": {
+          "median": 584.595388,
+          "mean": 584.595388,
+          "min": 584.595388,
+          "max": 584.595388
+        },
+        "first_after_refresh_ms": {
+          "median": 646.672267,
+          "mean": 646.672267,
+          "min": 646.672267,
+          "max": 646.672267
+        },
+        "active_data_refresh_ms": {
+          "median": 1291.636372,
+          "mean": 1291.636372,
+          "min": 1291.636372,
+          "max": 1291.636372
+        },
+        "boot_refresh_ms": {
+          "median": 1291.863464,
+          "mean": 1291.863464,
+          "min": 1291.863464,
+          "max": 1291.863464
+        },
+        "viewport_width": {
+          "median": 120,
+          "mean": 120,
+          "min": 120,
+          "max": 120
+        },
+        "viewport_height": {
+          "median": 40,
+          "mean": 40,
+          "min": 40,
+          "max": 40
+        },
+        "widgets_at_boot": {
+          "median": 106,
+          "mean": 106,
+          "min": 106,
+          "max": 106
+        },
+        "custom_widgets_at_boot": {
+          "median": 1,
+          "mean": 1,
+          "min": 1,
+          "max": 1
+        },
+        "observation_end_ms": {
+          "median": 5594.341334,
+          "mean": 5594.341334,
+          "min": 5594.341334,
+          "max": 5594.341334
+        },
+        "launcher_return_ms": {
+          "median": 5607.272108,
+          "mean": 5607.272108,
+          "min": 5607.272108,
+          "max": 5607.272108
+        },
+        "startup_factory_count": {
+          "median": 1,
+          "mean": 1,
+          "min": 1,
+          "max": 1
+        },
+        "startup_factory_inclusive_ms": {
+          "median": 0.398885,
+          "mean": 0.398885,
+          "min": 0.398885,
+          "max": 0.398885
+        },
+        "startup_collector_count": {
+          "median": 1,
+          "mean": 1,
+          "min": 1,
+          "max": 1
+        },
+        "startup_collector_inclusive_ms": {
+          "median": 375.804282,
+          "mean": 375.804282,
+          "min": 375.804282,
+          "max": 375.804282
+        },
+        "startup_command_count": {
+          "median": 6,
+          "mean": 6,
+          "min": 6,
+          "max": 6
+        },
+        "startup_command_inclusive_ms": {
+          "median": 608.587901,
+          "mean": 608.587901,
+          "min": 608.587901,
+          "max": 608.587901
+        },
+        "startup_compose_step_count": {
+          "median": 32,
+          "mean": 32,
+          "min": 32,
+          "max": 32
+        },
+        "startup_compose_step_inclusive_ms": {
+          "median": 4.562832,
+          "mean": 4.562832,
+          "min": 4.562832,
+          "max": 4.562832
+        },
+        "max_rss_kib": {
+          "median": 57888,
+          "mean": 57888,
+          "min": 57888,
+          "max": 57888
+        },
+        "process_cpu_ms": {
+          "median": 1445.567618,
+          "mean": 1445.567618,
+          "min": 1445.567618,
+          "max": 1445.567618
+        }
+      },
+      "records": [
+        {
+          "metrics": {
+            "launcher_enter_ms": 98.445529,
+            "app_run_enter_ms": 307.528777,
+            "app_mount_enter_ms": 423.942034,
+            "app_mount_return_ms": 425.262798,
+            "first_compositor_callback_ms": 584.595388,
+            "first_after_refresh_ms": 646.672267,
+            "active_data_refresh_ms": 1291.636372,
+            "boot_refresh_ms": 1291.863464,
+            "viewport_width": 120,
+            "viewport_height": 40,
+            "widgets_at_boot": 106,
+            "custom_widgets_at_boot": 1,
+            "observation_end_ms": 5594.341334,
+            "launcher_return_ms": 5607.272108,
+            "startup_factory_count": 1,
+            "startup_factory_inclusive_ms": 0.398885,
+            "startup_collector_count": 1,
+            "startup_collector_inclusive_ms": 375.804282,
+            "startup_command_count": 6,
+            "startup_command_inclusive_ms": 608.587901,
+            "startup_compose_step_count": 32,
+            "startup_compose_step_inclusive_ms": 4.562832,
+            "max_rss_kib": 57888,
+            "process_cpu_ms": 1445.567618
+          },
+          "spans": [
+            {
+              "kind": "import_inclusive",
+              "name": "dusky_schema_tui_ufw",
+              "phase": "startup",
+              "start_ms": 108.636799,
+              "duration_ms": 28.920622,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "import_inclusive",
+              "name": "textual",
+              "phase": "startup",
+              "start_ms": 139.909672,
+              "duration_ms": 39.647305,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "import_inclusive",
+              "name": "textual.app",
+              "phase": "startup",
+              "start_ms": 179.640288,
+              "duration_ms": 71.961322,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "import_inclusive",
+              "name": "python.frontend.ui",
+              "phase": "startup",
+              "start_ms": 137.774012,
+              "duration_ms": 163.855078,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "method",
+              "name": "__init__",
+              "phase": "startup",
+              "start_ms": 301.694319,
+              "duration_ms": 5.820205,
+              "thread": "MainThread",
+              "argument": null
+            },
+            {
+              "kind": "compose_step",
+              "name": "compose",
+              "phase": "startup",
+              "start_ms": 324.547543,
+              "duration_ms": 0.183239,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "compose_step",
+              "name": "compose",
+              "phase": "startup",
+              "start_ms": 324.739686,
+              "duration_ms": 1.244497,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "compose_step",
+              "name": "compose",
+              "phase": "startup",
+              "start_ms": 325.994014,
+              "duration_ms": 0.053351,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "compose_step",
+              "name": "compose",
+              "phase": "startup",
+              "start_ms": 326.052332,
+              "duration_ms": 0.051555,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "compose_step",
+              "name": "compose",
+              "phase": "startup",
+              "start_ms": 326.107623,
+              "duration_ms": 0.277143,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "compose_step",
+              "name": "compose",
+              "phase": "startup",
+              "start_ms": 326.389585,
+              "duration_ms": 0.165115,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "compose_step",
+              "name": "compose",
+              "phase": "startup",
+              "start_ms": 326.559495,
+              "duration_ms": 0.084434,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "compose_step",
+              "name": "compose",
+              "phase": "startup",
+              "start_ms": 326.64708,
+              "duration_ms": 0.068235,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "compose_step",
+              "name": "compose",
+              "phase": "startup",
+              "start_ms": 326.718478,
+              "duration_ms": 0.136043,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "compose_step",
+              "name": "compose",
+              "phase": "startup",
+              "start_ms": 326.858212,
+              "duration_ms": 0.081299,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "compose_step",
+              "name": "compose",
+              "phase": "startup",
+              "start_ms": 326.943144,
+              "duration_ms": 0.073595,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "compose_step",
+              "name": "compose",
+              "phase": "startup",
+              "start_ms": 327.019618,
+              "duration_ms": 0.133547,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "compose_step",
+              "name": "compose",
+              "phase": "startup",
+              "start_ms": 327.158295,
+              "duration_ms": 0.227522,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "compose_step",
+              "name": "compose",
+              "phase": "startup",
+              "start_ms": 327.389585,
+              "duration_ms": 0.066767,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "compose_step",
+              "name": "compose",
+              "phase": "startup",
+              "start_ms": 327.459682,
+              "duration_ms": 0.129307,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "compose_step",
+              "name": "compose",
+              "phase": "startup",
+              "start_ms": 327.594015,
+              "duration_ms": 0.078366,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "compose_step",
+              "name": "compose",
+              "phase": "startup",
+              "start_ms": 327.674923,
+              "duration_ms": 0.136382,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "compose_step",
+              "name": "compose",
+              "phase": "startup",
+              "start_ms": 327.814608,
+              "duration_ms": 0.072149,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "compose_step",
+              "name": "compose",
+              "phase": "startup",
+              "start_ms": 327.889347,
+              "duration_ms": 0.064003,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "compose_step",
+              "name": "compose",
+              "phase": "startup",
+              "start_ms": 327.956146,
+              "duration_ms": 0.121407,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "compose_step",
+              "name": "compose",
+              "phase": "startup",
+              "start_ms": 328.082581,
+              "duration_ms": 0.067097,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "compose_step",
+              "name": "compose",
+              "phase": "startup",
+              "start_ms": 328.152461,
+              "duration_ms": 0.122478,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "compose_step",
+              "name": "compose",
+              "phase": "startup",
+              "start_ms": 328.278406,
+              "duration_ms": 0.068053,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "compose_step",
+              "name": "compose",
+              "phase": "startup",
+              "start_ms": 328.349575,
+              "duration_ms": 0.121583,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "compose_step",
+              "name": "compose",
+              "phase": "startup",
+              "start_ms": 328.474222,
+              "duration_ms": 0.177793,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "compose_step",
+              "name": "compose",
+              "phase": "startup",
+              "start_ms": 328.655892,
+              "duration_ms": 0.127151,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "compose_step",
+              "name": "compose",
+              "phase": "startup",
+              "start_ms": 328.785992,
+              "duration_ms": 0.063418,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "compose_step",
+              "name": "compose",
+              "phase": "startup",
+              "start_ms": 328.854187,
+              "duration_ms": 0.061587,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "compose_step",
+              "name": "compose",
+              "phase": "startup",
+              "start_ms": 328.918889,
+              "duration_ms": 0.070247,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "compose_step",
+              "name": "compose",
+              "phase": "startup",
+              "start_ms": 328.992017,
+              "duration_ms": 0.17929,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "compose_step",
+              "name": "compose",
+              "phase": "startup",
+              "start_ms": 329.175198,
+              "duration_ms": 0.049492,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "compose_step",
+              "name": "compose",
+              "phase": "startup",
+              "start_ms": 329.227865,
+              "duration_ms": 0.006687,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "display",
+              "name": "compositor",
+              "phase": "startup",
+              "start_ms": 584.589298,
+              "duration_ms": 0.011207,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "display",
+              "name": "compositor",
+              "phase": "startup",
+              "start_ms": 593.952561,
+              "duration_ms": 0.007782,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "display",
+              "name": "compositor",
+              "phase": "startup",
+              "start_ms": 598.880425,
+              "duration_ms": 0.005422,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "method",
+              "name": "_populate_option_list",
+              "phase": "startup",
+              "start_ms": 600.907394,
+              "duration_ms": 0.104908,
+              "thread": "MainThread",
+              "argument": "0"
+            },
+            {
+              "kind": "display",
+              "name": "compositor",
+              "phase": "startup",
+              "start_ms": 643.088928,
+              "duration_ms": 0.008063,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "display",
+              "name": "compositor",
+              "phase": "startup",
+              "start_ms": 645.571817,
+              "duration_ms": 0.005679,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "display",
+              "name": "compositor",
+              "phase": "startup",
+              "start_ms": 651.585334,
+              "duration_ms": 0.005556,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "command",
+              "name": "['ufw', 'status', 'verbose']",
+              "phase": "startup",
+              "start_ms": 604.691963,
+              "duration_ms": 122.563298,
+              "thread": "asyncio_0",
+              "returncode": 0
+            },
+            {
+              "kind": "command",
+              "name": "['ufw', 'status', 'numbered']",
+              "phase": "startup",
+              "start_ms": 728.989633,
+              "duration_ms": 111.331294,
+              "thread": "asyncio_0",
+              "returncode": 0
+            },
+            {
+              "kind": "method",
+              "name": "_load_one_engine_sync",
+              "phase": "startup",
+              "start_ms": 604.6197,
+              "duration_ms": 236.455752,
+              "thread": "asyncio_0",
+              "argument": "('ufw', '/etc/default/ufw')"
+            },
+            {
+              "kind": "method",
+              "name": "_populate_option_list",
+              "phase": "startup",
+              "start_ms": 841.385002,
+              "duration_ms": 0.273666,
+              "thread": "MainThread",
+              "argument": "0"
+            },
+            {
+              "kind": "method",
+              "name": "_populate_option_list",
+              "phase": "startup",
+              "start_ms": 843.80506,
+              "duration_ms": 1.34942,
+              "thread": "MainThread",
+              "argument": "1"
+            },
+            {
+              "kind": "method",
+              "name": "_populate_option_list",
+              "phase": "startup",
+              "start_ms": 846.812327,
+              "duration_ms": 3.337053,
+              "thread": "MainThread",
+              "argument": "3"
+            },
+            {
+              "kind": "method",
+              "name": "_populate_option_list",
+              "phase": "startup",
+              "start_ms": 863.998264,
+              "duration_ms": 2.961214,
+              "thread": "MainThread",
+              "argument": "5"
+            },
+            {
+              "kind": "method",
+              "name": "_populate_option_list",
+              "phase": "startup",
+              "start_ms": 880.012116,
+              "duration_ms": 2.905394,
+              "thread": "MainThread",
+              "argument": "7"
+            },
+            {
+              "kind": "method",
+              "name": "_populate_option_list",
+              "phase": "startup",
+              "start_ms": 897.260565,
+              "duration_ms": 2.494782,
+              "thread": "MainThread",
+              "argument": "8"
+            },
+            {
+              "kind": "method",
+              "name": "_populate_option_list",
+              "phase": "startup",
+              "start_ms": 914.082458,
+              "duration_ms": 2.265346,
+              "thread": "MainThread",
+              "argument": "10"
+            },
+            {
+              "kind": "method",
+              "name": "_populate_option_list",
+              "phase": "startup",
+              "start_ms": 930.500171,
+              "duration_ms": 2.136779,
+              "thread": "MainThread",
+              "argument": "11"
+            },
+            {
+              "kind": "method",
+              "name": "_populate_option_list",
+              "phase": "startup",
+              "start_ms": 946.68652,
+              "duration_ms": 2.350434,
+              "thread": "MainThread",
+              "argument": "12"
+            },
+            {
+              "kind": "method",
+              "name": "_populate_option_list",
+              "phase": "startup",
+              "start_ms": 964.162647,
+              "duration_ms": 2.060109,
+              "thread": "MainThread",
+              "argument": "13"
+            },
+            {
+              "kind": "command",
+              "name": "['ufw', 'status', 'numbered']",
+              "phase": "startup",
+              "start_ms": 852.597491,
+              "duration_ms": 115.478398,
+              "thread": "asyncio_0",
+              "returncode": 0
+            },
+            {
+              "kind": "command",
+              "name": "['ufw', 'status', 'verbose']",
+              "phase": "startup",
+              "start_ms": 968.325338,
+              "duration_ms": 111.749555,
+              "thread": "asyncio_0",
+              "returncode": 0
+            },
+            {
+              "kind": "command",
+              "name": "['ip', '-4', 'route', 'show', 'default']",
+              "phase": "startup",
+              "start_ms": 1080.204476,
+              "duration_ms": 1.474535,
+              "thread": "asyncio_0",
+              "returncode": 0
+            },
+            {
+              "kind": "command",
+              "name": "['ufw', 'show', 'listening']",
+              "phase": "startup",
+              "start_ms": 1082.070449,
+              "duration_ms": 145.990821,
+              "thread": "asyncio_0",
+              "returncode": 0
+            },
+            {
+              "kind": "collector",
+              "name": "custom-view-0",
+              "phase": "startup",
+              "start_ms": 852.538078,
+              "duration_ms": 375.804282,
+              "thread": "asyncio_0"
+            },
+            {
+              "kind": "factory",
+              "name": "custom-view-0",
+              "phase": "startup",
+              "start_ms": 1228.654039,
+              "duration_ms": 0.398885,
+              "thread": "MainThread",
+              "ancestor_display": true
+            },
+            {
+              "kind": "display",
+              "name": "compositor",
+              "phase": "startup",
+              "start_ms": 1261.752158,
+              "duration_ms": 0.009203,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "display",
+              "name": "compositor",
+              "phase": "startup",
+              "start_ms": 1291.307014,
+              "duration_ms": 0.009755,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "command",
+              "name": "['ufw', 'status', 'numbered']",
+              "phase": "idle_observation",
+              "start_ms": 2843.713101,
+              "duration_ms": 112.540957,
+              "thread": "asyncio_0",
+              "returncode": 0
+            },
+            {
+              "kind": "command",
+              "name": "['ufw', 'status', 'verbose']",
+              "phase": "idle_observation",
+              "start_ms": 2956.51153,
+              "duration_ms": 113.25522,
+              "thread": "asyncio_0",
+              "returncode": 0
+            },
+            {
+              "kind": "command",
+              "name": "['ip', '-4', 'route', 'show', 'default']",
+              "phase": "idle_observation",
+              "start_ms": 3069.83899,
+              "duration_ms": 1.276147,
+              "thread": "asyncio_0",
+              "returncode": 0
+            },
+            {
+              "kind": "command",
+              "name": "['ufw', 'show', 'listening']",
+              "phase": "idle_observation",
+              "start_ms": 3071.339428,
+              "duration_ms": 144.975364,
+              "thread": "asyncio_0",
+              "returncode": 0
+            },
+            {
+              "kind": "collector",
+              "name": "custom-view-0",
+              "phase": "idle_observation",
+              "start_ms": 2843.655043,
+              "duration_ms": 372.831581,
+              "thread": "asyncio_0"
+            },
+            {
+              "kind": "factory",
+              "name": "custom-view-0",
+              "phase": "idle_observation",
+              "start_ms": 3216.757047,
+              "duration_ms": 0.354365,
+              "thread": "MainThread",
+              "ancestor_display": true
+            },
+            {
+              "kind": "display",
+              "name": "compositor",
+              "phase": "idle_observation",
+              "start_ms": 3252.780868,
+              "duration_ms": 0.008704,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "display",
+              "name": "compositor",
+              "phase": "tab_1_first_visit",
+              "start_ms": 4505.01411,
+              "duration_ms": 0.015425,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "display",
+              "name": "compositor",
+              "phase": "tab_1_first_visit",
+              "start_ms": 4570.580021,
+              "duration_ms": 0.009694,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "display",
+              "name": "compositor",
+              "phase": "tab_1_first_visit",
+              "start_ms": 4573.33945,
+              "duration_ms": 0.007415,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "display",
+              "name": "compositor",
+              "phase": "tab_1_first_visit",
+              "start_ms": 4604.225516,
+              "duration_ms": 0.00921,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "display",
+              "name": "compositor",
+              "phase": "tab_1_first_visit",
+              "start_ms": 4623.335137,
+              "duration_ms": 0.008362,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "display",
+              "name": "compositor",
+              "phase": "tab_1_first_visit",
+              "start_ms": 4625.976889,
+              "duration_ms": 0.005624,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "display",
+              "name": "compositor",
+              "phase": "tab_1_revisit",
+              "start_ms": 4632.183334,
+              "duration_ms": 0.0061,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "display",
+              "name": "compositor",
+              "phase": "tab_1_revisit",
+              "start_ms": 4659.942569,
+              "duration_ms": 0.009493,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "display",
+              "name": "compositor",
+              "phase": "tab_1_revisit",
+              "start_ms": 4662.774891,
+              "duration_ms": 0.006508,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "display",
+              "name": "compositor",
+              "phase": "tab_1_revisit",
+              "start_ms": 4669.42735,
+              "duration_ms": 0.006309,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "display",
+              "name": "compositor",
+              "phase": "tab_1_revisit",
+              "start_ms": 4690.518087,
+              "duration_ms": 0.008677,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "display",
+              "name": "compositor",
+              "phase": "tab_1_revisit",
+              "start_ms": 4693.086809,
+              "duration_ms": 0.006506,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "display",
+              "name": "compositor",
+              "phase": "tab_2_first_visit",
+              "start_ms": 4699.175552,
+              "duration_ms": 0.006885,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "method",
+              "name": "_populate_option_list",
+              "phase": "tab_2_first_visit",
+              "start_ms": 4703.438474,
+              "duration_ms": 0.117589,
+              "thread": "MainThread",
+              "argument": "2"
+            },
+            {
+              "kind": "display",
+              "name": "compositor",
+              "phase": "tab_2_first_visit",
+              "start_ms": 4723.538203,
+              "duration_ms": 0.009514,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "display",
+              "name": "compositor",
+              "phase": "tab_2_first_visit",
+              "start_ms": 4726.16691,
+              "duration_ms": 0.007018,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "display",
+              "name": "compositor",
+              "phase": "tab_2_first_visit",
+              "start_ms": 4732.382314,
+              "duration_ms": 0.006885,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "command",
+              "name": "['ss', '-H', '-tlunp']",
+              "phase": "tab_2_first_visit",
+              "start_ms": 4707.685094,
+              "duration_ms": 25.387691,
+              "thread": "asyncio_1",
+              "returncode": 0
+            },
+            {
+              "kind": "command",
+              "name": "['ufw', 'status', 'numbered']",
+              "phase": "tab_2_first_visit",
+              "start_ms": 4733.129381,
+              "duration_ms": 111.650784,
+              "thread": "asyncio_1",
+              "returncode": 0
+            },
+            {
+              "kind": "command",
+              "name": "['ufw', 'status', 'verbose']",
+              "phase": "tab_2_first_visit",
+              "start_ms": 4845.025372,
+              "duration_ms": 112.776579,
+              "thread": "asyncio_1",
+              "returncode": 0
+            },
+            {
+              "kind": "collector",
+              "name": "custom-view-2",
+              "phase": "tab_2_first_visit",
+              "start_ms": 4707.619347,
+              "duration_ms": 258.569096,
+              "thread": "asyncio_1"
+            },
+            {
+              "kind": "factory",
+              "name": "custom-view-2",
+              "phase": "tab_2_first_visit",
+              "start_ms": 4966.398218,
+              "duration_ms": 0.537849,
+              "thread": "MainThread",
+              "ancestor_display": true
+            },
+            {
+              "kind": "display",
+              "name": "compositor",
+              "phase": "tab_2_first_visit",
+              "start_ms": 5038.746526,
+              "duration_ms": 0.009466,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "display",
+              "name": "compositor",
+              "phase": "tab_2_first_visit",
+              "start_ms": 5116.124938,
+              "duration_ms": 0.010475,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "display",
+              "name": "compositor",
+              "phase": "tab_2_first_visit",
+              "start_ms": 5157.735865,
+              "duration_ms": 0.009282,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "display",
+              "name": "compositor",
+              "phase": "tab_2_first_visit",
+              "start_ms": 5160.444942,
+              "duration_ms": 0.006497,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "display",
+              "name": "compositor",
+              "phase": "tab_2_revisit",
+              "start_ms": 5166.479207,
+              "duration_ms": 0.006372,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "display",
+              "name": "compositor",
+              "phase": "tab_2_revisit",
+              "start_ms": 5210.483034,
+              "duration_ms": 0.009372,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "display",
+              "name": "compositor",
+              "phase": "tab_2_revisit",
+              "start_ms": 5213.304912,
+              "duration_ms": 0.006123,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "display",
+              "name": "compositor",
+              "phase": "tab_2_revisit",
+              "start_ms": 5256.273551,
+              "duration_ms": 0.009297,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "display",
+              "name": "compositor",
+              "phase": "tab_2_revisit",
+              "start_ms": 5258.937366,
+              "duration_ms": 0.006776,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "display",
+              "name": "compositor",
+              "phase": "tab_14_first_visit",
+              "start_ms": 5267.271579,
+              "duration_ms": 0.006648,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "method",
+              "name": "_populate_option_list",
+              "phase": "tab_14_first_visit",
+              "start_ms": 5271.093259,
+              "duration_ms": 0.109333,
+              "thread": "MainThread",
+              "argument": "14"
+            },
+            {
+              "kind": "display",
+              "name": "compositor",
+              "phase": "tab_14_first_visit",
+              "start_ms": 5315.369656,
+              "duration_ms": 0.008713,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "display",
+              "name": "compositor",
+              "phase": "tab_14_first_visit",
+              "start_ms": 5317.984345,
+              "duration_ms": 0.006994,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "display",
+              "name": "compositor",
+              "phase": "tab_14_first_visit",
+              "start_ms": 5352.997914,
+              "duration_ms": 0.008159,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "command",
+              "name": "['ufw', 'show', 'listening']",
+              "phase": "tab_14_first_visit",
+              "start_ms": 5275.665972,
+              "duration_ms": 148.323077,
+              "thread": "asyncio_0",
+              "returncode": 0
+            },
+            {
+              "kind": "collector",
+              "name": "custom-view-14",
+              "phase": "tab_14_first_visit",
+              "start_ms": 5275.585956,
+              "duration_ms": 148.425872,
+              "thread": "asyncio_0"
+            },
+            {
+              "kind": "factory",
+              "name": "custom-view-14",
+              "phase": "tab_14_first_visit",
+              "start_ms": 5424.519235,
+              "duration_ms": 0.073208,
+              "thread": "MainThread",
+              "ancestor_display": true
+            },
+            {
+              "kind": "display",
+              "name": "compositor",
+              "phase": "tab_14_first_visit",
+              "start_ms": 5443.196343,
+              "duration_ms": 0.013497,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "display",
+              "name": "compositor",
+              "phase": "tab_14_first_visit",
+              "start_ms": 5487.237596,
+              "duration_ms": 0.011002,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "display",
+              "name": "compositor",
+              "phase": "tab_14_first_visit",
+              "start_ms": 5524.509045,
+              "duration_ms": 0.009581,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "display",
+              "name": "compositor",
+              "phase": "tab_14_first_visit",
+              "start_ms": 5527.230462,
+              "duration_ms": 0.006042,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "display",
+              "name": "compositor",
+              "phase": "tab_14_revisit",
+              "start_ms": 5536.974723,
+              "duration_ms": 0.007541,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "display",
+              "name": "compositor",
+              "phase": "tab_14_revisit",
+              "start_ms": 5559.384231,
+              "duration_ms": 0.010299,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "display",
+              "name": "compositor",
+              "phase": "tab_14_revisit",
+              "start_ms": 5562.327434,
+              "duration_ms": 0.006257,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "display",
+              "name": "compositor",
+              "phase": "tab_14_revisit",
+              "start_ms": 5569.03173,
+              "duration_ms": 0.006409,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "display",
+              "name": "compositor",
+              "phase": "tab_14_revisit",
+              "start_ms": 5589.966478,
+              "duration_ms": 0.010442,
+              "thread": "MainThread"
+            },
+            {
+              "kind": "display",
+              "name": "compositor",
+              "phase": "tab_14_revisit",
+              "start_ms": 5592.668615,
+              "duration_ms": 0.00659,
+              "thread": "MainThread"
+            }
+          ],
+          "switches": [
+            {
+              "tab": 1,
+              "visit": "first_visit",
+              "warmed_before": true,
+              "children_before": 1,
+              "retained_content_before": false,
+              "dirty_collector_before": false,
+              "duration_ms": 109.140078
+            },
+            {
+              "tab": 1,
+              "visit": "revisit",
+              "warmed_before": true,
+              "children_before": 1,
+              "retained_content_before": false,
+              "dirty_collector_before": false,
+              "duration_ms": 43.175386
+            },
+            {
+              "tab": 2,
+              "visit": "first_visit",
+              "warmed_before": false,
+              "children_before": 1,
+              "retained_content_before": false,
+              "dirty_collector_before": false,
+              "duration_ms": 422.945733
+            },
+            {
+              "tab": 2,
+              "visit": "revisit",
+              "warmed_before": true,
+              "children_before": 1,
+              "retained_content_before": true,
+              "dirty_collector_before": false,
+              "duration_ms": 53.431573
+            },
+            {
+              "tab": 14,
+              "visit": "first_visit",
+              "warmed_before": false,
+              "children_before": 1,
+              "retained_content_before": false,
+              "dirty_collector_before": false,
+              "duration_ms": 227.988971
+            },
+            {
+              "tab": 14,
+              "visit": "revisit",
+              "warmed_before": true,
+              "children_before": 1,
+              "retained_content_before": true,
+              "dirty_collector_before": false,
+              "duration_ms": 40.431408
+            }
+          ],
+          "errors": [],
+          "environment": {
+            "python": "3.14.7 (main, Aug 10 2026, 07:46:56) [GCC 16.1.1 20260728]",
+            "executable": "/usr/bin/python3",
+            "textual": "8.2.8",
+            "kernel": "7.3.0-rc4-dusky-battery",
+            "uid": 0,
+            "home": "/home/dusk",
+            "gil_enabled": true,
+            "cpu_count": 14,
+            "affinity": [
+              0,
+              1,
+              2,
+              3,
+              4,
+              5,
+              6,
+              7,
+              8,
+              9,
+              10,
+              11,
+              12,
+              13
+            ],
+            "term": "xterm-kitty",
+            "term_program": null,
+            "mode": "headless",
+            "size": [
+              120,
+              40
+            ],
+            "pycache_prefix": "/home/dusk/.cache/dusky_tui",
+            "power_limits_uw": {
+              "/sys/devices/virtual/powercap/intel-rapl/intel-rapl:0/constraint_2_power_limit_uw": 215000000,
+              "/sys/devices/virtual/powercap/intel-rapl/intel-rapl:0/constraint_1_power_limit_uw": 115000000,
+              "/sys/devices/virtual/powercap/intel-rapl/intel-rapl:0/constraint_0_power_limit_uw": 90000000,
+              "/sys/devices/virtual/powercap/intel-rapl/intel-rapl:0/intel-rapl:0:0/constraint_0_power_limit_uw": 0,
+              "/sys/devices/virtual/powercap/intel-rapl/intel-rapl:0/intel-rapl:0:1/constraint_0_power_limit_uw": 0,
+              "/sys/devices/virtual/powercap/intel-rapl-mmio/intel-rapl-mmio:0/constraint_2_power_limit_uw": 215000000,
+              "/sys/devices/virtual/powercap/intel-rapl-mmio/intel-rapl-mmio:0/constraint_1_power_limit_uw": 115000000,
+              "/sys/devices/virtual/powercap/intel-rapl-mmio/intel-rapl-mmio:0/constraint_0_power_limit_uw": 90000000
+            },
+            "source_sha256": {
+              "/home/dusk/user_scripts/dusky_tui/python/tests/benchmarks/benchmark_startup.py": "b9387af13180e1be65cf4474a21c418fef74bc1a1c606c6dbb98f47cd16e8186",
+              "/home/dusk/user_scripts/dusky_tui/python/main/main.py": "1c10ba654a40465c521bc6dba699da9df3b70fcd838a4b20bbdcb93448f8a764",
+              "/home/dusk/user_scripts/network_manager/tui_ufw.py": "0a4829bdec76fc9343f99dafeef5ad02698a53c7b5d112b27e0218a4fbfda622",
+              "/home/dusk/user_scripts/dusky_tui/python/frontend/ui.py": "01eec4cdc4a29c4082807ad023056e0f7b0f534943ee88a0a8a9095bbe2c959b",
+              "/home/dusk/user_scripts/dusky_tui/python/frontend/core_types.py": "8ec1073f4e8cf58a8e596a13d264d416a73283c5266352d6abb91e872a83ad82",
+              "/home/dusk/user_scripts/dusky_tui/python/engines/ufw.py": "f7d1f9d3143fd1f0eb5335b781e890bb293778c3be7fe3695f3a157d4e8f4918"
+            },
+            "sync_output_detected": false
+          },
+          "schema": "/home/dusk/user_scripts/network_manager/tui_ufw.py",
+          "launcher": "/home/dusk/user_scripts/dusky_tui/python/main/main.py",
+          "stderr": ""
+        }
+      ],
+      "caveats": [
+        "Fresh interpreters; filesystem and bytecode caches are uncontrolled, not cold disk.",
+        "Timestamp milestones overlap: do not add them or inclusive diagnostic spans.",
+        "Headless callbacks do not measure terminal output or optical presentation.",
+        "Driver flush return is not terminal/compositor presentation acknowledgement.",
+        "Active data refresh is a readiness proxy, not proven input-to-pixel TTI.",
+        "First visit may already be warmed; see per-switch metadata.",
+        "CPU/RSS include observation, switches and shutdown."
+      ]
+    }
+  }
+}

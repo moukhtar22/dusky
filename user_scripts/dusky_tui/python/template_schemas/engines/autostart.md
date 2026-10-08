@@ -19,7 +19,7 @@ uncommenting** them (`-- ` prefix).
 
 ## Fixed key catalog (`autostart/<name>`)
 
-Interface & background: `awww_daemon`, `waybar`, `waybar_timer`, `nm_applet`,
+Interface & background: `awww_daemon`, `waybar`, `nm_applet`,
 `gnome_keyring`, `xhost_root`, `hypridle`, `layout_notify`,
 `audio_visualizer`, `wayclick`, `hyprpm_reload`.
 

@@ -6,7 +6,7 @@ Comment=Syncs local setup with latest git commit and updates system
 Keywords=system;update;upgrade;sync;git;
 Categories=System;ConsoleOnly;
 
-Exec=kitty --class update_dusky.py --title "Dusky System Update" --hold python3 /home/dusk/user_scripts/update_dusky/python/update_dusky.py
+Exec=kitty --class update_dusky.py --title "Dusky System Update" --hold python3 /home/dusk/user_scripts/update_dusky/python/update_dusky_supervisor.py
 
 Terminal=false
 Icon=system-software-update

@@ -142,8 +142,8 @@ SCHEMA = {
             default=f"{_SETUP_CMD} --yes",
             options=["trigger"],
             group="Install / Update",
-            confirm_message="Install or update Dusky Sites across all detected browser profiles? This runs the full setup script.",
-            extended_help="**Install / Update**\n\nRuns `dusky_sites_setup.py` with `--yes`, dynamically discovering every browser profile (Firefox, LibreWolf, Zen, Waterfox, Floorp, FireDragon, Flatpak variants) and installing the native host, messaging manifests, per-profile XPI, and userChrome.css styling."
+            confirm_message="Install or update Dusky Sites across all detected native Firefox profiles? This runs the full setup script.",
+            extended_help="**Install / Update**\n\nRuns `dusky_sites_setup.py` with `--yes`, dynamically discovering native Firefox 157+ profiles in the traditional and XDG registries (including external profile paths) and installing the native host, messaging manifests, per-profile XPI, and userChrome.css styling."
         ),
         ConfigItem(
             label="Uninstall System",

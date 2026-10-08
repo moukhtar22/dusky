@@ -3,9 +3,7 @@ Description=Dusky Quick Panal Daemon
 After=graphical-session.target
 PartOf=graphical-session.target
 
-# [RELIABILITY FIX] Extreme Burst Limits.
-# Allows up to 50 rapid restarts within 10 seconds.
-# You can mash your toggle keybind as fast as humanly possible, and Systemd will NEVER lock this service into a 'failed' state.
+# Permit up to 50 starts in 10 seconds; repeated crashes can still hit the limit.
 StartLimitIntervalSec=10
 StartLimitBurst=50
 
@@ -13,45 +11,34 @@ StartLimitBurst=50
 Type=dbus
 BusName=org.dusky.quickpanal
 
-# --- [ULTIMATE RAM OPTIMIZATION] ---
-# PYTHONOPTIMIZE=2: Strips all __debug__ asserts AND docstrings from memory.
-# MALLOC_ARENA_MAX=1: Forces glibc to use a single memory arena for all threads. Slashes multi-threading RAM bloat.
+# PYTHONOPTIMIZE=2 removes asserts and docstrings; MALLOC_ARENA_MAX=1 limits glibc arenas.
 Environment=PYTHONUNBUFFERED=1 PYTHONOPTIMIZE=2 MALLOC_ARENA_MAX=1
 
 ExecStart=%h/user_scripts/dusky_system/quickpanal/dusky_quickpanal.py --gapplication-service
 Slice=app-graphical.slice
 
-# --- Next-Gen Arch Linux Restart Logic ---
 Restart=on-failure
-# (Systemd 254+) Skips the failed/inactive state to ensure instant D-Bus socket reactivation.
+# Skip failed/inactive transitions during automatic restarts.
 RestartMode=direct
 
-# (Systemd 254+) Geometric Exponential Backoff.
-# Instant 250ms restart on a random crash.
-# If it keeps crashing, it slows down (250ms -> 500ms -> 1s -> 2s -> 4s) instead of spinning your CPU to 100%.
+# Back off repeated restarts from 250ms up to 4s.
 RestartSec=250ms
 RestartSteps=5
 RestartMaxDelaySec=4s
 RestartPreventExitStatus=5
 
-# --- Anti-Hang & Freeze Protection ---
 TimeoutStopSec=2s
-# (Systemd 246+) If a subprocess (like hyprsunset or ddcutil) hangs for more than 2 seconds 
-# during a restart, Systemd will bypass standard termination and ruthlessly SIGKILL the entire cgroup.
+# Kill remaining service processes if graceful shutdown exceeds two seconds.
 TimeoutStopFailureMode=kill
 
-# --- Memory Management & ZSTD (ZRAM) Synergy ---
 MemoryAccounting=yes
-# (Systemd 243+) Cleanly kills the whole cgroup if the system runs completely out of memory.
+# Kill the remaining service processes if one is killed by the OOM manager.
 OOMPolicy=kill
 OOMScoreAdjust=400
 
-# [ZSTD COMPRESSION TRIGGER] 
-# GTK3 utilizes Cairo drawing surfaces which can bloat the heap over time.
-# By setting a soft limit (MemoryHigh), we instruct the Arch Linux kernel: 
-# "If this panel uses more than 150MB of RAM, aggressively swap its idle pages into ZRAM (ZSTD compression)."
+# Above 150M, memory.high applies reclaim pressure and throttling; it does not guarantee swap.
 MemoryHigh=150M
-# Hard limit to prevent memory leaks from crashing the compositor.
+# At 300M, the cgroup can be killed by the OOM manager.
 MemoryMax=300M
 
 SyslogIdentifier=dusky-quickpanal

@@ -1,0 +1,21 @@
+@-moz-document domain("pb.wtf") {
+    /* >>> dusky:picks - managed by the Visual Picker, one rule per line */
+    html { background-color: var(--surface) !important; color: var(--on_surface) !important; border-color: var(--outline_variant) !important; } /* dusky key=sel%1Fhtml%1Fbg | bg: surface */
+    body { background-color: var(--surface) !important; color: var(--on_surface) !important; border-color: var(--outline_variant) !important; } /* dusky key=sel%1Fbody%1Fbg | bg: surface */
+    table { background-color: var(--surface) !important; color: var(--on_surface) !important; border-color: var(--outline_variant) !important; } /* dusky key=sel%1Ftable%1Fbg | bg: surface */
+    div { background-color: var(--surface) !important; color: var(--on_surface) !important; border-color: var(--outline_variant) !important; } /* dusky key=sel%1Fdiv%1Fbg | bg: surface */
+    td { background-color: var(--surface) !important; color: var(--on_surface) !important; border-color: var(--outline_variant) !important; } /* dusky key=sel%1Ftd%1Fbg | bg: surface */
+    th { background-color: var(--surface) !important; color: var(--on_surface) !important; border-color: var(--outline_variant) !important; } /* dusky key=sel%1Fth%1Fbg | bg: surface */
+    .mrg_4 { background-color: var(--surface) !important; color: var(--on_surface) !important; border-color: var(--outline_variant) !important; } /* dusky key=sel%1F.mrg_4%1Fbg | bg: surface */
+    select { background-color: var(--surface) !important; color: var(--on_surface) !important; border-color: var(--outline_variant) !important; } /* dusky key=sel%1Fselect%1Fbg | bg: surface */
+    ul { background-color: var(--surface) !important; color: var(--on_surface) !important; border-color: var(--outline_variant) !important; } /* dusky key=sel%1Ful%1Fbg | bg: surface */
+    .btn { background-color: var(--surface) !important; color: var(--on_surface) !important; border-color: var(--outline_variant) !important; } /* dusky key=sel%1F.btn%1Fbg | bg: surface */
+    a { color: var(--on_surface) !important; } /* dusky key=sel%1Fa%1Ftext | text: on_surface */
+    input { background-color: var(--surface) !important; color: var(--on_surface) !important; border-color: var(--outline_variant) !important; } /* dusky key=sel%1Finput%1Fbg | bg: surface */
+    input { color: var(--on_surface) !important; } /* dusky key=sel%1Finput%1Ftext | text: on_surface */
+    .cat_title { background-color: var(--surface) !important; color: var(--on_surface) !important; border-color: var(--outline_variant) !important; } /* dusky key=sel%1F.cat_title%1Fbg | bg: surface */
+    strong { color: var(--on_surface) !important; } /* dusky key=sel%1Fstrong%1Ftext | text: on_surface */
+    p { color: var(--on_surface) !important; } /* dusky key=sel%1Fp%1Ftext | text: on_surface */
+    html > body > div:nth-of-type(1) > nav { background-color: var(--surface) !important; color: var(--on_surface) !important; border-color: var(--outline_variant) !important; } /* dusky key=sel%1Fhtml%20%3E%20body%20%3E%20div%3Anth-of-type%281%29%20%3E%20nav%1Fbg | bg: surface */
+    /* <<< dusky:picks */
+}

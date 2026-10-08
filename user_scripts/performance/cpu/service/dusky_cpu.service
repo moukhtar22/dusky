@@ -1,13 +1,13 @@
 [Unit]
 Description=Dusky CPU Core and Power Limiter Restorer
-After=multi-user.target
+After=local-fs.target systemd-modules-load.service
+Before=multi-user.target
+RequiresMountsFor=/home
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-Environment=HOME=$HOME
-ExecStart=-/usr/bin/python3 $HOME/user_scripts/performance/cpu/tui_dusky_power_throttle.py --restore
-ExecStart=-/usr/bin/python3 $HOME/user_scripts/performance/cpu/tui_dusky_core_manager.py --restore
+ExecStart=/usr/bin/bash -c 'for d in /home/*; do [ -d "$d" ] && [ -f "$d/user_scripts/performance/cpu/tui_dusky_core_manager.py" ] && exec /usr/bin/python3 "$d/user_scripts/performance/cpu/tui_dusky_core_manager.py" --restore-all; done'
 
 [Install]
 WantedBy=multi-user.target

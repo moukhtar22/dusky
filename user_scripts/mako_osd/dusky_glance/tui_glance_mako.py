@@ -132,12 +132,15 @@ def build_standard_glance(suffix, label_name, group_name="Modules", expanded=Fal
     
     # Surgical variants directly compiled from the active Mako specification sheet
     width_map = {
-        "": 170, "clock": 170, "clock-short": 120, "stopwatch": 170, "timer": 170, "pomodoro": 170,
+        "": 170, "clock": 170, "clock-short": 120, "stopwatch": 170, "timer": 170, "pomodoro": 170, "alarm": 120,
         "cpu": 100, "cpu-power": 130, "ram": 120, "ram-temp": 160, "zram": 210, "temp": 110,
         "battery": 180, "battery-percent": 100, "battery-watts": 120, "battery-time": 130,
         "gpu-power": 130, "gpu-usage": 100, "gpu-mem": 160,
         "disk": 260, "disk-read": 190, "disk-write": 190, "disk-temp": 100,
-        "network": 190, "uptime": 170, "workspace": 140, "hud": 180, "world-clock": 140
+        "network": 190, "network-down": 110, "network-up": 110, "network-combined": 110,
+        "network-down-session": 100, "network-up-session": 100, "network-session": 100,
+        "network-boot-down": 100, "network-boot-up": 100, "network-boot": 100,
+        "uptime": 170, "workspace": 140, "hud": 180, "world-clock": 140
     }
     
     height_map = {
@@ -150,6 +153,15 @@ def build_standard_glance(suffix, label_name, group_name="Modules", expanded=Fal
     border_size_map = {
         "ram-temp": 0,
         "network": 0,
+        "network-down": 0,
+        "network-up": 0,
+        "network-combined": 0,
+        "network-down-session": 0,
+        "network-up-session": 0,
+        "network-session": 0,
+        "network-boot-down": 0,
+        "network-boot-up": 0,
+        "network-boot": 0,
         "hud": 0
     }
 
@@ -599,6 +611,7 @@ SCHEMA = {
        build_standard_glance("stopwatch", "Stopwatch", "Time") +
        build_standard_glance("timer", "Timer", "Time") +
        build_standard_glance("pomodoro", "Pomodoro", "Time") +
+       build_standard_glance("alarm", "Alarm", "Time") +
        build_standard_glance("world-clock", "World-Clock", "Time"),
 
     # --- TAB 3: Core Hardware ---
@@ -625,6 +638,15 @@ SCHEMA = {
 
     # --- TAB 5: Peripheral Status ---
     5: build_standard_glance("network", "Network", "Status") +
+       build_standard_glance("network-down", "Network-Download", "Status") +
+       build_standard_glance("network-up", "Network-Upload", "Status") +
+       build_standard_glance("network-combined", "Network-Combined", "Status") +
+       build_standard_glance("network-down-session", "Network-Session-Down", "Status") +
+       build_standard_glance("network-up-session", "Network-Session-Up", "Status") +
+       build_standard_glance("network-session", "Network-Session-Total", "Status") +
+       build_standard_glance("network-boot-down", "Network-Boot-Down", "Status") +
+       build_standard_glance("network-boot-up", "Network-Boot-Up", "Status") +
+       build_standard_glance("network-boot", "Network-Boot-Total", "Status") +
        build_standard_glance("uptime", "Uptime", "Status") +
        build_standard_glance("workspace", "Workspace", "Status"),
 

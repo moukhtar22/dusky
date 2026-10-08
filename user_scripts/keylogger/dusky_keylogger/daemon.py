@@ -2,13 +2,13 @@
 
 Wires the evdev KeyListener to SQLite via a dedicated writer thread:
 the asyncio loop never issues a blocking sqlite3 call. Designed to run
-under systemd Type=simple, stopping cleanly on SIGINT/SIGTERM.
+under systemd Type=notify, stopping cleanly on SIGINT/SIGTERM.
 """
 
 import asyncio
-import contextlib
 import json
 import logging
+import math
 import os
 import signal
 import socket
@@ -26,39 +26,22 @@ DEFAULT_FLUSH_INTERVAL = 0.5
 MAX_BUFFER = 256
 
 
+def resolve_path(raw: str | Path) -> Path:
+    """Expand user/environment paths; relative config paths start at HOME."""
+    p = Path(os.path.expandvars(str(raw))).expanduser()
+    return p if p.is_absolute() else Path.home() / p
+
+
 def default_data_dir() -> Path:
-    """Persistent DB directory (survives reboot). Never hardcodes username.
-
-    Priority: env DUSKY_KEYLOGGER_DATA_DIR > config.json data_dir > default.
-    Default is now ~/.config/dusky/settings/keylogger/data (per user request).
-    Legacy ~/.local/share/dusky-keylogger is auto-migrated if present.
-    The directory is auto-created on a fresh install if it doesn't already exist
-    (see KeyStore.init_db / Daemon). Uses Path.home() expansion for ~.
-    """
-    override = os.environ.get("DUSKY_KEYLOGGER_DATA_DIR")
-    if override:
-        p = Path(override).expanduser()
-        return p if p.is_absolute() else Path.home() / p
-    # Try config file (new canonical, fallback old) for data_dir without recursion
-    for cfg_path in (
-        Path.home() / ".config" / "dusky" / "settings" / "keylogger" / "config.json",
-        Path.home() / ".config" / "dusky-keylogger" / "config.json",
-    ):
-        if cfg_path.exists():
-            try:
-                import json as _json
-
-                with cfg_path.open("r", encoding="utf-8") as fh:
-                    data = _json.load(fh)
-                if isinstance(data, dict) and data.get("data_dir"):
-                    raw = str(data["data_dir"]).strip()
-                    if raw:
-                        p = Path(raw).expanduser()
-                        return p if p.is_absolute() else Path.home() / p
-            except Exception:
-                pass
-            break
-    return Path.home() / ".config" / "dusky" / "settings" / "keylogger" / "data"
+    """Resolve env > selected config > default without modifying config."""
+    config = {}
+    try:
+        loaded = json.loads(default_config_path().read_text(encoding="utf-8"))
+        if isinstance(loaded, dict):
+            config = loaded
+    except (OSError, ValueError):
+        pass
+    return get_data_dir(config)
 
 
 def get_data_dir(config: dict | None = None) -> Path:
@@ -66,16 +49,8 @@ def get_data_dir(config: dict | None = None) -> Path:
     if config is None:
         # Avoid recursion: directly check env + config file minimally
         return default_data_dir()
-    # Config passed explicitly (from TUI)
-    env = os.environ.get("DUSKY_KEYLOGGER_DATA_DIR")
-    if env:
-        p = Path(env).expanduser()
-        return p if p.is_absolute() else Path.home() / p
-    raw = str(config.get("data_dir", "") or "").strip()
-    if raw:
-        p = Path(raw).expanduser()
-        return p if p.is_absolute() else Path.home() / p
-    return Path.home() / ".config" / "dusky" / "settings" / "keylogger" / "data"
+    raw = os.environ.get("DUSKY_KEYLOGGER_DATA_DIR") or config.get("data_dir")
+    return resolve_path(raw or "~/.config/dusky/settings/keylogger/data")
 
 
 def default_config_path() -> Path:
@@ -89,10 +64,7 @@ def default_config_path() -> Path:
     """
     env = os.environ.get("DUSKY_KEYLOGGER_CONFIG")
     if env:
-        p = Path(env).expanduser()
-        if not p.is_absolute():
-            p = Path.home() / p
-        return p
+        return resolve_path(env)
     new = Path.home() / ".config" / "dusky" / "settings" / "keylogger" / "config.json"
     old = Path.home() / ".config" / "dusky-keylogger" / "config.json"
     # Fresh install: neither exists -> return new (will be auto-created)
@@ -131,162 +103,55 @@ def load_config(path: Path | None = None) -> dict:
     config = dict(DEFAULT_CONFIG)
     try:
         if cfg_path.exists():
-            # Tighten existing config dir/file perms (privacy) even on read path.
-            try:
-                os.chmod(cfg_path.parent, 0o700)
-            except OSError:
-                pass
-            try:
-                os.chmod(cfg_path, 0o600)
-            except OSError:
-                pass
-            with cfg_path.open("r", encoding="utf-8") as fh:
-                loaded = json.load(fh)
-                if isinstance(loaded, dict):
-                    config.update(loaded)
-                else:
-                    logger.warning("Config %s is not a JSON object -- using defaults", cfg_path)
+            loaded = json.loads(cfg_path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                config.update(loaded)
+            else:
+                logger.warning("Config %s is not a JSON object; using defaults", cfg_path)
         else:
-            cfg_path.parent.mkdir(parents=True, exist_ok=True)
-            try:
-                os.chmod(cfg_path.parent, 0o700)
-            except OSError:
-                pass
-            # Use O_EXCL to avoid clobbering concurrent daemon writes; ignore if exists.
+            cfg_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             try:
                 fd = os.open(cfg_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
                 with os.fdopen(fd, "w", encoding="utf-8") as fh:
                     json.dump(DEFAULT_CONFIG, fh, indent=2)
                     fh.write("\n")
             except FileExistsError:
-                pass
+                # Another process won creation; use its configuration.
+                return load_config(cfg_path)
+        # Existing files are read without backfilling or changing permissions:
+        # readers must not replace a concurrent TUI edit with stale values.
+        if path is None and not os.environ.get("DUSKY_KEYLOGGER_CONFIG") and cfg_path == _old_config_path():
+            new_path = Path.home() / ".config/dusky/settings/keylogger/config.json"
+            new_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             try:
-                os.chmod(cfg_path, 0o600)
-            except OSError:
-                pass
+                fd = os.open(new_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    json.dump(config, fh, indent=2)
+                    fh.write("\n")
+            except FileExistsError:
+                return load_config(new_path)
     except (OSError, ValueError) as exc:
         logger.warning("Could not read config %s: %s", cfg_path, exc)
-    # Clamp flush_interval to sane range to avoid busy-spin or huge latency.
+
     try:
-        fi = float(config.get("flush_interval", DEFAULT_FLUSH_INTERVAL))
-        config["flush_interval"] = max(0.05, min(fi, 5.0))
-    except Exception:
+        fi = float(config["flush_interval"])
+        config["flush_interval"] = max(0.05, min(fi, 5.0)) if math.isfinite(fi) else DEFAULT_FLUSH_INTERVAL
+    except (TypeError, ValueError):
         config["flush_interval"] = DEFAULT_FLUSH_INTERVAL
-    if str(config.get("log_level", "info")).lower() not in {"debug", "info", "warning", "error"}:
-        config["log_level"] = "info"
-    else:
-        config["log_level"] = str(config.get("log_level", "info")).lower()
-
-    # -- transcript_dir: env overrides config for flexibility (no hardcoding user) --
-    env_transcript = os.environ.get("DUSKY_TRANSCRIPT_DIR")
-    if env_transcript:
-        config["transcript_dir"] = env_transcript
-    raw_tdir = str(config.get("transcript_dir", "/tmp") or "/tmp").strip()
-    # Expand ~ and $HOME without hardcoding username; keep /tmp as default even if
-    # user passes empty. Normalize.
-    try:
-        tdir = Path(raw_tdir).expanduser()
-        # If relative, make it relative to $HOME (intuitive for users editing config)
-        if not tdir.is_absolute():
-            tdir = (Path.home() / tdir)
-        # Do NOT resolve strictly; /tmp may be symlink to /var/tmp etc.
-        config["transcript_dir"] = str(tdir)
-    except Exception:
-        config["transcript_dir"] = "/tmp"
-
-    fmt = str(config.get("transcript_format", "text")).lower().strip()
-    if fmt not in {"text", "markdown", "md"}:
-        fmt = "text"
-    if fmt == "md":
-        fmt = "markdown"
-    config["transcript_format"] = fmt
-
-    # Env format override (also flexible)
-    env_fmt = os.environ.get("DUSKY_TRANSCRIPT_FORMAT")
-    if env_fmt:
-        ef = env_fmt.lower().strip()
-        if ef in {"text", "markdown", "md"}:
-            config["transcript_format"] = "markdown" if ef in {"markdown", "md"} else "text"
-
-    # -- data_dir: persistent DB location (env overrides config) --
-    env_data = os.environ.get("DUSKY_KEYLOGGER_DATA_DIR")
-    if env_data:
-        config["data_dir"] = env_data
-    raw_data = str(config.get("data_dir", "~/.config/dusky/settings/keylogger/data") or "~/.config/dusky/settings/keylogger/data").strip()
-    try:
-        ddir = Path(raw_data).expanduser()
-        if not ddir.is_absolute():
-            ddir = Path.home() / ddir
-        config["data_dir"] = str(ddir)
-    except Exception:
-        config["data_dir"] = str(Path.home() / ".config" / "dusky" / "settings" / "keylogger" / "data")
-
-    # Persist auto-migrated keys (e.g., fresh fields after update) without
-    # clobbering user values. Best-effort; failure is non-fatal.
-    try:
-        if cfg_path.exists():
-            with cfg_path.open("r", encoding="utf-8") as fh:
-                on_disk = json.load(fh)
-            if isinstance(on_disk, dict):
-                missing = {k: v for k, v in config.items() if k not in on_disk}
-                # Only persist keys that are part of DEFAULT_CONFIG (avoid
-                # writing env-overridden ephemeral values if env set)
-                persisted_missing = {k: v for k, v in missing.items() if k in DEFAULT_CONFIG}
-                # Don't persist env-override transcript_dir if it came from env
-                if os.environ.get("DUSKY_TRANSCRIPT_DIR") and "transcript_dir" in persisted_missing:
-                    persisted_missing.pop("transcript_dir", None)
-                if os.environ.get("DUSKY_TRANSCRIPT_FORMAT") and "transcript_format" in persisted_missing:
-                    persisted_missing.pop("transcript_format", None)
-                if os.environ.get("DUSKY_KEYLOGGER_DATA_DIR") and "data_dir" in persisted_missing:
-                    persisted_missing.pop("data_dir", None)
-                if persisted_missing:
-                    on_disk.update(persisted_missing)
-                    tmp = cfg_path.with_suffix(".tmp")
-                    tmp.write_text(json.dumps(on_disk, indent=2) + "\n", encoding="utf-8")
-                    tmp.chmod(0o600)
-                    tmp.rename(cfg_path)
-    except Exception:
-        pass
-
-    # Intelligent migration: old path ~/.config/dusky-keylogger/config.json ->
-    # new canonical ~/.config/dusky/settings/keylogger/config.json
-    # Auto-creates the new directory on a fresh install if it doesn't already exist.
-    try:
-        if path is None and not os.environ.get("DUSKY_KEYLOGGER_CONFIG"):
-            new_path = Path.home() / ".config" / "dusky" / "settings" / "keylogger" / "config.json"
-            old_path = _old_config_path()
-            # If we just read from old and new doesn't exist, migrate
-            if cfg_path == old_path and old_path.exists() and not new_path.exists():
-                new_path.parent.mkdir(parents=True, exist_ok=True)
-                try:
-                    os.chmod(new_path.parent, 0o700)
-                    # Also ensure intermediate dusky/settings dirs are 0700 for privacy
-                    for parent in [new_path.parent, new_path.parent.parent, new_path.parent.parent.parent]:
-                        try:
-                            os.chmod(parent, 0o700)
-                        except OSError:
-                            pass
-                except OSError:
-                    pass
-                # Copy with 0600
-                try:
-                    data = old_path.read_text(encoding="utf-8")
-                    tmp = new_path.with_suffix(".tmp")
-                    tmp.write_text(data, encoding="utf-8")
-                    tmp.chmod(0o600)
-                    tmp.rename(new_path)
-                except OSError:
-                    pass
-                # Keep old for backward compat, but future default_config_path will now return new
-                cfg_path = new_path
-    except Exception:
-        pass
-
+    level = str(config["log_level"]).lower()
+    config["log_level"] = level if level in {"debug", "info", "warning", "error"} else "info"
+    for key in ("persistent_enabled", "ephemeral_enabled"):
+        if not isinstance(config[key], bool):
+            logger.warning("%s must be a JSON boolean; using default", key)
+            config[key] = DEFAULT_CONFIG[key]
+    config["data_dir"] = str(get_data_dir(config))
+    config["transcript_dir"] = str(get_transcript_dir(config))
+    config["transcript_format"] = get_transcript_format(config)
     return config
 
 
 def get_transcript_dir(config: dict | None = None) -> Path:
-    """Resolve ephemeral transcript directory (config > env > /tmp).
+    """Resolve transcript directory (env > config > /tmp).
 
     Never hardcodes a username; uses $HOME expansion if relative.
     Auto-creates on first use (caller should mkdir) but this helper just resolves.
@@ -297,10 +162,7 @@ def get_transcript_dir(config: dict | None = None) -> Path:
     env = os.environ.get("DUSKY_TRANSCRIPT_DIR")
     if env:
         raw = env
-    p = Path(raw).expanduser()
-    if not p.is_absolute():
-        p = Path.home() / p
-    return p
+    return resolve_path(raw)
 
 
 def get_transcript_format(config: dict | None = None) -> str:
@@ -366,12 +228,7 @@ def _setup_logging(level: str, data_dir: Path) -> None:
         h._dusky = True  # type: ignore[attr-defined]
     try:
         log_dir = data_dir / "logs"
-        log_dir.mkdir(parents=True, exist_ok=True)
-        try:
-            os.chmod(log_dir, 0o700)
-            os.chmod(data_dir, 0o700)
-        except OSError:
-            pass
+        log_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         from logging.handlers import RotatingFileHandler
 
         file_handler = RotatingFileHandler(
@@ -400,8 +257,8 @@ class Daemon:
         data_dir: str | Path | None = None,
         config: dict | None = None,
     ) -> None:
-        self._data_dir = Path(data_dir) if data_dir else default_data_dir()
         self._config = config if config is not None else load_config()
+        self._data_dir = resolve_path(data_dir) if data_dir else get_data_dir(self._config)
         self._store = KeyStore(self._data_dir / "keys.db")
         self._writer = EventWriter(self._store)
         self._listener: KeyListener | None = None
@@ -411,8 +268,9 @@ class Daemon:
             fi = float(self._config.get("flush_interval", DEFAULT_FLUSH_INTERVAL))
         except Exception:
             fi = DEFAULT_FLUSH_INTERVAL
-        self._flush_interval = max(0.05, min(fi, 5.0))
+        self._flush_interval = max(0.05, min(fi, 5.0)) if math.isfinite(fi) else DEFAULT_FLUSH_INTERVAL
         self._stop = asyncio.Event()
+        self._loop: asyncio.AbstractEventLoop | None = None
         self._started_at = time.monotonic()
 
     def _handle_press(self, press: KeyPress) -> None:
@@ -457,6 +315,8 @@ class Daemon:
                     err = self._writer.last_error
                     if err is not None:
                         logger.error("Writer error: %s", err)
+                    if not self._writer.is_alive:
+                        self._stop.set()
         except asyncio.CancelledError:
             raise
 
@@ -470,94 +330,75 @@ class Daemon:
                 continue
 
     async def run(self) -> None:
+        with self._store.collector_lock() as ownership_fd:
+            await self._run(ownership_fd)
+
+    async def _run(self, ownership_fd: int) -> None:
         _setup_logging(self._config.get("log_level", "info"), self._data_dir)
         self._store.init_db()
-        self._writer.start()
-
-        listener = KeyListener()
-        self._listener = listener
-        listener.on_key = self._handle_press
-        await listener.start()
-
+        self._writer.start(ownership_fd=ownership_fd)
+        listener = None
+        tasks: list[asyncio.Task] = []
         loop = asyncio.get_running_loop()
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            with contextlib.suppress(NotImplementedError):
-                loop.add_signal_handler(sig, self._stop.set)
-
-        flush_task = asyncio.create_task(self._flush_loop(), name="dusky-flush")
-        wd_usec = int(os.environ.get("WATCHDOG_USEC", "0"))
-        wd_task: asyncio.Task | None = None
-        if wd_usec > 0:
-            wd_task = asyncio.create_task(
-                self._watchdog_loop(wd_usec / 2_000_000), name="dusky-watchdog"
-            )
-        sd_notify(f"READY=1\nSTATUS=dusky v{__version__} listening\n")
-        logger.info(
-            "Dusky Keylogger v%s started (data: %s)",
-            __version__,
-            self._store.path,
-        )
+        self._loop = loop
+        registered_signals: list[signal.Signals] = []
         try:
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                loop.add_signal_handler(sig, self._stop.set)
+                registered_signals.append(sig)
+            listener = KeyListener()
+            self._listener = listener
+            listener.on_key = self._handle_press
+            await listener.start()
+            tasks.append(asyncio.create_task(self._flush_loop(), name="dusky-flush"))
+            wd_usec = int(os.environ.get("WATCHDOG_USEC", "0"))
+            if wd_usec > 0:
+                tasks.append(asyncio.create_task(
+                    self._watchdog_loop(wd_usec / 2_000_000), name="dusky-watchdog"
+                ))
+            sd_notify(f"READY=1\nSTATUS=dusky v{__version__} listening\n")
+            logger.info("Dusky Keylogger v%s started (data: %s)", __version__, self._store.path)
             await self._stop.wait()
         finally:
             sd_notify("STOPPING=1\nSTATUS=flushing\n")
-            logger.info("Shutting down...")
-            flush_task.cancel()
-            if wd_task is not None:
-                wd_task.cancel()
-            await asyncio.gather(
-                flush_task, *((wd_task,) if wd_task else ()), return_exceptions=True
-            )
-            await listener.stop()
-            # Flush in-memory buffer to the writer queue first.
-            self._kick_flush()
-            # If queue was saturated, _kick_flush leaves rows in _buffer.
-            # Close the writer first to drain whatever is queued; then
-            # synchronously persist any leftovers that could not be queued.
-            # This avoids two concurrent SQLite writers contending for the
-            # WAL lock during shutdown.
-            self._writer.close(timeout=8.0)
-            if self._buffer:
-                rows, self._buffer = self._buffer, []
+            for task in tasks:
+                task.cancel()
+            try:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            finally:
                 try:
-                    self._store.insert_many(rows)
-                    logger.info("Final synchronous flush: %d rows", len(rows))
-                except Exception:
-                    logger.exception("Final flush failed (%d rows)", len(rows))
-            # Also flush any writer retry that was held due to transient SQLITE_BUSY.
-            # EventWriter.close already attempts to flush _retry, but if the writer
-            # thread hit an error and preserved _retry, try once more synchronously.
-            if self._writer.last_error is not None:
-                logger.error("Writer finished with error: %s", self._writer.last_error)
-                retry = getattr(self._writer, "_retry", [])
-                if retry:
-                    try:
-                        self._store.insert_many(list(retry))
-                        logger.info("Flushed %d retry rows synchronously", len(retry))
-                    except Exception:
-                        logger.exception("Retry flush failed (%d rows)", len(retry))
-            logger.info(
-                "Shutdown complete: %d rows persisted, uptime %.1fs",
-                self._writer.written,
-                time.monotonic() - self._started_at,
-            )
+                    if listener is not None:
+                        await listener.stop()
+                finally:
+                    for sig in registered_signals:
+                        loop.remove_signal_handler(sig)
+                    self._loop = None
+                    self._kick_flush()
+                    # A timed-out worker still owns its connection and retry rows.
+                    # Never start a competing synchronous flush in that case.
+                    closed = await asyncio.to_thread(self._writer.close, timeout=8.0)
+                    if not closed:
+                        raise RuntimeError("SQLite writer did not stop; pending data may be lost")
+                    pending = self._writer.take_pending() + self._buffer
+                    self._buffer = []
+                    final_written = 0
+                    if pending:
+                        final_written = await asyncio.to_thread(self._store.insert_many, pending)
+                    elif self._writer.last_error is not None:
+                        raise RuntimeError("SQLite writer failed") from self._writer.last_error
+                    logger.info(
+                        "Shutdown complete: %d rows persisted, uptime %.1fs",
+                        self._writer.written + final_written,
+                        time.monotonic() - self._started_at,
+                    )
 
     async def stop(self) -> None:
-        # Thread-safe: may be called from signal handler or another thread.
-        loop = asyncio.get_running_loop()
-        if loop.is_running():
-            loop.call_soon_threadsafe(self._stop.set)
-        else:
-            self._stop.set()
+        self.stop_sync()
 
     def stop_sync(self) -> None:
         """Synchronous stop for non-async callers / tests."""
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            self._stop.set()
-            return
-        if loop.is_running():
+        loop = self._loop
+        if loop is not None:
             loop.call_soon_threadsafe(self._stop.set)
         else:
             self._stop.set()

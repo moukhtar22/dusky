@@ -25,14 +25,9 @@ AUTOSTART_DEFAULTS: dict[str, dict[str, Any]] = {
         "default": True
     },
     "autostart/waybar": {
-        "pattern": r'(?:waybar_toggle\.sh|\bwaybar\b)',
+        "pattern": r'waybar_toggle\.sh|["\'\s]waybar(?:["\'\s]|$)',
         "canonical": 'hl.exec_cmd("$HOME/user_scripts/waybar/waybar_toggle.sh")',
         "default": True
-    },
-    "autostart/waybar_timer": {
-        "pattern": r'toggle_timer_waybar\.sh',
-        "canonical": 'hl.exec_cmd("$HOME/user_scripts/waybar/toggle_timer_waybar.sh")',
-        "default": False
     },
     "autostart/nm_applet": {
         "pattern": r'nm-applet',
@@ -87,12 +82,12 @@ AUTOSTART_DEFAULTS: dict[str, dict[str, Any]] = {
 
     # --- Clipboard Services ---
     "autostart/cliphist_text": {
-        "pattern": r'wl-paste\s+--type\s+text\s+--watch\s+cliphist\s+store',
+        "pattern": r'^(?!.*cliphist_db_env).*wl-paste\s+--type\s+text\s+--watch\s+cliphist\s+store',
         "canonical": 'hl.exec_cmd("wl-paste --type text --watch cliphist store")',
         "default": False
     },
     "autostart/cliphist_image": {
-        "pattern": r'wl-paste\s+--type\s+image\s+--watch\s+cliphist\s+store',
+        "pattern": r'^(?!.*cliphist_db_env).*wl-paste\s+--type\s+image\s+--watch\s+cliphist\s+store',
         "canonical": 'hl.exec_cmd("wl-paste --type image --watch cliphist store")',
         "default": False
     },
@@ -206,8 +201,53 @@ AUTOSTART_DEFAULTS: dict[str, dict[str, Any]] = {
         "default": False
     },
     "autostart/glance_network": {
-        "pattern": r'dusky_glance\.sh\s+--network',
+        "pattern": r'dusky_glance\.sh\s+--network(?:["\'\s]|$)',
         "canonical": 'hl.exec_cmd("~/user_scripts/rofi/dusky_glance.sh --network")',
+        "default": False
+    },
+    "autostart/glance_network_down": {
+        "pattern": r'dusky_glance\.sh\s+--network-down(?:["\'\s]|$)',
+        "canonical": 'hl.exec_cmd("~/user_scripts/rofi/dusky_glance.sh --network-down")',
+        "default": False
+    },
+    "autostart/glance_network_up": {
+        "pattern": r'dusky_glance\.sh\s+--network-up(?:["\'\s]|$)',
+        "canonical": 'hl.exec_cmd("~/user_scripts/rofi/dusky_glance.sh --network-up")',
+        "default": False
+    },
+    "autostart/glance_network_combined": {
+        "pattern": r'dusky_glance\.sh\s+--network-combined(?:["\'\s]|$)',
+        "canonical": 'hl.exec_cmd("~/user_scripts/rofi/dusky_glance.sh --network-combined")',
+        "default": False
+    },
+    "autostart/glance_network_down_session": {
+        "pattern": r'dusky_glance\.sh\s+--network-down-session(?:["\'\s]|$)',
+        "canonical": 'hl.exec_cmd("~/user_scripts/rofi/dusky_glance.sh --network-down-session")',
+        "default": False
+    },
+    "autostart/glance_network_up_session": {
+        "pattern": r'dusky_glance\.sh\s+--network-up-session(?:["\'\s]|$)',
+        "canonical": 'hl.exec_cmd("~/user_scripts/rofi/dusky_glance.sh --network-up-session")',
+        "default": False
+    },
+    "autostart/glance_network_session": {
+        "pattern": r'dusky_glance\.sh\s+--network-session(?:["\'\s]|$)',
+        "canonical": 'hl.exec_cmd("~/user_scripts/rofi/dusky_glance.sh --network-session")',
+        "default": False
+    },
+    "autostart/glance_network_boot_down": {
+        "pattern": r'dusky_glance\.sh\s+--network-boot-down(?:["\'\s]|$)',
+        "canonical": 'hl.exec_cmd("~/user_scripts/rofi/dusky_glance.sh --network-boot-down")',
+        "default": False
+    },
+    "autostart/glance_network_boot_up": {
+        "pattern": r'dusky_glance\.sh\s+--network-boot-up(?:["\'\s]|$)',
+        "canonical": 'hl.exec_cmd("~/user_scripts/rofi/dusky_glance.sh --network-boot-up")',
+        "default": False
+    },
+    "autostart/glance_network_boot": {
+        "pattern": r'dusky_glance\.sh\s+--network-boot(?:["\'\s]|$)',
+        "canonical": 'hl.exec_cmd("~/user_scripts/rofi/dusky_glance.sh --network-boot")',
         "default": False
     },
     "autostart/glance_uptime": {
@@ -250,11 +290,6 @@ AUTOSTART_DEFAULTS: dict[str, dict[str, Any]] = {
         "canonical": 'hl.exec_cmd("~/user_scripts/rofi/dusky_glance.sh --disk-temp nvme0n1")',
         "default": False
     },
-    "autostart/glance_zram": {
-        "pattern": r'dusky_glance\.sh\s+--zram',
-        "canonical": 'hl.exec_cmd("~/user_scripts/rofi/dusky_glance.sh --zram")',
-        "default": False
-    },
     "autostart/glance_stopwatch": {
         "pattern": r'dusky_glance\.sh\s+--stopwatch',
         "canonical": 'hl.exec_cmd("~/user_scripts/rofi/dusky_glance.sh --stopwatch")',
@@ -288,8 +323,12 @@ AUTOSTART_DEFAULTS: dict[str, dict[str, Any]] = {
 }
 
 def _is_header_comment(lines: list[str], idx: int) -> bool:
-    """Returns True if the line index is inside top-level doc/syntax header comments."""
-    if idx < 15:
+    """Returns True if the line is part of the top-level doc/syntax header comments."""
+    if idx < 15 and idx < len(lines):
+        # Only comment lines can be header; active code in the first 15
+        # lines must still be honoured (short/test files).
+        if not lines[idx].strip().startswith("--"):
+            return False
         for i in range(min(idx + 1, 15)):
             if "Syntax:" in lines[i] or "USER CONFIGURATION" in lines[i]:
                 return True

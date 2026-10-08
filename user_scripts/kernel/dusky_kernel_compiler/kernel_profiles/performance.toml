@@ -1,0 +1,58 @@
+# Stock upstream kernel; strict target hardware census. See README.md for the workflow.
+
+[meta]
+name = "performance"
+description = "Native CPU tuning for interactive performance; increased power use"
+suffix = "dusky-performance"
+priority = 70
+tags = ["hardware-tailored"]
+
+[cpu]
+governor = "performance"
+epp = "performance"
+mitigations = "off"
+
+[timing]
+preempt = "full"
+
+[memory]
+mglru_min_ttl_ms = 0
+zram_size_pct = 50
+zram_multi_comp = false
+swappiness = 60
+vfs_cache_pressure = 100
+watermark_scale_factor = 50
+dirty_bytes_mb = 256
+numa_balancing = true
+ksm = false
+hugetlbfs = false
+kallsyms_all = false
+tracing = "minimal"
+kexec = false
+
+[compiler]
+debug_info = "none"
+rust = false
+
+[security]
+profile = "extreme"
+init_on_alloc = false
+hardened_usercopy = false
+stackprotector = "regular"
+slab_freelist_hardened = false
+slab_freelist_random = false
+randomize_kstack = false
+ubsan_bounds = false
+acknowledge_risk = true
+
+[gaming]
+max_map_count = 1048576
+
+[storage]
+io_scheduler = "keep"
+
+[power]
+pcie_aspm = "performance"
+
+[network]
+mptcp = false

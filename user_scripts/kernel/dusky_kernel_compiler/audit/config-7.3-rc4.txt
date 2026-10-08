@@ -1,0 +1,16 @@
+── Apply Kconfig matrix ──────────────────────────────────────────────────────────────────────────
+  ✓ Applied 589 Kconfig operations in 3 batched scripts/config invocations
+  12 symbols not offered by this tree were skipped: DEBUG_TIMEKEEPING, HZ_500, HZ_600, HZ_750, LEGACY_VSYSCALL_EMULATE, READ_ONLY_THP_FOR_FS, SCHED_ALT, SCHED_BMQ, SCHED_BORE, SCHED_PDS, SLUB_CPU_PARTIAL, TCP_CONG_RENO
+── Resolve dependencies (olddefconfig) ───────────────────────────────────────────────────────────
+  ✓ .config resolved
+── Verify .config contract ───────────────────────────────────────────────────────────────────────
+  kernel 7.3-rc4 | LOCALVERSION -dusky-battery | HZ 300 | preempt lazy +dynamic
+  scheduler eevdf | sched_ext y | CAS y | BORE absent
+  toolchain llvm | LTO thin | kCFI n | Rust n | BTF y | AutoFDO n
+  memory: THP never | SLUB_TINY n | MGLRU y | ZRAM y multi-comp n | ZSWAP n | DAMON n | LOG_BUF_SHIFT 16 | NR_CPUS 64
+  cpu: native y | X86_64_VERSION absent | mitigations n | amd_pstate mode 3 | NTSYNC m
+  modules: 366 =m, 2209 =y | compress zstd | TRIM_UNUSED_KSYMS n
+  4 soft (dependency-gated) entries differ: THP_SWAP, PAGE_REPORTING, MODULE_SIG, CPU_THERMAL
+  ✓ Contract satisfied: 589 operations verified against the resolved .config
+  ✓ LLD ThinLTO jobs=14, cache=enabled
+KERNELRELEASE 7.3.0-rc4-dusky-battery

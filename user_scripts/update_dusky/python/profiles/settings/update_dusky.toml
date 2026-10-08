@@ -108,6 +108,11 @@ write_reports = true
 # EXECUTION & DISK TUNING
 # ------------------------------------------------------------------------------
 [execution]
+# Optional strict pre-scan of managed .py/.sh files. Disabled by default:
+# subscripts run with their selected interpreter and report their actual exit
+# status. Updater self-update validation remains mandatory and separate.
+validate_subscript_syntax = false
+
 # Minimum required free disk space in megabytes before starting update pipeline
 disk_min_free_mb = 100
 
@@ -119,6 +124,24 @@ db_busy_timeout = 5000
 
 # Default interpreter for extensionless scripts or unmapped file suffixes
 default_interpreter = "bash"
+
+# Maximum wall-clock runtime for a normal task unless the profile overrides it.
+# Four hours is intentionally generous for full bleeding-edge package upgrades/builds.
+default_task_timeout = 14400
+
+# Maximum wall-clock runtime for tasks explicitly marked interactive.
+interactive_task_timeout = 21600
+
+# Delay before an unresolved interactive prompt produces a visible warning.
+# This does not kill the child; the enclosing task timeout remains authoritative.
+prompt_wait_timeout = 900
+
+# Maximum condition-defer passes before the task is reported as deferred/skipped.
+max_defer_passes = 3
+
+# In-memory TUI log limits. Oversized single lines are truncated before enqueue.
+log_max_bytes = 8388608
+log_max_line_bytes = 262144
 
 # Script extension to interpreter binary mapping
 [execution.extension_interpreters]
@@ -225,6 +248,13 @@ clone_timeout = 120
 # Maximum git clone retry attempts on network failures
 clone_max_attempts = 5
 
+# Bound all other Git plumbing commands so a wedged repository helper cannot
+# hold the updater forever. Individual fetch/clone bounds above remain separate.
+command_timeout = 300
+
+# Maximum time allowed for the forensic bare-repository history copy.
+backup_timeout = 900
+
 # Keys stripped from environment during git subprocess invocations to prevent hangs
 env_strip = ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_LITERAL_PATHSPECS", "GIT_ASKPASS", "SSH_ASKPASS"]
 
@@ -241,8 +271,8 @@ GIT_OPTIONAL_LOCKS = "0"
 # AUTOMATED INTERACTIVE PROMPTS
 # ------------------------------------------------------------------------------
 [prompts]
-# Minimum delay in seconds between auto-responding to matching interactive prompt patterns
 cooldown = 0.35
+allow_insecure_password_autofeed = true
 
 [[prompts.rules]]
 name = "sudo_password"
@@ -250,10 +280,32 @@ pattern = "(?i)(\\[sudo\\] password for [^:]+:|^\\s*Password:\\s*$|sudo: a passw
 kind = "password"
 
 [[prompts.rules]]
+name = "pgp_import"
+pattern = "(?i)(::\\s*Import PGP key.*\\?\\s*\\[Y/n\\]|::\\s*Append key\\?.*\\[Y/n\\]|Import PGP key.*\\?\\s*\\[Y/n\\])"
+kind = "yes"
+
+[[prompts.rules]]
 name = "pacman_proceed"
 pattern = "(?i)::\\s*(Proceed with (?:installation|download|upgrade)|Continue (?:installation|download|upgrade)).*\\?\\s*\\[Y/n\\]"
 kind = "yes"
 
+[[prompts.rules]]
+name = "pacman_replace"
+pattern = "(?i)::\\s*Replace\\s+.*\\?\\s*\\[Y/n\\]"
+kind = "yes"
+
+[[prompts.rules]]
+name = "pacman_remove_conflict"
+pattern = "(?i)::\\s*Remove conflicting file.*\\?\\s*\\[Y/n\\]"
+kind = "yes"
+
+[[prompts.rules]]
+name = "aur_proceed"
+pattern = "(?i)(Proceed with installation\\?|Continue building\\?|Continue installing\\?|::\\s*Proceed with (?:installation|download|build).*\\?\\s*\\[Y/n\\])"
+kind = "yes"
+
+# Explicit user policy: answer yes to both default-Yes and default-No generic
+# confirmation prompts. Remove the [y/N]/(y/N) alternatives if that is not desired.
 [[prompts.rules]]
 name = "generic_yes"
 pattern = "(?i)\\[Y/n\\]|\\(Y/n\\)|\\[y/N\\]|\\(y/N\\)"

@@ -8,9 +8,12 @@ import shlex
 import shutil
 import asyncio
 import math
-import copy
 import sys
-import threading
+import signal
+import tempfile
+import logging
+import termios
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, override
 from collections import deque, defaultdict
@@ -20,8 +23,10 @@ from textual import on, events, work
 from textual.message import Message
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Vertical, Horizontal
-from textual.geometry import Size
+from textual.containers import Vertical, Horizontal, VerticalScroll
+from textual.css.query import NoMatches
+from textual.geometry import Size, Region, Offset, Spacing
+from textual.layout import Layout, WidgetPlacement
 from textual.widgets import Label, Input, Tabs, Tab, ContentSwitcher, OptionList, Markdown, Static
 from textual.widgets.option_list import Option, OptionDoesNotExist
 from textual.screen import ModalScreen
@@ -32,6 +37,10 @@ from textual.widget import Widget
 
 from rich.text import Text
 from rich.cells import cell_len
+
+
+LOGGER = logging.getLogger(__name__)
+_TARGET_UNREADABLE = object()
 
 from python.frontend.core_types import (
     ConfigItem,
@@ -55,10 +64,17 @@ _ICON_PENCIL = "\uf040"    # nf-fa-pencil
 _ICON_ARROW  = "\uf061"    # nf-fa-arrow-right
 
 _RE_RGB = re.compile(r"rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)")
-_RE_HSL = re.compile(r"hsla?\(\s*([\d.]+)\s*,\s*([\d.]+)%?\s*,\s*([\d.]+)%?")
-_RE_OKLCH = re.compile(r"oklch\(\s*([\d.]+)\s+([\d.]+)\s+([\d.]+)")
+_COLOR_NUMBER = r"([+-]?(?:\d+(?:\.\d*)?|\.\d+))"
+_RE_HSL = re.compile(rf"hsla?\(\s*{_COLOR_NUMBER}\s*,\s*{_COLOR_NUMBER}%?\s*,\s*{_COLOR_NUMBER}%?")
+_RE_OKLCH = re.compile(rf"oklch\(\s*{_COLOR_NUMBER}(%)?\s+{_COLOR_NUMBER}\s+{_COLOR_NUMBER}")
 _RE_RGBA_ALPHA = re.compile(r"rgba\([^,]+,[^,]+,[^,]+,\s*([0-9.]+)\)")
 _RE_HSLA_ALPHA = re.compile(r"hsla\([^,]+,[^,]+,[^,]+,\s*([0-9.]+)\)")
+
+# Bounded background-action execution (execute_action non-interactive path).
+_ACTION_OUTPUT_LIMIT = 8192
+_ACTION_TIMEOUT = 15.0
+_ACTION_DRAIN_TIMEOUT = 3.0
+_ACTION_KILL_GRACE = 1.0
 
 
 def _md_escape(text: str) -> str:
@@ -86,16 +102,26 @@ class EnginesLoaded(Message):
 # =============================================================================
 # RENDERABLE CACHE & PRESET MATRIX
 # =============================================================================
+@dataclass(frozen=True, slots=True)
+class OptionCacheKey:
+    uid: str
+    kind: str
+    presentation: tuple[Any, ...]
+    state: tuple[Any, ...]
+
+
 class OptionTextCache:
-    __slots__ = ("_maxsize", "_data", "hits", "misses")
+    __slots__ = ("_maxsize", "_data", "_uid_index", "_kind_index", "hits", "misses")
 
     def __init__(self, maxsize: int = 2048) -> None:
         self._maxsize = max(64, maxsize)
-        self._data: dict[tuple, Text] = {}
+        self._data: dict[OptionCacheKey, Text] = {}
+        self._uid_index: defaultdict[str, set[OptionCacheKey]] = defaultdict(set)
+        self._kind_index: defaultdict[str, set[OptionCacheKey]] = defaultdict(set)
         self.hits = 0
         self.misses = 0
 
-    def get(self, key: tuple) -> Text | None:
+    def get(self, key: OptionCacheKey) -> Text | None:
         txt = self._data.pop(key, None)
         if txt is None:
             self.misses += 1
@@ -104,37 +130,55 @@ class OptionTextCache:
         self.hits += 1
         return txt.copy()
 
-    def put(self, key: tuple, txt: Text) -> Text:
+    def put(self, key: OptionCacheKey, txt: Text) -> Text:
         if key in self._data:
-            del self._data[key]
+            self._drop(key)
         elif len(self._data) >= self._maxsize:
-            del self._data[next(iter(self._data))]
+            self._drop(next(iter(self._data)))
         self._data[key] = txt.copy()
+        self._uid_index[key.uid].add(key)
+        self._kind_index[key.kind].add(key)
         return txt
 
-    def invalidate_uid(self, uid: str) -> None:
-        kill = [k for k in self._data if k[0] == uid or (len(k) > 1 and k[1] in ("menu", "preset"))]
-        for k in kill:
-            del self._data[k]
+    def invalidate_uid(self, uid: str, *, include_presets: bool = False) -> None:
+        kill = set(self._uid_index.get(uid, ()))
+        if include_presets:
+            kill.update(self._kind_index.get("preset", ()))
+        for key in kill:
+            self._drop(key)
 
     def invalidate_presets(self) -> None:
-        kill = [k for k in self._data if len(k) > 1 and k[1] == "preset"]
-        for k in kill:
-            del self._data[k]
+        for key in tuple(self._kind_index.get("preset", ())):
+            self._drop(key)
+
+    def _drop(self, key: OptionCacheKey) -> None:
+        self._data.pop(key, None)
+        uid_keys = self._uid_index.get(key.uid)
+        if uid_keys is not None:
+            uid_keys.discard(key)
+            if not uid_keys:
+                self._uid_index.pop(key.uid, None)
+        kind_keys = self._kind_index.get(key.kind)
+        if kind_keys is not None:
+            kind_keys.discard(key)
+            if not kind_keys:
+                self._kind_index.pop(key.kind, None)
 
     def clear(self) -> None:
         self._data.clear()
+        self._uid_index.clear()
+        self._kind_index.clear()
 
 
 class PresetMatchMatrix:
     """
     Structural index built once; current serialized values updated incrementally.
-    ratio() is O(1). on_item_changed is O(affected) via inverted dependency index.
+    ratio() is O(1). Changes update the preset counters directly.
     """
     __slots__ = (
         "_app", "_current", "_exists", "_defaults", "_expected",
         "_all_defaults", "_matches", "_totals", "_preset_uids",
-        "_configurable_uids", "_uid_set", "_item_to_presets"
+        "_configurable_uids", "_uid_set"
     )
 
     def __init__(self, app: Any) -> None:
@@ -149,7 +193,6 @@ class PresetMatchMatrix:
         self._preset_uids: list[str] = []
         self._configurable_uids: list[str] = []
         self._uid_set: set[str] = set()
-        self._item_to_presets: defaultdict[str, set[str]] = defaultdict(set)
 
     def rebuild(self, configurable_items: Any) -> None:
         self._current.clear()
@@ -162,7 +205,6 @@ class PresetMatchMatrix:
         self._preset_uids.clear()
         self._configurable_uids.clear()
         self._uid_set.clear()
-        self._item_to_presets.clear()
 
         items: list[Any] = []
         presets: list[Any] = []
@@ -177,6 +219,10 @@ class PresetMatchMatrix:
 
         for item in items:
             uid = item.uid
+            # A UID is a logical setting.  Duplicate presentations of it must
+            # contribute once to a preset ratio.
+            if uid in self._uid_set:
+                continue
             self._configurable_uids.append(uid)
             self._uid_set.add(uid)
             self._current[uid] = item.serialize(item.value)
@@ -185,6 +231,8 @@ class PresetMatchMatrix:
 
         for p in presets:
             puid = p.uid
+            if puid in self._expected:
+                continue
             self._preset_uids.append(puid)
             payload = p.preset_payload or {}
             all_def = bool(payload.get("__ALL_DEFAULTS__", False))
@@ -194,19 +242,19 @@ class PresetMatchMatrix:
                 if key_path == "__ALL_DEFAULTS__":
                     continue
                 exp[key_path] = self._serialize_payload(key_path, raw)
-                self._item_to_presets[key_path].add(puid)
             self._expected[puid] = exp
-            if all_def:
-                for uid in self._configurable_uids:
-                    self._item_to_presets[uid].add(puid)
             self._recompute_preset(puid)
 
     def ingest_items(self, items: Any) -> None:
         touched = False
+        seen: set[str] = set()
         for it in items:
             if it.type_ in ("preset", "action", "menu"):
                 continue
             uid = it.uid
+            if uid in seen:
+                continue
+            seen.add(uid)
             self._current[uid] = it.serialize(it.value)
             self._defaults[uid] = it.serialize(it.default)
             self._exists[uid] = bool(it.exists_in_target)
@@ -245,7 +293,11 @@ class PresetMatchMatrix:
         self._current[uid] = new_ser
         self._exists[uid] = new_exists
 
-        affected_presets = self._item_to_presets.get(uid) or self._preset_uids
+        # Settings omitted from a payload are matched against their defaults,
+        # so every setting can affect every preset's ratio.
+        affected_presets = self._preset_uids
+        if not old_exists and not new_exists:
+            return
         for puid in affected_presets:
             exp = self._expected_for(puid, uid)
             if old_exists and not new_exists:
@@ -277,25 +329,28 @@ class PresetMatchMatrix:
         return self._matches.get(puid, 0) / total
 
     def _serialize_payload(self, uid: str, raw: Any) -> str:
-        # Canonical index is _items_by_uid (list of duplicates); use first entry's ConfigItem for typing.
+        # Canonical index is _items_by_uid (list of duplicate presentations);
+        # serialize with the default-target presentation when available.
         items_for_uid = getattr(self._app, "_items_by_uid", {}).get(uid)
         if items_for_uid:
             try:
-                # _items_by_uid[uid] is list[(tab_idx, item_idx, ConfigItem)]
-                first = items_for_uid[0]
-                item = first[2] if isinstance(first, tuple) and len(first) == 3 else first
+                # Prefer the canonical/default target when a UID is shown in
+                # several per-target presentations.
+                item = None
+                for candidate in items_for_uid:
+                    candidate_item = candidate[2] if isinstance(candidate, tuple) and len(candidate) == 3 else candidate
+                    try:
+                        if self._app._get_item_engine_info(candidate_item) == self._app.default_engine_key:
+                            item = candidate_item
+                            break
+                    except Exception:
+                        item = item or candidate_item
+                if item is None:
+                    item = items_for_uid[0]
+                    item = item[2] if isinstance(item, tuple) and len(item) == 3 else item
                 return item.serialize(raw)
             except Exception:
                 pass
-        # Legacy fallback – some callers may populate a single-item map
-        single = getattr(self._app, "_item_by_uid", None)
-        if isinstance(single, dict):
-            item2 = single.get(uid)
-            if item2 is not None:
-                try:
-                    return item2.serialize(raw)
-                except Exception:
-                    pass
         match raw:
             case None:
                 return "nil"
@@ -356,8 +411,6 @@ def _oklch_to_rgb(L: float, C: float, H: float) -> tuple[int, int, int]:
 
 
 _RE_HYPR_HEX = re.compile(r"^rgba?\(([0-9a-fA-F]+)\)$")
-_RE_VAR_CSS = re.compile(r"^var\(--([^)]+)\)$")
-_RE_VAR_MAT = re.compile(r"^\{\{([^}]+)\}\}$")
 
 
 @lru_cache(maxsize=1024)
@@ -431,19 +484,23 @@ def color_to_rgb(val: str) -> tuple[int, int, int]:
 
     # Functional rgb/rgba.
     if m_rgb := _RE_RGB.match(val):
-        return (int(m_rgb.group(1)), int(m_rgb.group(2)), int(m_rgb.group(3)))
+        return tuple(min(255, int(component)) for component in m_rgb.groups())
 
     # Functional hsl/hsla.
     if m_hsl := _RE_HSL.match(val):
-        h = float(m_hsl.group(1)) / 360.0
-        s = float(m_hsl.group(2)) / 100.0
-        l_ = float(m_hsl.group(3)) / 100.0
+        h = (float(m_hsl.group(1)) % 360.0) / 360.0
+        s = max(0.0, min(1.0, float(m_hsl.group(2)) / 100.0))
+        l_ = max(0.0, min(1.0, float(m_hsl.group(3)) / 100.0))
         r, g, b = colorsys.hls_to_rgb(h, l_, s)
         return (int(r * 255), int(g * 255), int(b * 255))
 
     # OKLCH.
     if m_oklch := _RE_OKLCH.match(val):
-        r, g, b = _oklch_to_rgb(float(m_oklch.group(1)), float(m_oklch.group(2)), float(m_oklch.group(3)))
+        lightness = float(m_oklch.group(1)) / (100 if m_oklch.group(2) else 1)
+        chroma, hue = float(m_oklch.group(3)), float(m_oklch.group(4))
+        if not all(map(math.isfinite, (lightness, chroma, hue))):
+            return (128, 128, 128)
+        r, g, b = _oklch_to_rgb(max(0.0, min(1.0, lightness)), max(0.0, min(1.0, chroma)), hue % 360)
         return (
             max(0, min(255, int(r))),
             max(0, min(255, int(g))),
@@ -453,6 +510,7 @@ def color_to_rgb(val: str) -> tuple[int, int, int]:
     return KNOWN_COLORS_LOWER.get(val, (128, 128, 128))
 
 
+@lru_cache(maxsize=1024)
 def get_color_name(r: int, g: int, b: int) -> str:
     best_name = "Unknown"
     best_dist = float("inf")
@@ -467,6 +525,7 @@ def get_color_name(r: int, g: int, b: int) -> str:
 
 
 def format_rgb(color_name: str, fmt: str, original_val: str) -> str:
+    original_val = original_val.strip()
     r, g, b = KNOWN_COLORS.get(color_name, (128, 128, 128))
 
     if fmt == "hypr_hex":
@@ -481,6 +540,8 @@ def format_rgb(color_name: str, fmt: str, original_val: str) -> str:
         return f"{prefix}({r:02x}{g:02x}{b:02x}{suffix})"
 
     if fmt == "hex":
+        if len(original_val) == 5 and original_val.startswith("#"):
+            return f"#{r:02x}{g:02x}{b:02x}{original_val[-1] * 2}"
         if len(original_val) == 9 and original_val.startswith("#"):
             return f"#{r:02x}{g:02x}{b:02x}{original_val[7:9]}"
         return f"#{r:02x}{g:02x}{b:02x}"
@@ -540,7 +601,7 @@ def load_matugen_json(file_path: Path) -> dict[str, str] | None:
             if isinstance(data, dict):
                 return data
             return None
-    except (OSError, json.JSONDecodeError):
+    except (OSError, UnicodeError, json.JSONDecodeError):
         return None
 
 
@@ -576,6 +637,7 @@ class ConfirmDialog(ModalScreen[bool]):
         Binding("tab", "nav_next", "Next Option", priority=True),
         Binding("shift+tab", "nav_prev", "Previous Option", priority=True),
         Binding("enter,space", "select_current", "Confirm", priority=True),
+        Binding("y", "dismiss_true", "Confirm", priority=True, show=False),
     ]
 
     selected_index: reactive[int] = reactive(1)
@@ -821,8 +883,6 @@ class UnsavedChangesDialog(ModalScreen[str]):
 class HybridInputScreen(ModalScreen[str | None]):
     BINDINGS = [
         Binding("escape", "dismiss_modal", "Cancel", priority=True),
-        Binding("down,j", "focus_list", "Focus List", priority=True),
-        Binding("up,k", "focus_input", "Focus Input", priority=True),
     ]
 
     def __init__(self, prompt: str, default: str, options: list[Any] | None = None) -> None:
@@ -860,6 +920,55 @@ class HybridInputScreen(ModalScreen[str | None]):
                     ol.highlighted = idx
                     break
 
+    def on_key(self, event: events.Key) -> None:
+        if not self.options:
+            return
+
+        inp = self.query_one(Input)
+        ol = self.query_one(OptionList)
+
+        if inp.has_focus:
+            if event.key == "down":
+                event.stop()
+                ol.focus()
+                if ol.highlighted is None:
+                    ol.highlighted = 0
+                elif ol.highlighted < len(self.options) - 1:
+                    ol.action_cursor_down()
+                if ol.highlighted is not None:
+                    inp.value = str(self.options[ol.highlighted])
+        elif ol.has_focus:
+            if event.key in ("down", "j"):
+                event.stop()
+                if ol.highlighted is None:
+                    ol.highlighted = 0
+                else:
+                    ol.action_cursor_down()
+                if ol.highlighted is not None:
+                    inp.value = str(self.options[ol.highlighted])
+            elif event.key in ("up", "k"):
+                event.stop()
+                if ol.highlighted is None or ol.highlighted <= 0:
+                    inp.focus()
+                else:
+                    ol.action_cursor_up()
+                    if ol.highlighted is not None:
+                        inp.value = str(self.options[ol.highlighted])
+            elif event.key == "enter":
+                event.stop()
+                if ol.highlighted is not None and 0 <= ol.highlighted < len(self.options):
+                    self.dismiss(str(self.options[ol.highlighted]))
+                else:
+                    self.dismiss(inp.value)
+
+    @on(OptionList.OptionHighlighted)
+    def handle_option_highlighted(self, event: OptionList.OptionHighlighted) -> None:
+        if event.option_list.has_focus and self.options and event.option_index is not None and 0 <= event.option_index < len(self.options):
+            val = str(self.options[event.option_index])
+            inp = self.query_one(Input)
+            if inp.value != val:
+                inp.value = val
+
     @on(Input.Submitted)
     def handle_submit(self, event: Input.Submitted) -> None:
         event.stop()
@@ -868,7 +977,10 @@ class HybridInputScreen(ModalScreen[str | None]):
     @on(OptionList.OptionSelected)
     def handle_option_selected(self, event: OptionList.OptionSelected) -> None:
         event.stop()
-        self.dismiss(str(event.option.prompt))
+        if self.options and event.option_index is not None and 0 <= event.option_index < len(self.options):
+            self.dismiss(str(self.options[event.option_index]))
+        else:
+            self.dismiss(str(event.option.prompt))
 
     def action_focus_list(self) -> None:
         if self.options:
@@ -977,8 +1089,8 @@ class PickerScreen(ModalScreen[str | None]):
 class SearchScreen(ModalScreen[tuple[int, int] | None]):
     BINDINGS = [
         Binding("escape", "dismiss_modal", "Cancel", priority=True),
-        Binding("down,j", "cursor_down", "Down", priority=True),
-        Binding("up,k", "cursor_up", "Up", priority=True),
+        Binding("down", "cursor_down", "Down", priority=True),
+        Binding("up", "cursor_up", "Up", priority=True),
         Binding("page_up,ctrl+u", "page_up", "Page Up", priority=True),
         Binding("page_down,ctrl+d", "page_down", "Page Down", priority=True),
     ]
@@ -995,35 +1107,55 @@ class SearchScreen(ModalScreen[tuple[int, int] | None]):
     def on_mount(self) -> None:
         self.query_one(Input).focus()
         self._search_cache = []
+        self._search_timer: Timer | None = None
+        self._last_query = None
 
         for tab_idx, tab_items in self.app.schema.items():
-            tab_name = self.app.tabs[tab_idx] if tab_idx < len(self.app.tabs) else f"Tab {tab_idx}"
+            tab_name = self.app.tabs.get(tab_idx, f"Tab {tab_idx}")
             for item_idx, item in enumerate(tab_items):
-                haystack = f"{tab_name} {item.label} {item.key} {item.type_}".lower().replace(" ", "")
-                self._search_cache.append((tab_idx, item_idx, item, tab_name, haystack))
+                label_norm = item.label.casefold()
+                haystack = f"{tab_name} {item.label} {item.key} {item.type_}".casefold()
+                haystack_compact = "".join(haystack.split())
+                self._search_cache.append(
+                    (tab_idx, item_idx, item, tab_name, label_norm, haystack, haystack_compact)
+                )
 
         self._populate_list("")
 
+    def on_unmount(self) -> None:
+        if self._search_timer is not None:
+            self._search_timer.stop()
+            self._search_timer = None
+
     @on(Input.Changed)
     def handle_input(self, event: Input.Changed) -> None:
-        self._populate_list(event.value)
+        if self._search_timer is not None:
+            self._search_timer.stop()
+        self._search_timer = self.set_timer(
+            0.05,
+            lambda query=event.value: self._populate_list(query),
+        )
 
-    def _populate_list(self, query: str) -> None:
+    def _populate_list(self, query: str, *, force: bool = False) -> None:
+        query_key = query.casefold().strip()
+        if not force and query_key == self._last_query:
+            return
+        self._last_query = query_key
         ol = self.query_one(OptionList)
         ol.clear_options()
         self.results = []
 
-        query_lower = query.lower().strip()
-        query_no_space = query_lower.replace(" ", "")
+        query_lower = query_key
+        query_no_space = "".join(query_key.split())
         scored_results = []
 
-        for tab_idx, item_idx, item, tab_name, haystack in self._search_cache:
+        for tab_idx, item_idx, item, tab_name, label_norm, haystack, haystack_compact in self._search_cache:
             if not query_no_space:
                 scored_results.append((100, tab_idx, item_idx, item, tab_name))
                 continue
 
             score = 0
-            lbl = item.label.lower()
+            lbl = label_norm
 
             if query_lower == lbl:
                 score += 100
@@ -1036,8 +1168,8 @@ class SearchScreen(ModalScreen[tuple[int, int] | None]):
             q_idx, s_idx = 0, 0
             match_positions = []
 
-            while q_idx < len(query_no_space) and s_idx < len(haystack):
-                if query_no_space[q_idx] == haystack[s_idx]:
+            while q_idx < len(query_no_space) and s_idx < len(haystack_compact):
+                if query_no_space[q_idx] == haystack_compact[s_idx]:
                     match_positions.append(s_idx)
                     q_idx += 1
                 s_idx += 1
@@ -1079,6 +1211,11 @@ class SearchScreen(ModalScreen[tuple[int, int] | None]):
     @on(Input.Submitted)
     def on_input_submitted(self, event: Input.Submitted) -> None:
         event.stop()
+
+        if self._search_timer is not None:
+            self._search_timer.stop()
+            self._search_timer = None
+        self._populate_list(event.value, force=True)
 
         ol = self.query_one(OptionList)
         if ol.highlighted is not None and ol.highlighted < len(self.results):
@@ -1227,6 +1364,7 @@ class ShortcutsInfoScreen(ModalScreen[None]):
             ("r", "Reset highlighted item to default"),
             ("R", "Reset entire page to defaults"),
         ]
+        bindings_info.insert(2, ("f5", "Refresh current TUI state"))
 
         for keys, desc in bindings_info:
             txt = Text()
@@ -1272,6 +1410,15 @@ class ConfigOptionList(OptionList):
     _last_click_x: int = 0
     _last_click_button: int = 1
 
+    def watch_highlighted(self, highlighted: int | None) -> None:
+        if getattr(self, "_restoring_options", False):
+            if highlighted is not None and not self.get_option_at_index(highlighted).disabled:
+                option = self.get_option_at_index(highlighted)
+                self._restored_option = option
+                self.post_message(self.OptionHighlighted(self, option, highlighted))
+            return
+        super().watch_highlighted(highlighted)
+
     def action_scroll_top(self) -> None:
         for i in range(self.option_count):
             if not self.get_option_at_index(i).disabled:
@@ -1289,20 +1436,14 @@ class ConfigOptionList(OptionList):
         self._last_click_x = getattr(event, "x", 0)
         self._last_click_button = getattr(event, "button", 1)
 
-        if hasattr(super(), "on_mouse_down"):
-            super().on_mouse_down(event)
-
         self._mouse_down_highlight = self.highlighted
 
     def on_mouse_move(self, event: events.MouseMove) -> None:
-        if hasattr(super(), "on_mouse_move"):
-            super().on_mouse_move(event)
-
         try:
-            line_idx = int(self.scroll_y) + int(event.y)
+            line_idx = event.style.meta.get("option")
             new_tooltip = None
 
-            if 0 <= line_idx < self.option_count:
+            if line_idx is not None and 0 <= line_idx < self.option_count:
                 opt = self.get_option_at_index(line_idx)
                 parsed = self.app._get_item_from_id(opt.id)
 
@@ -1328,29 +1469,13 @@ class ConfigOptionList(OptionList):
             if self.tooltip is not None:
                 self.tooltip = None
 
-    def on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
-        if hasattr(super(), "on_mouse_scroll_down"):
-            super().on_mouse_scroll_down(event)
-        else:
-            self.scroll_down(animate=False)
-
-    def on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
-        if hasattr(super(), "on_mouse_scroll_up"):
-            super().on_mouse_scroll_up(event)
-        else:
-            self.scroll_up(animate=False)
-
     def watch_scroll_y(self, old_value: float, new_value: float) -> None:
-        if hasattr(super(), "watch_scroll_y"):
-            super().watch_scroll_y(old_value, new_value)
+        super().watch_scroll_y(old_value, new_value)
 
         if hasattr(self.app, "_update_scroll_indicators"):
             self.app._update_scroll_indicators()
 
     def watch_max_scroll_y(self, old_value: float, new_value: float) -> None:
-        if hasattr(super(), "watch_max_scroll_y"):
-            super().watch_max_scroll_y(old_value, new_value)
-
         if hasattr(self.app, "_update_scroll_indicators"):
             self.app._update_scroll_indicators()
 
@@ -1402,6 +1527,24 @@ class ScrollIndicator(Label):
         txt.append("▼", style="bold")
 
         self.update(txt)
+
+    def on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
+        try:
+            tab_idx = int(self.id.split("-")[1])
+            ol = self.app.query_one(f"#list-{tab_idx}", ConfigOptionList)
+            ol.scroll_down(animate=False)
+            event.stop()
+        except Exception:
+            pass
+
+    def on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
+        try:
+            tab_idx = int(self.id.split("-")[1])
+            ol = self.app.query_one(f"#list-{tab_idx}", ConfigOptionList)
+            ol.scroll_up(animate=False)
+            event.stop()
+        except Exception:
+            pass
 
     def on_mouse_down(self, event: events.MouseDown) -> None:
         if self._max_scroll_y <= 0:
@@ -1519,7 +1662,7 @@ class ModeButton(Label):
 
         pending = getattr(self.app, "pending_commits", set())
         if not self.app.auto_save and pending:
-            txt.append(f" │ Pending: {len(pending)}", style=self.app.theme_colors["fg"])
+            txt.append(f" │ Pending: {self.app._pending_setting_count()}", style=self.app.theme_colors["fg"])
 
         self.update(txt)
 
@@ -1527,77 +1670,34 @@ class ModeButton(Label):
         await self.app.run_action("toggle_save_mode")
 
 
+class ShortcutFlowLayout(Layout):
+    """Arrange shortcut rows during layout, before the frame is painted."""
+    name = "shortcut_flow"
+
+    def arrange(self, parent, children, size, greedy=True):
+        placements = []
+        x = y = 0
+        for child in children:
+            width = min(size.width, child.get_content_width(size, parent.screen.size)
+                        + child.styles.gutter.width)
+            if x and x + width > size.width:
+                x = 0
+                y += 1
+            placements.append(WidgetPlacement(Region(x, y, width, 1), Offset(), Spacing(), child))
+            x += width
+        return placements
+
+
 class FlowContainer(Widget):
-    def on_mount(self) -> None:
-        self.styles.height = "auto"
-        self.styles.width = "100%"
-        self.call_after_refresh(self.reflow)
+    DEFAULT_CSS = "FlowContainer { height: auto; width: 100%; }"
 
-    def on_resize(self, event: events.Resize) -> None:
-        self.reflow()
+    @property
+    def layout(self):
+        return self._flow_layout
 
-    def reflow(self) -> None:
-        if not self.is_mounted:
-            return
-
-        width = self.size.width
-        if width <= 0:
-            # Width not yet resolved (hidden tab or initial layout).  A
-            # single retry is enough – the next Resize event will reflow
-            # anyway.  Avoid infinite call_after_refresh loops.
-            if not getattr(self, "_reflow_retry_scheduled", False):
-                self._reflow_retry_scheduled = True
-
-                def _retry() -> None:
-                    self._reflow_retry_scheduled = False
-                    self.reflow()
-
-                self.call_after_refresh(_retry)
-            return
-
-        visible_children = []
-
-        for child in self.children:
-            if not child.display:
-                continue
-
-            child.styles.position = "absolute"
-
-            cw = child.size.width
-            if cw <= 0:
-                rendered = child.render()
-                plain = rendered.plain if hasattr(rendered, "plain") else str(rendered)
-                cw = cell_len(plain) + 2
-
-            ch = child.size.height
-            if ch <= 0:
-                ch = 1
-
-            visible_children.append((child, cw, ch))
-
-        if not visible_children:
-            self.styles.height = 0
-            return
-
-        max_item_h = 1
-        for _, _, ch in visible_children:
-            max_item_h = max(max_item_h, ch)
-
-        x_offset = 0
-        y_offset = 0
-        gap = 2
-
-        for child, cw, ch in visible_children:
-            if x_offset + cw > width and x_offset > 0:
-                x_offset = 0
-                y_offset += max_item_h
-
-            child.styles.offset = (x_offset, y_offset)
-            x_offset += cw + gap
-
-        target_height = y_offset + max_item_h
-        if self.styles.height != target_height:
-            self.styles.height = target_height
+    def __init__(self, *args, **kwargs):
+        self._flow_layout = ShortcutFlowLayout()
+        super().__init__(*args, **kwargs)
 
 
 class AppFooter(Vertical):
@@ -1631,12 +1731,6 @@ class AppFooter(Vertical):
             yield Label("", id="pos-counter", classes="pos-counter-btn")
             yield Label("", id="status-bar")
 
-    def on_resize(self, event: events.Resize) -> None:
-        try:
-            self.query_one(FlowContainer).reflow()
-        except Exception:
-            pass
-
     def watch_status_msg(self, new_val: str) -> None:
         try:
             for bar in self.query("#status-bar"):
@@ -1662,6 +1756,7 @@ class TabContainer(Horizontal):
     """
 
     def watch_scroll_x(self, old_value: float, new_value: float) -> None:
+        super().watch_scroll_x(old_value, new_value)
         if hasattr(self.app, "check_tab_overflow"):
             self.app.check_tab_overflow()
 
@@ -1706,92 +1801,169 @@ class CustomRichTabWidget(Static):
     DEFAULT_CSS = """
     CustomRichTabWidget {
         width: 100%;
-        height: 100%;
+        height: auto;
         background: transparent;
         padding: 0 1;
-        overflow-x: auto;
-        overflow-y: auto;
-        scrollbar-size: 1 1;
+        overflow: hidden hidden;
     }
     """
 
     def __init__(
-        self,
-        renderable_or_factory: Any,
-        app_ref: Any = None,
-        refresh_interval: float | None = None,
+        self, renderable_or_factory: Any, app_ref: Any = None,
+        refresh_interval: float | None = None, *, collector=None, prepare=None,
         **kwargs: Any,
     ) -> None:
-        super().__init__(**kwargs)
+        super().__init__(Text("Loading…", style="dim italic"), **kwargs)
         self.renderable_or_factory = renderable_or_factory
         self.app_ref = app_ref
         self.refresh_interval = refresh_interval
+        self.collector = collector
+        self.prepare = prepare
         self._refresh_timer: Timer | None = None
         self._refresh_inflight = False
-
-    def on_mount(self) -> None:
-        self.update_content()
-        if self.display:
-            self._start_timer()
+        self._refresh_task: asyncio.Task | None = None
+        self._refresh_pending = False
+        self._active = False
+        self._dirty = True
+        self._generation = 0
+        self._factory_source = None
+        self._factory_takes_app = False
+        self._last_rendered_repr: str | None = None
+        self._is_unmounted = False
+        self._collected_snapshot = None
 
     def on_unmount(self) -> None:
-        self._stop_timer()
+        self._is_unmounted = True
+        self.set_active(False)
+        if self._refresh_task is not None:
+            self._refresh_task.cancel()
 
-    def on_show(self) -> None:
-        self.update_content()
-        self._start_timer()
+    def set_active(self, active: bool) -> None:
+        if active == self._active:
+            return
+        self._active = active
+        if active:
+            if self._dirty or self.collector is None:
+                self.update_content()
+            self._start_timer()
+        else:
+            self._generation += 1
+            self._stop_timer()
 
-    def on_hide(self) -> None:
-        self._stop_timer()
+    def invalidate_content(self) -> None:
+        """Invalidate a retained snapshot after a model change or explicit refresh."""
+        self._dirty = True
+        self._generation += 1
+        if self._refresh_task is not None:
+            self._refresh_pending = True
 
     def _start_timer(self) -> None:
-        if self._refresh_timer is not None:
-            return
-        interval = self.refresh_interval
-        if interval is not None and interval > 0:
-            self._refresh_timer = self.set_interval(interval, self.update_content)
+        if self._refresh_timer is None and self._active:
+            interval = self.refresh_interval
+            if interval is not None and interval > 0:
+                self._refresh_timer = self.set_interval(interval, self._timer_tick)
 
     def _stop_timer(self) -> None:
         if self._refresh_timer is not None:
             self._refresh_timer.stop()
             self._refresh_timer = None
 
+    def _timer_tick(self) -> None:
+        if self._active and not self._refresh_inflight:
+            self._request_refresh()
+
+    async def _async_refresh(self) -> None:
+        self._refresh_inflight = True
+        try:
+            while self._active and not self._is_unmounted:
+                self._refresh_pending = False
+                generation = self._generation
+                try:
+                    # Wait for engine writes before capturing selection and reading.
+                    async with self.app_ref._save_lock:
+                        if not self._active or generation != self._generation:
+                            continue
+                        prepared = self.prepare(self.app_ref) if self.prepare else None
+                        snapshot = await self.app_ref._run_save_io(self.collector, prepared)
+                    if self._active and generation == self._generation and not self._is_unmounted:
+                        self._collected_snapshot = snapshot
+                        self._apply_rendered_content(self._invoke_factory())
+                        self._dirty = False
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    LOGGER.exception("Custom view collection failed")
+                    if self._active and generation == self._generation and not self._is_unmounted:
+                        self._apply_rendered_content(Text(f"Error rendering custom view: {exc}", style="bold red"))
+                if not self._refresh_pending:
+                    break
+        finally:
+            self._refresh_inflight = False
+            self._refresh_task = None
+
     def _invoke_factory(self) -> Any:
         factory = self.renderable_or_factory
+        if self.collector is not None:
+            return factory(self._collected_snapshot)
         if not callable(factory):
             return factory
 
-        import inspect
-        try:
-            sig = inspect.signature(factory)
-        except (TypeError, ValueError):
+        if factory is not self._factory_source:
+            import inspect
             try:
-                return factory(self.app_ref)
-            except TypeError:
-                return factory()
-
-        required_positional = [
-            p for p in sig.parameters.values()
-            if p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
-            and p.default is inspect.Parameter.empty
-        ]
-
-        if not required_positional:
-            return factory()
-        return factory(self.app_ref)
+                parameters = inspect.signature(factory).parameters.values()
+            except (TypeError, ValueError):
+                self._factory_takes_app = True
+            else:
+                self._factory_takes_app = any(
+                    p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+                    and p.default is inspect.Parameter.empty
+                    for p in parameters
+                )
+            self._factory_source = factory
+        return factory(self.app_ref) if self._factory_takes_app else factory()
 
     def update_content(self) -> None:
-        if self._refresh_inflight:
+        self.invalidate_content()
+        self._request_refresh()
+
+    def _request_refresh(self) -> None:
+        if not self._active or self._is_unmounted:
             return
-        self._refresh_inflight = True
+        self._generation += 1
+        if self.collector is not None:
+            self._refresh_pending = True
+            if self._refresh_task is None:
+                task = self._refresh_task = asyncio.create_task(self._async_refresh())
+                self.app_ref._custom_refresh_tasks.add(task)
+                task.add_done_callback(self.app_ref._custom_refresh_tasks.discard)
+            return
+        # Legacy factories execute on their owning UI thread.
         try:
             res = self._invoke_factory()
             if res is not None:
-                self.update(res)
-        except Exception as e:
-            self.update(Text(f"Error rendering custom view: {e}", style="bold red"))
-        finally:
-            self._refresh_inflight = False
+                self._apply_rendered_content(res)
+                self._dirty = False
+        except Exception as exc:
+            LOGGER.exception("Custom view rendering failed")
+            self._apply_rendered_content(Text(f"Error rendering custom view: {exc}", style="bold red"))
+
+    def _apply_rendered_content(self, res: Any) -> None:
+        if self._is_unmounted:
+            return
+
+        res_repr = repr(res)
+        self._last_rendered_repr = res_repr
+
+        parent = self.parent
+        saved_y = None
+        if isinstance(parent, VerticalScroll):
+            saved_y = parent.scroll_y
+
+        self.update(res)
+
+        if saved_y is not None and isinstance(parent, VerticalScroll) and saved_y > 0:
+            parent.scroll_to(y=saved_y, animate=False, immediate=True)
 
 
 class DuskyTUI(App):
@@ -1826,7 +1998,7 @@ Screen { background: $background; }
 
 .tab-arrow {
     width: 3; height: 1; content-align: center middle;
-    background: $background; color: $primary; text-style: bold; display: none;
+    background: $background; color: $primary; text-style: bold;
 }
 .tab-arrow:hover { color: $foreground; background: $primary 25%; }
 
@@ -1863,13 +2035,18 @@ NoticeBox.-danger { border-left: solid $error; background: $error 10%; }
 NoticeBox.-success { border-left: solid $success; background: $success 10%; }
 
 .list-wrapper { height: 1fr; }
+.custom-view-scroll { height: 1fr; overflow-x: hidden; overflow-y: auto; scrollbar-size: 1 1; }
+.custom-rich-content { height: auto; overflow: hidden hidden; }
+.custom-body { height: 1fr; }
+.custom-body-with-options { height: 2fr; min-height: 3; }
+.custom-options { height: 1fr; min-height: 3; }
 
 ConfigOptionList {
     min-width: 20; width: 1fr; height: 1fr; scrollbar-size: 0 0;
     background: transparent; border: none;
 }
 ConfigOptionList > .option-list--option {
-    padding: 0 1; background: transparent; transition: background 150ms linear;
+    padding: 0 1; background: transparent;
 }
 ConfigOptionList > .option-list--option-hover { background: $primary 10%; }
 ConfigOptionList > .option-list--option-highlighted { background: $primary 20%; }
@@ -2062,6 +2239,7 @@ Tooltip {
         Binding("D", "delete_user_preset", "Delete Preset", priority=False),
         Binding("u", "undo", "Undo", priority=False),
         Binding("ctrl+r", "redo", "Redo", priority=True),
+        Binding("f5", "refresh_state", "Refresh", priority=True, show=False),
         Binding("r", "reset_item", "Reset Item", priority=False),
         Binding("R", "reset_all", "Reset Page", priority=True),
         Binding("?", "toggle_help", "Help", priority=False),
@@ -2097,12 +2275,17 @@ Tooltip {
         global_popup: Any | None = None,
         tab_notices: dict[int, dict | list[dict]] | None = None,
         deferred_load=None,
+        hide_missing_items: bool = False,
         custom_views: dict[int | str, Any] | None = None,
         **kwargs
     ):
         super().__init__(**kwargs)
 
+        self.supports_smooth_scrolling = True
+        self.scroll_sensitivity_y = 2.0
+
         self.deferred_load = deferred_load
+        self.hide_missing_items = hide_missing_items
         self.custom_views = custom_views or {}
         self.engine_pool = engine_pool
         self.default_engine_key = default_engine_key
@@ -2126,6 +2309,9 @@ Tooltip {
             self.tabs = dict(tabs)
         else:
             self.tabs = {0: "General"}
+
+        self._initial_tab = next(iter(self.tabs), None)
+        self.user_presets_tab_idx = self._initial_tab if self._initial_tab is not None else 0
 
         # Route User Presets to their proper schema tab assignment automatically.
         if self.user_presets_tab_name:
@@ -2156,7 +2342,6 @@ Tooltip {
                 self._committed[(t_idx, i_idx)] = clone_value(item.value)
 
         self._save_lock: asyncio.Lock | None = None
-        self._global_save_timer: Timer | None = None
         self._save_queued_during_run = False
 
         self._key_map: dict[str, tuple[int, int]] = {}
@@ -2180,13 +2365,16 @@ Tooltip {
         }
 
         self.last_theme_mtime: float = 0.0
+        self._last_theme_fingerprint = None
         if self.theme_path:
             loaded_theme = load_matugen_json(self.theme_path)
             if loaded_theme:
                 self.theme_colors.update(loaded_theme)
 
             try:
-                self.last_theme_mtime = self.theme_path.stat().st_mtime
+                theme_stat = self.theme_path.stat()
+                self.last_theme_mtime = theme_stat.st_mtime
+                self._last_theme_fingerprint = (theme_stat.st_mtime_ns, theme_stat.st_size, theme_stat.st_ino)
             except OSError:
                 pass
 
@@ -2200,28 +2388,50 @@ Tooltip {
         self.auto_save = (default_mode.lower() == "auto")
 
         # External target modification tracking.
-        self.last_target_mtimes: dict[tuple[str, str], float] = {}
+        self.last_target_mtimes: dict[tuple[str, str], tuple[int, int, int] | None] = {}
         self._initial_target_mtimes_set: bool = False
 
         # Lazy tab population state.
         self._tab_populated: set[int] = set()
         self._tab_dirty: set[int] = set()
+        self._tab_warmup_queue: deque[int] = deque()
+        self._tab_warmup_queued: set[int] = set()
+        self._tab_warmup_scheduled = False
 
         # Schema indexes.
         self._items_by_uid: dict[str, list[tuple[int, int, ConfigItem]]] = {}
+        self._item_refs: dict[int, tuple[int, int]] = {}
         self._items_by_engine: dict[tuple[str, str], list[tuple[int, int, ConfigItem]]] = {}
+        self._children_by_parent: defaultdict[tuple[int, str], list[ConfigItem]] = defaultdict(list)
         self._configurable_items: list[tuple[int, int, ConfigItem]] = []
         self._preset_items: list[tuple[int, int, ConfigItem]] = []
 
         # Async save / stale-write protection.
         self._write_generation: dict[str, int] = {}
+        self._active_save_count = 0
+        self._save_tasks: set[asyncio.Task[Any]] = set()
+        self._save_task_keys: dict[asyncio.Task[Any], set[str]] = {}
+        self._save_auth_pending = 0
+        self._save_failure_pending = False
+        self._quit_after_save = False
         # _save_lock is already declared above (line ~2005); do not re-declare.
         self._sudo_keepalive: Timer | None = None
+
+        # Background (non-interactive) action execution tracking.
+        self._action_tasks: set[asyncio.Task[Any]] = set()
+        self._action_procs: set[Any] = set()
+        self._action_cleanup_tasks: set[asyncio.Task[Any]] = set()
+        self._action_shutdown_started = False
+        self._action_shutdown_done = False
+        self._action_shutdown_lock: asyncio.Lock | None = None
 
         # Color variable registry.
         self._color_var_registry: dict[str, str] = {}
         self._color_var_counter: int = 1
+        self._deferred_started = False
 
+        self._engine_info_cache: dict[tuple[str | None, str | None], tuple[str, str]] = {}
+        self._init_boot_state()
         self._rebuild_indexes()
 
     # =========================================================================
@@ -2236,44 +2446,52 @@ Tooltip {
                 self.screen.dismiss(None)
             return
 
-        if self._sudo_keepalive:
-            self._sudo_keepalive.stop()
-            self._sudo_keepalive = None
+        if self._quit_after_save:
+            return
 
         # BATCH mode: don't silently throw away queued writes.
-        if not self.auto_save and self.pending_commits:
+        if self.pending_commits and not self._save_tasks and not self._save_auth_pending and (not self.auto_save or not self._save_timers):
             def on_reply(reply: str) -> None:
                 if reply == "save":
-                    def on_quit_save(success: bool):
-                        if success:
-                            self.exit()
-
-                    self.action_save_batch(on_complete=on_quit_save)
+                    self._quit_after_save = True
+                    # Textual invokes the result callback before popping the
+                    # modal. Save on the next message-pump turn, once the
+                    # dialog is gone and modal guards allow the write.
+                    self.call_later(self.action_save_batch)
 
                 elif reply == "discard":
+                    try:
+                        self._cancel_background_actions()
+                    except Exception:
+                        pass
                     self.exit()
 
-            self.push_screen(UnsavedChangesDialog(len(self.pending_commits)), on_reply)
+            self.push_screen(UnsavedChangesDialog(self._pending_setting_count()), on_reply)
             return
 
         # AUTO mode: flush debounced writes safely.
         if self.auto_save and self._save_timers:
             for (ti, ii), timer in list(self._save_timers.items()):
                 timer.stop()
+                self._bump_write_generation_for_item(self.schema[ti][ii])
                 self.pending_commits.add((ti, ii))
 
             self._save_timers.clear()
             self._pending_autosave_args.clear()
 
-            def on_auto_quit_save(success: bool):
-                if success:
-                    self.exit()
-                else:
-                    self.notify_status("Quit aborted: Could not save final changes.", level="warning")
-
-            self.action_save_batch(on_complete=on_auto_quit_save)
+            self._quit_after_save = True
+            self.action_save_batch()
             return
 
+        if self._save_tasks or self._save_auth_pending:
+            self._quit_after_save = True
+            self.notify_status("Waiting for the current save to finish.", level="info")
+            return
+
+        try:
+            self._cancel_background_actions()
+        except Exception:
+            pass
         self.exit()
 
     def _modal_active(self) -> bool:
@@ -2285,6 +2503,71 @@ Tooltip {
     # =========================================================================
     # COMPOSE
     # =========================================================================
+    def _custom_spec(self, tab_idx: int) -> Any:
+        spec = self.custom_views.get(tab_idx)
+        return self.custom_views.get(self.tabs.get(tab_idx)) if spec is None else spec
+
+    def _custom_body_widgets(self, tab_idx: int) -> list[Widget]:
+        spec = self._custom_spec(tab_idx)
+        settings = spec if isinstance(spec, dict) and "view" in spec else {}
+        view = settings.get("view", spec)
+        if isinstance(view, type) and issubclass(view, Widget):
+            return [view()]
+        if isinstance(view, Widget):
+            return [view]
+        rich_widget = CustomRichTabWidget(
+            view, app_ref=self, refresh_interval=settings.get("interval"),
+            collector=settings.get("collect"), prepare=settings.get("prepare"),
+            classes="custom-rich-content", id=f"custom-view-{tab_idx}",
+        )
+        rich_widget.can_focus = False
+        return [VerticalScroll(rich_widget, classes="custom-view-scroll", id=f"custom-scroll-{tab_idx}")]
+
+    def _notice_widgets(self, tab_idx: int, *, bottom: bool = False) -> list[Widget]:
+        notices = self.tab_notices.get(tab_idx, [])
+        if isinstance(notices, dict):
+            notices = [notices]
+        return [NoticeBox(notice.get("message", ""), level=notice.get("level", "info"),
+                          id=f"notice-{tab_idx}-{index}" + ("-bot" if bottom else ""))
+                for index, notice in enumerate(notices)
+                if (notice.get("position", "top") == "bottom") == bottom]
+
+    async def _ensure_custom_body(self, tab_idx: int) -> None:
+        if self._custom_spec(tab_idx) is None or tab_idx in self._mounted_tabs:
+            return
+        task = self._custom_mount_tasks.get(tab_idx)
+        if task is None:
+            async def mount_body():
+                nodes = []
+                try:
+                    host = self.query_one(f"#custom-body-{tab_idx}")
+                    body = self._custom_body_widgets(tab_idx)
+                    nodes.extend(body)
+                    await host.mount(*body)
+                    pane = self.query_one(f"#tab-{tab_idx}")
+                    if top := self._notice_widgets(tab_idx):
+                        nodes.extend(top)
+                        await pane.mount(*top, before=host)
+                    if bottom := self._notice_widgets(tab_idx, bottom=True):
+                        nodes.extend(bottom)
+                        await pane.mount(*bottom)
+                    self._mounted_tabs.add(tab_idx)
+                except BaseException:
+                    for node in nodes:
+                        if node.parent is not None:
+                            await node.remove()
+                    raise
+                finally:
+                    self._custom_mount_tasks.pop(tab_idx, None)
+            task = self._custom_mount_tasks[tab_idx] = asyncio.create_task(mount_body())
+        await asyncio.shield(task)
+
+    def _activate_custom_views(self) -> None:
+        current = self._current_tab_index()
+        for tab_idx in self._mounted_tabs:
+            for view in self.query_one(f"#custom-body-{tab_idx}").query(CustomRichTabWidget):
+                view.set_active(tab_idx == current and self._engines_for_tab(tab_idx).issubset(self._loaded_engines))
+
     def compose(self) -> ComposeResult:
         with Vertical(id="main-box"):
             with Horizontal(id="tab-bar"):
@@ -2302,55 +2585,29 @@ Tooltip {
             yield Label("", id="telemetry-banner")
 
             with Horizontal(id="content-area"):
-                with ContentSwitcher(initial="tab-0", id="content-switcher"):
+                with ContentSwitcher(initial=f"tab-{self._initial_tab}" if self._initial_tab is not None else None, id="content-switcher"):
                     for i, name in self.tabs.items():
                         with Vertical(id=f"tab-{i}"):
-                            tab_notices = self.tab_notices.get(i)
+                            custom_view = self._custom_spec(i)
+                            eager_notices = custom_view is None or i == self._initial_tab
+                            if eager_notices:
+                                yield from self._notice_widgets(i)
 
-                            if tab_notices:
-                                if isinstance(tab_notices, dict):
-                                    tab_notices = [tab_notices]
-
-                                for n_idx, tab_notice in enumerate(tab_notices):
-                                    if tab_notice.get("position", "top") != "bottom":
-                                        level = tab_notice.get("level", "info")
-                                        message = tab_notice.get("message", "")
-                                        yield NoticeBox(message, level=level, id=f"notice-{i}-{n_idx}")
-
-                            custom_view = self.custom_views.get(i)
-                            if custom_view is None:
-                                custom_view = self.custom_views.get(name)
-
+                            settings = custom_view if isinstance(custom_view, dict) else {}
                             if custom_view is not None:
-                                refresh_interval = None
-                                if isinstance(custom_view, dict) and "view" in custom_view:
-                                    refresh_interval = custom_view.get("interval")
-                                    custom_view = custom_view["view"]
-
-                                if isinstance(custom_view, type) and issubclass(custom_view, Widget):
-                                    yield custom_view()
-                                elif isinstance(custom_view, Widget):
-                                    yield custom_view
-                                else:
-                                    yield CustomRichTabWidget(
-                                        renderable_or_factory=custom_view,
-                                        app_ref=self,
-                                        refresh_interval=refresh_interval,
-                                        id=f"custom-view-{i}"
-                                    )
-                            else:
-                                with Horizontal(classes="list-wrapper"):
+                                initial = i == self._initial_tab
+                                body = self._custom_body_widgets(i) if initial else []
+                                if initial:
+                                    self._mounted_tabs.add(i)
+                                yield Vertical(*body, id=f"custom-body-{i}", classes="custom-body-with-options" if settings.get("show_options") else "custom-body")
+                            if custom_view is None or settings.get("show_options", False):
+                                with Horizontal(classes="list-wrapper custom-options" if custom_view is not None else "list-wrapper"):
                                     yield ConfigOptionList(id=f"list-{i}")
-
                                     with Vertical(classes="indicator-column"):
                                         yield ScrollIndicator("", id=f"indicator-{i}")
 
-                            if tab_notices:
-                                for n_idx, tab_notice in enumerate(tab_notices):
-                                    if tab_notice.get("position", "top") == "bottom":
-                                        level = tab_notice.get("level", "info")
-                                        message = tab_notice.get("message", "")
-                                        yield NoticeBox(message, level=level, id=f"notice-{i}-{n_idx}-bot")
+                            if eager_notices:
+                                yield from self._notice_widgets(i, bottom=True)
 
                 with Vertical(id="help-panel"):
                     yield Markdown("Select an item to view documentation.", id="help-markdown")
@@ -2365,10 +2622,27 @@ Tooltip {
     def _sync_pending(self, tab_idx: int, item_idx: int, item: ConfigItem) -> None:
         key = (tab_idx, item_idx)
         baseline = self._committed.get(key, item.default)
-        if item.value == baseline:
+        if (
+            item.serialize(item.value) == item.serialize(baseline)
+            and not is_trigger_item(item)
+            and not self._active_save_count
+        ):
             self.pending_commits.discard(key)
         else:
             self.pending_commits.add(key)
+
+    def _pending_setting_count(self) -> int:
+        """Count settings once even when they appear in several tabs."""
+        return len({
+            self._uid_engine_key(item)
+            for tab_idx, item_idx in self.pending_commits
+            if (item := self._get_schema_item(tab_idx, item_idx)) is not None
+        })
+
+    def _item_is_pending(self, item: ConfigItem) -> bool:
+        ref = self._item_refs.get(id(item))
+        baseline = self._committed.get(ref, item.initial_value)
+        return item.serialize(item.value) != item.serialize(baseline)
 
     def _current_tab_index(self) -> int | None:
         try:
@@ -2381,7 +2655,10 @@ Tooltip {
 
     def _on_item_value_changed(self, item: ConfigItem) -> None:
         if hasattr(self, "_option_cache"):
-            self._option_cache.invalidate_uid(item.uid)
+            self._option_cache.invalidate_uid(
+                item.uid,
+                include_presets=item.type_ not in ("preset", "action", "menu"),
+            )
         if item.type_ not in ("preset", "action", "menu"):
             # Preset matching is global-only: per-file overrides (e.g. per-game GPU) should NOT
             # pollute the global preset ratio. Only default-engine items participate.
@@ -2392,17 +2669,30 @@ Tooltip {
             except Exception:
                 if hasattr(self, "_preset_matrix"):
                     self._preset_matrix.on_item_changed(item)
-            if hasattr(self, "_option_cache"):
-                self._option_cache.invalidate_presets()
         self._schema_dirty_counter += 1
         cur = self._current_tab_index()
         if cur is not None:
             self._tab_dirty.add(cur)
 
+    def _has_pending_save_for_key(self, uek: str) -> bool:
+        for item, _value, _old in getattr(self, "_pending_autosave_args", {}).values():
+            if self._uid_engine_key(item) == uek:
+                return True
+        for tab_idx, item_idx in getattr(self, "pending_commits", set()):
+            item = self._get_schema_item(tab_idx, item_idx)
+            if item is not None and self._uid_engine_key(item) == uek:
+                return True
+        return any(uek in keys for keys in getattr(self, "_save_task_keys", {}).values())
+
     def _get_item_engine_info(self, item: ConfigItem) -> tuple[str, str]:
         """
         Resolves target engine and file config dynamically via overrides.
         """
+        overrides = (item.engine_type_override, item.target_file_override)
+        if overrides == (None, None):
+            return self.default_engine_key
+        if cached := self._engine_info_cache.get(overrides):
+            return cached
         e_type = (
             item.engine_type_override.lower()
             if item.engine_type_override
@@ -2415,11 +2705,14 @@ Tooltip {
             else self.default_engine_key[1]
         )
 
-        return (e_type, t_file)
+        result = (e_type, t_file)
+        self._engine_info_cache[overrides] = result
+        return result
 
     def _uid_engine_key(self, item: ConfigItem) -> str:
         """Composite key for per-file isolation: UID + engine."""
-        return f"{self._get_item_uid(item)}@@{self._get_item_engine_info(item)[0]}@@{self._get_item_engine_info(item)[1]}"
+        engine_type, target_file = self._get_item_engine_info(item)
+        return f"{item.uid}@@{engine_type}@@{target_file}"
 
     def _get_engine_for_item(self, item: ConfigItem) -> BaseEngine:
         key = self._get_item_engine_info(item)
@@ -2476,18 +2769,25 @@ Tooltip {
     # SCHEMA INDEXES
     # =========================================================================
     def _rebuild_indexes(self) -> None:
+        self._engine_info_cache.clear()
         self._key_map.clear()
         self._items_by_uid.clear()
+        self._item_refs.clear()
         self._items_by_engine.clear()
+        self._children_by_parent.clear()
         self._configurable_items.clear()
         self._preset_items.clear()
 
         for t_idx, items in self.schema.items():
             for i_idx, item in enumerate(items):
+                self._item_refs[id(item)] = (t_idx, i_idx)
                 uid = self._get_item_uid(item)
 
                 self._key_map[uid] = (t_idx, i_idx)
                 self._items_by_uid.setdefault(uid, []).append((t_idx, i_idx, item))
+
+                if item.parent_ref:
+                    self._children_by_parent[(t_idx, str(item.parent_ref))].append(item)
 
                 try:
                     ekey = self._get_item_engine_info(item)
@@ -2496,7 +2796,7 @@ Tooltip {
 
                 self._items_by_engine.setdefault(ekey, []).append((t_idx, i_idx, item))
 
-                if item.type_ not in ("action", "preset", "menu"):
+                if item.type_ not in ("action", "preset", "menu") and not item.read_only:
                     self._configurable_items.append((t_idx, i_idx, item))
 
                 if item.type_ == "preset":
@@ -2547,10 +2847,8 @@ Tooltip {
         if parent_item.type_ not in ("menu", "action", "preset"):
             v_ser = parent_item.serialize(parent_item.value)
             d_ser = parent_item.serialize(parent_item.default)
-            init_val = parent_item.initial_value if getattr(parent_item, "initial_value", None) is not None else parent_item.value
-            i_ser = parent_item.serialize(init_val)
             parent_modified = (v_ser != d_ser)
-            parent_pending = (v_ser != i_ser)
+            parent_pending = self._item_is_pending(parent_item)
 
         parent_key = parent_item.key
         parent_uid = self._get_item_uid(parent_item)
@@ -2558,47 +2856,40 @@ Tooltip {
         if tab_idx is None:
             tab_idx = self._current_tab_index()
 
-        items_in_tab = self.schema.get(tab_idx, [])
-
-        child_uids = set()
-        child_keys = set()
-        stack = []
-        if parent_key:
-            stack.append(parent_key)
-        if parent_uid:
-            stack.append(parent_uid)
-
-        while stack:
-            curr = stack.pop()
-            for itm in items_in_tab:
-                p_ref = getattr(itm, "parent_ref", None)
-                if p_ref and p_ref == curr:
-                    u = self._get_item_uid(itm)
-                    if u not in child_uids:
-                        child_uids.add(u)
-                        child_keys.add(itm.key)
-                        if getattr(itm, "is_parent", False) or getattr(itm, "type_", None) == "menu":
-                            if itm.key:
-                                stack.append(itm.key)
-                            stack.append(u)
+        seen_items: set[int] = set()
+        stack = [ref for ref in (parent_key, parent_uid) if ref]
 
         any_modified = parent_modified
         any_pending = parent_pending
 
-        for itm in items_in_tab:
-            if (itm.key in child_keys or self._get_item_uid(itm) in child_uids) and itm.type_ not in ("menu", "action", "preset"):
-                v_ser = itm.serialize(itm.value)
-                d_ser = itm.serialize(itm.default)
-                init_val = itm.initial_value if getattr(itm, "initial_value", None) is not None else itm.value
-                i_ser = itm.serialize(init_val)
+        def _settled() -> bool:
+            return any_modified and (any_pending or self.auto_save)
 
-                if v_ser != d_ser:
-                    any_modified = True
-                if v_ser != i_ser:
-                    any_pending = True
+        if _settled():
+            return any_modified, any_pending
 
-                if any_modified and (any_pending or self.auto_save):
-                    break
+        while stack:
+            curr = str(stack.pop())
+            for itm in self._children_by_parent.get((tab_idx, curr), ()):
+                marker = id(itm)
+                if marker in seen_items:
+                    continue
+                seen_items.add(marker)
+                if itm.type_ not in ("menu", "action", "preset"):
+                    v_ser = itm.serialize(itm.value)
+                    d_ser = itm.serialize(itm.default)
+
+                    if v_ser != d_ser:
+                        any_modified = True
+                    if self._item_is_pending(itm):
+                        any_pending = True
+
+                    if _settled():
+                        return any_modified, any_pending
+                if getattr(itm, "is_parent", False) or getattr(itm, "type_", None) == "menu":
+                    if itm.key:
+                        stack.append(itm.key)
+                    stack.append(self._get_item_uid(itm))
 
         return any_modified, any_pending
 
@@ -2613,31 +2904,44 @@ Tooltip {
         tab_idx: int | None = None
     ) -> Text:
         val_ser = item.serialize(item.value)
-        init_val = item.initial_value if getattr(item, "initial_value", None) is not None else item.value
-        init_ser = item.serialize(init_val)
         def_ser = item.serialize(item.default)
         ratio_bucket = int(self._get_preset_match_ratio(item) * 10) if item.type_ == "preset" else -1
 
         if item.is_parent or item.type_ == "menu":
             is_modified, is_pending = self._get_parent_children_status(item, tab_idx)
         else:
-            is_pending = (val_ser != init_ser)
+            is_pending = self._item_is_pending(item)
             is_modified = (val_ser != def_ser)
 
-        cache_key = (
-            item.uid,
-            item.type_,
-            val_ser,
-            item.exists_in_target,
-            is_pending,
-            is_modified,
-            is_highlighted,
-            indent_prefix,
-            item.expanded,
-            bool(item.warning_msg),
-            item.is_parent,
-            ratio_bucket,
-            getattr(self, "_theme_version", 0)
+        try:
+            engine_identity = self._get_item_engine_info(item)
+        except Exception:
+            engine_identity = self.default_engine_key
+        cache_key = OptionCacheKey(
+            uid=item.uid,
+            kind=item.type_,
+            presentation=(
+                tab_idx,
+                item.key,
+                item.label,
+                tuple(item.options or ()),
+                tuple(item.hints or ()),
+                engine_identity,
+            ),
+            state=(
+                val_ser,
+                item.exists_in_target,
+                is_pending,
+                is_modified,
+                is_highlighted,
+                indent_prefix,
+                item.expanded,
+                bool(item.warning_msg),
+                item.is_parent,
+                ratio_bucket,
+                self.auto_save,
+                getattr(self, "_theme_version", 0),
+            ),
         )
 
         if hasattr(self, "_option_cache"):
@@ -2732,7 +3036,9 @@ Tooltip {
         val_str = str(item.value)
 
         # Tail rendering.
-        if item.type_ in ("action", "preset", "menu"):
+        if item.read_only:
+            txt.append("Read only", style=self.theme_colors["muted"])
+        elif item.type_ in ("action", "preset", "menu"):
             if item.type_ == "preset":
                 if is_active_preset:
                     txt.append("󰄬 Active", style=f"bold {self.theme_colors['success']}")
@@ -2810,10 +3116,11 @@ Tooltip {
                     r, g, b = color_to_rgb(resolved_color)
                     hex_color = f"#{r:02x}{g:02x}{b:02x}"
 
-                    if not is_theme_variable(val_str):
+                    is_variable = is_theme_variable(val_str)
+                    if not is_variable:
                         txt.append("⬤ ", style=hex_color if exists else self.theme_colors["muted"])
 
-                    if is_theme_variable(val_str):
+                    if is_variable:
                         display_name = None
 
                         # Map to schema hints if possible.
@@ -2896,19 +3203,7 @@ Tooltip {
             return self._option_cache.put(cache_key, txt)
         return txt
 
-    def _intern_styles(self) -> None:
-        c = getattr(self, "theme_colors", {})
-        self._style = {
-            "cursor_hl": f"{c.get('accent', '#a8c8ff')} bold",
-            "cursor": "",
-            "muted": c.get("muted", "#43474e"),
-            "accent_bold": f"{c.get('accent', '#a8c8ff')} bold",
-            "fg": c.get("fg", "#e1e2e9"),
-            "fg_bold": f"{c.get('fg', '#e1e2e9')} bold",
-            "success": c.get("success", "#dbbce1"),
-            "warning": c.get("warning", "#bdc7dc"),
-            "error": c.get("error", "#ffb4ab"),
-        }
+    def _invalidate_theme_cache(self) -> None:
         self._theme_version = getattr(self, "_theme_version", 0) + 1
         if hasattr(self, "_option_cache"):
             self._option_cache.clear()
@@ -2916,11 +3211,36 @@ Tooltip {
     # =========================================================================
     # USER PRESETS
     # =========================================================================
-    def _load_user_presets(self) -> None:
+    def _read_user_presets(self) -> list[tuple[str, dict[str, Any], str | None]]:
         if not self.enable_user_presets:
-            return
+            return []
 
         self.user_presets_dir.mkdir(parents=True, exist_ok=True)
+        records: list[tuple[str, dict[str, Any], str | None]] = []
+        for file_path in sorted(
+            (p for p in self.user_presets_dir.iterdir() if p.name.endswith(".json")),
+            key=lambda p: p.stem.lower(),
+        ):
+            name = file_path.stem
+            warning = None
+            try:
+                with file_path.open("r", encoding="utf-8") as stream:
+                    payload = json.load(stream)
+                if not isinstance(payload, dict):
+                    payload = {"__INVALID__": True, "__ERROR__": "Expected JSON object"}
+                    warning = "Invalid preset payload: expected JSON object"
+            except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+                payload = {"__INVALID__": True, "__ERROR__": str(exc)}
+                warning = f"Unable to read preset: {exc}"
+            records.append((name, payload, warning))
+        return records
+
+    def _apply_user_presets(
+        self,
+        preset_records: list[tuple[str, dict[str, Any], str | None]],
+    ) -> None:
+        if not self.enable_user_presets:
+            return
 
         # Remove dynamically added User Presets from previous loads.
         for t_idx, items in self.schema.items():
@@ -2977,22 +3297,7 @@ Tooltip {
 
         user_preset_items = [reset_btn, save_btn, import_btn]
 
-        for file_path in sorted(self.user_presets_dir.glob("*.json"), key=lambda p: p.stem.lower()):
-            name = file_path.stem
-            warning = None
-
-            try:
-                with open(file_path, "r", encoding="utf-8") as f:
-                    payload = json.load(f)
-
-                if not isinstance(payload, dict):
-                    payload = {"__INVALID__": True, "__ERROR__": "Expected JSON object"}
-                    warning = "Invalid preset payload: expected JSON object"
-
-            except Exception as e:
-                payload = {"__INVALID__": True, "__ERROR__": str(e)}
-                warning = "Invalid preset JSON file"
-
+        for name, payload, warning in preset_records:
             new_item = ConfigItem(
                 label=f"User: {name}",
                 key=f"__user_preset_{name}",
@@ -3016,6 +3321,10 @@ Tooltip {
 
         self.schema[self.user_presets_tab_idx].extend(user_preset_items)
         self._schema_dirty_counter += 1
+
+    def _load_user_presets(self) -> None:
+        """Synchronous compatibility wrapper for already UI-bound callers."""
+        self._apply_user_presets(self._read_user_presets())
 
     # =========================================================================
     # EXTERNAL EDITING
@@ -3058,15 +3367,44 @@ Tooltip {
                 else:
                     self.notify_status("No suitable external editor found (xdg-open or mousepad).", level="warning")
 
-            elif button == 3:
-                editor_env = os.environ.get("VISUAL", os.environ.get("EDITOR", "nano"))
-                editor_cmd = shlex.split(editor_env)
-
-                with self.suspend():
-                    subprocess.run([*editor_cmd, str(expanded_path)])
+                self.run_suspended_interactive([*editor_cmd, str(expanded_path)])
 
         except (FileNotFoundError, OSError):
             self.notify_status("Error resolving path or launching external editor.", level="error")
+
+    def run_suspended_interactive(self, cmd: list[str] | str, shell: bool = False) -> subprocess.CompletedProcess:
+        """
+        Runs an interactive CLI application (editor, curses tool, fzf, etc.)
+        while cleanly suspending Textual, managing termios attributes, disabling
+        software flow control (IXON/Ctrl+S) so the TTY never locks up, flushing
+        residual input escapes, and forcing a full screen redraw upon return.
+        """
+        stdin_fd: int | None = None
+        saved_termios = None
+        if sys.stdin.isatty():
+            try:
+                stdin_fd = sys.stdin.fileno()
+                saved_termios = termios.tcgetattr(stdin_fd)
+                working = termios.tcgetattr(stdin_fd)
+                working[0] &= ~termios.IXON  # Disable software flow control
+                termios.tcsetattr(stdin_fd, termios.TCSANOW, working)
+                termios.tcflow(stdin_fd, termios.TCOON)
+            except Exception:
+                pass
+
+        try:
+            with self.suspend():
+                return subprocess.run(cmd, shell=shell)
+        finally:
+            if stdin_fd is not None:
+                try:
+                    termios.tcflush(stdin_fd, termios.TCIFLUSH)
+                    termios.tcflow(stdin_fd, termios.TCOON)
+                    if saved_termios is not None:
+                        termios.tcsetattr(stdin_fd, termios.TCSANOW, saved_termios)
+                except Exception:
+                    pass
+            self.refresh(layout=True)
 
     # =========================================================================
     # MOUNT
@@ -3092,24 +3430,17 @@ Tooltip {
         except Exception:
             pass
 
-        self._intern_styles()
-        self.call_after_refresh(self.check_tab_overflow)
-        self.run_deferred_boot(initial_tab=0)
+        self.run_deferred_boot(initial_tab=self._initial_tab)
 
         if first_ol := self.current_option_list:
             first_ol.focus()
             self._update_pagination(first_ol)
 
-        # Telemetry.
-        self.telemetry_engine = None
-        for engine in self.engine_pool.values():
-            if hasattr(engine, "get_telemetry"):
-                self.telemetry_engine = engine
-                break
-
-        if self.telemetry_engine:
-            self.query_one("#telemetry-banner").display = True
-            self.set_interval(1.0, self.update_telemetry)
+        self.telemetry_engine = first_engine if hasattr(first_engine, "get_telemetry") else None
+        if self.telemetry_engine is not None:
+            banner = self.query_one("#telemetry-banner", Label)
+            banner.update("Loading telemetry…")
+            banner.display = True
 
         if self.theme_path:
             self.set_interval(1.0, self.watch_theme_file)
@@ -3121,26 +3452,6 @@ Tooltip {
         self.call_after_refresh(self.check_tab_overflow)
         self.call_after_refresh(self._update_scroll_indicators)
         self._update_footer_legend()
-
-        # Deferred loading in background.
-        if self.deferred_load:
-            def _deferred_worker():
-                try:
-                    res = self.deferred_load()
-
-                    if isinstance(res, tuple) and len(res) == 2:
-                        updated_tabs, new_items = res
-                    else:
-                        updated_tabs = res
-                        new_items = None
-
-                    deferred_states = {ekey: eng.load_state() for ekey, eng in self.engine_pool.items()}
-                    self.call_from_thread(self._apply_deferred_tabs, updated_tabs, deferred_states, new_items)
-
-                except Exception as e:
-                    print(f"[DuskyTUI] Deferred load error: {e}", file=sys.stderr)
-
-            threading.Thread(target=_deferred_worker, daemon=True).start()
 
         # Global schema popup.
         if self.global_popup:
@@ -3170,7 +3481,10 @@ Tooltip {
         self._pending_engine_loads: set[tuple[str, str]] = set()
         self._failed_engines: dict[tuple[str, str], str] = {}
         self._mounted_tabs: set[int] = set()
-        self._populated_tabs: set[int] = set()
+        self._populated_tabs = self._tab_populated
+        self._custom_mount_tasks: dict[int, asyncio.Task] = {}
+        self._custom_refresh_tasks: set[asyncio.Task] = set()
+        self._pending_search_target: tuple[int, int] | None = None
         self._tab_data_ready: set[int] = set()
         self._boot_complete: bool = False
 
@@ -3188,6 +3502,8 @@ Tooltip {
 
     def _engines_for_tab(self, tab_idx: int) -> set[tuple[str, str]]:
         keys: set[tuple[str, str]] = set()
+        if self._custom_spec(tab_idx) is not None:
+            keys.add(self.default_engine_key)
         for item in self.schema.get(tab_idx, []):
             if item.type_ in ("action", "preset", "menu"):
                 continue
@@ -3236,7 +3552,7 @@ Tooltip {
                 item.exists_in_target = True
                 new_val = item.deserialize(raw)
             else:
-                item.exists_in_target = (item.default != "nil")
+                item.exists_in_target = not self.hide_missing_items and item.default != "nil"
                 new_val = item.value
 
             if not item._initial_loaded:
@@ -3256,6 +3572,7 @@ Tooltip {
                 self._preset_matrix.ingest_items(global_fresh)
 
     def _mark_boot_complete_if_done(self) -> None:
+        was_complete = self._boot_complete
         self._boot_complete = (
             not self._pending_engine_loads
             and set(self.engine_pool).issubset(
@@ -3271,11 +3588,172 @@ Tooltip {
             if hasattr(self, "_option_cache"):
                 self._option_cache.invalidate_presets()
             self._schema_dirty_counter += 1
+            self._refresh_presets_ui()
+        if self._boot_complete and not was_complete:
+            for ekey in self.engine_pool:
+                if ekey not in self._loaded_engines:
+                    continue
+                engine = self.engine_pool[ekey]
+                if hasattr(engine, "get_telemetry"):
+                    self.telemetry_engine = engine
+                    break
+
+            if self.telemetry_engine:
+                self.query_one("#telemetry-banner").display = True
+                self.set_interval(1.0, self.update_telemetry)
+
+        if self._boot_complete and self.deferred_load and not self._deferred_started:
+            self._deferred_started = True
+            self._inventory_refreshing = True
+            self._run_deferred_load()
+
+    @work(exclusive=True, group="deferred-tabs", exit_on_error=False)
+    async def _run_deferred_load(self, *, manual_refresh: bool = False) -> None:
+        self._inventory_refreshing = True
+        try:
+            writes_before = dict(self._write_generation)
+            result = await asyncio.to_thread(self.deferred_load)
+            if isinstance(result, tuple) and len(result) == 3:
+                updated_tabs, new_items, default_state = result
+            elif isinstance(result, tuple) and len(result) == 2:
+                updated_tabs, new_items = result
+                default_state = None
+            else:
+                updated_tabs, new_items = result, None
+                default_state = None
+            async with self._save_lock:
+                # A schema can return the state collected during discovery.
+                # Re-read it if an edit happened while discovery was running.
+                use_prefetched = default_state is not None and self._write_generation == writes_before
+                def load_one(key, engine):
+                    if use_prefetched and key == self.default_engine_key:
+                        return default_state
+                    if key == self.default_engine_key and new_items and hasattr(engine, "load_state_for_units"):
+                        discovered = [item for rows in new_items.values() for item in rows if item.type_ not in ("menu", "action", "preset")]
+                        return engine.load_state_for_units(
+                            [item.key for item in discovered if item.scope == "user"],
+                            [item.key for item in discovered if item.scope == "system"],
+                        )
+                    return engine.load_state()
+                def load_states():
+                    return {
+                        key: load_one(key, engine)
+                        for key, engine in self.engine_pool.items()
+                    }
+                states = await self._run_save_io(load_states)
+                if use_prefetched and self._write_generation != writes_before:
+                    use_prefetched = False
+                    states[self.default_engine_key] = await self._run_save_io(
+                        load_one, self.default_engine_key, self.engine_pool[self.default_engine_key]
+                    )
+            self._apply_deferred_tabs(updated_tabs, states, new_items)
+            if manual_refresh:
+                self._apply_refreshed_states(states)
+                self._refresh_custom_views()
+                self.notify_status("Refreshed current TUI state.")
+        except Exception:
+            LOGGER.exception("Deferred tab loading failed")
+            self.notify_status("Deferred discovery failed; existing rows were kept.", level="error")
+        finally:
+            self._inventory_refreshing = False
+
+    def action_refresh_state(self) -> None:
+        if not self._boot_complete or getattr(self, "_inventory_refreshing", False):
+            return
+        self._inventory_refreshing = True
+        if self.deferred_load:
+            self._run_deferred_load(manual_refresh=True)
+        else:
+            self._run_state_refresh()
+
+    @work(exclusive=True, group="manual-state-refresh", exit_on_error=False)
+    async def _run_state_refresh(self) -> None:
+        try:
+            async with self._save_lock:
+                states, errors = await self._run_save_io(
+                    self._load_engines_batch_sync, set(self.engine_pool)
+                )
+            for key, error in errors.items():
+                self.notify_status(f"Failed to refresh {key}: {error}", level="error")
+            self._apply_refreshed_states(states)
+            self._refresh_custom_views()
+            if states and not errors:
+                self.notify_status("Refreshed current TUI state.")
+        except Exception:
+            LOGGER.exception("State refresh failed")
+            self.notify_status("State refresh failed; existing values were kept.", level="error")
+        finally:
+            self._inventory_refreshing = False
+
+    def _apply_refreshed_states(self, states: dict) -> None:
+        self._states.update(states)
+        self._loaded_engines.update(states)
+        for key in states:
+            self._failed_engines.pop(key, None)
+
+        for tab_idx in self.tabs:
+            if tab_idx not in self._tab_data_ready and self._engines_for_tab(tab_idx).issubset(self._loaded_engines):
+                self._apply_states_to_tab(tab_idx, self._states)
+
+        changed_keys = set()
+        for engine_key, refs in self._items_by_engine.items():
+            if engine_key not in states:
+                continue
+            state = states[engine_key]
+            for tab_idx, item_idx, item in refs:
+                if item.type_ in ("action", "preset", "menu") or not item._initial_loaded:
+                    continue
+                uid = self._uid_engine_key(item)
+                if self._has_pending_save_for_key(uid):
+                    continue
+                raw = self._lookup_state(state, item)
+                if raw is not None:
+                    value = item.deserialize(raw)
+                    exists = True
+                else:
+                    exists = not self.hide_missing_items and item.default != "nil"
+                    value = item.default if exists else item.value
+                if item.serialize(item.value) != item.serialize(value) or item.exists_in_target != exists:
+                    item.value = clone_value(value)
+                    item.exists_in_target = exists
+                    self._on_item_value_changed(item)
+                    changed_keys.add(uid)
+                self._committed[(tab_idx, item_idx)] = clone_value(value)
+
+        for uid in changed_keys:
+            self._bump_write_generation(uid)
+        if states:
+            self._refresh_all_ui()
+            self._refresh_presets_ui()
+
+    def _refresh_custom_views(self) -> None:
+        for tab_idx in self._mounted_tabs:
+            for view in self.query_one(f"#custom-body-{tab_idx}").children:
+                try:
+                    rich_views = list(view.query(CustomRichTabWidget))
+                    if isinstance(view, CustomRichTabWidget):
+                        rich_views.append(view)
+                    if rich_views:
+                        for rich_view in rich_views:
+                            rich_view.update_content()
+                    elif tab_idx == self._current_tab_index():
+                        if callable(update := getattr(view, "update_content", None)):
+                            update()
+                        else:
+                            view.refresh()
+                except Exception:
+                    LOGGER.exception("Unable to refresh custom view in tab %s", tab_idx)
+                    self.notify_status(f"Could not refresh custom view in {self.tabs[tab_idx]}.", level="error")
 
     @work(exclusive=True, group="engine-boot", exit_on_error=False)
-    async def run_deferred_boot(self, *, initial_tab: int = 0) -> None:
-        self._init_boot_state()
-        await asyncio.to_thread(self._load_user_presets)
+    async def run_deferred_boot(self, *, initial_tab: int | None = 0) -> None:
+        try:
+            preset_records = await asyncio.to_thread(self._read_user_presets)
+        except OSError as exc:
+            preset_records = []
+            self.notify_status(f"Unable to load user presets: {exc}", level="error")
+        self._apply_user_presets(preset_records)
+        self._rebuild_indexes()
 
         need_now = self._engines_for_tab(initial_tab) if self.tabs else set()
         deferred = set(self.engine_pool) - need_now
@@ -3288,14 +3766,15 @@ Tooltip {
                 self._failed_engines[ekey] = f"{type(exc).__name__}: {exc}"
                 self.notify_status(f"Failed to load {ekey}: {exc}", level="error")
 
-        for t_idx in self.tabs:
-            if self._engines_for_tab(t_idx).issubset(self._loaded_engines):
-                self._apply_states_to_tab(t_idx, self._states)
+        if initial_tab in self.tabs and self._engines_for_tab(initial_tab).issubset(self._loaded_engines):
+            self._apply_states_to_tab(initial_tab, self._states)
 
         if self.tabs:
             await asyncio.sleep(0)
             self._populate_option_list(initial_tab)
             self._populated_tabs.add(initial_tab)
+            self._activate_custom_views()
+            self.call_after_refresh(self._queue_ready_tabs_for_warmup)
 
         if deferred:
             self._pending_engine_loads |= set(deferred)
@@ -3303,7 +3782,6 @@ Tooltip {
         else:
             self._mark_boot_complete_if_done()
 
-    @work(exclusive=True, group="engine-boot", exit_on_error=False)
     async def _load_engines_async(self, engine_keys: set[tuple[str, str]]) -> None:
         if not engine_keys:
             return
@@ -3338,9 +3816,60 @@ Tooltip {
                 self._tab_dirty.discard(cur)
 
         self._mark_boot_complete_if_done()
+        self._activate_custom_views()
+        self._queue_ready_tabs_for_warmup()
+
+    def _queue_ready_tabs_for_warmup(self) -> None:
+        """Prepare hidden lists after first paint so a later tab switch is cheap."""
+        current = self._current_tab_index()
+        for tab_idx in self.tabs:
+            if tab_idx == current:
+                continue
+            if not self.schema.get(tab_idx):
+                continue
+            if not self._engines_for_tab(tab_idx).issubset(self._loaded_engines):
+                continue
+            if tab_idx in self._populated_tabs and tab_idx not in self._tab_dirty:
+                continue
+            if tab_idx in self._tab_warmup_queued:
+                continue
+            try:
+                self.query_one(f"#list-{tab_idx}", ConfigOptionList)
+            except Exception:
+                continue
+            self._tab_warmup_queue.append(tab_idx)
+            self._tab_warmup_queued.add(tab_idx)
+
+        if self._tab_warmup_queue and not self._tab_warmup_scheduled:
+            self._tab_warmup_scheduled = True
+            self.call_after_refresh(self._warm_next_tab)
+
+    def _warm_next_tab(self) -> None:
+        self._tab_warmup_scheduled = False
+        while self._tab_warmup_queue:
+            tab_idx = self._tab_warmup_queue.popleft()
+            self._tab_warmup_queued.discard(tab_idx)
+            if tab_idx == self._current_tab_index():
+                continue
+            if not self._engines_for_tab(tab_idx).issubset(self._loaded_engines):
+                continue
+            if tab_idx in self._populated_tabs and tab_idx not in self._tab_dirty:
+                continue
+            if tab_idx not in self._tab_data_ready:
+                self._apply_states_to_tab(tab_idx, self._states)
+            self._populate_option_list(tab_idx)
+            self._populated_tabs.add(tab_idx)
+            self._tab_dirty.discard(tab_idx)
+            break
+        if self._tab_warmup_queue:
+            self._tab_warmup_scheduled = True
+            self.call_after_refresh(self._warm_next_tab)
 
     def require_boot_complete(self) -> bool:
         if getattr(self, "_boot_complete", True):
+            if self._failed_engines:
+                self.notify_status("A configuration backend failed to load; restart after fixing it.", level="error")
+                return False
             return True
         self.notify_status(
             "Still loading configuration backends — try again in a moment.",
@@ -3352,115 +3881,206 @@ Tooltip {
     # TAB POPULATION / LAZY UI
     # =========================================================================
     def _populate_option_list(self, tab_idx: int, maintain_highlight_id: str | None = None) -> None:
-        try:
-            ol = self.query_one(f"#list-{tab_idx}", ConfigOptionList)
-        except Exception:
-            return
-
-        scroll_y = ol.scroll_y
-
-        if not maintain_highlight_id and ol.highlighted is not None:
+        with self.batch_update():
             try:
-                maintain_highlight_id = ol.get_option_at_index(ol.highlighted).id
-            except OptionDoesNotExist:
-                pass
+                ol = self.query_one(f"#list-{tab_idx}", ConfigOptionList)
+            except Exception:
+                return
 
-        items = self.schema.get(tab_idx, [])
-        options = []
-        current_group = None
-        first_item_id = None
+            scroll_y = ol.scroll_y
+            old_keys = getattr(ol, "_rendered_option_keys", {})
 
-        children_map = {self._get_item_uid(itm): [] for itm in items}
-        root_items = []
+            if not maintain_highlight_id and ol.highlighted is not None:
+                try:
+                    maintain_highlight_id = ol.get_option_at_index(ol.highlighted).id
+                except OptionDoesNotExist:
+                    pass
 
-        for orig_idx, itm in enumerate(items):
-            pref = itm.parent_ref
-            if pref and pref in children_map:
-                children_map[pref].append((orig_idx, itm))
-            else:
-                root_items.append((orig_idx, itm))
-
-        # Clear only this tab's indent cache entries.
-        prefix_key = f"item_{tab_idx}_"
-        self._indent_cache = {
-            k: v for k, v in self._indent_cache.items()
-            if not k.startswith(prefix_key)
-        }
-
-        def traverse(node_idx: int, node_item: ConfigItem, is_last_sibling_list: list[bool]):
-            nonlocal current_group, first_item_id
-
-            if node_item.group and node_item.group != current_group:
-                current_group = node_item.group
-                header_txt = Text(f" {current_group.upper()}", style=f"bold {self.theme_colors['accent']}")
-                options.append(Option(header_txt, id=f"header_{tab_idx}_{node_idx}", disabled=True))
-
-            opt_id = f"item_{tab_idx}_{node_idx}"
-
-            if first_item_id is None:
-                first_item_id = opt_id
-
-            is_hl = (
-                (maintain_highlight_id == opt_id)
-                if maintain_highlight_id
-                else (tab_idx == 0 and first_item_id == opt_id)
-            )
-
-            prefix = ""
-            depth = len(is_last_sibling_list) - 1
-
-            if depth > 0:
-                prefix = "  "
-                for is_last in is_last_sibling_list[1:-1]:
-                    prefix += "  " if is_last else "│ "
-                prefix += "└─" if is_last_sibling_list[-1] else "├─"
-
-            self._indent_cache[opt_id] = prefix
-
-            options.append(
-                Option(
-                    self._build_option(node_item, is_highlighted=is_hl, indent_prefix=prefix, tab_idx=tab_idx),
-                    id=opt_id
+            items = self.schema.get(tab_idx, [])
+            option_keys = {
+                f"item_{tab_idx}_{idx}": (item.scope, item.key, item.parent_ref)
+                for idx, item in enumerate(items)
+            }
+            selected_key = old_keys.get(maintain_highlight_id) if maintain_highlight_id else None
+            if selected_key is None and ol.highlighted is not None:
+                try:
+                    selected_key = old_keys.get(ol.get_option_at_index(ol.highlighted).id)
+                except OptionDoesNotExist:
+                    pass
+            # Schemas opt in to hiding missing settings. Other TUIs often show
+            # settings whose config file has no entry yet.
+            visible = {
+                idx for idx, item in enumerate(items)
+                if (
+                    not isinstance(self.custom_views.get(tab_idx), dict)
+                    or not self.custom_views[tab_idx].get("option_groups")
+                    or item.group in self.custom_views[tab_idx]["option_groups"]
+                ) and (
+                    item.type_ in ("menu", "action", "preset")
+                    or not self.hide_missing_items
+                    or item.exists_in_target
                 )
+            }
+            for idx, item in enumerate(items):
+                if item.type_ == "menu" and self.hide_missing_items and not any(
+                    child.parent_ref in (item.uid, item.key) and child_idx in visible
+                    for child_idx, child in enumerate(items)
+                ):
+                    visible.discard(idx)
+            options = []
+            current_group = None
+            first_item_id = None
+
+            parents = {itm.uid: idx for idx, itm in enumerate(items) if idx in visible and (itm.is_parent or itm.type_ == "menu")}
+            for idx, itm in enumerate(items):
+                if idx in visible and (itm.is_parent or itm.type_ == "menu"):
+                    parents.setdefault(itm.key, idx)
+            children_map = defaultdict(list)
+            root_items = []
+            parent_indices = {
+                idx: parents[itm.parent_ref]
+                for idx, itm in enumerate(items)
+                if idx in visible and itm.parent_ref in parents and parents[itm.parent_ref] != idx
+            }
+            # Break malformed cycles so every tree has a visible root.
+            checked = set()
+            for start in tuple(parent_indices):
+                chain = set()
+                current = start
+                while current in parent_indices and current not in checked:
+                    if current in chain:
+                        del parent_indices[current]
+                        break
+                    chain.add(current)
+                    current = parent_indices[current]
+                checked.update(chain)
+            for orig_idx, itm in enumerate(items):
+                if orig_idx not in visible:
+                    continue
+                if orig_idx in parent_indices:
+                    children_map[parent_indices[orig_idx]].append((orig_idx, itm))
+                else:
+                    root_items.append((orig_idx, itm))
+
+            # Clear only this tab's indent cache entries.
+            prefix_key = f"item_{tab_idx}_"
+            self._indent_cache = {
+                k: v for k, v in self._indent_cache.items()
+                if not k.startswith(prefix_key)
+            }
+
+            visited: set[int] = set()
+            stack = [(idx, itm, [i == len(root_items) - 1]) for i, (idx, itm) in reversed(list(enumerate(root_items)))]
+
+            def traverse(node_idx: int, node_item: ConfigItem, is_last_sibling_list: list[bool]):
+                nonlocal current_group, first_item_id
+                if node_idx in visited:
+                    return
+                visited.add(node_idx)
+
+                if node_item.group and node_item.group != current_group:
+                    current_group = node_item.group
+                    header_txt = Text(f" {current_group.upper()}", style=f"bold {self.theme_colors['accent']}")
+                    options.append(Option(header_txt, id=f"header_{tab_idx}_{node_idx}", disabled=True))
+
+                opt_id = f"item_{tab_idx}_{node_idx}"
+
+                if first_item_id is None:
+                    first_item_id = opt_id
+
+                is_hl = (
+                    (maintain_highlight_id == opt_id)
+                    if maintain_highlight_id
+                    else first_item_id == opt_id
+                )
+
+                prefix = ""
+                depth = len(is_last_sibling_list) - 1
+
+                if depth > 0:
+                    prefix = "  "
+                    for is_last in is_last_sibling_list[1:-1]:
+                        prefix += "  " if is_last else "│ "
+                    prefix += "└─" if is_last_sibling_list[-1] else "├─"
+
+                self._indent_cache[opt_id] = prefix
+
+                options.append(
+                    Option(
+                        self._build_option(node_item, is_highlighted=is_hl, indent_prefix=prefix, tab_idx=tab_idx),
+                        id=opt_id
+                    )
+                )
+
+                if (node_item.is_parent or node_item.type_ == "menu") and node_item.expanded:
+                    children = children_map.get(node_idx, [])
+
+                    for i, (child_idx, child_item) in reversed(list(enumerate(children))):
+                        is_last = (i == len(children) - 1)
+                        stack.append((child_idx, child_item, is_last_sibling_list + [is_last]))
+
+            while stack:
+                traverse(*stack.pop())
+
+            old_options = list(ol.options)
+            if selected_key is not None:
+                visible_ids = {option_keys[option.id]: option.id for option in options if not option.disabled}
+                maintain_highlight_id = visible_ids.get(selected_key)
+                if maintain_highlight_id is None and selected_key[2]:
+                    parent = next((item for item in items if item.uid == selected_key[2] or item.key == selected_key[2]), None)
+                    if parent is not None:
+                        maintain_highlight_id = visible_ids.get((parent.scope, parent.key, parent.parent_ref))
+                if maintain_highlight_id is None:
+                    previous_index = ol.highlighted or 0
+                    neighbors = sorted(enumerate(old_options), key=lambda pair: abs(pair[0] - previous_index))
+                    maintain_highlight_id = next((visible_ids[old_keys[option.id]] for _, option in neighbors
+                                                  if old_keys.get(option.id) in visible_ids), first_item_id)
+
+            same_structure = (
+                len(old_options) == len(options)
+                and all(old.id == new.id and old_keys.get(old.id) == option_keys.get(new.id)
+                        for old, new in zip(old_options, options))
             )
+            if same_structure:
+                for index, (old, new) in enumerate(zip(old_options, options)):
+                    if old.prompt != new.prompt:
+                        ol.replace_option_prompt_at_index(index, new.prompt)
+            else:
+                ol._restoring_options = True
+                try:
+                    ol.clear_options()
+                    ol.add_options(options)
+                    if maintain_highlight_id:
+                        try:
+                            ol.highlighted = ol.get_option_index(maintain_highlight_id)
+                        except OptionDoesNotExist:
+                            ol.highlighted = ol.get_option_index(first_item_id) if first_item_id else None
+                    elif first_item_id:
+                        ol.highlighted = ol.get_option_index(first_item_id)
+                    ol.last_highlighted_id = (
+                        ol.get_option_at_index(ol.highlighted).id if ol.highlighted is not None else None
+                    )
+                    ol.scroll_y = scroll_y
+                finally:
+                    ol._restoring_options = False
 
-            if node_item.is_parent and node_item.expanded:
-                uid = self._get_item_uid(node_item)
-                children = children_map.get(uid, [])
+            positions = []
+            count = 0
+            for option in options:
+                count += not option.disabled
+                positions.append(count)
+            ol._selectable_positions = positions
 
-                for i, (child_idx, child_item) in enumerate(children):
-                    is_last = (i == len(children) - 1)
-                    traverse(child_idx, child_item, is_last_sibling_list + [is_last])
+            ol._rendered_option_keys = option_keys
 
-        for i, (orig_idx, itm) in enumerate(root_items):
-            is_last = (i == len(root_items) - 1)
-            traverse(orig_idx, itm, [is_last])
+            self._tab_populated.add(tab_idx)
+            self._tab_dirty.discard(tab_idx)
 
-        ol.clear_options()
-        ol.add_options(options)
+            if tab_idx == self._current_tab_index():
+                self._update_file_link()
+                self._update_current_help_panel()
 
-        if maintain_highlight_id:
-            try:
-                ol.highlighted = ol.get_option_index(maintain_highlight_id)
-            except OptionDoesNotExist:
-                ol.highlighted = 0 if ol.option_count > 0 else None
-
-        elif first_item_id and tab_idx == 0:
-            ol.last_highlighted_id = first_item_id
-            try:
-                ol.highlighted = ol.get_option_index(first_item_id)
-            except OptionDoesNotExist:
-                pass
-
-        ol.scroll_y = scroll_y
-
-        self._tab_populated.add(tab_idx)
-        self._tab_dirty.discard(tab_idx)
-
-        if tab_idx == self._current_tab_index():
-            self._update_file_link()
-
-        self.call_after_refresh(self._update_scroll_indicators)
+            self.call_after_refresh(self._update_scroll_indicators)
 
     def _apply_deferred_tabs(
         self,
@@ -3468,11 +4088,56 @@ Tooltip {
         states: dict,
         new_items: dict[int, list[ConfigItem]] | None = None
     ) -> None:
+        if new_items and (self._save_tasks or self._save_timers or self._save_auth_pending):
+            # Save callbacks hold positional references. Finish them before
+            # replacing lists; ordinary batch edits can be remapped below.
+            self.set_timer(0.1, lambda: self._apply_deferred_tabs(tab_indices, states, new_items))
+            return
         self._schema_dirty_counter += 1
 
+        remapped = {}
+        replaced_tabs = set()
         for tab_idx in tab_indices:
             if new_items and tab_idx in new_items:
+                replaced_tabs.add(tab_idx)
+                old_items = defaultdict(deque)
+                for old_idx, old_item in enumerate(self.schema.get(tab_idx, [])):
+                    identity = self._uid_engine_key(old_item)
+                    old_items[identity].append((old_idx, old_item))
+                    self._bump_write_generation(identity)
+                for new_idx, new_item in enumerate(new_items[tab_idx]):
+                    matches = old_items.get(self._uid_engine_key(new_item))
+                    if not matches:
+                        continue
+                    old_idx, old_item = matches.popleft()
+                    remapped[(tab_idx, old_idx)] = (tab_idx, new_idx)
+                    refreshes_inventory = self.hide_missing_items
+                    keep_value = not refreshes_inventory or (tab_idx, old_idx) in self.pending_commits
+                    if old_item._initial_loaded and keep_value and not new_item.read_only:
+                        new_item.value = clone_value(old_item.value)
+                        new_item.initial_value = clone_value(old_item.initial_value)
+                        new_item.exists_in_target = old_item.exists_in_target
+                        new_item._initial_loaded = True
+                    new_item.expanded = old_item.expanded
                 self.schema[tab_idx] = new_items[tab_idx]
+
+        if replaced_tabs:
+            def remap(ref):
+                return remapped.get(ref) if ref[0] in replaced_tabs else ref
+
+            self._committed = {new_ref: value for ref, value in self._committed.items() if (new_ref := remap(ref)) is not None}
+            self.pending_commits = {
+                new_ref for ref in self.pending_commits
+                if (new_ref := remap(ref)) is not None
+                and not self.schema[new_ref[0]][new_ref[1]].read_only
+            }
+            for history in (self.undo_stack, self.redo_stack):
+                transactions = [
+                    [(*new_ref, old, new) for ti, ii, old, new in transaction if (new_ref := remap((ti, ii))) is not None]
+                    for transaction in history
+                ]
+                history.clear()
+                history.extend(transaction for transaction in transactions if transaction)
 
         self._rebuild_indexes()
 
@@ -3486,6 +4151,10 @@ Tooltip {
 
         for tab_idx in tab_indices:
             for idx, item in enumerate(self.schema.get(tab_idx, [])):
+                # A late discovery refresh must not overwrite edits or reset
+                # launch/committed baselines for already loaded settings.
+                if item._initial_loaded:
+                    continue
                 engine_key = self._get_item_engine_info(item)
                 state = states.get(engine_key, {})
                 raw = self._lookup_state(state, item)
@@ -3496,7 +4165,7 @@ Tooltip {
                     item.exists_in_target = True
                     item.value = item.deserialize(raw)
                 else:
-                    item.exists_in_target = (item.default != "nil")
+                    item.exists_in_target = not self.hide_missing_items and item.default != "nil"
 
                 if not item._initial_loaded:
                     item.initial_value = clone_value(item.value)
@@ -3505,7 +4174,7 @@ Tooltip {
 
             self._tab_data_ready.add(tab_idx)
 
-            if tab_idx in self._populated_tabs or tab_idx in self._tab_populated or tab_idx == current_idx:
+            if tab_idx == current_idx:
                 self._populate_option_list(tab_idx)
                 self._populated_tabs.add(tab_idx)
                 self._tab_dirty.discard(tab_idx)
@@ -3527,9 +4196,91 @@ Tooltip {
         if current_idx in tab_indices:
             if ol := self.current_option_list:
                 self._update_pagination(ol)
+        self._queue_ready_tabs_for_warmup()
+
+    def _replace_dynamic_tabs(self, replacements: dict[int, list[ConfigItem]]) -> bool:
+        """Reconcile a live inventory without invalidating edits and callbacks."""
+        if self._save_tasks or self._save_timers or self._save_auth_pending or self._modal_active():
+            return False
+
+        remapped: dict[tuple[int, int], tuple[int, int]] = {}
+        observed: dict[tuple[int, int], Any] = {}
+        changed = False
+        for tab_idx, incoming in replacements.items():
+            existing = self.schema.get(tab_idx, [])
+            old_by_identity = defaultdict(deque)
+            for old_idx, item in enumerate(existing):
+                old_by_identity[(item.scope, item.key, item.parent_ref)].append((old_idx, item))
+
+            merged = []
+            for new_idx, fresh in enumerate(incoming):
+                matches = old_by_identity.get((fresh.scope, fresh.key, fresh.parent_ref))
+                if not matches:
+                    merged.append(fresh)
+                    changed = True
+                    continue
+                old_idx, item = matches.popleft()
+                remapped[(tab_idx, old_idx)] = (tab_idx, new_idx)
+                if old_idx != new_idx:
+                    changed = True
+                pending = (tab_idx, old_idx) in self.pending_commits
+                if not pending:
+                    item.value = clone_value(fresh.value)
+                    item.initial_value = clone_value(fresh.initial_value)
+                    item._initial_loaded = fresh._initial_loaded
+                    item.exists_in_target = fresh.exists_in_target
+                    observed[(tab_idx, new_idx)] = clone_value(fresh.value)
+                item.label = fresh.label
+                item.default = clone_value(fresh.default)
+                item.options = list(fresh.options)
+                item.hints = list(fresh.hints)
+                item.group = fresh.group
+                item.extended_help = fresh.extended_help
+                item.confirm_message = fresh.confirm_message
+                item.warning_msg = fresh.warning_msg
+                item.popup_message = fresh.popup_message
+                item.read_only = fresh.read_only
+                item.expanded = item.expanded if item.is_parent else fresh.expanded
+                merged.append(item)
+
+            if any(old_by_identity.values()):
+                changed = True
+            self.schema[tab_idx] = merged
+
+        replaced_tabs = set(replacements)
+
+        def remap(ref):
+            return remapped.get(ref) if ref[0] in replaced_tabs else ref
+
+        self._committed = {
+            new_ref: value for ref, value in self._committed.items()
+            if (new_ref := remap(ref)) is not None
+        }
+        self._committed.update(observed)
+        for tab_idx, incoming in replacements.items():
+            for idx, item in enumerate(self.schema[tab_idx]):
+                self._committed.setdefault((tab_idx, idx), clone_value(item.value))
+        self.pending_commits = {
+            new_ref for ref in self.pending_commits
+            if (new_ref := remap(ref)) is not None
+        }
+        for history in (self.undo_stack, self.redo_stack):
+            transactions = [
+                [(*new_ref, old, new) for ti, ii, old, new in transaction
+                 if (new_ref := remap((ti, ii))) is not None]
+                for transaction in history
+            ]
+            history.clear()
+            history.extend(transaction for transaction in transactions if transaction)
+        if changed:
+            self._schema_dirty_counter += 1
+        return True
 
     def _refresh_single_ui(self, tab_idx: int, item_idx: int, item: ConfigItem) -> None:
         if tab_idx not in self._tab_populated:
+            self._tab_dirty.add(tab_idx)
+            return
+        if tab_idx != self._current_tab_index():
             self._tab_dirty.add(tab_idx)
             return
 
@@ -3593,11 +4344,15 @@ Tooltip {
             pass
 
     def _refresh_all_ui(self) -> None:
+        current_tab = self._current_tab_index()
         for tab_idx in self.schema.keys():
-            if tab_idx in self._tab_populated:
+            if tab_idx == current_tab and tab_idx in self._tab_populated:
                 self._populate_option_list(tab_idx)
+            elif tab_idx in self._tab_populated:
+                self._tab_dirty.add(tab_idx)
             else:
                 self._tab_dirty.add(tab_idx)
+        self._queue_ready_tabs_for_warmup()
 
     # =========================================================================
     # SAVE MODE / FOOTER
@@ -3611,7 +4366,6 @@ Tooltip {
         try:
             self.query_one("#shortcut-ctrl-s").display = not new
             self.query_one("#shortcut-R").display = new
-            self.call_after_refresh(self.query_one("#footer-shortcuts-container", FlowContainer).reflow)
         except Exception:
             pass
 
@@ -3619,6 +4373,7 @@ Tooltip {
         if not new:
             for (ti, ii), timer in list(self._save_timers.items()):
                 timer.stop()
+                self._bump_write_generation_for_item(self.schema[ti][ii])
                 self.pending_commits.add((ti, ii))
 
             self._save_timers.clear()
@@ -3688,22 +4443,16 @@ Tooltip {
             cont_w = container.size.width
 
             if bar_w > 0 and tabs_w > 0:
-                has_overflow = (tabs_w > bar_w) or (left.display and tabs_w > cont_w)
+                has_overflow = tabs_w > cont_w
             else:
                 has_overflow = container.max_scroll_x > 0
 
             if has_overflow:
-                if not left.display:
-                    left.display = True
-                    right.display = True
                 left.update(" ◀ " if container.scroll_x > 0.5 else "   ")
                 right.update(" ▶ " if container.scroll_x < (container.max_scroll_x - 0.5) else "   ")
                 if container.styles.align != ("left", "middle"):
                     container.styles.align = ("left", "middle")
             else:
-                if left.display:
-                    left.display = False
-                    right.display = False
                 left.update("")
                 right.update("")
                 if container.scroll_x > 0:
@@ -3723,7 +4472,6 @@ Tooltip {
             tabs = self.query_one(Tabs)
 
             if tab_widget.region.width == 0:
-                self.call_after_refresh(lambda: self.scroll_tab_into_view(tab_widget))
                 return
 
             tab_offset_x = tab_widget.region.x - tabs.region.x
@@ -3756,78 +4504,129 @@ Tooltip {
     # =========================================================================
     # WATCHERS
     # =========================================================================
+    @staticmethod
+    def _target_fingerprint(path: Path) -> tuple[int, int, int] | None | object:
+        """Return a replacement-safe file identity for external-change polling."""
+        try:
+            stat = path.stat()
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            LOGGER.warning("Unable to stat target file %s: %s", path, exc)
+            return _TARGET_UNREADABLE
+        return (stat.st_mtime_ns, stat.st_size, stat.st_ino)
+
     async def watch_target_file(self) -> None:
+        if not self._boot_complete:
+            return
         try:
             changed_any = False
 
-            for e_key, engine in self.engine_pool.items():
+            for e_key in self.engine_pool:
+                if e_key in self._failed_engines:
+                    continue
+                engine = self.engine_pool[e_key]
                 if not engine.target_path:
                     continue
 
                 path = Path(engine.target_path).expanduser().resolve()
 
-                try:
-                    stat_info = await asyncio.to_thread(path.stat)
-                    current_mtime = stat_info.st_mtime
-                except FileNotFoundError:
-                    if self._initial_target_mtimes_set:
-                        for t_idx, i_idx, item in self._items_by_engine.get(e_key, []):
-                            if item.type_ in ("action", "preset", "menu"):
-                                continue
+                fingerprint = await asyncio.to_thread(self._target_fingerprint, path)
+                previous = self.last_target_mtimes.get(e_key)
 
-                            if item.exists_in_target:
-                                item.exists_in_target = False
-                                self._bump_write_generation(self._get_item_uid(item))
-                                changed_any = True
-                    continue
-                except OSError:
+                if fingerprint is _TARGET_UNREADABLE:
                     continue
 
                 if not self._initial_target_mtimes_set:
-                    self.last_target_mtimes[e_key] = current_mtime
+                    self.last_target_mtimes[e_key] = fingerprint
                     continue
 
-                if current_mtime > self.last_target_mtimes.get(e_key, 0.0):
-                    self.last_target_mtimes[e_key] = current_mtime
+                if fingerprint == previous:
+                    continue
 
-                    try:
-                        new_state = await asyncio.to_thread(engine.load_state)
-                    except Exception:
+                items_for_engine = [
+                    (t_idx, i_idx, item)
+                    for t_idx, i_idx, item in self._items_by_engine.get(e_key, [])
+                    if item.type_ not in ("action", "preset", "menu")
+                ]
+                items_by_uek: defaultdict[str, list[tuple[int, int, ConfigItem]]] = defaultdict(list)
+                for t_idx, i_idx, item in items_for_engine:
+                    items_by_uek[self._uid_engine_key(item)].append((t_idx, i_idx, item))
+
+                if fingerprint is None:
+                    if previous is None:
+                        continue
+                    # Keep the missing fingerprint so a recreated file is
+                    # recognized even if it gets an older timestamp.
+                    accepted = True
+                    for uek, grouped_items in items_by_uek.items():
+                        if self._has_pending_save_for_key(uek):
+                            accepted = False
+                            continue
+                        group_changed = False
+                        for _t_idx, _i_idx, item in grouped_items:
+                            if item.exists_in_target:
+                                item.exists_in_target = False
+                                self._on_item_value_changed(item)
+                                group_changed = True
+                        if group_changed:
+                            self._bump_write_generation(uek)
+                            changed_any = True
+                    if accepted:
+                        self.last_target_mtimes[e_key] = None
+                    continue
+
+                reload_generations = {
+                    uek: self._write_generation.get(uek, 0)
+                    for uek in items_by_uek
+                }
+                try:
+                    async with self._save_lock:
+                        new_state = await self._run_save_io(engine.load_state)
+                except Exception as exc:
+                    # Do not consume the fingerprint when parsing/loading
+                    # failed; the next poll can retry the same file.
+                    LOGGER.warning("Unable to reload %s: %s", path, exc)
+                    continue
+
+                accepted = True
+                for uek, grouped_items in items_by_uek.items():
+                    # A queued or running local save owns this logical setting;
+                    # let it finish instead of applying an older disk snapshot.
+                    if (
+                        self._write_generation.get(uek, 0) != reload_generations[uek]
+                        or self._has_pending_save_for_key(uek)
+                    ):
+                        accepted = False
                         continue
 
-                    for t_idx, i_idx, item in self._items_by_engine.get(e_key, []):
-                        if not self.auto_save and (t_idx, i_idx) in self.pending_commits:
-                            continue
-
-                        if item.type_ in ("action", "preset", "menu"):
-                            continue
-
+                    group_changed = False
+                    for _t_idx, _i_idx, item in grouped_items:
                         raw = self._lookup_state(new_state, item)
-
                         if raw is not None:
                             new_val = item.deserialize(raw)
-
-                            if str(item.value) != str(new_val):
-                                item.value = new_val
-                                item.exists_in_target = True
-                                self._on_item_value_changed(item)
-                                self._bump_write_generation(self._get_item_uid(item))
-                                changed_any = True
-
+                            expected_exists = True
                         else:
-                            expected_exists = (item.default != "nil")
-                            expected_val = item.default if expected_exists else item.value
+                            expected_exists = item.default != "nil"
+                            new_val = item.default if expected_exists else item.value
 
-                            if item.exists_in_target != expected_exists or str(item.value) != str(expected_val):
-                                item.exists_in_target = expected_exists
+                        value_changed = item.serialize(item.value) != item.serialize(new_val)
+                        existence_changed = item.exists_in_target != expected_exists
+                        if value_changed or existence_changed:
+                            item.value = new_val
+                            item.exists_in_target = expected_exists
+                            self._on_item_value_changed(item)
+                            group_changed = True
+                        self._committed[(_t_idx, _i_idx)] = clone_value(new_val)
 
-                                if expected_exists:
-                                    item.value = expected_val
+                    if group_changed:
+                        self._bump_write_generation(uek)
+                        changed_any = True
 
-                                # Always notify – existence toggle affects preset totals.
-                                self._on_item_value_changed(item)
-                                self._bump_write_generation(self._get_item_uid(item))
-                                changed_any = True
+                # Consume the fingerprint only after every item has been
+                # reconciled successfully; failures above must be retried.
+                if accepted:
+                    self.last_target_mtimes[e_key] = fingerprint
 
             if not self._initial_target_mtimes_set:
                 self._initial_target_mtimes_set = True
@@ -3839,7 +4638,7 @@ Tooltip {
                 self.notify_status("Config modified externally. Refreshed UI.")
 
         except Exception:
-            pass
+            LOGGER.exception("Unexpected error while watching target files")
 
     async def update_telemetry(self) -> None:
         if self.telemetry_engine:
@@ -3848,13 +4647,13 @@ Tooltip {
                 banner = self.query_one("#telemetry-banner", Label)
                 banner.update(msg)
             except Exception:
-                pass
+                LOGGER.exception("Telemetry update failed")
 
     async def watch_presets_dir(self) -> None:
         if (
-            not self.enable_user_presets
+            not self._boot_complete
+            or not self.enable_user_presets
             or not hasattr(self, "user_presets_dir")
-            or not self.user_presets_dir.exists()
         ):
             return
 
@@ -3863,33 +4662,36 @@ Tooltip {
                 self._preset_mtimes = {}
 
             def check_mtimes():
-                return {f.name: f.stat().st_mtime for f in self.user_presets_dir.glob("*.json")}
+                result = {}
+                for file_path in self.user_presets_dir.iterdir():
+                    if not file_path.name.endswith(".json"):
+                        continue
+                    stat = file_path.stat()
+                    result[file_path.name] = (stat.st_mtime_ns, stat.st_size, stat.st_ino)
+                return result
 
             current_mtimes = await asyncio.to_thread(check_mtimes)
             changed_any = False
 
             for fname, mtime in current_mtimes.items():
-                if self._preset_mtimes.get(fname, 0.0) < mtime:
+                if self._preset_mtimes.get(fname) != mtime:
                     changed_any = True
                     break
 
             if set(self._preset_mtimes.keys()) - set(current_mtimes.keys()):
                 changed_any = True
 
-            if not getattr(self, "_initial_presets_mtime_set", False):
+            if changed_any or not getattr(self, "_initial_presets_mtime_set", False):
+                preset_records = await asyncio.to_thread(self._read_user_presets)
+                self._apply_user_presets(preset_records)
+                self._rebuild_indexes()
                 self._preset_mtimes = current_mtimes
                 self._initial_presets_mtime_set = True
-                return
-
-            if changed_any:
                 self._schema_dirty_counter += 1
-                self._preset_mtimes = current_mtimes
-                self._load_user_presets()
-                self._rebuild_indexes()
                 self._refresh_all_ui()
 
         except Exception:
-            pass
+            LOGGER.exception("Unexpected error while watching preset files")
 
     async def watch_theme_file(self) -> None:
         if not self.theme_path:
@@ -3898,13 +4700,15 @@ Tooltip {
         try:
             stat_info = await asyncio.to_thread(self.theme_path.stat)
             current_mtime = stat_info.st_mtime
+            fingerprint = (stat_info.st_mtime_ns, stat_info.st_size, stat_info.st_ino)
 
-            if current_mtime > self.last_theme_mtime:
+            if fingerprint != self._last_theme_fingerprint:
                 new_theme = await asyncio.to_thread(load_matugen_json, self.theme_path)
 
                 if new_theme is not None:
                     self._schema_dirty_counter += 1
                     self.last_theme_mtime = current_mtime
+                    self._last_theme_fingerprint = fingerprint
 
                     self.theme_colors.update(new_theme)
                     self.apply_theme_to_engine()
@@ -3920,7 +4724,7 @@ Tooltip {
                     self._update_footer_legend()
 
         except Exception:
-            pass
+            LOGGER.exception("Unexpected error while watching theme file")
 
     def apply_theme_to_engine(self) -> None:
         self._theme_toggle = not getattr(self, "_theme_toggle", False)
@@ -3959,7 +4763,7 @@ Tooltip {
         self.register_theme(custom_theme)
         self.theme = theme_name
         # Invalidate render cache so next _build_option picks up new palette.
-        self._intern_styles()
+        self._invalidate_theme_cache()
 
     def _update_file_link(self, item: ConfigItem | None = None) -> None:
         try:
@@ -3987,48 +4791,61 @@ Tooltip {
     # TAB HANDLING
     # =========================================================================
     @on(Tabs.TabActivated)
-    def handle_tab_activated(self, event: Tabs.TabActivated) -> None:
+    async def handle_tab_activated(self, event: Tabs.TabActivated) -> None:
         try:
             idx = int(event.tab.id.split("-")[-1])
-            self.query_one(ContentSwitcher).current = f"tab-{idx}"
-            self.scroll_tab_into_view(event.tab)
+            await self._ensure_custom_body(idx)
+            if self.query_one(Tabs).active != event.tab.id:
+                return
+            with self.batch_update():
+                self.query_one(ContentSwitcher).current = f"tab-{idx}"
+                self._activate_custom_views()
+                self.scroll_tab_into_view(event.tab)
 
-            if idx not in self._tab_data_ready and self._engines_for_tab(idx).issubset(self._loaded_engines):
-                self._apply_states_to_tab(idx, self._states)
+                if idx not in self._tab_data_ready and self._engines_for_tab(idx).issubset(self._loaded_engines):
+                    self._apply_states_to_tab(idx, self._states)
 
-            if idx not in self._populated_tabs or idx in self._tab_dirty:
-                self._populate_option_list(idx)
-                self._populated_tabs.add(idx)
-                self._tab_dirty.discard(idx)
+                if idx not in self._populated_tabs or idx in self._tab_dirty:
+                    self._populate_option_list(idx)
+                    self._populated_tabs.add(idx)
+                    self._tab_dirty.discard(idx)
 
-            if ol := self.current_option_list:
-                ol.focus()
+                if ol := self.current_option_list:
+                    ol.focus()
 
-                if ol.highlighted is None and ol.option_count > 0:
-                    for i in range(ol.option_count):
-                        opt = ol.get_option_at_index(i)
-                        if not getattr(opt, "disabled", False):
-                            ol.highlighted = i
-                            break
+                    if ol.highlighted is None and ol.option_count > 0:
+                        for i in range(ol.option_count):
+                            opt = ol.get_option_at_index(i)
+                            if not getattr(opt, "disabled", False):
+                                ol.highlighted = i
+                                break
 
-                self._update_pagination(ol)
-            else:
-                try:
-                    for cw in self.query(CustomRichTabWidget):
-                        if cw.display:
-                            cw.focus()
-                            break
-                except Exception:
-                    pass
+                    self._update_pagination(ol)
+                else:
+                    try:
+                        host = self.query_one(f"#custom-body-{idx}")
+                        for view in host.children:
+                            if not view.query(CustomRichTabWidget) and not isinstance(view, CustomRichTabWidget):
+                                if callable(update := getattr(view, "update_content", None)):
+                                    update()
+                        for widget in host.query(Widget):
+                            if widget.can_focus and not widget.disabled:
+                                widget.focus()
+                                break
+                    except Exception:
+                        pass
 
-                self._update_pagination(None)
+                    self._update_pagination(None)
 
-            self._update_scroll_indicators()
-            self.check_tab_overflow()
-            self._update_file_link()
+                self._focus_search_target()
+                self._update_scroll_indicators()
+                self.check_tab_overflow()
+                self._update_file_link()
+                self._update_current_help_panel()
 
         except Exception:
-            pass
+            LOGGER.exception("Unable to activate tab")
+            self.notify_status("Unable to open tab.", level="error")
 
     @on(events.Click, "#tab-left")
     def scroll_tabs_left(self, event: events.Click) -> None:
@@ -4091,11 +4908,31 @@ Tooltip {
                 if item.warning_msg:
                     help_text += f"> **{_ICON_WARNING} WARNING:** {item.warning_msg}\n"
 
-                help_text += item.extended_help or f"**{item.label}**\nNo extended documentation available."
+                help_text += item.extended_help or f"**{_md_escape(item.label)}**\nNo extended documentation available."
 
-                md.update(help_text)
+                if getattr(md, "_dusky_help_text", None) != help_text:
+                    md.update(help_text)
+                    md._dusky_help_text = help_text
 
         except Exception:
+            pass
+
+    def _update_current_help_panel(self) -> None:
+        try:
+            if not self.query_one("#content-area").has_class("-show-help"):
+                return
+            ol = self.current_option_list
+            if ol and ol.highlighted is not None:
+                parsed = self._get_item_from_id(ol.get_option_at_index(ol.highlighted).id)
+                if parsed:
+                    self._update_help_panel(parsed[2])
+                    return
+            md = self.query_one("#help-markdown", Markdown)
+            neutral = "Select an item to view documentation."
+            if getattr(md, "_dusky_help_text", None) != neutral:
+                md.update(neutral)
+                md._dusky_help_text = neutral
+        except (NoMatches, OptionDoesNotExist):
             pass
 
     @on(OptionList.OptionHighlighted)
@@ -4103,6 +4940,19 @@ Tooltip {
         ol = event.option_list
 
         if not isinstance(ol, ConfigOptionList) or not event.option_id:
+            return
+
+        restored = getattr(ol, "_restored_option", None) is event.option
+        if restored:
+            ol._restored_option = None
+
+        try:
+            if (
+                ol is not self.current_option_list or ol.highlighted != event.option_index
+                or ol.get_option_at_index(event.option_index) is not event.option
+            ):
+                return
+        except OptionDoesNotExist:
             return
 
         parsed = self._get_item_from_id(event.option_id)
@@ -4139,12 +4989,12 @@ Tooltip {
 
                 ol.last_highlighted_id = event.option_id
 
-                if hasattr(ol, "scroll_to_highlight"):
-                    ol.scroll_to_highlight()
-                elif hasattr(ol, "scroll_to_option") and curr_idx is not None:
-                    ol.scroll_to_option(curr_idx)
-
-                self._ensure_header_visible(ol, curr_idx)
+                if not restored:
+                    if hasattr(ol, "scroll_to_highlight"):
+                        ol.scroll_to_highlight()
+                    elif hasattr(ol, "scroll_to_option") and curr_idx is not None:
+                        ol.scroll_to_option(curr_idx)
+                    self._ensure_header_visible(ol, curr_idx)
 
             except OptionDoesNotExist:
                 pass
@@ -4155,26 +5005,13 @@ Tooltip {
         if ol is None or curr_idx is None or ol.option_count == 0:
             return
 
-        has_selectable_above = False
-        for i in range(curr_idx):
-            try:
-                if not getattr(ol.get_option_at_index(i), "disabled", False):
-                    has_selectable_above = True
-                    break
-            except Exception:
-                pass
-
-        if not has_selectable_above:
-            ol.scroll_y = 0
-            return
-
-        if curr_idx > 0:
+        # Only adjust if the option is at the very top of the visible window
+        # and has an immediate disabled group header 1 row above it
+        if curr_idx > 0 and int(ol.scroll_y) == curr_idx:
             try:
                 prev_opt = ol.get_option_at_index(curr_idx - 1)
                 if getattr(prev_opt, "disabled", False):
-                    target_header_idx = curr_idx - 1
-                    if int(ol.scroll_y) > target_header_idx:
-                        ol.scroll_y = target_header_idx
+                    ol.scroll_y = curr_idx - 1
             except Exception:
                 pass
 
@@ -4183,15 +5020,9 @@ Tooltip {
             counter = self.query_one("#pos-counter", Label)
             if ol and ol.option_count > 0:
                 curr_idx = ol.highlighted if ol.highlighted is not None else 0
-                total_selectable = 0
-                selectable_idx = 0
-
-                for i in range(ol.option_count):
-                    opt = ol.get_option_at_index(i)
-                    if not getattr(opt, "disabled", False):
-                        total_selectable += 1
-                        if i <= curr_idx:
-                            selectable_idx += 1
+                positions = ol._selectable_positions
+                total_selectable = positions[-1] if positions else 0
+                selectable_idx = positions[curr_idx] if positions else 0
 
                 if total_selectable > 0 and selectable_idx > 0:
                     txt = Text()
@@ -4235,8 +5066,8 @@ Tooltip {
     def notify_status(self, msg: str, level: str = "info") -> None:
         try:
             app_footer = self.query_one(AppFooter)
-            app_footer.status_msg = msg
             app_footer.status_level = level
+            app_footer.status_msg = msg
 
             if self._status_timer:
                 self._status_timer.stop()
@@ -4259,6 +5090,9 @@ Tooltip {
     def play_reset_sound(self) -> None:
         global _AUDIO_PLAYER_CACHE
 
+        if self._action_shutdown_started:
+            return
+
         sound_path = "/usr/share/sounds/freedesktop/stereo/dialog-information.oga"
 
         if Path(sound_path).exists():
@@ -4277,11 +5111,24 @@ Tooltip {
                 if player.endswith("mpv"):
                     cmd.extend(["--no-video", "--really-quiet"])
 
-                subprocess.Popen(
-                    cmd,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL
-                )
+                async def play() -> None:
+                    proc = None
+                    spawn = asyncio.create_task(asyncio.create_subprocess_exec(
+                        *cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                        start_new_session=True,
+                    ))
+                    try:
+                        proc = await asyncio.shield(spawn)
+                        self._action_procs.add(proc)
+                        await proc.wait()
+                    except OSError as error:
+                        LOGGER.debug("Unable to play notification sound: %s", error)
+                    finally:
+                        self._track_action_cleanup(asyncio.create_task(
+                            self._cleanup_action_resources(proc, [], spawn)
+                        ))
+
+                self._track_action_task(asyncio.create_task(play()))
 
     # =========================================================================
     # WRITE GENERATION / AUTOSAVE SAFETY
@@ -4289,6 +5136,9 @@ Tooltip {
     def _bump_write_generation(self, uid: str) -> int:
         gen = self._write_generation.get(uid, 0) + 1
         self._write_generation[uid] = gen
+        if self.custom_views and self.is_mounted:
+            for view in self.query(CustomRichTabWidget):
+                view.invalidate_content()
         return gen
 
     def _bump_write_generation_for_item(self, item: ConfigItem) -> int:
@@ -4325,9 +5175,9 @@ Tooltip {
             for dup_t, dup_i, dup_itm in self._items_by_uid.get(src_uid, []):
                 if (dup_t, dup_i) in seen:
                     continue
-                seen.add((dup_t, dup_i))
                 if self._get_item_engine_info(dup_itm) != src_eng:
                     continue
+                seen.add((dup_t, dup_i))
                 self._cancel_autosave_ref(dup_t, dup_i)
 
         for uek in uid_engines:
@@ -4354,6 +5204,8 @@ Tooltip {
 
     def _revert_transaction(self, transaction: list[tuple[int, int, Any, Any]]) -> None:
         self._apply_transaction_to_ram(transaction, undo=True)
+        for tab_idx, item_idx, _, _ in transaction:
+            self._sync_pending(tab_idx, item_idx, self.schema[tab_idx][item_idx])
 
         if self.undo_stack and list(self.undo_stack[-1]) == list(transaction):
             self.undo_stack.pop()
@@ -4369,9 +5221,29 @@ Tooltip {
             if self._get_item_engine_info(other_item) != src_eng:
                 continue
             other_item.value = item.default
+            self._committed[(t_idx, i_idx)] = clone_value(item.default)
+            self.pending_commits.discard((t_idx, i_idx))
             self._on_item_value_changed(other_item)
             self._refresh_single_ui(t_idx, i_idx, other_item)
 
+        self._bump_write_generation(self._uid_engine_key(item))
+        self._refresh_presets_ui()
+
+    def _apply_observed_systemd_state(self, item: ConfigItem, actual: str, expected: str) -> None:
+        """Reconcile every view of one unit after an uncertain systemctl write."""
+        uid = self._get_item_uid(item)
+        engine_key = self._get_item_engine_info(item)
+        for tab_idx, item_idx, other in self._items_by_uid.get(uid, ()):
+            if self._get_item_engine_info(other) != engine_key:
+                continue
+            observed = other.deserialize(actual)
+            self._committed[(tab_idx, item_idx)] = clone_value(observed)
+            if other.serialize(other.value) == expected:
+                other.value = observed
+            other.exists_in_target = True
+            self._sync_pending(tab_idx, item_idx, other)
+            self._on_item_value_changed(other)
+            self._refresh_single_ui(tab_idx, item_idx, other)
         self._bump_write_generation(self._uid_engine_key(item))
         self._refresh_presets_ui()
 
@@ -4384,15 +5256,27 @@ Tooltip {
         action_type: str = "new",
         success_msg: str = ""
     ) -> None:
+        if not self.require_boot_complete():
+            return
+        # Every presentation of the same setting belongs to one transaction.
+        # Keep different target files isolated and write each setting once.
+        expanded = {(t, i): (t, i, clone_value(old), clone_value(new)) for t, i, old, new in transaction}
+        for t, i, old, new in transaction:
+            item = self.schema[t][i]
+            engine_key = self._get_item_engine_info(item)
+            for dt, di, duplicate in self._items_by_uid.get(item.uid, ()):
+                if self._get_item_engine_info(duplicate) == engine_key:
+                    expanded.setdefault((dt, di), (dt, di, clone_value(duplicate.value), clone_value(new)))
+        transaction = list(expanded.values())
         self._schema_dirty_counter += 1
         self._cancel_autosave_for_transaction(transaction)
 
         for t, i, o, n in transaction:
             item = self.schema[t][i]
-            item.value = o if action_type == "undo" else n
+            item.value = clone_value(o if action_type == "undo" else n)
             item.exists_in_target = True
             self._on_item_value_changed(item)
-            self.pending_commits.add((t, i))
+            self._sync_pending(t, i, item)
             self._refresh_single_ui(t, i, item)
 
         uid_engines: set[str] = set()
@@ -4404,6 +5288,13 @@ Tooltip {
         for uek in uid_engines:
             self._bump_write_generation(uek)
 
+        # Keep the edit generation that belongs to this transaction.  A
+        # later edit can legitimately return to the same serialized value;
+        # comparing values alone would let an older failed batch roll it back.
+        transaction_generations = {
+            uek: self._write_generation.get(uek, 0) for uek in uid_engines
+        }
+
         if self.auto_save:
             def finalize_transaction(batch_success: bool):
                 successful_parts = []
@@ -4414,10 +5305,20 @@ Tooltip {
                         failed_parts.append((t, i, o, n))
 
                         item = self.schema[t][i]
-                        item.value = n if action_type == "undo" else o
-                        self._on_item_value_changed(item)
-                        self._refresh_single_ui(t, i, item)
-                        self.pending_commits.discard((t, i))
+                        expected = o if action_type == "undo" else n
+                        uek = self._uid_engine_key(item)
+                        generation_unchanged = (
+                            self._write_generation.get(uek, 0)
+                            == transaction_generations.get(uek, -1)
+                        )
+                        if (
+                            generation_unchanged
+                            and item.serialize(item.value) == item.serialize(expected)
+                        ):
+                            item.value = n if action_type == "undo" else o
+                            self._on_item_value_changed(item)
+                            self._refresh_single_ui(t, i, item)
+                            self.pending_commits.discard((t, i))
                     else:
                         successful_parts.append((t, i, o, n))
 
@@ -4467,6 +5368,42 @@ Tooltip {
 
             self._refresh_presets_ui()
 
+    def _is_unchanged_submission(self, item: ConfigItem, new_val: Any) -> bool:
+        """Narrow guard for input submission paths: skip ordinary settings whose
+        accepted value already matches, avoiding undo/redo/save churn."""
+        if item.type_ in ("action", "preset", "menu"):
+            return False
+        if is_trigger_item(item):
+            return False
+        if not bool(getattr(item, "exists_in_target", False)):
+            return False
+        try:
+            if item.serialize(item.value) != item.serialize(new_val):
+                return False
+        except Exception:
+            return False
+        try:
+            src_eng = self._get_item_engine_info(item)
+        except Exception:
+            return False
+        try:
+            for _, _, other in self._items_by_uid.get(self._get_item_uid(item), ()):
+                if other is item:
+                    continue
+                try:
+                    if self._get_item_engine_info(other) != src_eng:
+                        continue
+                except Exception:
+                    return False
+                try:
+                    if other.serialize(other.value) != other.serialize(new_val):
+                        return False
+                except Exception:
+                    return False
+        except Exception:
+            return False
+        return True
+
     def _safe_apply_value(
         self,
         tab_idx: int,
@@ -4477,6 +5414,14 @@ Tooltip {
         batch_mode: bool = False,
         record_undo: bool = True
     ) -> None:
+        if item.read_only:
+            self.notify_status(f"{item.label} cannot be enabled or disabled directly.", level="warning")
+            return
+        if not item.exists_in_target and self.hide_missing_items:
+            self.notify_status(f"{item.label} is no longer available. Press F5 to refresh.", level="warning")
+            return
+        if not self.require_boot_complete():
+            return
         if item.confirm_message and not is_undo and not batch_mode:
             def on_confirm(confirmed: bool) -> None:
                 if confirmed:
@@ -4503,7 +5448,9 @@ Tooltip {
         batch_mode: bool = False,
         record_undo: bool = True
     ) -> bool:
-        old_val = item.value
+        if item.read_only:
+            return False
+        old_val = clone_value(item.value)
         self._schema_dirty_counter += 1
 
         item_uid = self._get_item_uid(item)
@@ -4543,19 +5490,22 @@ Tooltip {
         val_str = item.serialize(new_val)
 
         if self.auto_save and not batch_mode:
+            if not self._save_tasks and self._save_auth_pending == 0:
+                self._save_failure_pending = False
             k = (tab_idx, item_idx)
             gen = self._bump_write_generation(self._uid_engine_key(item))
 
             self._save_timers[k] = self.set_timer(
                 0.25,
                 lambda ti=tab_idx, ii=item_idx, it=item, vs=val_str, ov=old_val, g=gen, tx=transaction:
-                    asyncio.create_task(self._do_auto_save_async(ti, ii, it, vs, ov, g, tx, False))
+                    self._start_save_task(self._do_auto_save_async(ti, ii, it, vs, ov, g, tx, False))
             )
 
             self._pending_autosave_args[k] = (item, val_str, old_val)
 
         else:
-            self.pending_commits.add((tab_idx, item_idx))
+            for ti, ii, _, _ in transaction:
+                self._sync_pending(ti, ii, self.schema[ti][ii])
 
         if not batch_mode:
             self._update_footer_legend()
@@ -4582,6 +5532,70 @@ Tooltip {
     # =========================================================================
     # ASYNC AUTO SAVE
     # =========================================================================
+    def _start_save_task(self, coroutine: Any) -> asyncio.Task[Any]:
+        task = asyncio.create_task(coroutine)
+        self._save_tasks.add(task)
+        task.add_done_callback(self._on_save_task_done)
+        return task
+
+    def _on_save_task_done(self, task: asyncio.Task[Any]) -> None:
+        self._save_tasks.discard(task)
+        getattr(self, "_save_task_keys", {}).pop(task, None)
+        if task.cancelled():
+            self._save_failure_pending = True
+        else:
+            try:
+                if task.exception() is not None:
+                    self._save_failure_pending = True
+            except Exception:
+                self._save_failure_pending = True
+            # Some engines select a record or normalize dependent values on save.
+            # Refresh once this task no longer marks its own setting as pending.
+            states = {
+                key: engine.cache for key, engine in self.engine_pool.items()
+                if getattr(engine, "refresh_after_write", False)
+            }
+            if states:
+                self._apply_refreshed_states(states)
+        self._maybe_finish_quit()
+
+    async def _run_save_io(self, func: Any, /, *args: Any, **kwargs: Any) -> Any:
+        """Run blocking save/auth I/O while draining the worker on cancellation."""
+        worker = asyncio.create_task(asyncio.to_thread(func, *args, **kwargs))
+        try:
+            await asyncio.wait({worker})
+            return worker.result()
+        except asyncio.CancelledError:
+            # Repeated cancellation must not cancel the worker or release the
+            # caller's save lock while its blocking write is still running.
+            while not worker.done():
+                try:
+                    await asyncio.wait({worker})
+                except asyncio.CancelledError:
+                    continue
+                except Exception:
+                    break
+            try:
+                worker.result()
+            except Exception:
+                LOGGER.exception("Save I/O failed while draining cancellation")
+            finally:
+                raise
+
+    def _maybe_finish_quit(self) -> None:
+        if (
+            self._quit_after_save
+            and not self._save_tasks
+            and self._save_auth_pending == 0
+            and not self._save_timers
+        ):
+            self._quit_after_save = False
+            if self._save_failure_pending or self.pending_commits:
+                self._save_failure_pending = False
+                self.notify_status("Quit aborted: pending changes were not fully saved.", level="warning")
+            else:
+                self.exit()
+
     async def _do_auto_save_async(
         self,
         tab_idx: int,
@@ -4593,13 +5607,29 @@ Tooltip {
         transaction: list[tuple[int, int, Any, Any]],
         force: bool = False
     ) -> None:
+        uek = self._uid_engine_key(item)
+        # A superseded task must not remove a newer edit's debounce timer.
+        if self._write_generation.get(uek) != generation:
+            return
         self._save_timers.pop((tab_idx, item_idx), None)
         self._pending_autosave_args.pop((tab_idx, item_idx), None)
-
-        uek = self._uid_engine_key(item)
+        current_task = asyncio.current_task()
+        if current_task is not None:
+            task_keys = getattr(self, "_save_task_keys", None)
+            if task_keys is None:
+                task_keys = self._save_task_keys = {}
+            task_keys.setdefault(current_task, set()).add(uek)
 
         if force:
+            if (
+                self._write_generation.get(uek) != generation
+                or item.serialize(item.value) != item.serialize(old_val)
+            ):
+                return
             self._apply_transaction_to_ram(transaction, undo=False)
+            # Applying the retry transaction advances the generation.  The
+            # new value is the one that must survive the lock wait and write.
+            generation = self._write_generation.get(uek, generation)
         else:
             if self._write_generation.get(uek) != generation:
                 return
@@ -4613,55 +5643,126 @@ Tooltip {
         try:
             engine = self._get_engine_for_item(item)
         except Exception as e:
+            self._save_failure_pending = True
             self.notify_status(f"Engine Error: {e}", level="error")
             self._revert_transaction(transaction)
+            self._maybe_finish_quit()
             return
 
         async with self._save_lock:
+            # A newer edit may have happened while this save waited for the
+            # serialized write lock.  Validate again immediately before I/O.
+            if (
+                self._write_generation.get(uek) != generation
+                or item.serialize(item.value) != val_str
+            ):
+                return
+
+            self._active_save_count += 1
+            write_result = None
             try:
-                success, msg, _ = await asyncio.to_thread(
-                    engine.write_value,
-                    item.key,
-                    item.scope,
-                    val_str,
-                    item_type=item.type_
-                )
-            except Exception as e:
-                success, msg = False, f"Engine Error: {e}"
+                try:
+                    if hasattr(engine, "write_value_result"):
+                        write_result = await self._run_save_io(
+                            engine.write_value_result, item.key, item.scope, val_str
+                        )
+                        success, msg = write_result.ok, write_result.message
+                    else:
+                        success, msg, _ = await self._run_save_io(
+                            engine.write_value, item.key, item.scope, val_str,
+                            item_type=item.type_
+                        )
+                except Exception as e:
+                    success, msg = False, f"Engine Error: {e}"
+            finally:
+                self._active_save_count -= 1
 
         if success:
+            for ti, ii, _, new_value in transaction:
+                self._committed[(ti, ii)] = clone_value(new_value)
+                other = self.schema[ti][ii]
+                if other.serialize(other.value) == other.serialize(new_value):
+                    self.pending_commits.discard((ti, ii))
+                else:
+                    self._sync_pending(ti, ii, other)
+            # The write may have completed after a newer edit was made.  Do
+            # not report the old value as current or roll anything back.
+            if self._write_generation.get(uek) != generation:
+                return
             try:
                 ekey = self._get_item_engine_info(item)
-                self.last_target_mtimes[ekey] = Path(engine.target_path).expanduser().resolve().stat().st_mtime
-            except OSError:
+                if engine.target_path:
+                    fingerprint = self._target_fingerprint(Path(engine.target_path).expanduser().resolve())
+                    if isinstance(fingerprint, tuple):
+                        self.last_target_mtimes[ekey] = fingerprint
+            except (OSError, TypeError):
                 pass
 
+            # A completed write is a state transition too.  Advancing the
+            # generation prevents an external reload that began earlier from
+            # replacing the value just committed.
+            self._bump_write_generation(uek)
+
             if is_trigger_item(item):
+                reset_generation = self._write_generation[uek]
                 def reset_trigger():
-                    self._reset_trigger_ui(item)
+                    if self._write_generation.get(uek) == reset_generation:
+                        self._reset_trigger_ui(item)
 
                 self.set_timer(0.15, reset_trigger)
 
-            self.notify_status(f"Updated {item.label}", level="success")
+            message = msg if self._get_item_engine_info(item)[0] == "network" and msg else f"Updated {item.label}"
+            self.notify_status(message, level="success")
+            self._maybe_finish_quit()
+            return
+
+        if write_result is not None and "AUTH_REQUIRED" not in msg:
+            if self._write_generation.get(uek) != generation or item.serialize(item.value) != val_str:
+                return
+            if write_result.actual is not None:
+                self._apply_observed_systemd_state(item, write_result.actual, val_str)
+                self.notify_status(f"Error: {msg}; current enablement was refreshed.", level="error")
+            else:
+                for ti, ii, _, _ in transaction:
+                    self._sync_pending(ti, ii, self.schema[ti][ii])
+                self.notify_status(f"Error: {msg}; current enablement is unknown.", level="error")
+            self._save_failure_pending = True
+            self._maybe_finish_quit()
             return
 
         if "AUTH_REQUIRED" in msg:
+            if (
+                self._write_generation.get(uek) != generation
+                or item.serialize(item.value) != val_str
+            ):
+                return
             if isinstance(self.screen, PasswordScreen):
                 self.notify_status("Another authorization is already in progress.", level="warning")
+                self._save_failure_pending = True
                 self._revert_transaction(transaction)
                 return
 
             self._revert_transaction(transaction)
+            generation = self._write_generation.get(uek, generation)
 
             def on_pwd(pwd: str | None) -> None:
-                asyncio.create_task(self._on_auto_password(pwd, tab_idx, item_idx, item, val_str, old_val, generation, transaction))
+                self._start_save_task(self._on_auto_password(pwd, tab_idx, item_idx, item, val_str, old_val, generation, transaction))
 
+            self._save_auth_pending += 1
             self.push_screen(PasswordScreen(), on_pwd)
             return
 
+        if (
+            self._write_generation.get(uek) != generation
+            or item.serialize(item.value) != val_str
+        ):
+            return
+
         self.notify_status(f"Error: {msg}", level="error")
+        self._save_failure_pending = True
         self._revert_transaction(transaction)
         self.play_reset_sound()
+        self._maybe_finish_quit()
 
     async def _on_auto_password(
         self,
@@ -4674,13 +5775,30 @@ Tooltip {
         generation: int,
         transaction: list[tuple[int, int, Any, Any]]
     ) -> None:
+        self._save_auth_pending = max(0, self._save_auth_pending - 1)
         if pwd:
-            auth_res = await asyncio.to_thread(
-                subprocess.run,
-                ["sudo", "-S", "-v"],
-                input=(pwd + "\n").encode(),
-                capture_output=True
-            )
+            try:
+                auth_res = await self._run_save_io(
+                    subprocess.run,
+                    ["sudo", "-S", "-v"],
+                    input=(pwd + "\n").encode(),
+                    capture_output=True,
+                    timeout=30,
+                    check=False,
+                    env={**os.environ, "LC_ALL": "C"},
+                )
+            except subprocess.TimeoutExpired:
+                self.notify_status("Sudo authentication timed out.", level="error")
+                self._save_failure_pending = True
+                self._maybe_finish_quit()
+                return
+            except Exception as exc:
+                self.notify_status(f"Sudo authentication failed: {exc}", level="error")
+                self._save_failure_pending = True
+                self._maybe_finish_quit()
+                return
+            finally:
+                pwd = None
 
             if auth_res.returncode == 0:
                 self.notify_status("Sudo authenticated. Retrying...", level="info")
@@ -4698,9 +5816,12 @@ Tooltip {
                 )
             else:
                 self.notify_status("Incorrect sudo password.", level="error")
+                self._save_failure_pending = True
                 self.play_reset_sound()
         else:
             self.notify_status("Sudo authentication cancelled.", level="warning")
+            self._save_failure_pending = True
+        self._maybe_finish_quit()
 
     def _start_sudo_keepalive(self) -> None:
         if self._sudo_keepalive is None:
@@ -4726,20 +5847,27 @@ Tooltip {
         if self._modal_active():
             if on_complete:
                 on_complete(False)
+            if self._quit_after_save:
+                self._save_failure_pending = True
+                self._maybe_finish_quit()
             return False
 
         self.trigger_shortcut_blink("ctrl-s")
+
+        if not self._save_tasks and self._save_auth_pending == 0:
+            self._save_failure_pending = False
 
         if not self.pending_commits:
             self.notify_status("No pending changes.", level="info")
             if on_complete:
                 on_complete(True)
+            self._maybe_finish_quit()
             return True
 
         if self._save_lock is None:
             self._save_lock = asyncio.Lock()
 
-        asyncio.create_task(self._save_batch_async(on_complete))
+        self._start_save_task(self._save_batch_async(on_complete))
         return True
 
     async def _save_batch_async(self, on_complete=None) -> None:
@@ -4747,11 +5875,6 @@ Tooltip {
             self._save_lock = asyncio.Lock()
 
         async with self._save_lock:
-            if self._modal_active():
-                if on_complete:
-                    on_complete(False)
-                return
-
             if not self.pending_commits:
                 self.notify_status("No pending changes.", level="info")
                 if on_complete:
@@ -4760,7 +5883,7 @@ Tooltip {
 
             # Frozen snapshot: (change_tuple, commit_key, val_str, frozen_val, ConfigItem)
             type FrozenItem = tuple[tuple[str, str, str, str], tuple[int, int], str, Any, ConfigItem]
-            batches: dict[tuple[str, str], list[FrozenItem]] = {}
+            batches: dict[tuple[tuple[str, str], str | None], list[FrozenItem]] = {}
 
             for tab_idx, item_idx in tuple(self.pending_commits):
                 item = self.schema[tab_idx][item_idx]
@@ -4769,7 +5892,8 @@ Tooltip {
                 val_str = item.serialize(frozen_val)
                 ekey = self._get_item_engine_info(item)
                 change = (item.key, item.scope, val_str, str(item.type_))
-                batches.setdefault(ekey, []).append((change, key, val_str, frozen_val, item))
+                trigger_key = self._uid_engine_key(item) if is_trigger_item(item) else None
+                batches.setdefault((ekey, trigger_key), []).append((change, key, val_str, frozen_val, item))
 
             final_success = True
             success_count = 0
@@ -4777,65 +5901,142 @@ Tooltip {
             auth_required = False
 
             def mark_success(key: tuple[int, int], frozen_val_str: str, frozen_val: Any, itm: ConfigItem) -> bool:
+                self._committed[key] = clone_value(frozen_val)
                 current_str = itm.serialize(itm.value)
                 if current_str != frozen_val_str:
                     self._save_queued_during_run = True
                     return False
                 self.pending_commits.discard(key)
-                self._committed[key] = clone_value(frozen_val)
                 return True
 
-            for ekey, batch in batches.items():
+            for (ekey, trigger_key), batch in batches.items():
                 engine = self.engine_pool[ekey]
-                changes = [b[0] for b in batch]
+                # Duplicate views must not execute a trigger multiple times.
+                changes = list({(b[0][0], b[0][1]): b[0] for b in batch}.values())
 
+                if trigger_key is None and hasattr(engine, "write_batch_results"):
+                    self._active_save_count += 1
+                    try:
+                        results = await self._run_save_io(engine.write_batch_results, changes)
+                    except Exception as exc:
+                        results = {}
+                        error_msgs.append(f"Engine Error: {exc}")
+                        final_success = False
+                    finally:
+                        self._active_save_count -= 1
+
+                    reconciled = set()
+                    for change, key, frozen_str, frozen_val, itm in batch:
+                        identity = (change[0], change[1])
+                        result = results.get(identity)
+                        if result is None:
+                            continue  # Unknown outcome remains pending; never repeat it blindly.
+                        if result.ok:
+                            if mark_success(key, frozen_str, frozen_val, itm):
+                                success_count += 1
+                                self._bump_write_generation(self._uid_engine_key(itm))
+                            continue
+                        final_success = False
+                        if result.message == "AUTH_REQUIRED":
+                            auth_required = True
+                            continue
+                        if identity not in reconciled and result.actual is not None:
+                            self._apply_observed_systemd_state(itm, result.actual, frozen_str)
+                            reconciled.add(identity)
+                        if result.actual == frozen_str:
+                            success_count += 1
+                        error_msgs.append(result.message)
+                    if auth_required:
+                        break
+                    continue
+
+                self._active_save_count += 1
                 try:
-                    success, msg, _ = await asyncio.to_thread(engine.write_batch, changes)
+                    if trigger_key is not None:
+                        key_s, scope, value, kind = changes[0]
+                        success, msg, _ = await self._run_save_io(engine.write_value, key_s, scope, value, item_type=kind)
+                    else:
+                        success, msg, _ = await self._run_save_io(engine.write_batch, changes)
                 except Exception as e:
                     success, msg = False, f"Engine Error: {e}"
+                finally:
+                    self._active_save_count -= 1
 
                 if success:
+                    committed_ueks: set[str] = set()
+                    completed_triggers = {}
                     for _change, key, frozen_str, frozen_val, itm in batch:
                         if mark_success(key, frozen_str, frozen_val, itm):
                             success_count += 1
+                            committed_ueks.add(self._uid_engine_key(itm))
                             if is_trigger_item(itm):
-                                self._reset_trigger_ui(itm)
+                                completed_triggers[self._uid_engine_key(itm)] = itm
+
+                    for trigger in completed_triggers.values():
+                        self._reset_trigger_ui(trigger)
+
+                    for uek in committed_ueks:
+                        self._bump_write_generation(uek)
 
                     try:
-                        self.last_target_mtimes[ekey] = Path(engine.target_path).expanduser().resolve().stat().st_mtime
-                    except OSError:
+                        if engine.target_path:
+                            fingerprint = self._target_fingerprint(Path(engine.target_path).expanduser().resolve())
+                            if isinstance(fingerprint, tuple):
+                                self.last_target_mtimes[ekey] = fingerprint
+                    except (OSError, TypeError):
                         pass
                 else:
                     if "AUTH_REQUIRED" in msg:
                         auth_required = True
                         break
 
-                    engine_success_count = 0
+                    if getattr(engine, "atomic_batches", False):
+                        final_success = False
+                        error_msgs.append(msg)
+                        continue
 
+                    engine_success_count = 0
+                    committed_ueks = set()
+                    completed_triggers = {}
+
+                    fallback_results = {}
+                    if trigger_key is not None:
+                        # An action may already have had side effects before
+                        # reporting failure. Never execute it again as fallback.
+                        fallback_results[(changes[0][0], changes[0][1])] = (success, msg)
                     for change, key, frozen_str, frozen_val, itm in batch:
                         key_s, scope, val_str, itype = change
 
-                        try:
-                            ok, item_msg, _ = await asyncio.to_thread(
-                                engine.write_value,
-                                key_s,
-                                scope,
-                                val_str,
-                                item_type=itype
-                            )
-                        except Exception as e:
-                            ok, item_msg = False, f"Engine Error: {e}"
+                        identity = (key_s, scope)
+                        if identity not in fallback_results:
+                            self._active_save_count += 1
+                            try:
+                                ok, item_msg, _ = await self._run_save_io(
+                                    engine.write_value, key_s, scope, val_str, item_type=itype
+                                )
+                            except Exception as e:
+                                ok, item_msg = False, f"Engine Error: {e}"
+                            finally:
+                                self._active_save_count -= 1
+                            fallback_results[identity] = (ok, item_msg)
+                        else:
+                            ok, item_msg = fallback_results[identity]
 
                         if ok:
                             if mark_success(key, frozen_str, frozen_val, itm):
                                 success_count += 1
                                 engine_success_count += 1
+                                committed_ueks.add(self._uid_engine_key(itm))
                                 if is_trigger_item(itm):
-                                    self._reset_trigger_ui(itm)
+                                    uek = self._uid_engine_key(itm)
+                                    completed_triggers[uek] = (itm, self._write_generation.get(uek, 0))
 
                             try:
-                                self.last_target_mtimes[ekey] = Path(engine.target_path).expanduser().resolve().stat().st_mtime
-                            except OSError:
+                                if engine.target_path:
+                                    fingerprint = self._target_fingerprint(Path(engine.target_path).expanduser().resolve())
+                                    if isinstance(fingerprint, tuple):
+                                        self.last_target_mtimes[ekey] = fingerprint
+                            except (OSError, TypeError):
                                 pass
                         else:
                             if "AUTH_REQUIRED" in item_msg:
@@ -4846,6 +6047,12 @@ Tooltip {
                                 self.pending_commits.discard(key)
                                 self._reset_trigger_ui(itm)
 
+                    for uek, (trigger, generation) in completed_triggers.items():
+                        if self._write_generation.get(uek, 0) == generation:
+                            self._reset_trigger_ui(trigger)
+                    for uek in committed_ueks:
+                        self._bump_write_generation(uek)
+
                     if auth_required:
                         break
 
@@ -4855,19 +6062,23 @@ Tooltip {
         if self._save_queued_during_run:
             self._save_queued_during_run = False
             if self.pending_commits:
-                asyncio.create_task(self._save_batch_async(on_complete))
+                self._start_save_task(self._save_batch_async(on_complete))
                 return
 
         if auth_required:
+            self._refresh_all_ui()
+            self._refresh_presets_ui()
             if isinstance(self.screen, PasswordScreen):
                 self.notify_status("Another authorization is already in progress.", level="warning")
+                self._save_failure_pending = True
                 if on_complete:
                     on_complete(False)
                 return
 
             def on_pwd_batch(pwd: str | None) -> None:
-                asyncio.create_task(self._on_batch_password(pwd, on_complete))
+                self._start_save_task(self._on_batch_password(pwd, on_complete))
 
+            self._save_auth_pending += 1
             self.push_screen(PasswordScreen(), on_pwd_batch)
             return
 
@@ -4875,10 +6086,12 @@ Tooltip {
             self.notify_status(f"Batched {success_count} commits successfully.", level="success")
             self.play_reset_sound()
         elif success_count > 0:
+            self._save_failure_pending = True
             first_err = error_msgs[0] if error_msgs else "Unknown Engine Error"
             self.notify_status(f"Partial success ({success_count} applied). Error: {first_err}", level="warning")
             self.play_reset_sound()
         else:
+            self._save_failure_pending = True
             first_err = error_msgs[0] if error_msgs else "Unknown Engine Error"
             self.notify_status(f"Batch Error: {first_err}", level="error")
 
@@ -4890,9 +6103,10 @@ Tooltip {
             on_complete(final_success)
 
     async def _on_batch_password(self, pwd: str | None, on_complete=None) -> None:
+        self._save_auth_pending = max(0, self._save_auth_pending - 1)
         if pwd:
             try:
-                auth_res = await asyncio.to_thread(
+                auth_res = await self._run_save_io(
                     subprocess.run,
                     ["sudo", "-S", "-v"],
                     input=(pwd + "\n").encode(),
@@ -4903,8 +6117,17 @@ Tooltip {
                 )
             except subprocess.TimeoutExpired:
                 self.notify_status("Sudo authentication timed out.", level="error")
+                self._save_failure_pending = True
                 if on_complete:
                     on_complete(False)
+                self._maybe_finish_quit()
+                return
+            except Exception as exc:
+                self.notify_status(f"Sudo authentication failed: {exc}", level="error")
+                self._save_failure_pending = True
+                if on_complete:
+                    on_complete(False)
+                self._maybe_finish_quit()
                 return
             finally:
                 pwd = None
@@ -4912,15 +6135,24 @@ Tooltip {
             if auth_res.returncode == 0:
                 self.notify_status("Sudo authenticated. Retrying batch...", level="info")
                 self._start_sudo_keepalive()
-                self.action_save_batch(on_complete=on_complete)
+                # PasswordScreen also calls back before it is popped.
+                # Keep quit waiting until the deferred retry owns a save task.
+                self._save_auth_pending += 1
+                def retry_after_dialog() -> None:
+                    self._save_auth_pending -= 1
+                    self.action_save_batch(on_complete=on_complete)
+                self.call_later(retry_after_dialog)
             else:
                 self.notify_status("Incorrect sudo password. Batch aborted.", level="error")
+                self._save_failure_pending = True
                 if on_complete:
                     on_complete(False)
         else:
             self.notify_status("Sudo authentication cancelled.", level="warning")
+            self._save_failure_pending = True
             if on_complete:
                 on_complete(False)
+        self._maybe_finish_quit()
 
     # =========================================================================
     # GLOBAL ACTIONS
@@ -5003,12 +6235,7 @@ Tooltip {
         self.toggle_shortcut_active("help", content_area.has_class("-show-help"))
 
         if content_area.has_class("-show-help"):
-            ol = self.current_option_list
-
-            if ol and ol.last_highlighted_id:
-                parsed = self._get_item_from_id(ol.last_highlighted_id)
-                if parsed:
-                    self._update_help_panel(parsed[2])
+            self._update_current_help_panel()
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
         if action == "clear_local_search":
@@ -5102,7 +6329,7 @@ Tooltip {
                         seen_prefs.add(current_pref)
 
                         for p_item in items:
-                            if self._get_item_uid(p_item) == current_pref and p_item.is_parent:
+                            if current_pref in (p_item.uid, p_item.key) and (p_item.is_parent or p_item.type_ == "menu"):
                                 if not p_item.expanded:
                                     p_item.expanded = True
                                     expanded_any = True
@@ -5128,6 +6355,22 @@ Tooltip {
     def submit_local_search(self, event: Input.Submitted) -> None:
         event.stop()
         self.action_clear_local_search()
+
+    def _focus_search_target(self) -> None:
+        target = self._pending_search_target
+        if target is None or self._current_tab_index() != target[0]:
+            return
+        tab_idx, item_idx = target
+        try:
+            ol = self.query_one(f"#list-{tab_idx}", ConfigOptionList)
+            ol.highlighted = ol.get_option_index(f"item_{tab_idx}_{item_idx}")
+            ol.focus()
+            ol.scroll_to_highlight()
+        except (NoMatches, OptionDoesNotExist):
+            LOGGER.exception("Unable to focus search result")
+            self.notify_status("Search result is no longer available.", level="warning")
+        finally:
+            self._pending_search_target = None
 
     def action_search(self) -> None:
         if isinstance(self.screen, SearchScreen):
@@ -5155,31 +6398,19 @@ Tooltip {
                         seen_prefs.add(current_pref)
 
                         for p_item in self.schema[tab_idx]:
-                            if self._get_item_uid(p_item) == current_pref and p_item.is_parent:
+                            if current_pref in (p_item.uid, p_item.key) and (p_item.is_parent or p_item.type_ == "menu"):
                                 p_item.expanded = True
                                 current_pref = p_item.parent_ref
                                 break
                         else:
                             break
 
+                self._pending_search_target = (tab_idx, item_idx)
                 self._populate_option_list(tab_idx, maintain_highlight_id=f"item_{tab_idx}_{item_idx}")
                 self.action_switch_tab(tab_idx)
-
-                def _focus_and_highlight():
-                    try:
-                        ol = self.query_one(f"#list-{tab_idx}", ConfigOptionList)
-                        ol.focus()
-
-                        idx = ol.get_option_index(f"item_{tab_idx}_{item_idx}")
-                        ol.highlighted = idx
-
-                        if hasattr(ol, "scroll_to_highlight"):
-                            ol.scroll_to_highlight()
-
-                    except Exception:
-                        pass
-
-                self.call_after_refresh(_focus_and_highlight)
+                # Same-tab searches need no activation event. Other searches
+                # are focused by handle_tab_activated after lazy mount completes.
+                self.call_after_refresh(self._focus_search_target)
 
         self.push_screen(SearchScreen(), check_reply)
 
@@ -5299,6 +6530,8 @@ Tooltip {
             return
 
         tab_idx, item_idx, item = parsed
+        if item.read_only:
+            return
 
         if item.is_parent or item.type_ == "menu":
             items_in_tab = self.schema.get(tab_idx, [])
@@ -5335,14 +6568,16 @@ Tooltip {
 
             # 2. Reset all descendant child items if modified
             for i_idx, itm in enumerate(items_in_tab):
-                if (itm.key in child_keys or self._get_item_uid(itm) in child_uids) and itm.type_ not in ("menu", "action", "preset"):
+                if (itm.key in child_keys or self._get_item_uid(itm) in child_uids) and itm.type_ not in ("menu", "action", "preset") and not itm.read_only and (
+                    itm.exists_in_target or not self.hide_missing_items
+                ):
                     if str(itm.value) != str(itm.default):
                         transaction.append((tab_idx, i_idx, itm.value, itm.default))
 
             if transaction:
                 self._apply_transaction(
                     transaction,
-                    action_type="reset",
+                    action_type="new",
                     success_msg=f"Reset settings under '{item.label}' to default."
                 )
 
@@ -5367,7 +6602,8 @@ Tooltip {
             items = self.schema.get(tab_idx, [])
             configurable_items = [
                 (idx, item) for idx, item in enumerate(items)
-                if item.type_ not in ("action", "menu", "preset")
+                if item.type_ not in ("action", "menu", "preset") and not item.read_only
+                and (item.exists_in_target or not self.hide_missing_items)
             ]
 
             has_changes = any(
@@ -5412,8 +6648,61 @@ Tooltip {
     # =========================================================================
     # PRESET ACTIONS
     # =========================================================================
+    def _write_preset_atomically(self, file_path: Path, payload: dict, *, exclusive: bool) -> None:
+        """Serialize first, then publish via temp file plus atomic replacement.
+
+        exclusive=True keeps new-name creation race-safe: the destination is
+        linked (fails if it already exists) instead of replaced.  Existing
+        bytes are never truncated; temporary files are always cleaned up.
+        Temporary files use a non-.json suffix so preset readers polling
+        for *.json never observe an incomplete file.
+        """
+        text = json.dumps(payload, indent=4)
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path: Path | None = None
+        try:
+            fd, tmp_name = tempfile.mkstemp(
+                dir=str(file_path.parent), prefix=".tmp-preset-", suffix=".tmp"
+            )
+            tmp_path = Path(tmp_name)
+            try:
+                stream = os.fdopen(fd, "w", encoding="utf-8")
+            except BaseException:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+                raise
+            with stream:
+                stream.write(text)
+                stream.flush()
+                os.fsync(stream.fileno())
+            if exclusive:
+                try:
+                    os.link(tmp_path, file_path)
+                except FileExistsError:
+                    raise FileExistsError(f"Preset already exists: {file_path.stem}")
+                finally:
+                    try:
+                        os.unlink(tmp_path)
+                    except OSError:
+                        pass
+                    tmp_path = None
+            else:
+                os.replace(tmp_path, file_path)
+                tmp_path = None
+        finally:
+            if tmp_path is not None:
+                try:
+                    if tmp_path.exists():
+                        tmp_path.unlink()
+                except OSError:
+                    pass
+
     def action_save_preset(self) -> None:
         if self._modal_active():
+            return
+        if not self.enable_user_presets or not self.require_boot_complete():
             return
 
         def check_reply(name: str | None) -> None:
@@ -5428,17 +6717,22 @@ Tooltip {
 
             for t_idx, items in self.schema.items():
                 for item in items:
-                    if item.type_ in ("action", "preset", "menu"):
+                    if item.type_ in ("action", "preset", "menu") or self._get_item_engine_info(item) != self.default_engine_key:
                         continue
 
                     payload[self._get_item_uid(item)] = item.value
 
-            self.user_presets_dir.mkdir(parents=True, exist_ok=True)
             file_path = self.user_presets_dir / f"{name}.json"
 
-            try:
-                with open(file_path, "w", encoding="utf-8") as f:
-                    json.dump(payload, f, indent=4)
+            def do_save(*, exclusive: bool) -> None:
+                try:
+                    self._write_preset_atomically(file_path, payload, exclusive=exclusive)
+                except FileExistsError:
+                    self.notify_status(f"Preset already exists: {name}", level="error")
+                    return
+                except Exception as e:
+                    self.notify_status(f"Error saving preset: {e}", level="error")
+                    return
 
                 self.notify_status(f"Successfully saved preset: {name}", level="success")
 
@@ -5446,8 +6740,20 @@ Tooltip {
                 self._rebuild_indexes()
                 self._refresh_all_ui()
 
-            except Exception as e:
-                self.notify_status(f"Error saving preset: {e}", level="error")
+            if file_path.exists():
+                safe_name = _md_escape(name)
+                self.push_screen(
+                    ConfirmDialog(
+                        f"Preset **{safe_name}** already exists. Overwrite?",
+                        title="Overwrite Preset",
+                        level="warning",
+                        default_confirm=False,
+                    ),
+                    lambda confirmed: do_save(exclusive=False) if confirmed else None,
+                )
+                return
+
+            do_save(exclusive=True)
 
         self.push_screen(HybridInputScreen("Save Current State as Preset (Name):", ""), check_reply)
 
@@ -5463,23 +6769,33 @@ Tooltip {
             if not name:
                 return
 
-            self.user_presets_dir.mkdir(parents=True, exist_ok=True)
             file_path = self.user_presets_dir / f"{name}.json"
 
             try:
-                with open(file_path, "w", encoding="utf-8") as f:
-                    json.dump({}, f, indent=4)
-
-                self.notify_status(f"Created import template: {name}", level="success")
-
-                self._load_user_presets()
-                self._rebuild_indexes()
-                self._refresh_all_ui()
-
-                self.open_file_externally(file_path, button=1, touch_first=False)
-
+                if file_path.exists():
+                    self.notify_status(
+                        f"Preset already exists: {name}. Choose a new name.",
+                        level="error",
+                    )
+                    return
+                self._write_preset_atomically(file_path, {}, exclusive=True)
+            except FileExistsError:
+                self.notify_status(
+                    f"Preset already exists: {name}. Choose a new name.",
+                    level="error",
+                )
+                return
             except Exception as e:
                 self.notify_status(f"Error importing preset: {e}", level="error")
+                return
+
+            self.notify_status(f"Created import template: {name}", level="success")
+
+            self._load_user_presets()
+            self._rebuild_indexes()
+            self._refresh_all_ui()
+
+            self.open_file_externally(file_path, button=1, touch_first=False)
 
         self.push_screen(HybridInputScreen("Import Preset (Enter new name):", ""), check_reply)
 
@@ -5552,7 +6868,12 @@ Tooltip {
     def handle_selection(self, event: OptionList.OptionSelected) -> None:
         ol = event.option_list
 
-        if isinstance(ol, ConfigOptionList):
+        if isinstance(ol, ConfigOptionList) and ol is self.current_option_list:
+            try:
+                if ol.get_option_at_index(event.option_index) is not event.option:
+                    return
+            except OptionDoesNotExist:
+                return
             click_x = getattr(ol, "_last_click_x", 0)
             button = getattr(ol, "_last_click_button", 1)
             was_already_selected = getattr(ol, "_mouse_down_highlight", None) == event.option_index
@@ -5675,7 +6996,7 @@ Tooltip {
 
         tab_idx, item_idx, item = parsed
 
-        if item.is_parent:
+        if item.is_parent or item.type_ == "menu":
             item.expanded = not item.expanded
             self._populate_option_list(tab_idx, maintain_highlight_id=ol.last_highlighted_id)
 
@@ -5764,7 +7085,10 @@ Tooltip {
             return out
 
         try:
-            tokens = shlex.split(cmd_str)
+            lexer = shlex.shlex(cmd_str, posix=True, punctuation_chars="|&;")
+            lexer.whitespace_split = True
+            lexer.commenters = ""
+            tokens = list(lexer)
         except Exception:
             tokens = re.findall(r"[A-Za-z0-9_./+-]+", cmd_str)
 
@@ -5879,7 +7203,248 @@ Tooltip {
 
         return False
 
+    @staticmethod
+    async def _drain_action_stream(stream: asyncio.StreamReader, limit: int) -> bytes:
+        buf = bytearray()
+        try:
+            while True:
+                chunk = await stream.read(4096)
+                if not chunk:
+                    break
+                if len(buf) < limit:
+                    buf.extend(chunk[: limit - len(buf)])
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            pass
+        return bytes(buf)
+
+    def _kill_action_tree(self, proc: asyncio.subprocess.Process) -> None:
+        # Actions start in their own Linux session, so pgid == pid.
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+
+    @staticmethod
+    def _action_group_alive(pgid: int) -> bool:
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        return True
+
+    def _close_action_pipes(self, proc: asyncio.subprocess.Process | None) -> None:
+        if proc is not None:
+            # asyncio exposes no public Process.close(). Closing its transport
+            # also releases pipes inherited by detached descendants.
+            proc._transport.close()
+
+    async def _terminate_and_reap_action(self, proc: asyncio.subprocess.Process) -> None:
+        self._kill_action_tree(proc)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + _ACTION_KILL_GRACE
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=_ACTION_KILL_GRACE)
+        except TimeoutError:
+            pass
+        while self._action_group_alive(proc.pid) and loop.time() < deadline:
+            await asyncio.sleep(min(0.05, max(0, deadline - loop.time())))
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=_ACTION_KILL_GRACE)
+        except TimeoutError:
+            self._close_action_pipes(proc)
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=_ACTION_KILL_GRACE)
+            except TimeoutError:
+                LOGGER.warning("Action process %s did not exit after SIGKILL", proc.pid)
+
+    async def _cleanup_action_resources(
+        self,
+        proc: asyncio.subprocess.Process | None,
+        drains: list[asyncio.Task[bytes]],
+        spawn_task: asyncio.Task[Any] | None = None,
+        proc_box: list[Any] | None = None,
+    ) -> None:
+        """Single-owner group termination + drain reaping + pipe closing."""
+        if proc is None and proc_box:
+            for cand in list(proc_box):
+                if cand is not None:
+                    proc = cand
+                    break
+        if proc is None and spawn_task is not None and not spawn_task.done():
+            try:
+                got = await asyncio.wait_for(asyncio.shield(spawn_task), timeout=_ACTION_DRAIN_TIMEOUT)
+                if isinstance(got, asyncio.subprocess.Process):
+                    proc = got
+            except TimeoutError:
+                pass
+        if proc is None and spawn_task is not None and spawn_task.done() and not spawn_task.cancelled():
+            try:
+                if spawn_task.exception() is None:
+                    got = spawn_task.result()
+                    if isinstance(got, asyncio.subprocess.Process):
+                        proc = got
+            except Exception:
+                pass
+        if proc is not None:
+            try:
+                self._action_procs.add(proc)
+            except Exception:
+                pass
+            try:
+                await self._terminate_and_reap_action(proc)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                pass
+        for pending in drains:
+            try:
+                if pending is not None and not pending.done():
+                    pending.cancel()
+            except Exception:
+                pass
+        if drains:
+            try:
+                await asyncio.gather(*drains, return_exceptions=True)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                pass
+        if proc is not None:
+            try:
+                self._close_action_pipes(proc)
+            except Exception:
+                pass
+            try:
+                self._action_procs.discard(proc)
+            except Exception:
+                pass
+
+    @staticmethod
+    def _track_background_task(task: asyncio.Task[Any], tasks: set[asyncio.Task[Any]]) -> asyncio.Task[Any]:
+        tasks.add(task)
+
+        def done(completed: asyncio.Task[Any]) -> None:
+            tasks.discard(completed)
+            if not completed.cancelled() and (error := completed.exception()) is not None:
+                LOGGER.error("Background action failed", exc_info=error)
+
+        task.add_done_callback(done)
+        return task
+
+    def _track_action_task(self, task: asyncio.Task[Any]) -> asyncio.Task[Any]:
+        return self._track_background_task(task, self._action_tasks)
+
+    def _track_action_cleanup(self, task: asyncio.Task[Any]) -> asyncio.Task[Any]:
+        return self._track_background_task(task, self._action_cleanup_tasks)
+
+    def _cancel_background_actions(self) -> None:
+        """Synchronous best-effort kill/cancel; awaiting happens in shutdown."""
+        for proc in list(getattr(self, "_action_procs", ())):
+            try:
+                self._kill_action_tree(proc)
+            except Exception:
+                pass
+        for task in list(getattr(self, "_action_tasks", ())):
+            try:
+                if not task.done():
+                    task.cancel()
+            except Exception:
+                pass
+
+    async def _shutdown_background_actions(self) -> None:
+        """Idempotent bounded shutdown; safe to call from any exit path."""
+        if getattr(self, "_action_shutdown_done", False):
+            return
+        lock = getattr(self, "_action_shutdown_lock", None)
+        if lock is None:
+            lock = self._action_shutdown_lock = asyncio.Lock()
+        async with lock:
+            if getattr(self, "_action_shutdown_done", False):
+                return
+            self._action_shutdown_started = True
+            self._cancel_background_actions()
+            tasks = [t for t in list(getattr(self, "_action_tasks", ())) if not t.done()]
+            if tasks:
+                try:
+                    await asyncio.wait_for(
+                        asyncio.gather(*tasks, return_exceptions=True),
+                        timeout=5.0,
+                    )
+                except TimeoutError:
+                    pass
+                for t in tasks:
+                    try:
+                        if t.done() and not t.cancelled():
+                            t.exception()
+                    except Exception:
+                        pass
+            cleanup_tasks = [t for t in list(getattr(self, "_action_cleanup_tasks", ())) if not t.done()]
+            if cleanup_tasks:
+                try:
+                    await asyncio.wait_for(
+                        asyncio.gather(*cleanup_tasks, return_exceptions=True),
+                        timeout=5.0,
+                    )
+                except TimeoutError:
+                    pass
+                for t in cleanup_tasks:
+                    try:
+                        if t.done() and not t.cancelled():
+                            t.exception()
+                    except Exception:
+                        pass
+            for proc in list(getattr(self, "_action_procs", ())):
+                try:
+                    await self._terminate_and_reap_action(proc)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    pass
+                try:
+                    self._close_action_pipes(proc)
+                except Exception:
+                    pass
+                try:
+                    self._action_procs.discard(proc)
+                except Exception:
+                    pass
+            if (
+                all(t.done() for t in tasks)
+                and all(t.done() for t in cleanup_tasks)
+                and not getattr(self, "_action_procs", set())
+            ):
+                self._action_shutdown_done = True
+
+    async def on_unmount(self) -> None:
+        if self._sudo_keepalive:
+            self._sudo_keepalive.stop()
+            self._sudo_keepalive = None
+        # Blocking collectors drain before engine resources are shut down.
+        tasks = list(self._custom_refresh_tasks) + list(self._custom_mount_tasks.values())
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        engines = (
+            dict.values(self.engine_pool) if isinstance(self.engine_pool, dict)
+            else self.engine_pool.values()
+        )
+        for engine in engines:
+            if callable(shutdown := getattr(engine, "shutdown", None)):
+                shutdown()
+        await self._shutdown_background_actions()
+
     def execute_action(self, item: ConfigItem) -> None:
+        if item.read_only:
+            return
         if item.key == "__save_new_preset":
             self.action_save_preset()
             return
@@ -5895,6 +7460,9 @@ Tooltip {
             return
 
         def do_execute():
+            if getattr(self, "_action_shutdown_started", False):
+                self.notify_status("Shutting down; action not started.", level="warning")
+                return
             self.notify_status(f"Executing: {item.label}...", level="info")
 
             forced = getattr(item, "force_interactive", None)
@@ -5909,8 +7477,7 @@ Tooltip {
 
                 self._tty_action_busy = True
                 try:
-                    with self.suspend():
-                        completed = subprocess.run(command, shell=True)
+                    completed = self.run_suspended_interactive(command, shell=True)
                     rc = completed.returncode
                     if rc == 0:
                         self.notify_status(f"Action '{item.label}' completed.", level="success")
@@ -5924,20 +7491,83 @@ Tooltip {
 
             async def run_noninteractive():
                 proc: asyncio.subprocess.Process | None = None
+                drains: list[asyncio.Task[bytes]] = []
+                spawn_task: asyncio.Task[Any] | None = None
+                proc_box: list[Any] = []
+                stdout = b""
+                stderr = b""
+                timed_out = False
                 try:
-                    proc = await asyncio.create_subprocess_shell(
-                        command,
-                        stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.PIPE
-                    )
+                    async def _spawn() -> asyncio.subprocess.Process:
+                        p = await asyncio.create_subprocess_shell(
+                            command,
+                            stdout=asyncio.subprocess.PIPE,
+                            stderr=asyncio.subprocess.PIPE,
+                            start_new_session=True,
+                        )
+                        proc_box.append(p)
+                        try:
+                            self._action_procs.add(p)
+                        except Exception:
+                            pass
+                        return p
+
+                    spawn_task = asyncio.create_task(_spawn())
+                    self._track_action_cleanup(spawn_task)
+                    try:
+                        # Shield the await (not the task): outer cancellation
+                        # must not propagate into the owned spawn task.
+                        proc = await asyncio.shield(spawn_task)
+                    except asyncio.CancelledError:
+                        for cand in list(proc_box):
+                            if cand is not None:
+                                proc = cand
+                                break
+                        if proc is None and spawn_task.done() and not spawn_task.cancelled():
+                            try:
+                                if spawn_task.exception() is None:
+                                    cand = spawn_task.result()
+                                    if isinstance(cand, asyncio.subprocess.Process):
+                                        proc = cand
+                                        try:
+                                            self._action_procs.add(proc)
+                                        except Exception:
+                                            pass
+                            except Exception:
+                                pass
+                        raise
+                    assert proc.stdout is not None and proc.stderr is not None
+                    drains = [
+                        asyncio.create_task(
+                            self._drain_action_stream(proc.stdout, _ACTION_OUTPUT_LIMIT)
+                        ),
+                        asyncio.create_task(
+                            self._drain_action_stream(proc.stderr, _ACTION_OUTPUT_LIMIT)
+                        ),
+                    ]
 
                     try:
-                        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=15.0)
+                        await asyncio.wait_for(proc.wait(), timeout=_ACTION_TIMEOUT)
                     except TimeoutError:
-                        if proc is not None:
-                            proc.kill()
-                            await proc.wait()
-                        self.notify_status("Action timed out after 15 seconds.", level="error")
+                        timed_out = True
+
+                    if not timed_out:
+                        try:
+                            parts = await asyncio.wait_for(
+                                asyncio.gather(*drains),
+                                timeout=_ACTION_DRAIN_TIMEOUT,
+                            )
+                            stdout, stderr = parts[0], parts[1]
+                        except TimeoutError:
+                            # Shell exited but descendants still hold pipes.
+                            timed_out = True
+                            stdout, stderr = b"", b""
+
+                    if timed_out:
+                        self.notify_status(
+                            f"Action timed out after {_ACTION_TIMEOUT:g} seconds.",
+                            level="error",
+                        )
                         return
 
                     if proc.returncode == 0:
@@ -5954,14 +7584,18 @@ Tooltip {
                             err = "Unknown execution error"
                         self.notify_status(f"Action failed: {err[:60]}", level="error")
 
+                except asyncio.CancelledError:
+                    raise
                 except Exception as e:
                     self.notify_status(f"Execution error: {str(e)[:60]}", level="error")
                 finally:
-                    if proc is not None and proc.returncode is None:
-                        proc.kill()
-                        await proc.wait()
+                    if proc is not None or drains or (spawn_task is not None and not spawn_task.done()):
+                        cleanup = asyncio.create_task(
+                            self._cleanup_action_resources(proc, drains, spawn_task, proc_box)
+                        )
+                        self._track_action_cleanup(cleanup)
 
-            asyncio.create_task(run_noninteractive())
+            self._track_action_task(asyncio.create_task(run_noninteractive()))
 
         if item.confirm_message:
             self.push_screen(
@@ -5976,6 +7610,8 @@ Tooltip {
             do_execute()
 
     def apply_preset(self, preset_item: ConfigItem) -> None:
+        if not self.require_boot_complete():
+            return
         # Hot-reload user preset payload from disk before applying.
         if preset_item.group == "User Presets" and preset_item.key.startswith("__user_preset_"):
             name = preset_item.label.replace("User: ", "", 1)
@@ -6012,6 +7648,10 @@ Tooltip {
             self.notify_status("Preset payload is invalid.", level="error")
             return
 
+        global_items = [entry for entry in self._configurable_items if self._get_item_engine_info(entry[2]) == self.default_engine_key]
+        self._preset_matrix.rebuild(global_items + self._preset_items)
+        self._option_cache.invalidate_presets()
+
         def do_apply():
             transaction = []
             skipped = 0
@@ -6020,6 +7660,10 @@ Tooltip {
             is_all_defaults = payload.get("__ALL_DEFAULTS__", False)
 
             for t_idx, i_idx, target_item in self._configurable_items:
+                # Presets are snapshots of the default target.  Per-target
+                # overrides sharing the same UID must not be changed by one.
+                if self._get_item_engine_info(target_item) != self.default_engine_key:
+                    continue
                 if not target_item.exists_in_target:
                     skipped += 1
                     continue
@@ -6033,7 +7677,9 @@ Tooltip {
                 else:
                     target_val = target_item.default
 
-                if str(target_item.value) != str(target_val) and target_val is not None:
+                if target_item.serialize(target_item.value) != target_item.serialize(target_val):
+                    if target_val is not None:
+                        target_val = target_item.deserialize(target_val)
                     transaction.append((t_idx, i_idx, target_item.value, target_val))
 
             if not transaction:
@@ -6072,10 +7718,18 @@ Tooltip {
             if new_val is not None:
                 if item.type_ == "int":
                     try:
+                        text = str(new_val).strip()
                         try:
-                            parsed_val = int(new_val, 0)
+                            parsed_val = int(text, 0)
                         except ValueError:
-                            parsed_val = int(float(new_val))
+                            try:
+                                parsed_val = int(text, 10)
+                            except ValueError:
+                                float_val = float(text)
+                                if not math.isfinite(float_val):
+                                    self.notify_status("Error: Value must be a finite integer.", level="error")
+                                    return
+                                parsed_val = int(float_val)
 
                         if item.min_val is not None:
                             parsed_val = max(int(item.min_val), parsed_val)
@@ -6085,13 +7739,17 @@ Tooltip {
 
                         new_val = parsed_val
 
-                    except ValueError:
-                        self.notify_status("Error: Value must be an integer.", level="error")
+                    except (ValueError, OverflowError):
+                        self.notify_status("Error: Value must be a finite integer.", level="error")
                         return
 
                 elif item.type_ == "float":
                     try:
-                        parsed_val = float(new_val)
+                        parsed_val = float(str(new_val).strip())
+
+                        if not math.isfinite(parsed_val):
+                            self.notify_status("Error: Value must be a finite float.", level="error")
+                            return
 
                         if item.min_val is not None:
                             parsed_val = max(float(item.min_val), parsed_val)
@@ -6101,10 +7759,12 @@ Tooltip {
 
                         new_val = parsed_val
 
-                    except ValueError:
-                        self.notify_status("Error: Value must be a float.", level="error")
+                    except (ValueError, OverflowError):
+                        self.notify_status("Error: Value must be a finite float.", level="error")
                         return
 
+                if self._is_unchanged_submission(item, new_val):
+                    return
                 self._safe_apply_value(tab_idx, item_idx, item, new_val)
 
         self.push_screen(
@@ -6119,6 +7779,8 @@ Tooltip {
     def prompt_picker(self, tab_idx: int, item_idx: int, item: ConfigItem) -> None:
         def check_reply(new_val: str | None) -> None:
             if new_val is not None:
+                if self._is_unchanged_submission(item, new_val):
+                    return
                 self._safe_apply_value(tab_idx, item_idx, item, new_val)
 
         self.push_screen(

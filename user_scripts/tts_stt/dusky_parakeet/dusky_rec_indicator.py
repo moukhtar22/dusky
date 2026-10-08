@@ -82,10 +82,16 @@ class LevelTap(threading.Thread):
     def __init__(self, on_level) -> None:
         super().__init__(name="dusky-level", daemon=True)
         self._on_level = on_level
-        self._stop = threading.Event()
+        self._stop_event = threading.Event()
+        self._proc = None
 
     def stop(self) -> None:
-        self._stop.set()
+        self._stop_event.set()
+        if self._proc is not None:
+            try:
+                self._proc.terminate()
+            except OSError:
+                pass
 
     def run(self) -> None:
         try:
@@ -97,9 +103,10 @@ class LevelTap(threading.Thread):
         except OSError:
             return
         assert proc.stdout is not None
+        self._proc = proc
         smooth = 0.0
         try:
-            while not self._stop.is_set():
+            while not self._stop_event.is_set():
                 raw = proc.stdout.read(2048 * 2)
                 if len(raw) < 2048 * 2:
                     break
@@ -119,6 +126,9 @@ class LevelTap(threading.Thread):
                 proc.kill()
             except OSError:
                 pass
+            proc.wait()
+            proc.stdout.close()
+            self._proc = None
 
 
 class Indicator:
@@ -273,6 +283,7 @@ class Indicator:
     def _quit(self, *_args) -> None:
         try:
             self._tap.stop()
+            self._tap.join(timeout=0.5)
         except Exception:
             pass
         Gtk.main_quit()

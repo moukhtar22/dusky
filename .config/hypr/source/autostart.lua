@@ -1,9 +1,9 @@
 hl.on("hyprland.start", function()
 
     -- --- Sync variables with D-Bus and Systemd ---
-    -- Must be first, ensures CLIPHIST_DB_PATH from environment_variables.lua reaches systemd/dbus for live switches
-    hl.exec_cmd("systemctl --user import-environment WAYLAND_DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE XDG_SESSION_DESKTOP CLIPHIST_DB_PATH")
-    hl.exec_cmd("dbus-update-activation-environment --systemd --all")
+    -- exec_cmd is asynchronous: use one shell so imports finish before services start.
+    -- A D-Bus update failure must not prevent startup after systemd's import succeeds.
+    hl.exec_cmd("systemctl --user import-environment WAYLAND_DISPLAY HYPRLAND_INSTANCE_SIGNATURE XDG_SESSION_ID XDG_CURRENT_DESKTOP XDG_SESSION_TYPE XDG_SESSION_DESKTOP XDG_CONFIG_HOME XDG_CACHE_HOME XDG_DATA_HOME PATH CLIPHIST_DB_PATH && { dbus-update-activation-environment --systemd --all; systemctl --user start hyprland-session.target; }")
     -- --- SYSTEM ESSENTIALS ---
 
     -- Gnome Keyring: Stores passwords for apps (VSCode, Chrome, etc.). (recommanded to enable systemd service instead of auto starting with exec-once)
@@ -11,9 +11,6 @@ hl.on("hyprland.start", function()
     -- OR
     -- replace the exec-once line with:
     -- hl.exec_cmd("systemctl --user start gnome-keyring-daemon.service")
-
-    -- --- Start graphical session target ---
-    hl.exec_cmd("systemctl --user start hyprland-session.target")
 
     -- --- Protect Compositor from OOM Killer ---
     hl.exec_cmd("sudo choom -n -250 -p $(pgrep -x Hyprland)")
@@ -23,7 +20,7 @@ hl.on("hyprland.start", function()
     -- --- CLIPBOARD MANAGER (Systemd Managed) ---
     -- Managed via unified systemd user service: dusky_clipboard.service
     -- bound to graphical-session.target.
-    -- This guarantees automatic recovery and persistence even if Hyprland restarts.
+    -- The service supervises the watchers and restarts on failure during the session.
 
 
 end)

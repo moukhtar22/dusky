@@ -1,91 +1,102 @@
 # ==============================================================================
-# UNIVERSAL DRIVE MANAGER - CONFIGURATION
+# UNIVERSAL DRIVE MANAGER — FLEET CONFIGURATION (schema enforced by drive_manager.py)
 # ==============================================================================
-# TYPE:
-#   "PROTECTED" = Encrypted (LUKS/BitLocker). Requires outer_uuid & inner_uuid.
-#   "SIMPLE"    = Standard partition (Ext4/NTFS/Btrfs/etc). Only outer_uuid needed.
+# [drives.<name>]      name: [A-Za-z0-9][A-Za-z0-9_.-]{0,63}
+#   type          = "PROTECTED" | "SIMPLE"          REQUIRED
+#   mountpoint    = "/mnt/x" | "~/.config/x"        REQUIRED  (~, $VARS, legacy /home/<olduser> rebased)
+#   outer_uuid    = "<blkid UUID>"                  REQUIRED  raw partition, seen while LOCKED  (lsblk -f)
+#   inner_uuid    = "<blkid UUID>"                  REQUIRED for PROTECTED, FORBIDDEN for SIMPLE
+#   hint          = "<string>"                      OPTIONAL  shown before manual prompts (never a secret)
+#   fstype        = "ext4"|"btrfs"|"ntfs"|"exfat".. OPTIONAL  always the 7.1+ 'ntfs' driver (legacy ntfs3 rejected)
+#   mount_options = ["opt", ...]                    OPTIONAL  one option per element; "force" is rejected
+#   symlinks      = ["~/.link", ...]                OPTIONAL  healed on every unlock (existing dirs are renamed, never deleted)
+#   post_unlock   = ["cmd", ...]                    OPTIONAL  commands run unprivileged after mount & symlinks ready
+#   pre_lock      = ["cmd", ...]                    OPTIONAL  commands run before lock & unmount (e.g. stop services)
+#   post_lock     = ["cmd", ...]                    OPTIONAL  commands run after lock & container closure
 #
-# UUID GUIDE:
-#   outer_uuid = UUID of the raw physical partition (run `lsblk -f` while LOCKED)
-#   inner_uuid = UUID of the filesystem inside (run `lsblk -f` while UNLOCKED)
-#
-# fstype:        Overrides the dynamic probe.
-# mount_options: Array of options passed directly to the kernel `mount` syscall.
+# UUID CASE IS SIGNIFICANT (/dev/disk/by-uuid is case-sensitive):
+#   ext4/btrfs/xfs/LUKS -> lowercase 8-4-4-4-12      NTFS -> UPPERCASE 16 hex      FAT/exFAT -> UPPERCASE XXXX-XXXX
+# uid=/gid= values are rewritten to the invoking user at runtime, so 1000 is only a placeholder.
+# TRIM policy is automatic: non-rotational + supported fs -> transient fstrim unit, unless a discard option is set.
+# Any unknown key, duplicate UUID/mountpoint/symlink or malformed UUID aborts with exit 1 before touching sudo.
 # ==============================================================================
 
-# --- SOLID STATE DRIVES (SSD) ---
+# ---------------------------------------------------------------- SSD / NVMe --
 
 [drives.windows]
-type = "SIMPLE"
-mountpoint = "/mnt/windows"
-outer_uuid = "848A215E8A214E4C"
-fstype = "ntfs"
-mount_options = ["noatime", "uid=1000", "gid=1000", "umask=002", "windows_names"]
+type          = "SIMPLE"
+mountpoint    = "/mnt/windows"
+outer_uuid    = "848A215E8A214E4C"
+fstype        = "ntfs"
+mount_options = ["noatime", "uid=1000", "gid=1000", "umask=002", "windows_names", "iocharset=utf8"]
 
 [drives.browser]
-type = "PROTECTED"
-mountpoint = "~/.config/mozilla"
-outer_uuid = "65541589-e0e0-4cc0-99f4-9b179f05ffb5"
-inner_uuid = "b982f02e-32f6-40cd-86de-964c90676cc2"
-hint = "LAP_P"
-fstype = "ext4"
-mount_options = ["noatime", "delalloc", "commit=20"]
-symlinks = ["~/.mozilla"]
+type          = "PROTECTED"
+mountpoint    = "~/.config/mozilla"
+outer_uuid    = "65541589-e0e0-4cc0-99f4-9b179f05ffb5"
+inner_uuid    = "b982f02e-32f6-40cd-86de-964c90676cc2"
+hint          = "LAP_P"
+fstype        = "ext4"
+mount_options = ["noatime", "lazytime", "delalloc", "commit=20"]
+symlinks      = ["~/.mozilla"]
+post_unlock   = ['python3 "$HOME/user_scripts/firefox/optimize_firefox.py" --sync --disk-fallback && systemctl --user start dusky_firefox_cache.service']
+pre_lock      = ['systemctl --user stop dusky_firefox_cache.service && python3 "$HOME/user_scripts/firefox/optimize_firefox.py" --unsync']
 
 [drives.media]
-type = "PROTECTED"
-mountpoint = "/mnt/media"
-outer_uuid = "98353f6a-b21b-4966-9f57-948678bde66d"
-inner_uuid = "a7230e67-34e8-4cd2-981d-ea02d1253539"
-hint = "LAP_P"
-fstype = "ext4"
-mount_options = ["noatime", "delalloc", "commit=20"]
+type          = "PROTECTED"
+mountpoint    = "/mnt/media"
+outer_uuid    = "98353f6a-b21b-4966-9f57-948678bde66d"
+inner_uuid    = "a7230e67-34e8-4cd2-981d-ea02d1253539"
+hint          = "LAP_P"
+fstype        = "ext4"
+mount_options = ["noatime", "lazytime", "delalloc", "commit=20"]
 
-
-# --- MECHANICAL HARD DISKS (HDD) ---
+# ------------------------------------------------------- Rotational HDD (no TRIM) --
 
 [drives.fast]
-type = "PROTECTED"
-mountpoint = "/mnt/fast"
-outer_uuid = "542c6463-2ad7-4e88-b577-2f47650f7555"
-inner_uuid = "8c1f87fc-dcea-4d2e-81fd-d8028c0fa86b"
-fstype = "ext4"
-hint = "game_simple"
-mount_options = ["noatime", "delalloc", "commit=20"]
+type          = "PROTECTED"
+mountpoint    = "/mnt/fast"
+outer_uuid    = "542c6463-2ad7-4e88-b577-2f47650f7555"
+inner_uuid    = "8c1f87fc-dcea-4d2e-81fd-d8028c0fa86b"
+hint          = "game_simple"
+fstype        = "ext4"
+mount_options = ["noatime", "lazytime", "delalloc", "commit=20"]
 
 [drives.slow]
-type = "PROTECTED"
-mountpoint = "/mnt/slow"
-outer_uuid = "e15929e5-417f-4761-b478-55c9a7c24220"
-inner_uuid = "5A921A119219F26D"
-hint = "game_simple"
-# fstab comment noted this was a BTRFS drive with nodatacow
-fstype = "ntfs"
-mount_options = ["noatime", "uid=1000", "gid=1000", "umask=002", "windows_names"]
+# Inner filesystem is NTFS (16-hex UUID confirms it); the old "btrfs nodatacow" fstab note was stale.
+type          = "PROTECTED"
+mountpoint    = "/mnt/slow"
+outer_uuid    = "e15929e5-417f-4761-b478-55c9a7c24220"
+inner_uuid    = "5A921A119219F26D"
+hint          = "game_simple"
+fstype        = "ntfs"
+mount_options = ["noatime", "uid=1000", "gid=1000", "umask=002", "windows_names", "iocharset=utf8"]
 
 [drives.wdfast]
-type = "PROTECTED"
-mountpoint = "/mnt/wdfast"
-outer_uuid = "953a147e-a346-4fea-91f4-a81ec97fa56a"
-inner_uuid = "46798d3b-cda7-4031-818f-37a06abbeb37"
-hint = "game_simple"
-fstype = "btrfs"
-mount_options = ["compress=zstd:3", "noatime", "space_cache=v2", "autodefrag", "subvol=/"]
+type          = "PROTECTED"
+mountpoint    = "/mnt/wdfast"
+outer_uuid    = "953a147e-a346-4fea-91f4-a81ec97fa56a"
+inner_uuid    = "46798d3b-cda7-4031-818f-37a06abbeb37"
+hint          = "game_simple"
+fstype        = "btrfs"
+mount_options = ["noatime", "compress=zstd:3", "space_cache=v2", "autodefrag", "subvol=/"]
 
 [drives.wdslow]
-type = "PROTECTED"
-mountpoint = "/mnt/wdslow"
-outer_uuid = "01f38f5b-86de-4499-b93f-6c982e2067cb"
-inner_uuid = "2765359f-232e-4165-bc69-ef402b50c74c"
-hint = "game_simple"
-fstype = "btrfs"
-mount_options = ["compress=zstd:3", "noatime", "space_cache=v2", "autodefrag", "subvol=/"]
+type          = "PROTECTED"
+mountpoint    = "/mnt/wdslow"
+outer_uuid    = "01f38f5b-86de-4499-b93f-6c982e2067cb"
+inner_uuid    = "2765359f-232e-4165-bc69-ef402b50c74c"
+hint          = "game_simple"
+fstype        = "btrfs"
+mount_options = ["noatime", "compress=zstd:3", "space_cache=v2", "autodefrag", "subvol=/"]
+
+# ------------------------------------------------------------------ USB enclosure --
 
 [drives.enclosure]
-type = "PROTECTED"
-mountpoint = "/mnt/enclosure"
-outer_uuid = "bde4bde0-19f7-4ba9-a0f0-541fec19beb6"
-inner_uuid = "5A428B8A428B6A19"
-hint = "pass_p"
-fstype = "ntfs"
-mount_options = ["noatime", "uid=1000", "gid=1000", "umask=002", "windows_names"]
+type          = "PROTECTED"
+mountpoint    = "/mnt/enclosure"
+outer_uuid    = "bde4bde0-19f7-4ba9-a0f0-541fec19beb6"
+inner_uuid    = "5A428B8A428B6A19"
+hint          = "pass_p"
+fstype        = "ntfs"
+mount_options = ["noatime", "uid=1000", "gid=1000", "umask=002", "windows_names", "iocharset=utf8"]

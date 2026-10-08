@@ -18,6 +18,7 @@ readonly C_CYAN='\e[1;36m'
 # ==============================================================================
 
 cleanup() {
+    stty echo 2>/dev/null || true
     echo -e "\n${C_YELLOW}[*] Script interrupted. Exiting cleanly.${C_RESET}"
     exit 130
 }
@@ -111,9 +112,9 @@ check_connectivity() {
         # Bound the lookup: a hung resolver (filtered/slow DNS) must not stall the script.
         if ! timeout 5 getent ahosts nonexistent-dns-test-12345.org >/dev/null 2>&1; then
             # Concurrent parallel checks for DNS routing reliability
-            ping -n -c 1 -W 2 google.com >/dev/null 2>&1 &
+            timeout 5 ping -n -c 1 -W 2 google.com >/dev/null 2>&1 &
             local p1=$!
-            ping -n -c 1 -W 2 cloudflare.com >/dev/null 2>&1 &
+            timeout 5 ping -n -c 1 -W 2 cloudflare.com >/dev/null 2>&1 &
             local p2=$!
             
             local has_internet=1
@@ -163,10 +164,15 @@ check_connectivity() {
 
 check_eth_carrier() {
     local dev=$1
-    # LOWER_UP validates physical electrical carrier presence on the interface
-    if ip link show dev "$dev" 2>/dev/null | grep -q "LOWER_UP"; then
-        return 0
-    fi
+    ip link set dev "$dev" up 2>/dev/null || sudo -n ip link set dev "$dev" up 2>/dev/null || true
+    # Allow PHY auto-negotiation to settle before trusting carrier state
+    for ((i = 0; i < 10; i++)); do
+        # LOWER_UP validates physical electrical carrier presence on the interface
+        if ip link show dev "$dev" 2>/dev/null | grep -q "LOWER_UP"; then
+            return 0
+        fi
+        sleep 0.2
+    done
     return 1
 }
 
@@ -220,6 +226,18 @@ ensure_wifi_radio() {
             fail_and_exit
         fi
     fi
+}
+
+valid_passphrase() {
+    local pass=$1
+    [[ -z "$pass" ]] && return 0
+    if (( ${#pass} >= 8 && ${#pass} <= 63 )); then
+        return 0
+    fi
+    if (( ${#pass} == 64 )) && [[ "$pass" =~ ^[0-9a-fA-F]{64}$ ]]; then
+        return 0
+    fi
+    return 1
 }
 
 # ==============================================================================
@@ -289,58 +307,83 @@ fi
 # ==============================================================================
 # Interactive Menu (TTY Mode Only - When Genuinely Disconnected)
 # ==============================================================================
-PS3=$(echo -e "\n${C_CYAN}Select connection interface (1/2) or Ctrl+C to abort: ${C_RESET}")
+while true; do
+PS3=$(echo -e "\n${C_CYAN}Select connection interface or option: ${C_RESET}")
 
-select conn_method in "LAN (Wired)" "Wi-Fi"; do
+select conn_method in "LAN (Wired)" "Wi-Fi" "Re-check Connection" "Abort"; do
     case $conn_method in
         "LAN (Wired)")
-            eth_dev=$(get_active_eth_dev || true)
+            mapfile -t lan_cands < <(get_eth_devs)
+            target_eth=""
+            for cand in "${lan_cands[@]}"; do
+                if check_eth_carrier "$cand"; then
+                    target_eth="$cand"
+                    break
+                fi
+            done
 
-            if [[ -z "$eth_dev" ]]; then
-                log_error "No physical Ethernet interface detected on this system."
-                fail_and_exit
-            fi
-
-            log_info "Primary Ethernet device detected: $eth_dev"
-            nmcli device set "$eth_dev" managed yes 2>/dev/null || sudo -n nmcli device set "$eth_dev" managed yes 2>/dev/null || true
-
-            if ! check_eth_carrier "$eth_dev"; then
-                echo -e "${C_YELLOW}[+] Please ensure your Ethernet cable is physically plugged in.${C_RESET}"
-                read -r -p "Press Enter to verify carrier state..."
-                if ! check_eth_carrier "$eth_dev"; then
-                    log_error "No carrier detected on $eth_dev. The cable is unplugged or the switch port is dead."
-                    fail_and_exit
+            if [[ -z "$target_eth" ]]; then
+                if [[ ${#lan_cands[@]} -eq 0 ]]; then
+                    log_error "No physical Ethernet interface detected on this system."
+                else
+                    echo -e "${C_YELLOW}[+] Please ensure your Ethernet cable is physically plugged in.${C_RESET}"
+                    read -r -p "Press Enter to verify carrier state..." _ || true
+                    for cand in "${lan_cands[@]}"; do
+                        if check_eth_carrier "$cand"; then
+                            target_eth="$cand"
+                            break
+                        fi
+                    done
                 fi
             fi
 
-            log_info "Carrier detected. Requesting DHCP lease..."
-            if timeout 15 nmcli device connect "$eth_dev" >/dev/null 2>&1 || timeout 15 sudo -n nmcli device connect "$eth_dev" >/dev/null 2>&1 || timeout 15 sudo nmcli device connect "$eth_dev" >/dev/null 2>&1; then
+            if [[ -z "$target_eth" ]]; then
+                log_error "No carrier detected on any wired interface. Check physical cable."
+                break
+            fi
+
+            log_info "Carrier active on $target_eth. Requesting DHCP lease..."
+            nmcli device set "$target_eth" managed yes 2>/dev/null || sudo -n nmcli device set "$target_eth" managed yes 2>/dev/null || true
+
+            if timeout 15 nmcli device connect "$target_eth" >/dev/null 2>&1 || timeout 15 sudo -n nmcli device connect "$target_eth" >/dev/null 2>&1 || timeout 15 sudo nmcli device connect "$target_eth" >/dev/null 2>&1; then
                 flush_dns_caches
                 if check_connectivity; then
-                    log_success "LAN connected and internet routed."
+                    log_success "LAN connected and internet routed ($target_eth)."
                     exit 0
                 else
-                    log_error "LAN connected, but no internet access (Check DNS/Gateway)."
-                    fail_and_exit
+                    log_error "Carrier on $target_eth, but no internet access (Check DNS/Gateway)."
                 fi
             else
-                log_error "Failed to bring up $eth_dev. DHCP timeout or Layer 2 failure."
-                fail_and_exit
+                log_error "Failed to bring up $target_eth. DHCP timeout or Layer 2 failure."
             fi
+            break
             ;;
 
         "Wi-Fi")
-            wifi_dev=$(get_active_wifi_dev || true)
-
-            if [[ -z "$wifi_dev" ]]; then
+            mapfile -t wifi_devs < <(get_wifi_devs)
+            if [[ ${#wifi_devs[@]} -eq 0 ]]; then
                 log_error "No Wi-Fi interface detected on this system."
-                fail_and_exit
+                break
             fi
 
+            wifi_dev="${wifi_devs[0]}"
+            if [[ ${#wifi_devs[@]} -gt 1 ]]; then
+                PS3=$(echo -e "\n${C_CYAN}Select Wi-Fi interface: ${C_RESET}")
+                select wdev in "${wifi_devs[@]}"; do
+                    if [[ -n "$wdev" ]]; then
+                        wifi_dev="$wdev"
+                        break
+                    fi
+                    log_warn "Invalid selection."
+                done
+            fi
+
+            log_info "Using Wi-Fi interface: $wifi_dev"
             ensure_wifi_radio
-            
+
             nmcli device set "$wifi_dev" managed yes 2>/dev/null || sudo -n nmcli device set "$wifi_dev" managed yes 2>/dev/null || true
 
+            while true; do
             log_info "Triggering active 802.11 rescan on $wifi_dev..."
             timeout 10 nmcli dev wifi rescan ifname "$wifi_dev" >/dev/null 2>&1 || timeout 10 sudo -n nmcli dev wifi rescan ifname "$wifi_dev" >/dev/null 2>&1 || true
             sleep 3
@@ -349,29 +392,54 @@ select conn_method in "LAN (Wired)" "Wi-Fi"; do
             mapfile -t networks < <(nmcli -g SSID dev wifi list ifname "$wifi_dev" 2>/dev/null | grep -v '^$' | sort -u || true)
 
             if [[ ${#networks[@]} -eq 0 ]]; then
-                log_warn "No networks found on initial scan. Retrying scan..."
+                log_warn "No networks found. Retrying scan once..."
                 timeout 10 nmcli dev wifi rescan ifname "$wifi_dev" >/dev/null 2>&1 || timeout 10 sudo -n nmcli dev wifi rescan ifname "$wifi_dev" >/dev/null 2>&1 || true
                 sleep 3
                 mapfile -t networks < <(nmcli -g SSID dev wifi list ifname "$wifi_dev" 2>/dev/null | grep -v '^$' | sort -u || true)
-                
+
                 if [[ ${#networks[@]} -eq 0 ]]; then
                     log_error "No broadcasting 802.11 networks found in range."
-                    fail_and_exit
+                    break
                 fi
             fi
 
             log_info "Discovered ${#networks[@]} available networks."
-            PS3=$(echo -e "\n${C_CYAN}Select target SSID: ${C_RESET}")
+            PS3=$(echo -e "\n${C_CYAN}Select target SSID or option: ${C_RESET}")
 
-            select ssid in "${networks[@]}"; do
-                if [[ -n "$ssid" ]]; then
+            select ssid in "${networks[@]}" "[Rescan Networks]" "[Hidden SSID - Enter Manually]" "[Back to Main Menu]"; do
+                if [[ -z "$ssid" ]]; then
+                    log_warn "Invalid selection. Enter a number from the list."
+                    continue
+                fi
+                if [[ "$ssid" == "[Back to Main Menu]" ]]; then
+                    break 2
+                fi
+                if [[ "$ssid" == "[Rescan Networks]" ]]; then
+                    break
+                fi
+                hidden=0
+                if [[ "$ssid" == "[Hidden SSID - Enter Manually]" ]]; then
+                    read -r -p "Enter hidden SSID: " ssid || true
+                    if [[ -z "$ssid" ]]; then
+                        log_warn "SSID cannot be empty."
+                        continue
+                    fi
+                    hidden=1
+                fi
                     echo ""
-                    read -r -s -p "Enter WPA/WEP password for '$ssid' (leave empty if open): " pass
+                    read -r -s -p "Enter WPA/WEP password for '$ssid' (leave empty if open): " pass || true
                     echo -e "\n"
+
+                    if ! valid_passphrase "$pass"; then
+                        log_warn "WPA/WPA2/WPA3 passphrases must be 8-63 ASCII characters (or 64 hex digits)."
+                        continue
+                    fi
+
                     log_info "Negotiating handshake with '$ssid'..."
 
                     nm_cmd=(nmcli -w 20 dev wifi connect "$ssid" ifname "$wifi_dev")
                     [[ -n "$pass" ]] && nm_cmd+=(password "$pass")
+                    (( hidden == 1 )) && nm_cmd+=(hidden yes)
 
                     if timeout 30 "${nm_cmd[@]}" >/dev/null 2>&1 || timeout 30 sudo -n "${nm_cmd[@]}" >/dev/null 2>&1 || timeout 30 sudo "${nm_cmd[@]}" >/dev/null 2>&1; then
                         log_success "Layer 2 authentication successful."
@@ -395,20 +463,34 @@ select conn_method in "LAN (Wired)" "Wi-Fi"; do
                             exit 0
                         else
                             log_error "Connected to '$ssid', but ICMP/DNS routing failed (Possible captive portal)."
-                            fail_and_exit
                         fi
                     else
                         log_error "Handshake failed. Invalid password, out of range, or AP rejected client."
-                        fail_and_exit
                     fi
-                else
-                    log_warn "Invalid selection. Enter a number from the list."
-                fi
+                    break
             done
+            done
+            break
             ;;
 
+            "Re-check Connection")
+                log_info "Verifying current routing table and internet access..."
+                if check_connectivity; then
+                    log_success "System is already connected to the internet."
+                    exit 0
+                else
+                    log_warn "Still no internet connectivity detected."
+                fi
+                break
+                ;;
+
+            "Abort")
+                fail_and_exit
+                ;;
+
         *)
-            log_warn "Invalid input. Select 1 or 2."
+            log_warn "Invalid input. Select an option from the menu."
             ;;
     esac
+    done
 done

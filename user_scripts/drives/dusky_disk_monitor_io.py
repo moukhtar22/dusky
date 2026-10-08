@@ -71,6 +71,12 @@ def _sudo_keepalive_worker() -> None:
         _sudo_keepalive_stop.wait(45.0)
 
 
+def _run_privileged(cmd: list[str], timeout: float = 3.0) -> subprocess.CompletedProcess[str]:
+    """Executes a command with root privileges, bypassing sudo overhead when already root."""
+    prefix = [] if os.geteuid() == 0 else ["sudo", "-n"]
+    return subprocess.run([*prefix, *cmd], capture_output=True, text=True, timeout=timeout)
+
+
 def ensure_smart_access() -> None:
     """Prompts for sudo upfront and spawns a background refresher for non-expiring telemetry."""
     if os.geteuid() != 0:
@@ -89,9 +95,9 @@ def ensure_smart_access() -> None:
                 print("\n[!] Authentication cancelled. Exiting.")
                 sys.exit(0)
 
-    # Spawn daemon thread to keep sudo credentials alive
-    t = threading.Thread(target=_sudo_keepalive_worker, daemon=True, name="SudoKeepAlive")
-    t.start()
+        # Spawn daemon thread to keep sudo credentials alive (only required for non-root users)
+        t = threading.Thread(target=_sudo_keepalive_worker, daemon=True, name="SudoKeepAlive")
+        t.start()
 
 
 from rich.table import Table
@@ -148,26 +154,53 @@ TEMP_COL = "#fcd34d"
 # 3. CORE SYSTEM METRICS & FORMATTING ENGINE
 # ============================================================================
 def format_bytes(bytes_val: float) -> str:
-    """Formats bytes into human-readable KB, MB, GB, or TB string."""
+    """Formats bytes into human-readable B, KB, MB, GB, TB, or PB string."""
+    if bytes_val < 1024:
+        return f"{bytes_val:.0f} B"
     if bytes_val < 1024 * 1024:
         return f"{bytes_val / 1024:.1f} KB"
     if bytes_val < 1024 * 1024 * 1024:
         return f"{bytes_val / (1024 * 1024):.1f} MB"
     if bytes_val < 1024 * 1024 * 1024 * 1024:
         return f"{bytes_val / (1024 * 1024 * 1024):.1f} GB"
-    return f"{bytes_val / (1024 * 1024 * 1024 * 1024):.2f} TB"
+    if bytes_val < 1024 * 1024 * 1024 * 1024 * 1024:
+        return f"{bytes_val / (1024 * 1024 * 1024 * 1024):.2f} TB"
+    return f"{bytes_val / (1024 * 1024 * 1024 * 1024 * 1024):.2f} PB"
 
 
 def format_rate(rate_bytes_per_sec: float) -> str:
-    """Formats transfer rate into human-readable MB/s or GB/s."""
+    """Formats transfer rate into human-readable B/s, KB/s, MB/s, or GB/s."""
+    if rate_bytes_per_sec <= 0.0:
+        return "0.00 MB/s"
     mb_s = rate_bytes_per_sec / (1024 * 1024)
     if mb_s >= 1000.0:
         return f"{mb_s / 1024.0:.2f} GB/s"
     if mb_s >= 100.0:
         return f"{mb_s:.1f} MB/s"
-    if mb_s >= 0.01:
+    if mb_s >= 1.0:
         return f"{mb_s:.2f} MB/s"
-    return "0.00 MB/s"
+    if rate_bytes_per_sec >= 1024.0:
+        return f"{rate_bytes_per_sec / 1024.0:.1f} KB/s"
+    return f"{rate_bytes_per_sec:.0f} B/s"
+
+
+def format_nvme_units(units: int | float | str) -> str:
+    """Formats NVMe data units (1 unit = 1,000 * 512 bytes = 512 KB) into human-readable SI string matching nvme-cli."""
+    if isinstance(units, str) and any(u in units for u in ("KB", "MB", "GB", "TB", "PB")):
+        return units.strip()
+    try:
+        bytes_val = float(units) * 512_000.0
+        if bytes_val < 1e6:
+            return f"{bytes_val / 1e3:.1f} KB"
+        if bytes_val < 1e9:
+            return f"{bytes_val / 1e6:.1f} MB"
+        if bytes_val < 1e12:
+            return f"{bytes_val / 1e9:.1f} GB"
+        if bytes_val < 1e15:
+            return f"{bytes_val / 1e12:.2f} TB"
+        return f"{bytes_val / 1e15:.2f} PB"
+    except (ValueError, TypeError):
+        return "N/A"
 
 
 @dataclass(slots=True, frozen=True)
@@ -237,49 +270,125 @@ class SysStatParser:
     @staticmethod
     def _get_smartctl_data(device: str) -> SmartInfo:
         try:
-            cmd = ["sudo", "-n", "smartctl", "-j", "-a", f"/dev/{device}"]
-            res = subprocess.run(cmd, capture_output=True, text=True, timeout=3)
+            res = _run_privileged(["smartctl", "-j", "-a", f"/dev/{device}"], timeout=3.0)
             temp_str = "N/A"
             health_str = "N/A"
             p_cycles = "N/A"
             p_hours = "N/A"
             realloc = "N/A"
+            tbr = "N/A"
+            tbw = "N/A"
+            u_shut = "N/A"
+            crit_warn = "N/A"
 
             if res.stdout:
                 try:
                     data = json.loads(res.stdout)
-                    t_curr = data.get("temperature", {}).get("current")
-                    if t_curr is not None:
-                        temp_str = f"{t_curr}°C"
-                    else:
-                        for attr in data.get("ata_smart_attributes", {}).get("table", []):
-                            if attr.get("name") in ("Temperature_Celsius", "Airflow_Temperature_Cel", "Temperature"):
-                                raw_v = attr.get("raw", {}).get("value")
-                                if raw_v is not None:
-                                    temp_str = f"{raw_v}°C"
-                                    break
 
-                    smart_passed = data.get("smart_status", {}).get("passed")
-                    health_str = "PASSED" if smart_passed is True else ("FAILED" if smart_passed is False else "N/A")
-                    p_cycles = str(data.get("power_cycle_count", "N/A"))
-                    p_hours = str(data.get("power_on_time", {}).get("hours", "N/A"))
+                    # NVMe SMART log block from smartctl (handles NVMe devices seamlessly)
+                    nvme_log = data.get("nvme_smart_health_information_log", {})
+                    if nvme_log:
+                        pct_used = nvme_log.get("percentage_used")
+                        if pct_used is not None:
+                            try:
+                                health_str = f"{max(0, 100 - int(pct_used))}%"
+                            except (ValueError, TypeError):
+                                pass
+                        dur = nvme_log.get("data_units_read")
+                        if dur is not None:
+                            tbr = format_nvme_units(dur)
+                        duw = nvme_log.get("data_units_written")
+                        if duw is not None:
+                            tbw = format_nvme_units(duw)
+                        p_cycles = str(nvme_log.get("power_cycles", "N/A"))
+                        p_hours = str(nvme_log.get("power_on_hours", "N/A"))
+                        u_shut = str(nvme_log.get("unsafe_shutdowns", "N/A"))
+                        realloc = str(nvme_log.get("media_errors", "N/A"))
+                        cw = nvme_log.get("critical_warning")
+                        if cw is not None:
+                            crit_warn = str(cw)
 
-                    for attr in data.get("ata_smart_attributes", {}).get("table", []):
-                        if attr.get("name") in ("Reallocated_Sector_Ct", "Reallocated_Event_Count"):
-                            realloc = str(attr.get("raw", {}).get("value", attr.get("raw", {}).get("string", "N/A")))
-                            break
+                        # Multi-sensor temperatures support from smartctl NVMe log
+                        ts_list = nvme_log.get("temperature_sensors", [])
+                        if ts_list and isinstance(ts_list, list):
+                            raw_temps = [str(t) for t in ts_list if isinstance(t, (int, float)) and t > 0]
+                            if not raw_temps:
+                                t_nvme = nvme_log.get("temperature")
+                                temp_str = f"{t_nvme}°C" if t_nvme is not None else "N/A"
+                            elif len(raw_temps) <= 2:
+                                temp_str = " │ ".join(f"{n}°C" for n in raw_temps)
+                            else:
+                                temp_str = f"{' │ '.join(raw_temps)}°C"
+                        else:
+                            t_nvme = nvme_log.get("temperature")
+                            if t_nvme is not None:
+                                temp_str = f"{t_nvme}°C"
+
+                    # Parse ATA attributes for SATA SSDs & HDDs
+                    ata_attrs = data.get("ata_smart_attributes", {}).get("table", [])
+                    if ata_attrs:
+                        bad_sectors = 0
+                        found_bad = False
+                        for attr in ata_attrs:
+                            attr_name = attr.get("name", "")
+                            raw_val = attr.get("raw", {}).get("value")
+                            if raw_val is not None:
+                                # TBW / TBR for SATA SSDs
+                                if tbw == "N/A" and attr_name in ("Total_LBAs_Written", "Lifetime_Writes_GiB", "Host_Writes_32MiB"):
+                                    if attr_name == "Total_LBAs_Written":
+                                        tbw = format_bytes(raw_val * 512)
+                                    elif attr_name == "Lifetime_Writes_GiB":
+                                        tbw = format_bytes(raw_val * 1024 * 1024 * 1024)
+                                    elif attr_name == "Host_Writes_32MiB":
+                                        tbw = format_bytes(raw_val * 32 * 1024 * 1024)
+                                elif tbr == "N/A" and attr_name in ("Total_LBAs_Read", "Lifetime_Reads_GiB", "Host_Reads_32MiB"):
+                                    if attr_name == "Total_LBAs_Read":
+                                        tbr = format_bytes(raw_val * 512)
+                                    elif attr_name == "Lifetime_Reads_GiB":
+                                        tbr = format_bytes(raw_val * 1024 * 1024 * 1024)
+                                    elif attr_name == "Host_Reads_32MiB":
+                                        tbr = format_bytes(raw_val * 32 * 1024 * 1024)
+                                # SATA SSD Wear / Health Percentage
+                                elif health_str == "N/A" and attr_name in ("SSD_Life_Left", "Percent_Lifetime_Remain", "Wear_Leveling_Count"):
+                                    health_str = f"{raw_val}%"
+                                # Unsafe shutdowns for SATA
+                                elif u_shut == "N/A" and attr_name in ("Power-Off_Retract_Count", "Unsafe_Shutdown_Count"):
+                                    u_shut = str(raw_val)
+                                # Media errors & uncorrectable sectors
+                                if attr_name in ("Reallocated_Sector_Ct", "Current_Pending_Sector", "Offline_Uncorrectable"):
+                                    bad_sectors += int(raw_val)
+                                    found_bad = True
+                        if realloc == "N/A" and found_bad:
+                            realloc = str(bad_sectors)
+
+                    if temp_str == "N/A":
+                        t_curr = data.get("temperature", {}).get("current")
+                        if t_curr is not None:
+                            temp_str = f"{t_curr}°C"
+                        else:
+                            for attr in ata_attrs:
+                                if attr.get("name") in ("Temperature_Celsius", "Airflow_Temperature_Cel", "Temperature"):
+                                    raw_v = attr.get("raw", {}).get("value")
+                                    if raw_v is not None:
+                                        temp_str = f"{raw_v}°C"
+                                        break
+
+                    if health_str == "N/A":
+                        smart_passed = data.get("smart_status", {}).get("passed")
+                        health_str = "PASSED" if smart_passed is True else ("FAILED" if smart_passed is False else "N/A")
+
+                    if p_cycles == "N/A":
+                        p_cycles = str(data.get("power_cycle_count", "N/A"))
+                    if p_hours == "N/A":
+                        p_hours = str(data.get("power_on_time", {}).get("hours", "N/A"))
+
                 except json.JSONDecodeError:
                     pass
 
             if temp_str == "N/A":
                 # Fallback to plain smartctl -A /dev/{device} for legacy USB SAT bridges
                 try:
-                    res_a = subprocess.run(
-                        ["sudo", "-n", "smartctl", "-A", f"/dev/{device}"],
-                        capture_output=True,
-                        text=True,
-                        timeout=2,
-                    )
+                    res_a = _run_privileged(["smartctl", "-A", f"/dev/{device}"], timeout=2.0)
                     for line in res_a.stdout.splitlines():
                         if "Temperature_Celsius" in line or "Airflow_Temperature" in line:
                             parts = line.split()
@@ -291,10 +400,14 @@ class SysStatParser:
 
             return SmartInfo(
                 temp=temp_str,
+                tbr=tbr,
+                tbw=tbw,
                 health=health_str,
                 power_cycles=p_cycles,
                 power_on_hours=p_hours,
+                unsafe_shutdowns=u_shut,
                 media_errors=realloc,
+                critical_warning=crit_warn,
             )
         except Exception:
             pass
@@ -306,101 +419,100 @@ class SysStatParser:
         if device.startswith(("zram", "loop", "ram", "dm", "sr", "fd", "nbd")):
             return SmartInfo()
 
-        # Parse NVMe controller data
+        # Parse NVMe controller telemetry via modern nvme-cli 3.0
         match = re.match(r"(nvme\d+)", device)
         if match:
             ctrl = match.group(1)
+            dev_target = f"/dev/{ctrl}" if Path(f"/dev/{ctrl}").exists() else f"/dev/{device}"
             try:
-                cmd = ["sudo", "-n", "nvme", "smart-log", f"/dev/{ctrl}"]
-                res = subprocess.run(cmd, capture_output=True, text=True, timeout=2)
-                if res.returncode == 0:
-                    temp_base = "N/A"
-                    t_sensors: list[str] = []
-                    health = "N/A"
-                    tbr = "N/A"
-                    tbw = "N/A"
-                    power_cycles = "N/A"
-                    power_on_hours = "N/A"
-                    unsafe_shutdowns = "N/A"
-                    media_errors = "N/A"
-                    critical_warning = "N/A"
-                    therm_t1 = "N/A"
+                # Cutting-edge nvme-cli 3.0 native architecture:
+                # 1. 'nvme log smart': canonical 3.0 subcommand replacing deprecated 'smart-log'
+                # 2. '-o json' & '--output-format-version=2': script-friendly standardized JSON schema
+                # 3. '--timeout=1500': hardware IOCTL timeout preventing D-state kernel hangs
+                # 4. '--no-retries': disables retry loops on transient errors for zero-stutter polling
+                cmd = [
+                    "nvme", "log", "smart", dev_target,
+                    "-o", "json",
+                    "--output-format-version=2",
+                    "--timeout=1500",
+                    "--no-retries",
+                ]
+                res = _run_privileged(cmd, timeout=2.0)
+                if res.returncode == 0 and res.stdout:
+                    stdout_str = res.stdout.strip()
+                    if "{" in stdout_str and "}" in stdout_str:
+                        json_str = stdout_str[stdout_str.find("{"):stdout_str.rfind("}") + 1]
+                        data = json.loads(json_str)
 
-                    for line in res.stdout.splitlines():
-                        line = line.strip()
-                        if not line or ":" not in line:
-                            continue
+                        # Temperature (Kelvin in nvme-cli 3.0 JSON schema, converted to Celsius)
+                        raw_temps: list[str] = []
+                        temp_raw = data.get("temperature")
+                        if temp_raw is not None:
+                            t_c = temp_raw - 273 if temp_raw > 200 else temp_raw
+                            raw_temps.append(str(t_c))
 
-                        key, val = (p.strip() for p in line.split(":", 1))
+                        for i in range(1, 9):
+                            ts_raw = data.get(f"temperature_sensor_{i}")
+                            if ts_raw is not None and ts_raw > 0:
+                                ts_c = ts_raw - 273 if ts_raw > 200 else ts_raw
+                                s_str = str(ts_c)
+                                if s_str not in raw_temps and len(raw_temps) < 3:
+                                    raw_temps.append(s_str)
 
-                        if key == "temperature":
-                            temp_base = val.split("(")[0].strip().replace(" ", "")
-                        elif key.startswith("Temperature Sensor"):
-                            t_sensors.append(val.split("(")[0].strip().replace(" ", ""))
-                        elif key == "percentage_used":
-                            clean_val = val.replace("%", "").strip()
-                            try:
-                                health = f"{max(0, 100 - int(clean_val))}%"
-                            except ValueError:
-                                pass
-                        elif key == "Data Units Read":
-                            tbr = val.split("(")[1].replace(")", "").strip() if "(" in val else val
-                        elif key == "Data Units Written":
-                            tbw = val.split("(")[1].replace(")", "").strip() if "(" in val else val
-                        elif key == "power_cycles":
-                            power_cycles = val
-                        elif key == "power_on_hours":
-                            power_on_hours = val
-                        elif key == "unsafe_shutdowns":
-                            unsafe_shutdowns = val
-                        elif key == "media_errors":
-                            media_errors = val
-                        elif key == "critical_warning":
-                            critical_warning = val
-                        elif key == "Thermal Management T1 Total Time":
-                            therm_t1 = f"{val}s" if val.isdigit() else val
-
-                    raw_temps: list[str] = []
-                    if temp_base != "N/A":
-                        raw_temps.append(temp_base)
-                    for ts in t_sensors[:3]:
-                        if ts != temp_base and ts not in raw_temps:
-                            raw_temps.append(ts)
-
-                    if not raw_temps:
-                        temp_str = "N/A"
-                    else:
-                        clean_nums: list[str] = []
-                        unit = "°C"
-                        for t in raw_temps:
-                            num = t.replace("°C", "").replace("C", "").replace("°F", "").replace("F", "").strip()
-                            if "F" in t:
-                                unit = "°F"
-                            if num:
-                                clean_nums.append(num)
-                        if not clean_nums:
+                        if not raw_temps:
                             temp_str = "N/A"
-                        elif len(clean_nums) <= 2:
-                            temp_str = " │ ".join(f"{n}{unit}" for n in clean_nums)
+                        elif len(raw_temps) <= 2:
+                            temp_str = " │ ".join(f"{n}°C" for n in raw_temps)
                         else:
-                            temp_str = f"{' │ '.join(clean_nums)}{unit}"
+                            temp_str = f"{' │ '.join(raw_temps)}°C"
 
-                    return SmartInfo(
-                        temp=temp_str,
-                        tbr=tbr,
-                        tbw=tbw,
-                        health=health,
-                        power_cycles=power_cycles,
-                        power_on_hours=power_on_hours,
-                        unsafe_shutdowns=unsafe_shutdowns,
-                        media_errors=media_errors,
-                        critical_warning=critical_warning,
-                        therm_t1=therm_t1,
-                    )
+                        # Drive Health (Percentage Used)
+                        health = "N/A"
+                        pct_used = data.get("percent_used", data.get("percentage_used"))
+                        if pct_used is not None:
+                            try:
+                                health = f"{max(0, 100 - int(pct_used))}%"
+                            except (ValueError, TypeError):
+                                pass
+
+                        # TBR / TBW (Data Units Read/Written scaled to SI standard)
+                        dur = data.get("data_units_read")
+                        tbr = format_nvme_units(dur) if dur is not None else "N/A"
+                        duw = data.get("data_units_written")
+                        tbw = format_nvme_units(duw) if duw is not None else "N/A"
+
+                        # Hardware Lifecycle & Media Reliability Counters
+                        power_cycles = str(data.get("power_cycles", "N/A"))
+                        power_on_hours = str(data.get("power_on_hours", "N/A"))
+                        unsafe_shutdowns = str(data.get("unsafe_shutdowns", "N/A"))
+                        media_errors = str(data.get("media_errors", "N/A"))
+
+                        # Critical Warning (numeric or structured mask)
+                        cw = data.get("critical_warning", "N/A")
+                        if isinstance(cw, dict):
+                            cw = cw.get("value", "N/A")
+                        critical_warning = str(cw) if cw is not None else "N/A"
+
+                        # Thermal Throttling T1 Time
+                        t1 = data.get("thm_temp1_total_time")
+                        therm_t1 = f"{t1}s" if t1 is not None and str(t1).isdigit() else "N/A"
+
+                        return SmartInfo(
+                            temp=temp_str,
+                            tbr=tbr,
+                            tbw=tbw,
+                            health=health,
+                            power_cycles=power_cycles,
+                            power_on_hours=power_on_hours,
+                            unsafe_shutdowns=unsafe_shutdowns,
+                            media_errors=media_errors,
+                            critical_warning=critical_warning,
+                            therm_t1=therm_t1,
+                        )
             except Exception:
                 pass
 
-        # Fallback for SATA SSD, HDD, USB drives
+        # Fallback for SATA SSD, HDD, USB drives (or when nvme CLI is not authorized)
         return SysStatParser._get_smartctl_data(device)
 
     @staticmethod
@@ -461,7 +573,7 @@ class SysStatParser:
                 rota_val = d.get("rota")
                 is_hdd = str(rota_val).strip() in ("1", "true", "True") if rota_val is not None else False
                 tran = d.get("tran")
-                dtype = tran.upper() if tran else ("ZRAM" if name.startswith("zram") else d.get("type", "DISK").upper().strip())
+                dtype = tran.upper() if tran else ("ZRAM" if name.startswith("zram") else ("NVME" if name.startswith("nvme") else d.get("type", "DISK").upper().strip()))
                 results[name] = {
                     "size": d.get("size", "?").strip(),
                     "type": dtype,
@@ -494,21 +606,30 @@ class SysStatParser:
 
             def fetch_single_meta(dev: dict) -> tuple[str, dict]:
                 name = dev["name"]
-                model = dev.get("model")
-                clean_model = str(model).strip() if model else ("Compressed RAM" if name.startswith("zram") else "N/A")
-                rota_val = dev.get("rota")
-                is_hdd = str(rota_val).strip() in ("1", "true", "True") if rota_val is not None else False
-                tran = dev.get("tran")
-                dtype = tran.upper() if tran else ("ZRAM" if name.startswith("zram") else dev.get("type", "DISK").upper().strip())
+                try:
+                    model = dev.get("model")
+                    clean_model = str(model).strip() if model else ("Compressed RAM" if name.startswith("zram") else "N/A")
+                    rota_val = dev.get("rota")
+                    is_hdd = str(rota_val).strip() in ("1", "true", "True") if rota_val is not None else False
+                    tran = dev.get("tran")
+                    dtype = tran.upper() if tran else ("ZRAM" if name.startswith("zram") else ("NVME" if name.startswith("nvme") else dev.get("type", "DISK").upper().strip()))
 
-                smart = SysStatParser.get_smart_data(name)
-                return name, {
-                    "size": dev.get("size", "?").strip(),
-                    "type": dtype,
-                    "model": clean_model,
-                    "rota": is_hdd,
-                    "smart": smart,
-                }
+                    smart = SysStatParser.get_smart_data(name)
+                    return name, {
+                        "size": dev.get("size", "?").strip(),
+                        "type": dtype,
+                        "model": clean_model,
+                        "rota": is_hdd,
+                        "smart": smart,
+                    }
+                except Exception:
+                    return name, {
+                        "size": dev.get("size", "?").strip(),
+                        "type": "DISK",
+                        "model": "N/A",
+                        "rota": False,
+                        "smart": SmartInfo(),
+                    }
 
             # Parallel query across all connected block devices
             with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
@@ -596,23 +717,25 @@ class DriveWidget(Static, can_focus=True):
             prev = self.prev_stats
             dt = curr.timestamp - prev.timestamp
             if dt > 0:
-                r_mb_s = ((curr.read_sectors - prev.read_sectors) * 512) / dt / 1048576
-                w_mb_s = ((curr.write_sectors - prev.write_sectors) * 512) / dt / 1048576
-                r_iops = (curr.read_ios - prev.read_ios) / dt
-                w_iops = (curr.write_ios - prev.write_ios) / dt
+                r_mb_s = max(0.0, ((curr.read_sectors - prev.read_sectors) * 512) / dt / 1048576)
+                w_mb_s = max(0.0, ((curr.write_sectors - prev.write_sectors) * 512) / dt / 1048576)
+                r_iops = max(0.0, (curr.read_ios - prev.read_ios) / dt)
+                w_iops = max(0.0, (curr.write_ios - prev.write_ios) / dt)
 
                 total_ios_delta = (
-                    (curr.read_ios - prev.read_ios)
-                    + (curr.write_ios - prev.write_ios)
-                    + (curr.discard_ios - prev.discard_ios)
+                    max(0, curr.read_ios - prev.read_ios)
+                    + max(0, curr.write_ios - prev.write_ios)
+                    + max(0, curr.discard_ios - prev.discard_ios)
+                    + max(0, curr.flush_ios - prev.flush_ios)
                 )
                 total_ticks_delta = (
-                    (curr.read_ticks - prev.read_ticks)
-                    + (curr.write_ticks - prev.write_ticks)
-                    + (curr.discard_ticks - prev.discard_ticks)
+                    max(0, curr.read_ticks - prev.read_ticks)
+                    + max(0, curr.write_ticks - prev.write_ticks)
+                    + max(0, curr.discard_ticks - prev.discard_ticks)
+                    + max(0, curr.flush_ticks - prev.flush_ticks)
                 )
 
-                util_pct = min(((curr.io_ticks - prev.io_ticks) / 1000.0) / dt * 100.0, 100.0)
+                util_pct = max(0.0, min(((curr.io_ticks - prev.io_ticks) / 1000.0) / dt * 100.0, 100.0))
                 await_ms = (total_ticks_delta / total_ios_delta) if total_ios_delta > 0 else 0.0
 
                 self.history_read.append(r_mb_s)
@@ -632,7 +755,7 @@ class DriveWidget(Static, can_focus=True):
         table.add_column("C1_L", justify="left", no_wrap=True, width=10)
         table.add_column("C1_V", justify="left", no_wrap=True, width=10)
         table.add_column("F1", ratio=1)
-        table.add_column("C2", justify="left", no_wrap=True, width=24)
+        table.add_column("C2", justify="left", no_wrap=True, width=25)
         table.add_column("F2", ratio=1)
         table.add_column("C3", justify="left", no_wrap=True, width=16)
         table.add_column("F3", ratio=1)
@@ -641,8 +764,55 @@ class DriveWidget(Static, can_focus=True):
         r_spark, self.peak_read = self.generate_sparkline(self.history_read, self.peak_read, width=16, color_hex=SUCCESS)
         w_spark, self.peak_write = self.generate_sparkline(self.history_write, self.peak_write, width=16, color_hex=ACCENT)
 
-        err_col = SUCCESS if str(smart.media_errors) == "0" else ERROR
-        crit_col = SUCCESS if str(smart.critical_warning) == "0" else ERROR
+        # Diagnostics Color Evaluation (Eliminating False Alarms on Healthy Drives & N/A)
+        m_str = str(smart.media_errors).strip()
+        if m_str in ("N/A", "?", ""):
+            err_col = MUTED
+        elif m_str in ("0", "0x0", "0x00") or smart.media_errors == 0:
+            err_col = SUCCESS
+        else:
+            err_col = ERROR
+
+        c_str = str(smart.critical_warning).strip()
+        if c_str in ("N/A", "?", ""):
+            crit_col = MUTED
+        elif c_str in ("0", "0x0", "0x00") or smart.critical_warning == 0:
+            crit_col = SUCCESS
+        else:
+            crit_col = ERROR
+
+        h_str = str(smart.health).strip()
+        if h_str == "FAILED":
+            health_col = ERROR
+        elif h_str in ("N/A", "?", ""):
+            health_col = MUTED
+        elif h_str.endswith("%"):
+            try:
+                h_val = int(h_str.rstrip("%"))
+                health_col = ERROR if h_val < 30 else (WARNING if h_val < 70 else ACCENT)
+            except ValueError:
+                health_col = ACCENT
+        else:
+            health_col = SUCCESS
+
+        u_str = str(smart.unsafe_shutdowns).strip()
+        if u_str in ("N/A", "?", ""):
+            pwr_cut_col = MUTED
+        elif u_str in ("0", "0x0") or smart.unsafe_shutdowns == 0:
+            pwr_cut_col = SUCCESS
+        else:
+            pwr_cut_col = WARNING
+
+        t1_str = str(smart.therm_t1).strip()
+        if t1_str in ("N/A", "?", ""):
+            t1_col = MUTED
+        elif t1_str in ("0s", "0"):
+            t1_col = SUCCESS
+        else:
+            t1_col = WARNING
+
+        util_col = ERROR if util_pct >= 85.0 else (WARNING if util_pct >= 50.0 else FG)
+        lat_col = ERROR if await_ms >= 50.0 else (WARNING if await_ms >= 15.0 else FG)
 
         r_spd = format_rate(r_mb_s * 1048576)
         w_spd = format_rate(w_mb_s * 1048576)
@@ -655,7 +825,7 @@ class DriveWidget(Static, can_focus=True):
             else f"[{SUCCESS}]{r_iops_str:>11}[/]"
         )
         w_c4 = (
-            f"[{ACCENT}]{w_iops_str}[/] [bold {ERROR}]{await_ms:.2f} ms[/]"
+            f"[{ACCENT}]{w_iops_str}[/] [bold {lat_col}]{await_ms:.2f} ms[/]"
             if is_compact
             else f"[{ACCENT}]{w_iops_str:>11}[/]"
         )
@@ -688,9 +858,9 @@ class DriveWidget(Static, can_focus=True):
             # ROW 3 (Utilization / Critical / Power Cycles)
             table.add_row(
                 f"[{WARNING}]Latency:[/]",
-                f"[bold {ERROR}]{await_ms:.2f} ms[/]",
+                f"[bold {lat_col}]{await_ms:.2f} ms[/]",
                 "",
-                f"[{LABEL_COL}]UTIL    [{DIVIDER_COL}]│[/][/] [bold {ERROR}]{util_pct:>5.1f}%[/]",
+                f"[{LABEL_COL}]UTIL    [{DIVIDER_COL}]│[/][/] [bold {util_col}]{util_pct:>5.1f}%[/]",
                 "",
                 f"[{LABEL_COL}]CRITICAL [{DIVIDER_COL}]│[/][/] [bold {crit_col}]{smart.critical_warning:>4}[/]",
                 "",
@@ -702,7 +872,7 @@ class DriveWidget(Static, can_focus=True):
                 f"[{SUCCESS}]Total Rd:[/]",
                 f"[bold {SUCCESS}]{smart.tbr}[/]",
                 "",
-                f"[{LABEL_COL}]HEALTH  [{DIVIDER_COL}]│[/][/] [bold {ACCENT}]{smart.health:>5}[/]",
+                f"[{LABEL_COL}]HEALTH  [{DIVIDER_COL}]│[/][/] [bold {health_col}]{smart.health:>5}[/]",
                 "",
                 f"[{LABEL_COL}]ERRORS   [{DIVIDER_COL}]│[/][/] [bold {err_col}]{smart.media_errors:>4}[/]",
                 "",
@@ -716,9 +886,9 @@ class DriveWidget(Static, can_focus=True):
                 "",
                 f"[{LABEL_COL}]TEMP    [{DIVIDER_COL}]│[/][/] [bold {TEMP_COL}]{smart.temp:>5}[/]",
                 "",
-                f"[{LABEL_COL}]T1 TIME  [{DIVIDER_COL}]│[/][/] [bold {FG}]{smart.therm_t1:>4}[/]",
+                f"[{LABEL_COL}]T1 TIME  [{DIVIDER_COL}]│[/][/] [bold {t1_col}]{smart.therm_t1:>4}[/]",
                 "",
-                f"[{LABEL_COL}]PWR CUT [{DIVIDER_COL}]│[/][/] [bold {ERROR}]{smart.unsafe_shutdowns:>6}[/]",
+                f"[{LABEL_COL}]PWR CUT [{DIVIDER_COL}]│[/][/] [bold {pwr_cut_col}]{smart.unsafe_shutdowns:>6}[/]",
             )
 
         self.update(table)
@@ -957,6 +1127,9 @@ class IOMonitorApp(App):
             self.action_help()
 
     def action_sync(self) -> None:
+        if getattr(self, "_syncing", False):
+            return
+        self._syncing = True
         self.do_sync()
 
     @work(thread=True, exclusive=True)
@@ -985,12 +1158,13 @@ class IOMonitorApp(App):
                 btn.remove_class("-syncing")
                 btn.add_class("-synced")
             elif state == "idle":
+                self._syncing = False
                 btn.label = "󰚰 Sync"
                 btn.disabled = False
                 btn.remove_class("-syncing")
                 btn.remove_class("-synced")
         except Exception:
-            pass
+            self._syncing = False
 
     @work(thread=True, exclusive=True)
     def refresh_metadata_worker(self) -> None:
@@ -998,7 +1172,8 @@ class IOMonitorApp(App):
         self.call_from_thread(self._update_meta, new_meta)
 
     def _update_meta(self, new_meta: dict[str, dict]) -> None:
-        self.meta = new_meta
+        if new_meta:
+            self.meta.update(new_meta)
 
     # ========================================================================
     # CIRCULAR NAVIGATION (Loops seamlessly top-to-bottom and bottom-to-top)
@@ -1081,10 +1256,12 @@ class IOMonitorApp(App):
 
     def tick(self) -> None:
         dirty, wb = SysStatParser.get_ram_buffers()
+        wb_col = ERROR if wb > 50.0 else (WARNING if wb > 0.0 else SUCCESS)
+        dirty_col = WARNING if dirty > 500.0 else ACCENT
         ram_txt = Text.from_markup(
-            f"[{LABEL_COL}]Dirty (Wait):[/] [bold {ACCENT}]{dirty:.1f} MB[/]    "
+            f"[{LABEL_COL}]Dirty:[/] [bold {dirty_col}]{dirty:.1f} MB[/]    "
             f"[bold {BG} on {SUCCESS}] Dusky Disk [/]    "
-            f"[{LABEL_COL}]Writeback (Active):[/] [bold {ERROR}]{wb:.1f} MB[/]"
+            f"[{LABEL_COL}]Writeback:[/] [bold {wb_col}]{wb:.1f} MB[/]"
         )
         try:
             self.query_one("#ram_txt", Static).update(ram_txt)
@@ -1117,12 +1294,17 @@ class IOMonitorApp(App):
                 self.mounted_drives.remove(dev)
 
         # Mount new drives
+        new_drives_added = False
         for dev in current_drives:
             if dev not in self.mounted_drives:
                 clean_id = re.sub(r"[^a-zA-Z0-9_-]", "_", dev)
                 widget = DriveWidget(id=f"drive_{clean_id}", dev_name=dev)
                 scroll_area.mount(widget)
                 self.mounted_drives.add(dev)
+                new_drives_added = True
+
+        if new_drives_added and not is_initial:
+            self.refresh_metadata_worker()
 
         # Initial focus on first drive widget
         if is_initial and current_drives:

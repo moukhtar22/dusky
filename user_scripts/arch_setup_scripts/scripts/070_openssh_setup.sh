@@ -47,6 +47,7 @@ warn()    { printf "%s[WARN]%s %s\n" "$C_YELLOW" "$C_RESET" "$*"; }
 error()   { printf "%s[ERR]%s  %s\n" "$C_RED" "$C_RESET" "$*" >&2; }
 die()     { error "$*"; exit 1; }
 
+# shellcheck disable=SC2329 # Invoked by the EXIT trap below.
 cleanup() {
     local exit_code=$?
     if [[ $exit_code -ne 0 ]] && [[ $exit_code -ne 130 ]]; then
@@ -133,10 +134,10 @@ fi
 
 # --- 9. Config Validation ---
 info "Validating sshd configuration..."
-config_errors=""
-if ! config_errors=$(sshd -t 2>&1); then
+sshd_full_config=""
+if ! sshd_full_config=$(sshd -T 2>&1); then
     error "sshd configuration is invalid:"
-    printf "  %s\n" "$config_errors" >&2
+    printf "  %s\n" "$sshd_full_config" >&2
     # FIXED: Typo — was "sshd_confi g" (with space) in both original scripts
     die "Fix /etc/ssh/sshd_config and re-run."
 fi
@@ -150,6 +151,8 @@ if systemctl is-active --quiet sshd.socket 2>/dev/null; then
     SSH_UNIT="sshd.socket"
     SSH_UNIT_TYPE="socket"
     info "Detected active sshd.socket (on-demand activation)."
+elif systemctl is-active --quiet sshd.service 2>/dev/null; then
+    info "Detected active sshd.service."
 elif systemctl is-enabled --quiet sshd.socket 2>/dev/null; then
     SSH_UNIT="sshd.socket"
     SSH_UNIT_TYPE="socket"
@@ -185,7 +188,7 @@ if [[ "$SSH_UNIT_TYPE" == "socket" ]]; then
             SSH_PORT="$socket_port"
 
             # Cross-check against sshd_config
-            config_port=$(sshd -T 2>/dev/null \
+            config_port=$(printf '%s\n' "$sshd_full_config" \
                 | awk '/^port / {print $2; exit}' || true)
             if [[ -n "$config_port" ]] && [[ "$config_port" != "$SSH_PORT" ]]; then
                 warn "sshd.socket listens on port $SSH_PORT, sshd_config says port $config_port."
@@ -197,7 +200,7 @@ fi
 
 # Fallback: sshd_config
 if [[ -z "$SSH_PORT" ]]; then
-    SSH_PORT=$(sshd -T 2>/dev/null | awk '/^port / {print $2; exit}' || true)
+    SSH_PORT=$(printf '%s\n' "$sshd_full_config" | awk '/^port / {print $2; exit}' || true)
 fi
 
 # Final fallback
@@ -214,8 +217,6 @@ fi
 info "SSH port: $SSH_PORT"
 
 # --- 12. sshd_config Warnings ---
-sshd_full_config=$(sshd -T 2>/dev/null || true)
-
 if [[ -n "$sshd_full_config" ]]; then
 
     # 12a. ListenAddress — warn if only localhost
@@ -403,17 +404,11 @@ configure_firewalls() {
     # ── Handle UFW ──
     if [[ "$has_ufw" == "true" ]]; then
         info "Configuring UFW for SSH (port $port)..."
-        local ufw_rules
-        ufw_rules=$(ufw status 2>/dev/null || true)
-        # Match: "22 ALLOW", "22/tcp ALLOW", "22 (v6) ALLOW"
-        if printf '%s\n' "$ufw_rules" | grep -qE "^${port}[[:space:]/].*ALLOW"; then
-            success "UFW already allows port $port."
+        # ufw handles an existing identical rule without adding a duplicate.
+        if ufw allow "${port}/tcp" >/dev/null 2>&1; then
+            success "UFW: port ${port}/tcp allowed."
         else
-            if ufw allow "${port}/tcp" >/dev/null 2>&1; then
-                success "UFW: allowed port ${port}/tcp."
-            else
-                warn "Failed to add UFW rule for port $port."
-            fi
+            warn "Failed to add UFW rule for port $port."
         fi
     fi
 
@@ -423,31 +418,17 @@ configure_firewalls() {
         local default_zone
         default_zone=$(firewall-cmd --get-default-zone 2>/dev/null || echo "public")
 
+        local -a rule
         if [[ "$port" == "22" ]]; then
-            # Standard port — use the built-in ssh service definition
-            if firewall-cmd --zone="$default_zone" --query-service=ssh &>/dev/null; then
-                success "firewalld already allows SSH service in '$default_zone'."
-            else
-                if firewall-cmd --permanent --zone="$default_zone" --add-service=ssh >/dev/null 2>&1 \
-                    && firewall-cmd --reload >/dev/null 2>&1; then
-                    success "firewalld: SSH service allowed in '$default_zone'."
-                else
-                    warn "Failed to add SSH service in firewalld."
-                fi
-            fi
+            rule=(--add-service=ssh)
         else
-            # Non-standard port — --add-service=ssh would open 22, not our port
-            if firewall-cmd --zone="$default_zone" --query-port="${port}/tcp" &>/dev/null; then
-                success "firewalld already allows port ${port}/tcp in '$default_zone'."
-            else
-                if firewall-cmd --permanent --zone="$default_zone" \
-                    --add-port="${port}/tcp" >/dev/null 2>&1 \
-                    && firewall-cmd --reload >/dev/null 2>&1; then
-                    success "firewalld: port ${port}/tcp allowed in '$default_zone'."
-                else
-                    warn "Failed to add port $port in firewalld."
-                fi
-            fi
+            rule=(--add-port="${port}/tcp")
+        fi
+        if firewall-cmd --zone="$default_zone" "${rule[@]}" >/dev/null 2>&1 \
+            && firewall-cmd --permanent --zone="$default_zone" "${rule[@]}" >/dev/null 2>&1; then
+            success "firewalld: port ${port}/tcp allowed in '$default_zone' (runtime and permanent)."
+        else
+            warn "Failed to fully open port $port in firewalld."
         fi
     fi
 
@@ -506,19 +487,12 @@ configure_firewalls "$SSH_PORT"
 
 # --- 15. Service Management ---
 
-# Re-check for conflicts (state may have changed since section 10)
-if [[ "$SSH_UNIT" == "sshd.service" ]]; then
-    if systemctl is-active --quiet sshd.socket 2>/dev/null; then
-        info "sshd.socket became active. Switching to socket activation."
-        SSH_UNIT="sshd.socket"
-        SSH_UNIT_TYPE="socket"
-    fi
-elif [[ "$SSH_UNIT" == "sshd.socket" ]]; then
-    if systemctl is-active --quiet sshd.service 2>/dev/null; then
-        info "sshd.service became active. Switching to service mode."
-        SSH_UNIT="sshd.service"
-        SSH_UNIT_TYPE="service"
-    fi
+# The selected unit must stay paired with the port already used for firewall rules.
+# A concurrent change requires a fresh read of both before touching either unit.
+if [[ "$SSH_UNIT" == "sshd.service" ]] && systemctl is-active --quiet sshd.socket 2>/dev/null; then
+    die "sshd.socket became active during setup; re-run to detect its listening port."
+elif [[ "$SSH_UNIT" == "sshd.socket" ]] && systemctl is-active --quiet sshd.service 2>/dev/null; then
+    die "sshd.service became active during setup; re-run to detect its listening port."
 fi
 
 # Prevent boot-time conflict: stop AND disable the opposing unit
@@ -539,12 +513,14 @@ elif [[ "$SSH_UNIT" == "sshd.socket" ]]; then
 fi
 
 if systemctl is-active --quiet "$SSH_UNIT" 2>/dev/null; then
+    if ! systemctl is-enabled --quiet "$SSH_UNIT" 2>/dev/null; then
+        systemctl enable "$SSH_UNIT" >/dev/null || die "Could not enable $SSH_UNIT for boot."
+    fi
     success "$SSH_UNIT is already active."
 else
     info "Starting $SSH_UNIT..."
 
-    # Enable (separate from start for clarity on failures)
-    systemctl enable "$SSH_UNIT" >/dev/null 2>&1 || true
+    systemctl enable "$SSH_UNIT" >/dev/null || die "Could not enable $SSH_UNIT for boot."
 
     # Start
     if ! systemctl start "$SSH_UNIT" >/dev/null 2>&1; then
@@ -574,13 +550,16 @@ else
 fi
 
 # --- 16. Post-start Listening Verification ---
-sleep 1
-listen_check=$(ss -Hltnp sport = :"${SSH_PORT}" 2>/dev/null || true)
+listen_check=""
+for attempt in {1..5}; do
+    listen_check=$(ss -Hltnp sport = :"${SSH_PORT}" 2>/dev/null || true)
+    [[ -n "$listen_check" ]] && break
+    if (( attempt < 5 )); then sleep 1; fi
+done
 if [[ -n "$listen_check" ]]; then
     success "Verified: port $SSH_PORT is listening."
 else
-    warn "Port $SSH_PORT does not appear to be listening."
-    warn "Check 'ss -tlnp' and 'journalctl -xeu $SSH_UNIT' for details."
+    die "Port $SSH_PORT is not listening. Check 'ss -tlnp' and 'journalctl -xeu $SSH_UNIT'."
 fi
 
 # --- 17. Tailscale Handling ---

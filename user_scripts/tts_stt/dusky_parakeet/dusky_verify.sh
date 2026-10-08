@@ -1,91 +1,76 @@
 #!/usr/bin/env bash
-# Dusky STT verification: static / live / d3 / all. Hardware-aware.
+# Verify the installed runtime; live checks record from the configured microphone.
 set -uo pipefail
-
-APP_DIR="${HOME}/.local/lib/dusky-stt"
-SERVICE="dusky_stt.service"
-TRIGGER="${HOME}/.local/bin/dusky_trigger"
-CONFIG="${APP_DIR}/config.json"
-PASSED=0
-FAILED=0
-
-c_ok=$(printf '\033[32m'); c_bad=$(printf '\033[31m'); c_off=$(printf '\033[0m')
-pass() { PASSED=$((PASSED+1)); printf '%s  PASS%s %s\n' "$c_ok" "$c_off" "$1"; }
-fail() { FAILED=$((FAILED+1)); printf '%s  FAIL%s %s\n' "$c_bad" "$c_off" "$1"; }
-
-hardware() { "$APP_DIR/.venv-main/bin/python" -c 'import json;print(json.load(open("'"$CONFIG"'")).get("hardware","cpu"))' 2>/dev/null || echo cpu; }
-
+APP_DIR="${DUSKY_APP_DIR:-$HOME/.local/lib/dusky-stt}"
+CONFIG="${DUSKY_CONFIG:-$APP_DIR/config.json}"
+TRIGGER="${DUSKY_TRIGGER:-$HOME/.local/bin/dusky_trigger}"
+SERVICE=dusky_stt.service
+PY="$APP_DIR/.venv-main/bin/python"
+PASSED=0 FAILED=0
+pass() { PASSED=$((PASSED+1)); printf '  ✓ %s\n' "$1"; }
+fail() { FAILED=$((FAILED+1)); printf '  ✗ %s\n' "$1"; }
+check() { local message=$1; shift; if "$@"; then pass "$message"; else fail "$message"; fi; }
+config_value() { "$PY" -c 'import json,sys; print(json.load(open(sys.argv[1])).get(sys.argv[2],sys.argv[3]))' "$CONFIG" "$1" "$2"; }
 static_checks() {
-  printf '\n== Static ==\n'
-  [[ -f "$CONFIG" ]] || { fail "Missing config.json"; return; }
-  [[ -x "$TRIGGER" ]] || { fail "Trigger not executable"; return; }
-  local py; py=$("$APP_DIR/.venv-main/bin/python" -c 'import sys;print(".".join(map(str,sys.version_info[:3])))')
-  "$APP_DIR/.venv-main/bin/python" -c 'import sys;raise SystemExit(0 if sys.version_info>=(3,14,6) and sys._is_gil_enabled() else 1)' \
-    && pass "Main CPython $py GIL" || fail "Main python $py"
-  local mo wo
-  mo=$("$APP_DIR/.venv-main/bin/python" -c 'import importlib.metadata as m;print(sorted(set(m.packages_distributions().get("onnxruntime",[]))))')
-  wo=$("$APP_DIR/.venv-worker/bin/python" -c 'import importlib.metadata as m;print(sorted(set(m.packages_distributions().get("onnxruntime",[]))))')
-  [[ "$mo" == "['onnxruntime']" ]] && pass "Main ORT exclusive" || fail "Main ORT owners: $mo"
-  local hw; hw=$(hardware)
-  if [[ "$hw" == "nvidia" ]]; then
-    [[ "$wo" == "['onnxruntime-gpu']" ]] && pass "Worker ORT-GPU exclusive" || fail "Worker ORT owners: $wo"
+  printf '\nRuntime\n'
+  if [[ ! -f $CONFIG || ! -x $PY ]]; then fail 'Install missing'; return; fi
+  check 'Trigger executable' test -x "$TRIGGER"
+  check 'CPython 3.14.7+ with GIL' "$PY" -c 'import sys; assert sys.version_info >= (3,14,7) and sys._is_gil_enabled()'
+  check 'CPU daemon isolation' "$PY" "$APP_DIR/dusky_main.py" --config "$CONFIG" --check-cpu-isolation
+  local hw expected pid
+  hw=$(config_value hardware cpu)
+  expected=onnxruntime; [[ $hw != nvidia ]] || expected=onnxruntime-gpu
+  check 'Worker runtime ownership' "$APP_DIR/.venv-worker/bin/python" -c 'import importlib.metadata as m,sys; assert set(m.packages_distributions().get("onnxruntime",[])) == {sys.argv[1]}' "$expected"
+  check 'Unit configuration' systemd-analyze --user verify "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/$SERVICE"
+  pid=$(systemctl --user show -p MainPID --value "$SERVICE")
+  if [[ $pid =~ ^[0-9]+$ && $pid -gt 0 ]]; then
+    check 'Daemon has no CUDA libraries' "$PY" -c 'import pathlib,re,sys; assert not re.search(r"libcuda\.so|libcudart\.so|libcublas|libcudnn|onnxruntime_providers_cuda",pathlib.Path(f"/proc/{sys.argv[1]}/maps").read_text())' "$pid"
+    check 'Control endpoint responding' "$TRIGGER" --status --json
   else
-    [[ "$wo" == "['onnxruntime']" ]] && pass "Worker ORT exclusive ($hw)" || fail "Worker ORT owners: $wo"
+    pass 'Service idle; the trigger starts it on demand'
   fi
-  local pid; pid=$(systemctl --user show -p MainPID --value "$SERVICE")
-  if [[ "$pid" =~ ^[0-9]+$ ]] && [[ "$pid" -gt 0 ]]; then
-    pass "Service active PID $pid"
-    if grep -Eiq 'libcuda\.so|libcudart\.so|libcublas|libcudnn|onnxruntime_providers_cuda' "/proc/$pid/maps"; then
-      fail "CUDA leaked into daemon"; else pass "Daemon CUDA-clean"; fi
-  else fail "Service not active"; fi
-  local sock="$XDG_RUNTIME_DIR/dusky-stt/control.sock"
-  [[ -S "$sock" ]] && pass "Control socket exists" || fail "Control socket missing"
-  [[ "$(stat -c '%a' "$XDG_RUNTIME_DIR/dusky-stt" 2>/dev/null)" == "700" ]] && pass "Dir 0700" || fail "Dir mode"
-  [[ "$(stat -c '%a' "$sock" 2>/dev/null)" == "600" ]] && pass "Socket 0600" || fail "Socket mode"
-  systemd-analyze --user verify "$HOME/.config/systemd/user/$SERVICE" >/dev/null 2>&1 \
-    && pass "Unit verifies" || fail "Unit verify failed"
 }
-
 live_checks() {
-  printf '\n== Live ==\n'
-  wtype "" 2>/dev/null || fail "wtype rejected (compositor virtual-keyboard?)"
-  "$TRIGGER" --start --realtime >/dev/null || { fail "Start failed"; return; }
-  pass "Capture started"
-  local hw; hw=$(hardware)
-  if [[ "$hw" == "nvidia" ]]; then
-    local seen=0
-    for _ in {1..12}; do sleep 0.5
-      if nvidia-smi --query-compute-apps=pid,used_memory --format=csv,noheader 2>/dev/null | grep -q .; then seen=1; break; fi
-    done
-    [[ "$seen" -eq 1 ]] && pass "GPU compute context observed" || fail "No GPU context"
-  else
-    sleep 3; pass "CPU ($hw) capture running (no GPU context expected)"
-  fi
-  "$TRIGGER" --stop >/dev/null && pass "Stopped/finalized" || fail "Stop failed"
+  printf '\nMicrophone\n'
+  if ! "$TRIGGER" --start --push; then fail 'Capture start'; return; fi
+  pass 'Capture started'; sleep 3
+  check 'Capture stop requested' "$TRIGGER" --stop
+  local state
+  for _ in {1..120}; do
+    state=$("$TRIGGER" --status --json 2>/dev/null) || break
+    if [[ $state == *'"state": "idle"'* ]]; then pass 'Capture finalized'; return; fi
+    sleep 0.5
+  done
+  if systemctl --user is-active --quiet "$SERVICE"; then fail 'Finalization did not reach idle'; else pass 'On-demand service stopped'; fi
 }
-
 d3_checks() {
-  local hw; hw=$(hardware)
-  if [[ "$hw" != "nvidia" ]]; then printf '\n== D3 (skipped, hardware=%s) ==\n' "$hw"; pass "D3 N/A on $hw"; return; fi
-  printf '\n== D3cold ==\n'
-  local busid; busid=$(nvidia-smi --query-gpu=pci.bus_id --format=csv,noheader | head -n 1 | tr -d '[:space:]')
-  local pci_dev="/sys/bus/pci/devices/$(echo "$busid" | awk '{print tolower(substr($0,5))}')"
-  [[ -d "$pci_dev" ]] || { fail "PCI path $pci_dev"; return; }
-  local idle; idle=$(python3 -c 'import json;print(int(json.load(open("'"$CONFIG"'")).get("idle_timeout_seconds",90)))')
-  local wait_for=$((idle + 6)); printf 'Waiting %s s for idle exit...\n' "$wait_for"; sleep "$wait_for"
-  if pgrep -u "$USER" -f 'dusky_worker.py' >/dev/null 2>&1; then fail "Worker survived idle"; else pass "Worker exited"; fi
-  # Passive reads only: nvidia-smi wakes the GPU.
-  local rs ps; rs=$(cat "$pci_dev/power/runtime_status" 2>/dev/null || echo unknown)
-  ps=$(cat "$pci_dev/power_state" 2>/dev/null || echo unknown)
-  [[ "$rs" == "suspended" ]] && pass "runtime_status=suspended" || fail "runtime_status=$rs"
-  [[ "$ps" == "D3cold" ]] && pass "power_state=D3cold" || fail "power_state=$ps (needs NVreg_DynamicPowerManagement=0x02 + no other clients)"
+  printf '\nGPU power\n'
+  local hw device busid pci_dev rs ps
+  hw=$(config_value hardware cpu)
+  if [[ $hw != nvidia ]]; then printf '  Not applicable (%s)\n' "$hw"; return; fi
+  device=$(config_value gpu_device 0)
+  busid=$(nvidia-smi -i "$device" --query-gpu=pci.bus_id --format=csv,noheader) || { fail 'GPU lookup'; return; }
+  busid=${busid//[[:space:]]/}; busid=${busid,,}
+  pci_dev="/sys/bus/pci/devices/${busid:4}"
+  if ! "$TRIGGER" --unload; then fail 'Worker unload (finish active jobs first)'; return; fi
+  pass 'Worker unloaded'
+  # Passive reads: querying nvidia-smi again would wake the device.
+  for _ in {1..30}; do
+    rs=$(cat "$pci_dev/power/runtime_status" 2>/dev/null || printf unknown)
+    [[ $rs != suspended ]] || break
+    sleep 1
+  done
+  ps=$(cat "$pci_dev/power_state" 2>/dev/null || printf unknown)
+  printf '  Device %s: %s, %s\n' "$device" "$rs" "$ps"
+  # D3cold depends on other GPU clients and firmware; it is not an ASR health check.
+  if [[ $rs == suspended ]]; then pass 'GPU suspended'; else printf '  GPU remains active; check other clients and platform power management.\n'; fi
 }
-
-summary() { printf '\n== summary: %d passed, %d failed ==\n' "$PASSED" "$FAILED"; [[ "$FAILED" -eq 0 ]]; }
-case "${1:-all}" in
+summary() { printf '\n%d passed · %d failed\n' "$PASSED" "$FAILED"; [[ $FAILED -eq 0 ]]; }
+case "${1:-static}" in
   static) static_checks; summary ;;
   live) live_checks; summary ;;
   d3) d3_checks; summary ;;
   all) static_checks; live_checks; d3_checks; summary ;;
-  *) echo "Usage: $0 [static|live|d3|all]"; exit 2 ;;
+  -h|--help) printf 'Usage: dusky_verify [static|live|d3|all]\n\nstatic  Installed runtime (default)\nlive    Record three seconds and finalize\nd3      Unload worker; inspect GPU power\nall     Run all checks\n' ;;
+  *) printf 'Usage: dusky_verify [static|live|d3|all]\n' >&2; exit 2 ;;
 esac

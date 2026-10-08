@@ -19,12 +19,12 @@ declare -ar pkgs_graphics=(
 
 # Group 2: Hyprland Core
 declare -ar pkgs_hyprland=(
-  "hyprland" "xorg-xwayland" "xdg-desktop-portal-hyprland" "xdg-desktop-portal-gtk" "localsearch" "polkit" "xdg-utils" "socat" "inotify-tools" "libnotify" "mako" "file"
+  "hyprland" "xorg-xwayland" "xdg-desktop-portal-hyprland" "xdg-desktop-portal-gtk" "localsearch" "polkit" "dbus" "xdg-utils" "socat" "inotify-tools" "libnotify" "mako" "file"
 )
 
 # Group 3: GUI, Toolkits & Fonts
 declare -ar pkgs_appearance=(
-  "qt5-wayland" "qt6-wayland" "gtk3" "gtk4" "nwg-look" "qt5ct" "qt6ct" "qt6-svg" "qt6-multimedia-ffmpeg" "adw-gtk-theme" "upower" "plocate" "matugen" "otf-font-awesome" "ttf-jetbrains-mono-nerd" "otf-atkinsonhyperlegiblemono-nerd" "ttf-atkinson-hyperlegible" "otf-atkinson-hyperlegible" "noto-fonts-emoji" "sassc" "python-packaging" "python" "python-gobject" "python-cairo" "python-opengl" "gtk-layer-shell" "python-evdev" "python-pyudev" "fontconfig" "papirus-icon-theme" "python-pyquery" "python-textual" "python-rich"
+  "qt5-wayland" "qt6-wayland" "gtk3" "gtk4" "glib2" "dconf" "gsettings-desktop-schemas" "nwg-look" "qt5ct" "qt6ct" "qt6-svg" "qt6-multimedia-ffmpeg" "adw-gtk-theme" "upower" "plocate" "matugen" "otf-font-awesome" "ttf-jetbrains-mono-nerd" "otf-atkinsonhyperlegiblemono-nerd" "ttf-atkinson-hyperlegible" "otf-atkinson-hyperlegible" "noto-fonts-emoji" "ttf-liberation" "sassc" "python-packaging" "python" "python-gobject" "python-cairo" "python-opengl" "gtk-layer-shell" "python-evdev" "python-pyudev" "fontconfig" "papirus-icon-theme" "python-pyquery" "python-textual" "python-rich" "python-regex" "python-pillow"
 )
 
 # Group 4: Desktop Experience
@@ -40,7 +40,7 @@ declare -ar pkgs_audio=(
 # Group 6: Filesystem & Archives
 declare -ar pkgs_filesystem=(
 
-  "btrfs-progs" "compsize" "zram-generator" "udisks2" "udiskie" "dosfstools" "xdg-user-dirs" "usbutils" "gnome-disk-utility" "unzip" "zip" "unrar" "7zip" "cpio" "file-roller" "rsync" "nfs-utils" "nilfs-utils" "smartmontools" "dmraid" "hdparm" "hwdetect" "lsscsi" "sg3_utils" "cpupower" "dust" "dkms"
+  "btrfs-progs" "compsize" "zram-generator" "udisks2" "udiskie" "dosfstools" "xdg-user-dirs" "usbutils" "gnome-disk-utility" "unzip" "zip" "tar" "unrar" "7zip" "cpio" "file-roller" "rsync" "nfs-utils" "nilfs-utils" "smartmontools" "dmraid" "hdparm" "hwdetect" "lsscsi" "sg3_utils" "cpupower" "dust" "dkms"
   # thunar
   "thunar" "thunar-archive-plugin" "file-roller" "thunar-volman" "thunar-media-tags-plugin" "thunar-shares-plugin" "thunar-vcs-plugin" "tumbler" "ffmpegthumbnailer" "webp-pixbuf-loader" "poppler-glib" "libgsf" "libgepub" "libopenraw" "resvg" "gvfs" "gvfs-mtp" "gvfs-nfs" "gvfs-smb" "gvfs-gphoto2" "gvfs-afc" "gvfs-dnssd" "catfish" "gnome-keyring" "meld" "xreader" "imagemagick" "kio-admin"
 
@@ -50,7 +50,7 @@ declare -ar pkgs_filesystem=(
 
 # Group 7: Network & Internet
 declare -ar pkgs_network=(
-  "networkmanager" "wireless-regdb" "iwd" "nm-connection-editor" "inetutils" "wget" "curl" "openssh" "ufw" "vsftpd" "reflector" "bmon" "ethtool" "httrack" "wavemon" "firefox" "nss-mdns" "dnsmasq" "modemmanager" "usb_modeswitch"
+  "networkmanager" "wireless-regdb" "iwd" "nm-connection-editor" "inetutils" "wget" "curl" "openssh" "ufw" "wayvnc" "vsftpd" "reflector" "bmon" "ethtool" "httrack" "wavemon" "firefox" "nss-mdns" "dnsmasq" "modemmanager" "usb_modeswitch"
 )
 
 # Group 8: Terminal & Shell
@@ -60,7 +60,7 @@ declare -ar pkgs_terminal=(
 
 # Group 9: Development
 declare -ar pkgs_dev=(
-  "neovim" "git" "git-delta" "lazygit" "meson" "cmake" "clang" "uv" "rq" "jq" "pv" "bc" "viu" "chafa" "ueberzugpp" "ccache" "mold" "shellcheck" "fd" "ripgrep" "fzf" "shfmt" "stylua" "prettier" "tree-sitter-cli" "nano" "luarocks"
+  "neovim" "git" "git-delta" "lazygit" "meson" "cmake" "clang" "uv" "rq" "jq" "pv" "bc" "viu" "chafa" "ueberzugpp" "ccache" "mold" "shellcheck" "fd" "ripgrep" "fzf" "shfmt" "stylua" "prettier" "tree-sitter-cli" "nano" "lua51" "luarocks"
 )
 
 # Group 10: Multimedia
@@ -127,6 +127,26 @@ declare -ar GROUP_ARRAYS=(
   pkgs_btrfs_snapshot
 )
 
+# The generator reads the same package list used by installation, without
+# requiring root or performing any installation work.
+list_package_targets() {
+  local grp_array pkg
+  local -A seen=()
+  for grp_array in "${GROUP_ARRAYS[@]}"; do
+    local -n packages="$grp_array"
+    for pkg in "${packages[@]}"; do
+      [[ -n $pkg && -z ${seen[$pkg]+present} ]] || continue
+      seen[$pkg]=1
+      printf '%s\n' "$pkg"
+    done
+  done
+}
+
+if [[ $# == 1 && $1 == --list-packages ]]; then
+  list_package_targets
+  exit 0
+fi
+
 # --- 2. EARLY ROOT CHECK ---
 
 if (( EUID != 0 )); then
@@ -178,13 +198,13 @@ RED=''
 CYAN=''
 RESET=''
 
-if [[ -z ${NO_COLOR-} ]] && [[ -n ${TERM-} ]] && [[ -t 1 ]] && command -v tput >/dev/null 2>&1 && tput colors >/dev/null 2>&1; then
-  BOLD=$(tput bold)
-  GREEN=$(tput setaf 2)
-  YELLOW=$(tput setaf 3)
-  RED=$(tput setaf 1)
-  CYAN=$(tput setaf 6)
-  RESET=$(tput sgr0)
+if [[ -z ${NO_COLOR-} ]] && [[ -n ${TERM-} ]] && [[ -t 1 ]] && command -v tput >/dev/null 2>&1 && colors=$(tput colors 2>/dev/null) && (( colors >= 8 )); then
+  BOLD=$(tput bold 2>/dev/null || true)
+  GREEN=$(tput setaf 2 2>/dev/null || true)
+  YELLOW=$(tput setaf 3 2>/dev/null || true)
+  RED=$(tput setaf 1 2>/dev/null || true)
+  CYAN=$(tput setaf 6 2>/dev/null || true)
+  RESET=$(tput sgr0 2>/dev/null || true)
 fi
 
 readonly BOLD GREEN YELLOW RED CYAN RESET
@@ -195,7 +215,6 @@ if [[ -t 0 && -t 1 ]]; then
 fi
 readonly HAS_TTY
 
-readonly PACMAN_DB_LOCK='/var/lib/pacman/db.lck'
 readonly PACMAN_LOCK_TIMEOUT=300
 readonly SCRIPT_LOCK_FILE='/run/lock/elite-system-installer.lock'
 
@@ -300,7 +319,8 @@ run_pacman_silent() {
     if grep -Fqs 'unable to lock database' -- "$stderr_file"; then
       rm -rf -- "$temp_dir"
       if (( SECONDS - start_time >= PACMAN_LOCK_TIMEOUT )); then
-        return "$rc"
+        print_error "Timed out waiting for the pacman database lock."
+        exit "$rc"
       fi
       sleep 2
       continue
@@ -313,7 +333,6 @@ run_pacman_silent() {
 
 run_pacman() {
   local start_time=$SECONDS
-  local warned=0
   local rc=0
   local tee_pid=0
   local temp_dir=''
@@ -358,15 +377,11 @@ run_pacman() {
     if grep -Fqs 'unable to lock database' -- "$stderr_file"; then
       rm -rf -- "$temp_dir"
 
-      if (( warned == 0 )); then
-        print_warn "Pacman database is locked. Waiting up to ${PACMAN_LOCK_TIMEOUT}s..."
-        warned=1
-      fi
-
       if (( SECONDS - start_time >= PACMAN_LOCK_TIMEOUT )); then
-        die "Timed out waiting for pacman database lock: ${PACMAN_DB_LOCK}"
+        print_error "Timed out waiting for the pacman database lock."
+        exit "$rc"
       fi
-
+      print_warn "Pacman database is locked; waiting for the active transaction..."
       sleep 2
       continue
     fi
@@ -508,20 +523,8 @@ main() {
   
   ensure_keyring
 
-  # Build unified deduplicated package list across all configured groups
   local -a all_pkgs=()
-  local -A seen_pkgs=()
-  local grp_array pkg
-  for grp_array in "${GROUP_ARRAYS[@]}"; do
-    local -n arr_ref="$grp_array"
-    for pkg in "${arr_ref[@]}"; do
-      [[ -n $pkg ]] || continue
-      if [[ -z ${seen_pkgs[$pkg]+_} ]]; then
-        seen_pkgs[$pkg]=1
-        all_pkgs+=("$pkg")
-      fi
-    done
-  done
+  mapfile -t all_pkgs < <(list_package_targets)
 
   print_info "Attempting consolidated single-pass batch installation (${#all_pkgs[@]} packages)..."
   if run_pacman --sync --needed --noconfirm -- "${all_pkgs[@]}"; then
@@ -534,6 +537,7 @@ main() {
   fi
 
   print_summary
+  # Individual package failures are reported above; continue the installation.
   exit 0
 }
 

@@ -33,6 +33,8 @@ mako
 python-evdev
 python-pyudev
 python-textual
+python-pillow
 papirus-icon-theme
 ufw
+wayvnc
 rnnoise

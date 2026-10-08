@@ -116,7 +116,7 @@ def summarize(
 
 
 def card_totals(store: KeyStore) -> dict[str, int]:
-    """Today / week / month / all-time totals in a single table scan."""
+    """Today / week / month / all-time totals using covering-index counts."""
     now = datetime.now()
     ranges = [period_range(p, now) for p in _PERIODS]
     counts = store.count_ranges(ranges)

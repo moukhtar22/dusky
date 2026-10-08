@@ -1,0 +1,15 @@
+diff --git a/build.rs b/build.rs
+index 974ab52..2e91532 100644
+--- a/build.rs
++++ b/build.rs
+@@ -6,0 +7 @@ fn main() {
++        .filter(|output| output.status.success())
+diff --git a/src/main.rs b/src/main.rs
+index 6a1fe9d..99b07e0 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -318,0 +319 @@ fn handle_daemon_msg(state: &mut AppState, qh: &QueueHandle<AppState>, msg: &Uds
++                source.offer("application/x-dusky-spice-source".to_string());
+@@ -536 +537 @@ fn handle_selection(state: &mut AppState, has_offer: bool) {
+-    if !has_offer || state.we_own_clipboard {
++    if !has_offer || state.current_offer_mimes.iter().any(|mime| mime == "application/x-dusky-spice-source") {

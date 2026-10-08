@@ -2,6 +2,8 @@
 import os
 import json
 import fcntl
+import math
+from python.engines.cpu_core import atomic_write
 import time
 from pathlib import Path
 from typing import Any
@@ -10,8 +12,116 @@ from python.frontend.core_types import BaseEngine
 RAPL_BASE = Path("/sys/class/powercap")
 STATE_FILE = Path("/dev/shm/dusky_rapl_state.json")
 
+
+class PlatformHardwareExtension:
+    """
+    Lightweight, vendor-neutral hardware extension manager.
+    Coordinates laptop EC / firmware-level power limits that exist outside standard RAPL.
+    Designed for zero-overhead fallback: on standard/unsupported platforms (Dell, Lenovo,
+    Framework, desktops), all operations gracefully no-op.
+    """
+    def __init__(self) -> None:
+        self.pl1_node, self.pl2_node, self.vendor_name = self._discover_ppt_nodes()
+
+    @staticmethod
+    def _discover_ppt_nodes() -> tuple[Path | None, Path | None, str]:
+        # Probe known Linux kernel vendor WMI/armoury drivers (e.g. ASUS TUF/ROG)
+        for base, vendor in (
+            (Path("/sys/devices/platform/asus-nb-wmi"), "ASUS WMI PPT"),
+            (Path("/sys/devices/platform/asus-armoury"), "ASUS Armoury PPT"),
+        ):
+            if not base.is_dir():
+                continue
+            pl1 = base / "ppt_pl1_spl"
+            pl2 = base / "ppt_pl2_sppt"
+            if pl1.is_file() or pl2.is_file():
+                return (pl1 if pl1.is_file() else None, pl2 if pl2.is_file() else None, vendor)
+        return (None, None, "None")
+
+    @property
+    def supported(self) -> bool:
+        return self.pl1_node is not None or self.pl2_node is not None
+
+    def apply(self, pl1_watts: int | None = None, pl2_watts: int | None = None) -> None:
+        if self.pl1_node and pl1_watts is not None:
+            self._write_limit(self.pl1_node, pl1_watts)
+        if self.pl2_node and pl2_watts is not None:
+            self._write_limit(self.pl2_node, pl2_watts)
+
+    def restore(self, baseline: dict[str, Any], fallback_values: dict[str, int]) -> None:
+        if self.pl1_node:
+            val = baseline.get("_platform_pl1") or baseline.get("_asus_pl1")
+            if val is None and "pl1" in fallback_values:
+                val = round(fallback_values["pl1"] / 1_000_000)
+            if val is not None:
+                self._write_limit(self.pl1_node, val)
+        if self.pl2_node:
+            val = baseline.get("_platform_pl2") or baseline.get("_asus_pl2")
+            if val is None and "pl2" in fallback_values:
+                val = round(fallback_values["pl2"] / 1_000_000)
+            if val is not None:
+                self._write_limit(self.pl2_node, val)
+
+    def get_status(self) -> dict[str, Any]:
+        if not self.supported:
+            return {"supported": False}
+        return {
+            "supported": True,
+            "vendor": self.vendor_name,
+            "pl1": safe_read_int(self.pl1_node) if self.pl1_node else None,
+            "pl2": safe_read_int(self.pl2_node) if self.pl2_node else None,
+        }
+
+    def capture_baseline(self) -> dict[str, int]:
+        res: dict[str, int] = {}
+        if self.pl1_node:
+            v1 = safe_read_int(self.pl1_node)
+            if v1 is not None:
+                res["_platform_pl1"] = v1
+                res["_asus_pl1"] = v1
+        if self.pl2_node:
+            v2 = safe_read_int(self.pl2_node)
+            if v2 is not None:
+                res["_platform_pl2"] = v2
+                res["_asus_pl2"] = v2
+        return res
+
+    @staticmethod
+    def _write_limit(path: Path, watts: int) -> bool:
+        try:
+            clamped = max(5, int(watts))
+            path.write_text(f"{clamped}\n", encoding="ascii")
+            return True
+        except OSError:
+            return False
+
+
+def restore_cpufreq_max() -> int:
+    """Restores any cpufreq scaling_max_freq that was throttled back to cpuinfo_max_freq."""
+    restored = 0
+    cpufreq_dir = Path("/sys/devices/system/cpu/cpufreq")
+    if not cpufreq_dir.is_dir():
+        return 0
+    for p in cpufreq_dir.glob("policy*"):
+        info_max = safe_read_int(p / "cpuinfo_max_freq")
+        if info_max is not None and info_max > 0:
+            scale_max = safe_read_int(p / "scaling_max_freq")
+            if scale_max is not None and scale_max < info_max:
+                if safe_write(p / "scaling_max_freq", info_max):
+                    restored += 1
+    return restored
+
+
 def get_real_user() -> tuple[str, int, int, Path]:
     """Dynamically resolves real (non-root) user, UID, GID, and home directory."""
+    pkexec_uid = os.environ.get("PKEXEC_UID")
+    if pkexec_uid:
+        try:
+            import pwd
+            pw = pwd.getpwuid(int(pkexec_uid))
+            return pw.pw_name, pw.pw_uid, pw.pw_gid, Path(pw.pw_dir)
+        except (KeyError, ValueError):
+            pass
     sudo_user = os.environ.get("SUDO_USER")
     if sudo_user and sudo_user != "root":
         try:
@@ -84,7 +194,7 @@ def ensure_real_user_ownership(path: Path) -> None:
     if os.geteuid() != 0:
         return
     _, uid, gid, home = get_real_user()
-    if uid == 0:
+    if uid == 0 or not path.is_relative_to(home):
         return
     curr = path
     while curr != home and curr != curr.parent:
@@ -122,6 +232,7 @@ class FastEnergyReader:
             os.lseek(self.fd, 0, os.SEEK_SET)
             return int(os.read(self.fd, 32).decode().strip())
         except (OSError, ValueError):
+            self.close()
             return None
 
     def close(self) -> None:
@@ -134,6 +245,8 @@ class FastEnergyReader:
 
 class PkgThrottleEngine(BaseEngine):
     def __init__(self, config_path: str = ""):
+        self.platform = PlatformHardwareExtension()
+        self._constraint_cache: dict[Path, dict[str, str]] = {}
         self.domain = self.find_package_domain()
         self.all_package_domains = self.find_all_package_domains()
         self.energy_file = self.domain / "energy_uj" if self.domain else None
@@ -165,7 +278,7 @@ class PkgThrottleEngine(BaseEngine):
             if name_file.exists():
                 try:
                     name = name_file.read_text().strip().lower()
-                    if name in ("package-0", "package", "pkg-0") and (d / "constraint_0_power_limit_uw").exists():
+                    if name in ("package-0", "package", "pkg-0") and (d / self.constraint_file("pl1", d)).exists():
                         return d.resolve()
                 except OSError:
                     continue
@@ -176,7 +289,7 @@ class PkgThrottleEngine(BaseEngine):
             if name_file.exists():
                 try:
                     name = name_file.read_text().strip().lower()
-                    if name.startswith("package") and (d / "constraint_0_power_limit_uw").exists():
+                    if name.startswith("package") and (d / self.constraint_file("pl1", d)).exists():
                         return d.resolve()
                 except OSError:
                     continue
@@ -187,7 +300,7 @@ class PkgThrottleEngine(BaseEngine):
             if name_file.exists():
                 try:
                     name = name_file.read_text().strip().lower()
-                    if name not in ("core", "uncore", "dram", "psys") and (d / "constraint_0_power_limit_uw").exists():
+                    if name not in ("core", "uncore", "dram", "psys") and (d / self.constraint_file("pl1", d)).exists():
                         return d.resolve()
                 except OSError:
                     continue
@@ -205,7 +318,7 @@ class PkgThrottleEngine(BaseEngine):
             if name_file.exists():
                 try:
                     name = name_file.read_text().strip().lower()
-                    if (name in ("package-0", "package", "pkg-0") or name.startswith("package")) and (d / "constraint_0_power_limit_uw").exists():
+                    if (name in ("package-0", "package", "pkg-0") or name.startswith("package")) and (d / self.constraint_file("pl1", d)).exists():
                         resolved = d.resolve()
                         if resolved not in pkg_domains:
                             pkg_domains.append(resolved)
@@ -216,6 +329,25 @@ class PkgThrottleEngine(BaseEngine):
             if primary:
                 pkg_domains.append(primary)
         return pkg_domains
+
+    def constraint_file(self, key: str, domain: Path | None = None) -> str:
+        domain = domain or self.domain
+        if domain is None:
+            return f"unsupported_{key}"
+        if domain not in self._constraint_cache:
+            mapping = {}
+            keys = {"long_term": "pl1", "short_term": "pl2", "peak_power": "pl4"}
+            for path in sorted(domain.glob("constraint_*_name")):
+                try:
+                    base_key = keys.get(path.read_text().strip())
+                    if base_key:
+                        prefix = path.name.removesuffix("name")
+                        mapping[base_key] = prefix + "power_limit_uw"
+                        mapping[base_key + "_time"] = prefix + "time_window_us"
+                except OSError:
+                    continue
+            self._constraint_cache[domain] = mapping
+        return self._constraint_cache[domain].get(key, f"unsupported_{key}")
 
     def _get_persistent_baseline(self) -> dict[str, int]:
         try:
@@ -228,7 +360,10 @@ class PkgThrottleEngine(BaseEngine):
                 # Invalidate cache if machine hardware/CPU model changed
                 if cached_model and curr_model != "Generic CPU" and cached_model != curr_model:
                     return {}
-                return {k: int(v) for k, v in data.items() if not k.startswith("_")}
+                limits = {k: v for k, v in data.items() if not k.startswith("_")}
+                if any(type(v) is not int or not 0 <= v < 2**64 for v in limits.values()):
+                    return {}
+                return limits
         except Exception:
             pass
         return {}
@@ -257,10 +392,24 @@ class PkgThrottleEngine(BaseEngine):
             if should_save and limits:
                 payload = {k: int(v) for k, v in limits.items() if not k.startswith("_")}
                 payload["_cpu_model"] = get_cpu_model()
-                b_file.write_text(json.dumps(payload, indent=2) + "\n")
+                payload["_packages"] = self._capture_packages(raw=True)
+                if self.platform.supported:
+                    payload.update(self.platform.capture_baseline())
+                atomic_write(b_file, json.dumps(payload, indent=2) + "\n", user_owned=True)
                 ensure_real_user_ownership(b_file)
         except Exception:
             pass
+
+    def _capture_packages(self, raw: bool = False) -> dict[str, dict[str, int | float]]:
+        packages = {}
+        for domain in self.all_package_domains:
+            limits = {}
+            for key in ("pl1", "pl2", "pl4", "pl1_time", "pl2_time"):
+                value = safe_read_int(domain / self.constraint_file(key, domain))
+                if value is not None:
+                    limits[key] = value if raw else value / 1_000_000
+            packages[domain.name] = limits
+        return packages
 
     def _get_initial_state_data(self) -> dict[str, Any]:
         baseline = self._get_persistent_baseline()
@@ -282,7 +431,7 @@ class PkgThrottleEngine(BaseEngine):
                 baseline = self._capture_power_limits()
                 self._save_persistent_baseline(baseline)
 
-            if data.get("domain") != domain_str:
+            if data.get("domain") != domain_str or data.get("boot") != baseline:
                 data["domain"] = domain_str
                 data["boot"] = baseline
                 healed = True
@@ -327,6 +476,9 @@ class PkgThrottleEngine(BaseEngine):
                     except (json.JSONDecodeError, ValueError):
                         data = self._get_initial_state_data()
                         write_needed = True
+                    if not isinstance(data, dict) or not isinstance(data.get("boot", {}), dict):
+                        data = self._get_initial_state_data()
+                        write_needed = True
                     
                     updated_data = callback(data)
                     if updated_data is not None:
@@ -351,8 +503,8 @@ class PkgThrottleEngine(BaseEngine):
         result = {}
         if not self.domain:
             return result
-        for c in ["constraint_0_power_limit_uw", "constraint_1_power_limit_uw", "constraint_2_power_limit_uw",
-                  "constraint_0_time_window_us", "constraint_1_time_window_us"]:
+        for c in [self.constraint_file("pl1"), self.constraint_file("pl2"), self.constraint_file("pl4"),
+                  self.constraint_file("pl1_time"), self.constraint_file("pl2_time")]:
             val = safe_read_int(self.domain / c)
             if val is not None:
                 result[c] = val
@@ -385,23 +537,23 @@ class PkgThrottleEngine(BaseEngine):
         if not self.domain:
             return state
 
-        pl1 = safe_read_int(self.domain / "constraint_0_power_limit_uw")
-        pl2 = safe_read_int(self.domain / "constraint_1_power_limit_uw")
-        pl4 = safe_read_int(self.domain / "constraint_2_power_limit_uw")
-        pl1_time = safe_read_int(self.domain / "constraint_0_time_window_us")
-        pl2_time = safe_read_int(self.domain / "constraint_1_time_window_us")
+        pl1 = safe_read_int(self.domain / self.constraint_file("pl1"))
+        pl2 = safe_read_int(self.domain / self.constraint_file("pl2"))
+        pl4 = safe_read_int(self.domain / self.constraint_file("pl4"))
+        pl1_time = safe_read_int(self.domain / self.constraint_file("pl1_time"))
+        pl2_time = safe_read_int(self.domain / self.constraint_file("pl2_time"))
 
         values = {}
         if pl1 is not None:
-            values["pl1"] = pl1 // 1_000_000
+            values["pl1"] = pl1 / 1_000_000
         if pl2 is not None:
-            values["pl2"] = pl2 // 1_000_000
+            values["pl2"] = pl2 / 1_000_000
         if pl4 is not None:
-            values["pl4"] = pl4 // 1_000_000
+            values["pl4"] = pl4 / 1_000_000
         if pl1_time is not None:
-            values["pl1_time"] = round(pl1_time / 1_000_000, 2)
+            values["pl1_time"] = pl1_time / 1_000_000
         if pl2_time is not None:
-            values["pl2_time"] = round(pl2_time / 1_000_000, 4)
+            values["pl2_time"] = pl2_time / 1_000_000
 
         for k, v in values.items():
             state[k] = v
@@ -409,224 +561,171 @@ class PkgThrottleEngine(BaseEngine):
 
         return state
 
+    def _apply_values(self, values: dict[str, int], packages: dict[str, dict[str, int]] | None = None) -> tuple[bool, str]:
+        # A global edit targets controls exposed by the primary package.
+        # Secondary interfaces may legitimately expose fewer constraints.
+        if packages is None:
+            unsupported = [key for key in values if not (self.domain / self.constraint_file(key)).exists()]
+            if unsupported:
+                return False, f"Primary package does not support: {', '.join(unsupported)}"
+        failures = []
+        quantized = []
+        skipped = []
+        for domain in self.all_package_domains:
+            for key, requested in (packages.get(domain.name, values) if packages is not None else values).items():
+                path = domain / self.constraint_file(key, domain)
+                if packages is None and domain != self.domain and not path.exists():
+                    skipped.append(f"{domain.name}/{key}: unsupported (skipped)")
+                    continue
+                previous = safe_read_int(path)
+                if previous == requested:
+                    continue
+                if not path.exists() or not safe_write(path, requested):
+                    failures.append(f"{domain.name}/{key}: unsupported or write failed")
+                    continue
+                actual = safe_read_int(path)
+                # RAPL hardware has discrete encodings; verify the returned value.
+                tolerance = 0.25 if key.endswith("_time") else 0.05
+                if actual is None or (actual != requested and
+                        (requested == 0 or abs(actual - requested) / requested > tolerance)):
+                    failures.append(f"{domain.name}/{key}: requested {requested}, read back {actual}")
+                elif actual != requested:
+                    quantized.append(f"{domain.name}/{key}: quantized to {actual / 1_000_000:g}")
+        # Synchronize platform hardware extensions (e.g. ASUS WMI PPT) when present
+        if not failures and self.platform.supported:
+            pl1_val = round(values["pl1"] / 1_000_000) if "pl1" in values else None
+            pl2_val = round(values["pl2"] / 1_000_000) if "pl2" in values else None
+            self.platform.apply(pl1_watts=pl1_val, pl2_watts=pl2_val)
+        return not failures, "; ".join(failures if failures else quantized + skipped)
+
+    def _parse_values(self, changes: list[tuple[str, str, str, str]]) -> dict[str, int]:
+        values = {}
+        for key, _, raw, _ in changes:
+            if key not in ("pl1", "pl2", "pl4", "pl1_time", "pl2_time"):
+                raise ValueError(f"Unknown key: {key}")
+            value = float(raw)
+            if not math.isfinite(value) or value < 0:
+                raise ValueError(f"Invalid value for {key}: {raw}")
+            scaled = value * 1_000_000
+            if not math.isfinite(scaled) or scaled >= 2**64:
+                raise ValueError(f"Value exceeds powercap bounds: {raw}")
+            values[key] = round(scaled)
+        return values
+
     def write_value(self, target_key: str, target_scope: str, new_value: str, item_type: str = "string") -> tuple[bool, str, str]:
-        if not self.domain:
-            return False, "No active RAPL domain found", ""
-
-        mapping = {
-            "pl1": "constraint_0_power_limit_uw",
-            "pl2": "constraint_1_power_limit_uw",
-            "pl4": "constraint_2_power_limit_uw",
-            "pl1_time": "constraint_0_time_window_us",
-            "pl2_time": "constraint_1_time_window_us",
-        }
-
-        sysfs_file = mapping.get(target_key)
-        if not sysfs_file:
-            return False, f"Unknown key: {target_key}", ""
-
-        target_path = self.domain / sysfs_file
-        if not target_path.exists():
-            return False, f"Hardware does not support parameter '{target_key}' ({sysfs_file} not present in sysfs)", ""
-
-        try:
-            val_float = float(new_value)
-        except ValueError:
-            return False, f"Invalid value: {new_value}", ""
-
-        if val_float < 0:
-            return False, f"Invalid negative value: {new_value}", ""
-
-        val = int(round(val_float * 1_000_000))
-
-        # Write to system
-        if not safe_write(target_path, val):
-            return False, f"Failed to write to {sysfs_file} (check root permissions or hardware lock)", ""
-
-        for other_dom in self.all_package_domains:
-            if other_dom != self.domain:
-                other_path = other_dom / sysfs_file
-                if other_path.exists():
-                    safe_write(other_path, val)
-
-        # Verify write
-        actual = safe_read_int(target_path)
-        if actual is None:
-            return False, "Write verification failed (file unreadable)", ""
-
-        # Mark modified in shared state
-        def flag_modified(data):
-            data["modified"] = True
-            return data
-        self._atomic_state_update(flag_modified)
-
-        if actual == val:
-            self.save_persistent_state()
-            return True, f"Successfully set {target_key} to {new_value}", ""
-        elif target_key in ("pl1_time", "pl2_time"):
-            actual_display = f"{actual / 1_000_000:.4f}s"
-            if val > 0 and 0.2 <= (actual / val) <= 5.0:
-                self.save_persistent_state()
-                return True, f"Successfully set {target_key} to {new_value} (quantized to {actual_display})", ""
-            else:
-                return False, f"Rejected by hardware! Locked at: {actual_display}", ""
-        elif val != 0 and (abs(actual - val) / val) <= 0.05:
-            actual_display = f"{actual // 1_000_000} W"
-            self.save_persistent_state()
-            return True, f"Successfully set {target_key} to {new_value} (quantized to {actual_display})", ""
-        else:
-            actual_display = f"{actual // 1_000_000} W"
-            return False, f"Rejected by hardware! Locked at: {actual_display}", ""
+        return self.write_batch([(target_key, target_scope, new_value, item_type)])
 
     def write_batch(self, changes: list[tuple[str, str, str, str]]) -> tuple[bool, str, str]:
         if not self.domain:
             return False, "No active RAPL domain found", ""
-
-        mapping = {
-            "pl1": "constraint_0_power_limit_uw",
-            "pl2": "constraint_1_power_limit_uw",
-            "pl4": "constraint_2_power_limit_uw",
-            "pl1_time": "constraint_0_time_window_us",
-            "pl2_time": "constraint_1_time_window_us",
-        }
-
-        success_count = 0
-        for key, scope, val_str, itype in changes:
-            sysfs_file = mapping.get(key)
-            if not sysfs_file:
-                continue
-            target_path = self.domain / sysfs_file
-            if not target_path.exists():
-                continue
-            try:
-                val_float = float(val_str)
-                val = int(round(val_float * 1_000_000))
-                if safe_write(target_path, val):
-                    success_count += 1
-                    for other_dom in self.all_package_domains:
-                        if other_dom != self.domain:
-                            other_path = other_dom / sysfs_file
-                            if other_path.exists():
-                                safe_write(other_path, val)
-            except (ValueError, TypeError):
-                continue
-
-        if success_count > 0:
-            def flag_modified(data):
-                data["modified"] = True
-                return data
-            self._atomic_state_update(flag_modified)
+        try:
+            values = self._parse_values(changes)
+        except (ValueError, TypeError, OverflowError) as exc:
+            return False, str(exc), ""
+        if not values:
+            return True, "No changes", ""
+        ok, msg = self._apply_values(values)
+        def modified(data):
+            data["modified"] = True
+            return data
+        self._atomic_state_update(modified)
+        try:
             self.save_persistent_state()
-            return True, f"Successfully updated {success_count} power parameters in batch.", ""
-        return False, "Failed to apply power parameters in batch.", ""
+        except OSError as exc:
+            return False, f"Power settings applied with persistence failure: {exc}; {msg}", ""
+        return ok, msg or f"Applied and verified {len(values)} power settings on {len(self.all_package_domains)} domains", ""
 
     def save_persistent_state(self) -> None:
         if not self.domain:
             return
-        try:
-            _, uid, gid, home = get_real_user()
-            config_dir = home / ".config" / "dusky" / "settings"
-            config_dir.mkdir(parents=True, exist_ok=True)
-            ensure_real_user_ownership(config_dir)
-            state_file = config_dir / "dusky_pkg_power"
-            
-            # Read current active sysfs limits to save
-            pl1 = safe_read_int(self.domain / "constraint_0_power_limit_uw")
-            pl2 = safe_read_int(self.domain / "constraint_1_power_limit_uw")
-            pl4 = safe_read_int(self.domain / "constraint_2_power_limit_uw")
-            pl1_time = safe_read_int(self.domain / "constraint_0_time_window_us")
-            pl2_time = safe_read_int(self.domain / "constraint_1_time_window_us")
-            
-            limits: dict[str, Any] = {"_cpu_model": get_cpu_model()}
-            if pl1 is not None: limits["pl1"] = pl1 // 1_000_000
-            if pl2 is not None: limits["pl2"] = pl2 // 1_000_000
-            if pl4 is not None: limits["pl4"] = pl4 // 1_000_000
-            if pl1_time is not None: limits["pl1_time"] = round(pl1_time / 1_000_000, 2)
-            if pl2_time is not None: limits["pl2_time"] = round(pl2_time / 1_000_000, 4)
-            
-            state_file.write_text(json.dumps(limits, indent=2) + "\n")
-            ensure_real_user_ownership(state_file)
-        except Exception:
-            pass
+        limits: dict[str, Any] = {"_cpu_model": get_cpu_model()}
+        for key in ("pl1", "pl2", "pl4", "pl1_time", "pl2_time"):
+            value = safe_read_int(self.domain / self.constraint_file(key))
+            if value is not None:
+                limits[key] = value / 1_000_000
+        limits["_packages"] = self._capture_packages()
+        if self.platform.supported:
+            limits.update(self.platform.capture_baseline())
+        path = get_user_home() / ".config" / "dusky" / "settings" / "dusky_pkg_power"
+        atomic_write(path, json.dumps(limits, indent=2) + "\n", user_owned=True)
 
     def restore_state(self) -> bool:
+        path = get_user_home() / ".config" / "dusky" / "settings" / "dusky_pkg_power"
+        if not path.exists():
+            return True
         if not self.domain:
             return False
         try:
-            _, _, _, home = get_real_user()
-            state_file = home / ".config" / "dusky" / "settings" / "dusky_pkg_power"
-            if not state_file.exists():
+            limits = json.loads(path.read_text())
+            if not isinstance(limits, dict) or limits.get("_cpu_model") != get_cpu_model():
                 return False
-            limits = json.loads(state_file.read_text())
-
-            cached_model = limits.get("_cpu_model")
-            curr_model = get_cpu_model()
-            if cached_model and curr_model != "Generic CPU" and cached_model != curr_model:
-                return False
-            
-            mapping = {
-                "pl1": "constraint_0_power_limit_uw",
-                "pl2": "constraint_1_power_limit_uw",
-                "pl4": "constraint_2_power_limit_uw",
-                "pl1_time": "constraint_0_time_window_us",
-                "pl2_time": "constraint_1_time_window_us",
-            }
-            
-            restored = 0
-            for k, v in limits.items():
-                if k.startswith("_"):
-                    continue
-                sysfs_file = mapping.get(k)
-                if sysfs_file:
-                    target_path = self.domain / sysfs_file
-                    if target_path.exists():
-                        val = int(round(float(v) * 1_000_000))
-                        if safe_write(target_path, val):
-                            restored += 1
-                            for other_dom in self.all_package_domains:
-                                if other_dom != self.domain:
-                                    other_path = other_dom / sysfs_file
-                                    if other_path.exists():
-                                        safe_write(other_path, val)
-            
-            if restored > 0:
-                def flag_modified(data):
+            values = self._parse_values([(k, "DEFAULT", v, "float") for k, v in limits.items() if not k.startswith("_")])
+            packages = None
+            if "_packages" in limits:
+                if not isinstance(limits["_packages"], dict):
+                    return False
+                packages = {}
+                for name, entries in limits["_packages"].items():
+                    if not isinstance(entries, dict):
+                        return False
+                    packages[name] = self._parse_values([(k, "DEFAULT", v, "float") for k, v in entries.items()])
+                if set(packages) != {d.name for d in self.all_package_domains}:
+                    return False
+            ok, _ = self._apply_values(values, packages)
+            if ok:
+                if self.platform.supported:
+                    self.platform.restore(limits, values)
+                restore_cpufreq_max()
+                def modified(data):
                     data["modified"] = True
                     return data
-                self._atomic_state_update(flag_modified)
-                return True
-            return False
-        except Exception:
+                self._atomic_state_update(modified)
+            return ok
+        except (OSError, ValueError, TypeError, OverflowError):
             return False
 
     def restore_defaults(self) -> tuple[bool, str]:
-        """Restores power limits and time windows to original boot/BIOS defaults."""
         if not self.domain:
             return False, "No active RAPL domain found"
-        boot_limits = self.get_boot_limits()
-        if not boot_limits:
-            return False, "No BIOS boot baseline found in state cache"
-
-        restored = 0
-        for sysfs_file, val in boot_limits.items():
-            if sysfs_file.startswith("_"):
-                continue
-            target_path = self.domain / sysfs_file
-            if target_path.exists():
-                if safe_write(target_path, val):
-                    restored += 1
-                    for other_dom in self.all_package_domains:
-                        if other_dom != self.domain:
-                            other_path = other_dom / sysfs_file
-                            if other_path.exists():
-                                safe_write(other_path, val)
-
-        def reset_mod(data):
-            data["modified"] = False
+        boot = self.get_boot_limits()
+        values = {key: boot[file] for key in ("pl1", "pl2", "pl4", "pl1_time", "pl2_time")
+                  if (file := self.constraint_file(key)) in boot}
+        if not values:
+            return False, "No captured baseline available"
+        packages = None
+        try:
+            baseline_path = get_user_home() / ".config" / "dusky" / "settings" / "dusky_pkg_bios_baseline.json"
+            baseline = json.loads(baseline_path.read_text())
+            if isinstance(baseline, dict) and baseline.get("_cpu_model") == get_cpu_model() and isinstance(baseline.get("_packages"), dict):
+                packages = baseline["_packages"]
+                for entries in packages.values():
+                    if not isinstance(entries, dict) or any(k not in ("pl1", "pl2", "pl4", "pl1_time", "pl2_time")
+                                                           or type(v) is not int or not 0 <= v < 2**64 for k, v in entries.items()):
+                        return False, "Invalid captured package baseline"
+        except (OSError, ValueError, TypeError):
+            pass
+        if packages is not None and set(packages) != {d.name for d in self.all_package_domains}:
+            return False, "Captured baseline does not match the discovered package domains"
+        if packages is None:
+            try:
+                names = {(d / "name").read_text().strip() for d in self.all_package_domains}
+            except OSError as exc:
+                return False, f"Cannot identify package domains: {exc}"
+            if len(names) > 1:
+                return False, "Legacy baseline lacks per-package defaults; cannot reliably reset multiple sockets"
+        ok, msg = self._apply_values(values, packages)
+        if self.platform.supported:
+            self.platform.restore(baseline if isinstance(baseline, dict) else {}, values)
+        restore_cpufreq_max()
+        def modified(data):
+            data["modified"] = not ok
             return data
-        self._atomic_state_update(reset_mod)
-        self.save_persistent_state()
-        return True, f"Successfully restored {restored} power parameters to BIOS defaults."
+        self._atomic_state_update(modified)
+        try:
+            self.save_persistent_state()
+        except OSError as exc:
+            return False, f"Baseline applied with persistence failure: {exc}"
+        return ok, msg or f"Restored and verified {len(values)} captured baseline settings"
 
     def get_telemetry(self) -> str:
         if not self.domain:
@@ -651,15 +750,16 @@ class PkgThrottleEngine(BaseEngine):
             if delta_t > 0:
                 if delta_e < 0 and self.max_energy > 0:
                     delta_e += self.max_energy
-                pkg_watts = (delta_e / 1_000_000) / delta_t
+                if delta_e >= 0:
+                    pkg_watts = (delta_e / 1_000_000) / delta_t
 
         self.last_e = curr_e
         self.last_t = curr_t
 
         # Build telemetry bar
         bar_w = 20
-        pl1_raw = safe_read_int(self.domain / "constraint_0_power_limit_uw")
-        pl2_raw = safe_read_int(self.domain / "constraint_1_power_limit_uw")
+        pl1_raw = safe_read_int(self.domain / self.constraint_file("pl1"))
+        pl2_raw = safe_read_int(self.domain / self.constraint_file("pl2"))
         pl1_w = pl1_raw // 1_000_000 if pl1_raw else 0
         pl2_w = pl2_raw // 1_000_000 if pl2_raw else 0
         dynamic_max = pl1_w or pl2_w or 100
@@ -703,40 +803,43 @@ class PkgThrottleEngine(BaseEngine):
             "limits": {
                 "pl1": {
                     "label": "PL1 (Long-Term Limit)",
-                    "supported": (self.domain / "constraint_0_power_limit_uw").exists(),
-                    "current": (safe_read_int(self.domain / "constraint_0_power_limit_uw") or 0) // 1_000_000,
-                    "boot": boot.get("constraint_0_power_limit_uw", 0) // 1_000_000,
+                    "supported": (self.domain / self.constraint_file("pl1")).exists(),
+                    "current": (safe_read_int(self.domain / self.constraint_file("pl1")) or 0) / 1_000_000,
+                    "boot": boot.get(self.constraint_file("pl1"), 0) / 1_000_000,
                     "unit": "W"
                 },
                 "pl2": {
                     "label": "PL2 (Short-Term Boost)",
-                    "supported": (self.domain / "constraint_1_power_limit_uw").exists(),
-                    "current": (safe_read_int(self.domain / "constraint_1_power_limit_uw") or 0) // 1_000_000,
-                    "boot": boot.get("constraint_1_power_limit_uw", 0) // 1_000_000,
+                    "supported": (self.domain / self.constraint_file("pl2")).exists(),
+                    "current": (safe_read_int(self.domain / self.constraint_file("pl2")) or 0) / 1_000_000,
+                    "boot": boot.get(self.constraint_file("pl2"), 0) / 1_000_000,
                     "unit": "W"
                 },
                 "pl4": {
                     "label": "PL4 (Peak Clamp)",
-                    "supported": (self.domain / "constraint_2_power_limit_uw").exists(),
-                    "current": (safe_read_int(self.domain / "constraint_2_power_limit_uw") or 0) // 1_000_000,
-                    "boot": boot.get("constraint_2_power_limit_uw", 0) // 1_000_000,
+                    "supported": (self.domain / self.constraint_file("pl4")).exists(),
+                    "current": (safe_read_int(self.domain / self.constraint_file("pl4")) or 0) / 1_000_000,
+                    "boot": boot.get(self.constraint_file("pl4"), 0) / 1_000_000,
                     "unit": "W"
                 }
             },
             "time_windows": {
                 "pl1_time": {
                     "label": "PL1 Time Window (Tau)",
-                    "supported": (self.domain / "constraint_0_time_window_us").exists() and safe_read_int(self.domain / "constraint_0_time_window_us") is not None,
-                    "current": round((safe_read_int(self.domain / "constraint_0_time_window_us") or 0) / 1_000_000, 4),
-                    "boot": round(boot.get("constraint_0_time_window_us", 0) / 1_000_000, 4),
+                    "supported": (self.domain / self.constraint_file("pl1_time")).exists() and safe_read_int(self.domain / self.constraint_file("pl1_time")) is not None,
+                    "current": (safe_read_int(self.domain / self.constraint_file("pl1_time")) or 0) / 1_000_000,
+                    "boot": boot.get(self.constraint_file("pl1_time"), 0) / 1_000_000,
                     "unit": "s"
                 },
                 "pl2_time": {
                     "label": "PL2 Time Window",
-                    "supported": (self.domain / "constraint_1_time_window_us").exists() and safe_read_int(self.domain / "constraint_1_time_window_us") is not None,
-                    "current": round((safe_read_int(self.domain / "constraint_1_time_window_us") or 0) / 1_000_000, 4),
-                    "boot": round(boot.get("constraint_1_time_window_us", 0) / 1_000_000, 4),
+                    "supported": (self.domain / self.constraint_file("pl2_time")).exists() and safe_read_int(self.domain / self.constraint_file("pl2_time")) is not None,
+                    "current": (safe_read_int(self.domain / self.constraint_file("pl2_time")) or 0) / 1_000_000,
+                    "boot": boot.get(self.constraint_file("pl2_time"), 0) / 1_000_000,
                     "unit": "s"
                 }
-            }
+            },
+            "platform_extension": self.platform.get_status(),
+            "asus_wmi": self.platform.get_status(),
         }
+

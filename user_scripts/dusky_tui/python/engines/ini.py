@@ -334,6 +334,10 @@ class IniConfigEngine(BaseEngine):
             try:
                 if filename == "config" and "mako" in str(self.config_path.parent).lower():
                     subprocess.run(["makoctl", "reload"], check=False, capture_output=True)
+                elif "logind" in filename or "logind" in str(self.config_path.parent).lower():
+                    res = subprocess.run(["systemctl", "reload", "systemd-logind.service"], check=False, capture_output=True)
+                    if res.returncode != 0:
+                        subprocess.run(["pkill", "-HUP", "-x", "systemd-logind"], check=False, capture_output=True)
             except Exception:
                 pass
 

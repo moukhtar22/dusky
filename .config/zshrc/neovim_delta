@@ -1,102 +1,239 @@
-# ==========================================
+# =============================================================================
 # NeoDiff Engine Proxy & ZLE Completion
-# ==========================================
+#
+#   d [-n|--nvim] [-m|--multiple] [--] FILE...   run the NeoDiff engine
+#   d                                            re-run the most recent diff
+#   di                                           fzf picker over the history
+#
+#   The history is a line-oriented store of ${(q+)}-quoted argv vectors and is
+#   mutated ONLY through _d_hist_promote:
+#       flock -> load -> filter -> append -> cap -> unique tmp -> atomic rename
+#   Concurrent shells therefore cannot lose entries or observe a partial file,
+#   and a crash can never leave the real history truncated.
+#
+#   Forks: `d` = 1 (the engine).  Everything else is a builtin:
+#     zsh/files   zf_mkdir zf_mv zf_rm        (coreutils replacement)
+#     zsh/system  zsystem flock               (advisory locking)
+#     ${(f)"$(<f)"} ${a:#${(b)x}} ${a[-N,-1]} (cat / grep -vFx / tail)
+#
+#   (q+) instead of (q): minimal quoting that promotes control characters to
+#   $'...', so a filename containing a newline can never break the one-record-
+#   per-line invariant.  ${(@Q)${(@z)line}} round-trips it exactly.
+#
+#   Target: the ISO's fzf >= 0.74.4 and zsh 5.9.2.
+# =============================================================================
 
-# 1. State Configuration (UNIFIED DIRECTORY)
-typeset -g DUSKY_DIFF_DIR="$HOME/.config/dusky/settings/neodiff"
-typeset -g DUSKY_DIFF_HISTORY="$DUSKY_DIFF_DIR/history"
-typeset -g DUSKY_DIFF_ENGINE="$HOME/user_scripts/tools/delta/neo_delta_zsh_engine.py"
+zmodload -F zsh/files b:zf_mkdir b:zf_mv b:zf_rm 2>/dev/null  # -F: do NOT
+                          # define mv/rm/mkdir, which would shadow coreutils
+zmodload zsh/system    2>/dev/null
+zmodload zsh/parameter 2>/dev/null
 
-# Helper Function: Guarantees clean terminal execution and state restoration
-_d_execute() {
+typeset -g  DUSKY_DIFF_DIR=${DUSKY_DIFF_DIR:-$HOME/.config/dusky/settings/neodiff}
+typeset -g  DUSKY_DIFF_HISTORY=${DUSKY_DIFF_HISTORY:-$DUSKY_DIFF_DIR/history}
+typeset -g  DUSKY_DIFF_ENGINE=${DUSKY_DIFF_ENGINE:-$HOME/user_scripts/tools/delta/neo_delta_zsh_engine.py}
+typeset -gi DUSKY_DIFF_MAX=${DUSKY_DIFF_MAX:-100}
+
+# -----------------------------------------------------------------------------
+# State directory
+# -----------------------------------------------------------------------------
+_d_mkdir() {
     emulate -L zsh
-    local -a run_args=("$@")
-    
-    # Engine is now 100% autonomous. Direct execution.
-    "$DUSKY_DIFF_ENGINE" "${run_args[@]}"
-    
-    # Force reset terminal color, restore cursor visibility, and clear dirty states
-    print -n '\e[?25h\e[0m'
-    print -P "%b%f%k"
-    return 0
+    local dir=${DUSKY_DIFF_HISTORY:h}
+    [[ -d $dir ]] && return 0
+    if (( $+builtins[zf_mkdir] )); then
+        zf_mkdir -p -- $dir
+    else
+        command mkdir -p -- $dir
+    fi
 }
 
-# 2. The Zero-Cost Proxy
+# -----------------------------------------------------------------------------
+# Atomic, locked history promotion.  $1 = one quoted argv record.
+# -----------------------------------------------------------------------------
+_d_hist_promote() {
+    emulate -L zsh
+    setopt localoptions extendedglob noclobber
+    local entry=$1 lock=$DUSKY_DIFF_HISTORY.lock tmp=''
+    local -a hist
+    local -i fd=0 rc=0 i=0
+
+    [[ -n $entry ]] && (( DUSKY_DIFF_MAX > 0 )) || return 1
+    _d_mkdir || return 1
+    [[ -e $lock ]] || { : >>! $lock 2>/dev/null } || return 1
+
+    # Never mutate history without the lock, including after a timeout.
+    (( $+builtins[zsystem] )) || return 1
+    zsystem flock -t 2 -i 0.01 -f fd $lock 2>/dev/null || return 1
+    {
+        [[ -s $DUSKY_DIFF_HISTORY ]] && hist=( ${(f)"$(<$DUSKY_DIFF_HISTORY)"} )
+        hist=( ${hist:#${(b)entry}} )                 # (b) => exactly literal
+        hist+=( "$entry" )
+        (( $#hist > DUSKY_DIFF_MAX )) && hist=( "${(@)hist[-DUSKY_DIFF_MAX,-1]}" )
+
+        while (( i++ < 16 )); do
+            tmp=$DUSKY_DIFF_HISTORY.tmp.$$.$RANDOM
+            [[ -e $tmp ]] || break
+            tmp=''
+        done
+        if [[ -z $tmp ]]; then
+            rc=1
+        elif print -rl -- "${hist[@]}" > $tmp 2>/dev/null; then
+            if (( $+builtins[zf_mv] )); then
+                zf_mv -f -- $tmp $DUSKY_DIFF_HISTORY 2>/dev/null || rc=1
+            else
+                command mv -f -- $tmp $DUSKY_DIFF_HISTORY 2>/dev/null || rc=1
+            fi
+        else
+            rc=1
+        fi
+        if (( rc )) && [[ -n $tmp && -e $tmp ]]; then
+            if (( $+builtins[zf_rm] )); then
+                zf_rm -f -- $tmp 2>/dev/null
+            else
+                command rm -f -- $tmp 2>/dev/null
+            fi
+        fi
+    } always {
+        (( fd )) && zsystem flock -u $fd 2>/dev/null
+    }
+    return $rc
+}
+
+# -----------------------------------------------------------------------------
+# Engine execution: verified, status-preserving, terminal-safe
+# -----------------------------------------------------------------------------
+_d_execute() {
+    emulate -L zsh
+    local -i rc=0
+
+    if [[ ! -x $DUSKY_DIFF_ENGINE ]]; then
+        print -ru2 -- $'\e[31m✖ NeoDiff engine missing or not executable:\e[0m '"$DUSKY_DIFF_ENGINE"
+        return 127
+    fi
+    {
+        "$DUSKY_DIFF_ENGINE" "$@"
+        rc=$?
+    } always {
+        if [[ -t 1 ]]; then
+            print -rn -- $'\e[?25h\e[0m'     # cursor back, attributes cleared
+            print -P  -- "%b%f%k"
+        fi
+    }
+    return $rc
+}
+
+# -----------------------------------------------------------------------------
+# The proxy
+# -----------------------------------------------------------------------------
 d() {
     emulate -L zsh
-    
-    command mkdir -p -- "$DUSKY_DIFF_DIR"
+    setopt localoptions extendedglob
+    local arg entry CB=$'\e[34m' CR=$'\e[31m' C0=$'\e[0m'
+    local -a new_args run_args hist
+    local -i file_count=0 nvim=0 multi=0 opts_done=0 rc=0
 
-    # Re-run the absolute last diff.
-    if [[ $# -eq 0 ]]; then
-        if [[ ! -s "$DUSKY_DIFF_HISTORY" ]]; then
-            print -u2 -P "%F{red}󰑤 No previous diff history found. Try 'd <file>' first.%f"
+    # --- bare `d` : replay the most recent record -----------------------------
+    if (( $# == 0 )); then
+        if [[ ! -s $DUSKY_DIFF_HISTORY ]]; then
+            print -ru2 -- "${CR}󰑤 No previous diff history found. Try 'd FILE' first.${C0}"
             return 1
         fi
-        
-        local last_cmd=$(command tail -n 1 -- "$DUSKY_DIFF_HISTORY")
-        local -a run_args=("${(@Q)${(@z)last_cmd}}")
-        
-        print -u2 -P "%F{blue}󰑤 Rerunning: d ${run_args[*]}%f"
+        hist=( ${(f)"$(<$DUSKY_DIFF_HISTORY)"} )
+        entry=${hist[-1]}
+        if [[ -z $entry ]]; then
+            print -ru2 -- "${CR}󰑤 History is empty or corrupt.${C0}"
+            return 1
+        fi
+        run_args=( ${(@Q)${(@z)entry}} )
+        print -ru2 -- "${CB}󰑤 Rerunning: d ${run_args[*]}${C0}"
         _d_execute "${run_args[@]}"
         return $?
     fi
 
-    local -a new_args=()
-    local file_count=0
-    local has_nvim_flag=0
-    local options_done=0
+    if [[ $1 == (-h|--help) ]]; then
+        local title='' accent='' reset=''
+        if [[ -t 1 ]]; then
+            title=$'\e[1;36m'; accent=$'\e[36m'; reset=$'\e[0m'
+        fi
+        print -rl -- \
+            "${title}NeoDiff${reset} — compare files side by side" \
+            '' \
+            "  ${accent}d FILE${reset}          Compare a file with its previous saved Neovim state." \
+            "  ${accent}d OLD NEW${reset}       Compare two files." \
+            "  ${accent}d${reset}               Repeat the last successful comparison." \
+            "  ${accent}di${reset}              Search history and choose a comparison to repeat." \
+            '' \
+            "${title}Options${reset}" \
+            '  -n, --nvim       Explicit Neovim undo mode; requires one file.' \
+            '  -m, --multiple   Explicit two-file mode; requires exactly two files.' \
+            '  --               End options, for filenames starting with a dash.' \
+            '  -h, --help       Show this help.' \
+            '' \
+            "${title}Examples${reset}" \
+            '  d config.lua                  Check changes since the previous save.' \
+            '  d config.lua.bak config.lua   Compare a backup with the current file.' \
+            '  d -- -notes.txt               Compare a file named -notes.txt with its previous save.' \
+            '' \
+            'Neovim mode needs persistent undo history. Unsaved editor changes are excluded.'
+        return 0
+    fi
 
     for arg in "$@"; do
-        if (( options_done )); then
-            new_args+=("${arg:a}")
-            ((file_count++))
-        elif [[ "$arg" == "--" ]]; then
-            options_done=1
-            new_args+=("$arg")
-        elif [[ "$arg" == "-n" || "$arg" == "--nvim" ]]; then
-            has_nvim_flag=1
-            new_args+=("$arg")
-        elif [[ "$arg" == -* ]]; then
-            new_args+=("$arg")
+        if (( opts_done )); then
+            new_args+=( "${arg:a}" ); (( file_count++ ))
+        elif [[ $arg == '--' ]]; then
+            opts_done=1; new_args+=( "$arg" )
+        elif [[ $arg == (-n|--nvim) ]]; then
+            nvim=1; new_args+=( "$arg" )
+        elif [[ $arg == (-m|--multiple) ]]; then
+            multi=1; new_args+=( "$arg" )
+        elif [[ $arg == -* ]]; then
+            new_args+=( "$arg" )
         else
-            new_args+=("${arg:a}")
-            ((file_count++))
+            # :a = absolute, symlinks preserved, no existence requirement
+            new_args+=( "${arg:a}" ); (( file_count++ ))
         fi
     done
 
-    # Implicit Neovim State
-    if (( file_count == 1 && has_nvim_flag == 0 )); then
-        new_args=("-n" "${new_args[@]}")
+    # Implicit Neovim-undo mode: exactly one file, and neither -n nor -m given.
+    if (( file_count == 1 && ! nvim && ! multi )); then
+        new_args=( -n "${new_args[@]}" )
     fi
 
-    local args_quoted="${(j: :)${(q)new_args[@]}}"
-    
-    if [[ -f "$DUSKY_DIFF_HISTORY" ]]; then
-        command grep -v -F -x -- "$args_quoted" "$DUSKY_DIFF_HISTORY" > "${DUSKY_DIFF_HISTORY}.tmp"
-        command mv -f -- "${DUSKY_DIFF_HISTORY}.tmp" "$DUSKY_DIFF_HISTORY"
-    fi
-    
-    print -r -- "$args_quoted" >> "$DUSKY_DIFF_HISTORY"
-    
-    command tail -n 100 -- "$DUSKY_DIFF_HISTORY" > "${DUSKY_DIFF_HISTORY}.tmp"
-    command mv -f -- "${DUSKY_DIFF_HISTORY}.tmp" "$DUSKY_DIFF_HISTORY"
-
+    entry=${(j: :)${(@q+)new_args}}
     _d_execute "${new_args[@]}"
+    rc=$?
+    if (( rc == 0 )); then
+        _d_hist_promote "$entry" || print -ru2 -- 'NeoDiff: could not update diff history.'
+    fi
+    return $rc
 }
 
-# 3. Interactive FZF Fuzzy Finder
+# -----------------------------------------------------------------------------
+# Interactive history picker
+# -----------------------------------------------------------------------------
 di() {
     emulate -L zsh
-    
-    if [[ ! -s "$DUSKY_DIFF_HISTORY" ]]; then
-        print -u2 -P "%F{red}󰑤 No previous diff history found. Run 'd <target>' to populate your history.%f"
+    setopt localoptions extendedglob
+    local selected CB=$'\e[34m' CR=$'\e[31m' C0=$'\e[0m'
+    local -a run_args
+    local -i rc=0
+
+    if (( ! $+commands[fzf] )); then
+        print -ru2 -- "${CR}✖ fzf is required for 'di'.${C0}"
+        return 1
+    fi
+    if [[ ! -s $DUSKY_DIFF_HISTORY ]]; then
+        print -ru2 -- "${CR}󰑤 No previous diff history found. Run 'd FILE' to populate it.${C0}"
         return 1
     fi
 
-    local selected
-    
-    selected=$(command fzf \
+    selected=$(fzf \
+        --no-multi \
+        --no-print-query \
+        --no-expect \
+        --no-read0 \
+        --no-print0 \
         --height=100% \
         --style=full \
         --layout=reverse \
@@ -104,48 +241,62 @@ di() {
         --list-border=rounded \
         --input-border=rounded \
         --highlight-line \
-        --ghost="Filter diff history..." \
-        --list-label=" 󰋚 NeoDiff History " \
+        --ghost='Filter diff history...' \
+        --list-label=' 󰋚 NeoDiff History ' \
         --list-label-pos=center \
-        --input-label=" 󰍉 Search / Filter " \
+        --input-label=' 󰍉 Search / Filter ' \
         --input-label-pos=center \
         --padding=1,2 \
         --margin=1 \
         --prompt="   " \
-        --pointer="❯ " \
-        --marker="✔ " \
+        --pointer='❯ ' \
+        --marker='✔ ' \
         --info=inline-right \
-        --header="Select a previous diff target to re-run (Enter to run, Esc to abort)" \
+        --header='Select a previous diff target to re-run (Enter to run, Esc to abort)' \
         --header-first \
         --scheme=history \
         --wrap \
         --tac \
         --color="${DUSKY_FZF_COLORS:-bg:-1,bg+:#1e1e2e,fg:#cdd6f4}" \
-        < "$DUSKY_DIFF_HISTORY"
-    )
+        < "$DUSKY_DIFF_HISTORY")
+    rc=$?
+    case $rc in
+        0)     ;;
+        1|130) return 0 ;;
+        *)     print -ru2 -- "di: fzf exited $rc"; return $rc ;;
+    esac
+    [[ -n $selected ]] || return 0
 
-    if [[ -n "$selected" ]]; then
-        command grep -v -F -x -- "$selected" "$DUSKY_DIFF_HISTORY" > "${DUSKY_DIFF_HISTORY}.tmp"
-        print -r -- "$selected" >> "${DUSKY_DIFF_HISTORY}.tmp"
-        command tail -n 100 -- "${DUSKY_DIFF_HISTORY}.tmp" > "$DUSKY_DIFF_HISTORY"
-        command rm -f -- "${DUSKY_DIFF_HISTORY}.tmp"
-
-        local -a run_args=("${(@Q)${(@z)selected}}")
-        print -u2 -P "%F{blue}󰑤 Running: d ${run_args[*]}%f"
-        
-        _d_execute "${run_args[@]}"
+    run_args=( ${(@Q)${(@z)selected}} )
+    print -ru2 -- "${CB}󰑤 Running: d ${run_args[*]}${C0}"
+    _d_execute "${run_args[@]}"
+    rc=$?
+    if (( rc == 0 )); then
+        _d_hist_promote "$selected" || print -ru2 -- 'NeoDiff: could not update diff history.'
     fi
+    return $rc
 }
 
-# 4. Context-Aware Zsh Completion
+# -----------------------------------------------------------------------------
+# Completion: files for `d`; `di` honestly takes no arguments
+# -----------------------------------------------------------------------------
 _d_neodiff() {
-    local ret=1
+    local -i ret=1
+
+    if [[ $service == di ]]; then
+        _message -r 'di takes no arguments — it is the interactive history picker'
+        return 1
+    fi
+
     _arguments -s -S \
-        '(-n --nvim)'{-n,--nvim}'[Compare target against its previous Neovim undo state]' \
-        '(-m --multiple)'{-m,--multiple}'[Compare multiple files]' \
+        '(-n --nvim -m --multiple)'{-n,--nvim}'[Compare target against its previous saved Neovim undo state]' \
+        '(-n --nvim -m --multiple)'{-m,--multiple}'[Compare exactly two files]' \
+        '(-h --help)'{-h,--help}'[Show usage]' \
         '*:file:_files' && ret=0
     return ret
 }
 
-compdef _d_neodiff d
-compdef _d_neodiff di
+if (( $+functions[compdef] )); then
+    compdef _d_neodiff d
+    compdef _d_neodiff di
+fi

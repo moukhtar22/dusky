@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-#d: Set up tmpfs or ZRAM RAM disks
+"""
+Elite Arch Linux Hybrid Memory Mount Configurator (Kernel 7.3+, systemd 262+)
+Supports:
+  1) Native tmpfs (Pure RAM mapping - zero double-buffering, lowest idle RAM, huge=never)
+  2) Disable / clean up secondary RAM mounts
+"""
 
 from __future__ import annotations
 
@@ -14,7 +19,6 @@ import time
 from pathlib import Path
 from typing import NoReturn
 
-# --- Presentation (Zero-Dependency ANSI) ---
 class C:
     BOLD = "\033[1m"
     DIM = "\033[2m"
@@ -38,13 +42,9 @@ def die(msg: str, code: int = 1) -> NoReturn:
     err(msg)
     sys.exit(code)
 
-# --- Argument Parsing (Executed BEFORE Privilege Escalation) ---
-parser = argparse.ArgumentParser(description="Elite Arch Linux Hybrid Memory Mount Configurator")
-group = parser.add_mutually_exclusive_group()
-group.add_argument("--tmpfs", action="store_true", help="Autonomously deploy pure Tmpfs mapping")
-group.add_argument("--zram", action="store_true", help="Autonomously deploy Ext4 ZRAM block mapping")
-group.add_argument("--disable", "--none", dest="disable", action="store_true", help="Disable secondary RAM mount / clean up zram1")
-parser.add_argument("--size", "-s", type=str, default="", help="Size expression for ZRAM / Tmpfs (e.g. '100%%', '8G', 'ram')")
+parser = argparse.ArgumentParser(description="Elite Arch Linux Autonomous Tmpfs Mount Configurator (/mnt/zram1)")
+parser.add_argument("--disable", "--none", dest="disable", action="store_true", help="Disable RAM disk and clean up /mnt/zram1")
+parser.add_argument("--size", "-s", type=str, default="", help="Size expression ceiling (e.g. '100%%', '50%%', '8G', 'ram')")
 parser.add_argument("--no-color", action="store_true", help="Disable ANSI color output")
 
 args = parser.parse_args()
@@ -52,7 +52,6 @@ args = parser.parse_args()
 if args.no_color or not sys.stdout.isatty() or "NO_COLOR" in os.environ:
     C.strip()
 
-# --- Privilege Escalation ---
 def escalate_privileges() -> None:
     if os.geteuid() != 0:
         info("Root privileges required. Escalating...")
@@ -65,51 +64,21 @@ def escalate_privileges() -> None:
 
 escalate_privileges()
 
-# --- Core Constants ---
 MOUNT_POINT = Path("/mnt/zram1")
 BASE_MOUNT = Path("/mnt")
-ZRAM_CONF_FILE = Path("/etc/systemd/zram-generator.conf.d/99-elite-zram1.conf")
+ZRAM_CONF_FILE = Path("/etc/systemd/zram-generator.conf.d/99-zram1.conf")
+LEGACY_ZRAM_CONF_FILE = Path("/etc/systemd/zram-generator.conf.d/99-elite-zram1.conf")
 TMPFILES_CONF = Path("/etc/tmpfiles.d/zram-mounts.conf")
-OVERRIDE_DIR = Path("/etc/systemd/system/systemd-zram-setup@zram1.service.d")
-OVERRIDE_CONF = OVERRIDE_DIR / "override.conf"
-ZRAM_RESIDENT_LIMIT_EXPR = "ram * 4 / 5"
-COMPRESSION_ALGORITHM = "zstd(level=2)"
-FS_OPTIONS = "rw,nosuid,nodev,discard,noatime,lazytime,X-mount.mode=1777"
+TMPFS_MOUNT_UNIT_PATH = Path("/etc/systemd/system/mnt-zram1.mount")
+SETUP_OVERRIDE_DIR = Path("/etc/systemd/system/systemd-zram-setup@zram1.service.d")
+SETUP_OVERRIDE_CONF = SETUP_OVERRIDE_DIR / "override.conf"
+LEGACY_MAKEFS_OVERRIDE_DIR = Path("/etc/systemd/system/systemd-makefs@dev-zram1.service.d")
+PERMS_SERVICE_PATH = Path("/etc/systemd/system/mnt-zram1-permissions.service")
+PERMS_WANTS_DIR = Path("/etc/systemd/system/mnt-zram1.mount.wants")
+PERMS_WANTS_SYMLINK = PERMS_WANTS_DIR / "mnt-zram1-permissions.service"
+
 CMD_TIMEOUT = 15
 
-# --- Target User Identification (Dynamic & Wayland/Hyprland Safe) ---
-def resolve_target_user() -> tuple[int, int]:
-    sudo_uid = os.environ.get("SUDO_UID")
-    sudo_gid = os.environ.get("SUDO_GID")
-    if sudo_uid and int(sudo_uid) != 0:
-        return int(sudo_uid), int(sudo_gid or sudo_uid)
-    
-    try:
-        loginuid_path = Path("/proc/self/loginuid")
-        if loginuid_path.exists():
-            l_uid = int(loginuid_path.read_text().strip())
-            if 0 < l_uid < 65534:
-                import pwd
-                pw = pwd.getpwuid(l_uid)
-                return pw.pw_uid, pw.pw_gid
-    except Exception:
-        pass
-
-    try:
-        import pwd
-        for pw in pwd.getpwall():
-            if 1000 <= pw.pw_uid < 60000 and pw.pw_name != "nobody":
-                return pw.pw_uid, pw.pw_gid
-    except Exception:
-        pass
-
-    uid = os.getuid()
-    gid = os.getgid()
-    return (1000, 1000) if uid == 0 else (uid, gid)
-
-TARGET_UID, TARGET_GID = resolve_target_user()
-
-# --- Utility Functions ---
 def run_cmd(cmd: list[str], ignore_errors: bool = False) -> str:
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, check=not ignore_errors, timeout=CMD_TIMEOUT)
@@ -118,18 +87,17 @@ def run_cmd(cmd: list[str], ignore_errors: bool = False) -> str:
         die(f"Command timed out after {CMD_TIMEOUT}s: {' '.join(cmd)}")
     except subprocess.CalledProcessError as e:
         if not ignore_errors:
-            err(f"Command failed: {' '.join(cmd)}")
-            print(e.stderr)
+            err(f"Command failed: {' '.join(cmd)}\n{e.stderr.strip()}")
             sys.exit(1)
         return ""
 
 def write_file_atomic(path: Path, content: str, mode: int = 0o644) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists() and path.read_text() == content:
+    if path.exists() and path.read_text(encoding="utf-8") == content:
         return
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
     try:
-        with os.fdopen(fd, "w") as fh:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(content)
         os.chmod(tmp, mode)
         os.replace(tmp, path)
@@ -137,81 +105,67 @@ def write_file_atomic(path: Path, content: str, mode: int = 0o644) -> None:
         Path(tmp).unlink(missing_ok=True)
         raise
 
-def parse_size_expression(raw: str) -> str:
+def parse_tmpfs_size_expression(raw: str, default: str = "100%") -> str:
     s = raw.strip().lower()
     if not s or s in ("auto", "default"):
-        return "ram"
-    if s.endswith("%"):
-        try:
-            pct = float(s[:-1])
-            return "ram" if pct == 100.0 else f"ram * {pct / 100.0:.2f}".rstrip("0").rstrip(".")
-        except ValueError:
-            pass
-    try:
-        n = float(s)
-        if 0.0 < n <= 2.0:
-            return f"ram * {n:.2f}".rstrip("0").rstrip(".")
-        elif 3.0 <= n <= 100.0 and n.is_integer():
-            pct = n / 100.0
-            return "ram" if pct == 1.0 else f"ram * {pct:.2f}".rstrip("0").rstrip(".")
-    except ValueError:
-        pass
-    m = re.match(r"^([0-9.]+)\s*([gmk]b?)$", s)
-    if m:
-        val = float(m.group(1))
-        unit = m.group(2)
-        if unit.startswith("g"):
-            return str(int(val * 1024))
-        elif unit.startswith("m"):
-            return str(int(val))
-        elif unit.startswith("k"):
-            return str(int(val / 1024))
-    return re.sub(r"\s*([*/+-])\s*", r" \1 ", s)
+        return default
+    if s == "ram":
+        return "100%"
+    match = re.fullmatch(r"([0-9]+)([%gmk])", s)
+    if match and int(match[1]) > 0:
+        return s
+    match = re.fullmatch(r"ram\s*([*/])\s*([0-9]+(?:\.[0-9]+)?)", s)
+    if match:
+        value = float(match[2])
+        if value > 0:
+            percent = round(100 * value if match[1] == "*" else 100 / value)
+            if percent > 0:
+                return f"{percent}%"
+    match = re.fullmatch(r"[0-9]+(?:\.[0-9]+)?", s)
+    if match:
+        value = float(s)
+        if 0 < value <= 10:
+            percent = round(value * 100)
+        elif value <= 1000 and value.is_integer():
+            percent = int(value)
+        else:
+            percent = 0
+        if percent > 0:
+            return f"{percent}%"
+    die(f"Invalid tmpfs size {raw!r}; use a positive integer with %, G, M, K, or a RAM ratio.")
 
 def pre_flight_checks() -> None:
     if subprocess.run(["systemd-detect-virt", "--quiet", "--container"], capture_output=True).returncode == 0:
         die("Container detected — refusing to tune memory mounts inside a container.")
     
-    cmdline = Path("/proc/cmdline").read_text() if Path("/proc/cmdline").exists() else ""
-    if re.search(r"(^|\s)systemd\.zram=0(\s|$)", cmdline):
-        die("Kernel cmdline carries systemd.zram=0 — zram device creation is disabled by boot policy.")
-
-def unit_is_loaded(unit: str) -> bool:
-    stdout = run_cmd(["systemctl", "show", "-p", "LoadState", "--value", unit], ignore_errors=True)
-    return stdout == "loaded"
-
-def assert_unit_loaded(unit: str) -> None:
-    if not unit_is_loaded(unit):
-        die(f"Systemd failed to ingest the generated unit: {unit}")
+    # Native tmpfs and disabling a legacy mount do not require zram creation.
 
 def get_mount_source() -> str:
     return run_cmd(["findmnt", "-rn", "-o", "SOURCE", "--mountpoint", str(MOUNT_POINT)], ignore_errors=True)
 
+def get_mount_fstype() -> str:
+    return run_cmd(["findmnt", "-rn", "-o", "FSTYPE", "--mountpoint", str(MOUNT_POINT)], ignore_errors=True)
+
 def fix_mount_permissions() -> None:
-    """Fixes /mnt and /mnt/zram1 permissions, ACLs, and tmpfiles rules."""
     if not BASE_MOUNT.exists():
         BASE_MOUNT.mkdir(parents=True, mode=0o755)
     try:
         os.chmod(BASE_MOUNT, 0o755)
-        if shutil.which("setfacl"):
-            subprocess.run(["setfacl", "-b", "/mnt"], capture_output=True, check=False)
     except Exception:
         pass
 
     if not MOUNT_POINT.exists():
-        MOUNT_POINT.mkdir(parents=True, mode=0o755)
+        MOUNT_POINT.mkdir(parents=True, mode=0o1777)
     try:
         os.chmod(MOUNT_POINT, 0o1777)
-        if shutil.which("setfacl"):
-            subprocess.run(["setfacl", "-b", str(MOUNT_POINT)], capture_output=True, check=False)
     except Exception:
         pass
 
-    tmpfiles_content = """# Managed by Dusky Memory & Swap Subsystem
-d /mnt 0755 root root -
-d /mnt/zram1 1777 root root -
-z /mnt 0755 root root -
-z /mnt/zram1 1777 root root -
+    tmpfiles_content = f"""# Managed by 206_zram_tmpfs_mounts.py
+d {BASE_MOUNT} 0755 root root -
+d {MOUNT_POINT} 1777 root root -
+z {BASE_MOUNT} 0755 root root -
+z {MOUNT_POINT} 1777 root root -
 """
     try:
         write_file_atomic(TMPFILES_CONF, tmpfiles_content)
@@ -220,322 +174,239 @@ z /mnt/zram1 1777 root root -
     except Exception:
         pass
 
-    override_content = """[Service]
-ExecStartPost=/usr/sbin/tune2fs -O ^has_journal /dev/%i
-ExecStartPost=-/usr/bin/chmod 1777 /mnt/zram1
-"""
-    try:
-        OVERRIDE_DIR.mkdir(parents=True, exist_ok=True)
-        write_file_atomic(OVERRIDE_CONF, override_content)
-    except Exception:
-        pass
-
-def prepare_mount_directory() -> None:
-    fix_mount_permissions()
-def safely_unmount_and_stage(target_backend: str, mount_point: Path = MOUNT_POINT) -> Path | None:
-    """
-    Intelligently unmounts mount_point and stages files for seamless migration:
-    - Releasing active processes holding the mountpoint (SIGTERM -> SIGKILL) to quiesce filesystem.
-    - Syncs dirty buffers to prevent data loss.
-    - Accurately checks allocated disk block size (sparse-aware).
-    - Stages files using rsync with sparse and metadata preservation (fallback to cp -a).
-    - Cleans systemd failed states and performs unmount with lazy unmount fallback.
-    """
-    stage_dir: Path | None = None
-
-    src = run_cmd(["findmnt", "-rn", "-o", "SOURCE", "--mountpoint", str(mount_point)], ignore_errors=True)
-    if src:
-        # 1. Quiesce filesystem by releasing holding processes
-        info(f"Releasing active processes holding {mount_point}...")
-        if shutil.which("fuser"):
-            subprocess.run(["fuser", "-km", "-TERM", str(mount_point)], capture_output=True, check=False)
-            time.sleep(0.3)
-            subprocess.run(["fuser", "-km", "-KILL", str(mount_point)], capture_output=True, check=False)
-            time.sleep(0.2)
-
+def get_active_mount_pids(mount_point: Path) -> list[tuple[int, str]]:
+    pids = []
+    proc = Path("/proc")
+    for pid_dir in proc.glob("[0-9]*"):
         try:
-            subprocess.run(["sync", "-f", str(mount_point)], capture_output=True, check=False)
-        except Exception:
-            pass
-
-        # 2. Check for user files to migrate
-        try:
-            items = [p for p in mount_point.iterdir() if p.name not in ("lost+found", ".Trash-1000")]
-            if items:
-                info(f"Detected {len(items)} file(s)/folder(s) on {mount_point}. Staging for migration...")
-                du_out = run_cmd(["du", "-s", "-B1", "--exclude=lost+found", "--exclude=.Trash-1000", str(mount_point)], ignore_errors=True)
-                allocated_bytes = int(du_out.split()[0]) if du_out and du_out.split()[0].isdigit() else 1024 * 1024 * 1024
-
-                candidate_dirs = [Path("/var/tmp"), Path("/tmp")]
-                for cand in candidate_dirs:
+            pid = int(pid_dir.name)
+            comm_file = pid_dir / "comm"
+            comm = comm_file.read_text().strip() if comm_file.exists() else "unknown"
+            
+            matched = False
+            fd_dir = pid_dir / "fd"
+            if fd_dir.is_dir():
+                for fd in fd_dir.iterdir():
                     try:
-                        st = os.statvfs(str(cand))
-                        free_bytes = st.f_bavail * st.f_frsize
-                        if free_bytes > (allocated_bytes + 1024 * 1024 * 200):  # +200MB margin
-                            s_dir = cand / f".zram1_migration_{os.getpid()}_{int(time.time())}"
-                            s_dir.mkdir(parents=True, mode=0o700, exist_ok=True)
-                            
-                            if shutil.which("rsync"):
-                                res = subprocess.run(
-                                    ["rsync", "-aHAX", "--sparse", "--exclude=lost+found", "--exclude=.Trash-1000", f"{mount_point}/", f"{s_dir}/"],
-                                    capture_output=True, text=True, check=False
-                                )
-                                if res.returncode == 0:
-                                    stage_dir = s_dir
-                            
-                            if not stage_dir:
-                                for it in items:
-                                    if it.is_dir():
-                                        shutil.copytree(it, s_dir / it.name, symlinks=True, dirs_exist_ok=True)
-                                    else:
-                                        subprocess.run(["cp", "-a", "--sparse=always", str(it), str(s_dir / it.name)], capture_output=True, check=False)
-                                stage_dir = s_dir
+                        if Path(os.readlink(fd)).is_relative_to(mount_point):
+                            pids.append((pid, comm))
+                            matched = True
+                            break
+                    except (FileNotFoundError, PermissionError):
+                        continue
+            if matched:
+                continue
+            
+            cwd = os.readlink(pid_dir / "cwd")
+            if Path(cwd).is_relative_to(mount_point):
+                pids.append((pid, comm))
+        except (FileNotFoundError, PermissionError, ProcessLookupError):
+            continue
+    return sorted(pids, key=lambda x: x[0])
 
-                            if stage_dir:
-                                ok(f"Successfully staged {len(items)} item(s) to {stage_dir}.")
-                                break
-                    except Exception as e:
-                        warn(f"Staging to {cand} failed: {e}. Trying next candidate...")
+def safely_unmount_and_stage(mount_point: Path = MOUNT_POINT) -> Path | None:
+    if not mount_point.exists() or not get_mount_source():
+        return None
+
+    active = get_active_mount_pids(mount_point)
+    if active:
+        pid_list_str = ", ".join(f"{pid} ({comm})" for pid, comm in active[:8])
+        if len(active) > 8:
+            pid_list_str += f" and {len(active)-8} more"
+        warn(f"Active process(es) holding open handles on {mount_point}: {pid_list_str}")
+        
+        if not sys.stdin.isatty():
+            die(f"Mount point {mount_point} is in active use. Aborting in non-interactive shell.")
+        
+        ans = input(f"  > Send SIGTERM to {len(active)} holding process(es)? [y/N]: ").strip().lower()
+        if ans != 'y':
+            die("Aborted by user.")
+        
+        for pid, _ in active:
+            try:
+                os.kill(pid, 15)
+            except ProcessLookupError:
+                pass
+        
+        for _ in range(10):
+            time.sleep(0.5)
+            if not get_active_mount_pids(mount_point):
+                break
+        
+        remaining = get_active_mount_pids(mount_point)
+        if remaining:
+            ans_kill = input(f"  > {len(remaining)} process(es) still active. Send SIGKILL? [y/N]: ").strip().lower()
+            if ans_kill == 'y':
+                for pid, _ in remaining:
+                    try:
+                        os.kill(pid, 9)
+                    except ProcessLookupError:
+                        pass
+                time.sleep(0.5)
+            else:
+                die("Aborted by user — open processes prevented clean unmount.")
+
+    stage_dir: Path | None = None
+    try:
+        subprocess.run(["sync", "-f", str(mount_point)], capture_output=True, check=False)
+        items = [p for p in mount_point.iterdir() if p.name not in ("lost+found",)]
+        if items:
+            info(f"Detected {len(items)} item(s) on {mount_point}. Staging for seamless migration...")
+            
+            staging_base = Path("/var/tmp")
+            staging_fstype = run_cmd(["findmnt", "-n", "-o", "FSTYPE", "-T", str(staging_base)], ignore_errors=True)
+            staging_source = run_cmd(["findmnt", "-n", "-o", "SOURCE", "-T", str(staging_base)], ignore_errors=True)
+            if staging_fstype in ("tmpfs", "ramfs") or staging_source.startswith("/dev/zram"):
+                die(f"Cannot migrate data to RAM-backed staging path {staging_base}; mount retained.")
+            else:
+                du_out = run_cmd(["du", "-s", "-B1", "--exclude=lost+found", str(mount_point)], ignore_errors=True)
+                allocated_bytes = int(du_out.split()[0]) if du_out and du_out.split()[0].isdigit() else 512 * 1024 * 1024
                 
-                if not stage_dir:
-                    warn("Could not stage files (insufficient space or permission). Discarding files as requested.")
-        except Exception as e:
-            warn(f"Error inspecting files in {mount_point}: {e}. Proceeding with discard.")
+                st = os.statvfs(str(staging_base))
+                free_bytes = st.f_bavail * st.f_frsize
+                required_bytes = int(allocated_bytes * 1.2) + (100 * 1024 * 1024)
+                if free_bytes > required_bytes:
+                    s_dir = staging_base / f".zram1_migration_{os.getpid()}_{int(time.time())}"
+                    s_dir.mkdir(parents=True, mode=0o700, exist_ok=True)
+                    
+                    subprocess.run(
+                        ["cp", "-a", "--sparse=always", f"{mount_point}/.", str(s_dir)],
+                        check=True,
+                    )
+                    stage_dir = s_dir
 
-        # 3. Stop systemd mount / generator services
-        run_cmd(["systemctl", "stop", "mnt-zram1.mount"], ignore_errors=True)
-        run_cmd(["systemctl", "stop", "systemd-zram-setup@zram1.service"], ignore_errors=True)
+                    if stage_dir:
+                        ok(f"Successfully staged {len(items)} item(s) to persistent storage ({stage_dir}).")
+                else:
+                    warn(f"Insufficient free space on {staging_base} ({free_bytes // (1024*1024)}MB free vs {required_bytes // (1024*1024)}MB needed).")
+                    if not sys.stdin.isatty():
+                        die("Cannot stage files: insufficient free space on staging disk in non-interactive mode.")
+                    ans = input("  > Proceed with unmount anyway? WARNING: unstaged files on /mnt/zram1 will be lost! [y/N]: ").strip().lower()
+                    if ans != 'y':
+                        die("Operation aborted by user to prevent data loss.")
+    except Exception as e:
+        die(f"File staging failed; mount retained and any partial copy left in /var/tmp: {e}")
 
-        # 4. Standard unmount -> force lazy unmount fallback
-        run_cmd(["umount", "-q", str(mount_point)], ignore_errors=True)
-        cur_src = run_cmd(["findmnt", "-rn", "-o", "SOURCE", "--mountpoint", str(mount_point)], ignore_errors=True)
-        if cur_src:
-            warn(f"{mount_point} still busy. Performing lazy unmount (umount -f -l)...")
-            run_cmd(["umount", "-f", "-l", str(mount_point)], ignore_errors=True)
-            time.sleep(0.3)
+    # A busy mount must stay attached. A lazy unmount leaves writers using the
+    # old filesystem while new data is restored into an unrelated mount.
+    run_cmd(["systemctl", "stop", "mnt-zram1.mount"], ignore_errors=True)
+    if get_mount_source():
+        run_cmd(["umount", str(mount_point)])
+    if get_mount_source():
+        die(f"Could not unmount {mount_point}; staged data retained at {stage_dir}.")
+    run_cmd(["systemctl", "stop", "systemd-zram-setup@zram1.service"], ignore_errors=True)
 
-    # Reset zram1 block device if existing and clear systemd failure states
-    run_cmd(["zramctl", "--reset", "/dev/zram1"], ignore_errors=True)
-    run_cmd(["systemctl", "reset-failed", "mnt-zram1.mount", "systemd-zram-setup@zram1.service"], ignore_errors=True)
     return stage_dir
 
-
 def restore_staged_files(stage_dir: Path | None, mount_point: Path = MOUNT_POINT) -> None:
-    """Restores previously staged files back to mount_point after the new filesystem is mounted."""
     if not stage_dir or not stage_dir.exists():
         return
     try:
-        info(f"Restoring migrated data to {mount_point}...")
-        if shutil.which("rsync"):
-            res = subprocess.run(
-                ["rsync", "-aHAX", "--sparse", f"{stage_dir}/", f"{mount_point}/"],
-                capture_output=True, text=True, check=False
-            )
-            if res.returncode == 0:
-                shutil.rmtree(stage_dir, ignore_errors=True)
-                ok(f"Restored migrated data to {mount_point} successfully.")
-                return
-        
-        items = list(stage_dir.iterdir())
-        for it in items:
-            dest = mount_point / it.name
-            if it.is_dir():
-                shutil.copytree(it, dest, symlinks=True, dirs_exist_ok=True)
-            else:
-                subprocess.run(["cp", "-a", "--sparse=always", str(it), str(dest)], capture_output=True, check=False)
-        shutil.rmtree(stage_dir, ignore_errors=True)
-        ok(f"Restored {len(items)} item(s) to {mount_point} successfully.")
+        info(f"Restoring staged data back to {mount_point}...")
+        subprocess.run(
+            ["cp", "-a", "--sparse=always", f"{stage_dir}/.", str(mount_point)],
+            check=True,
+        )
+        shutil.rmtree(stage_dir)
+        ok("Restored staged data successfully.")
     except Exception as e:
-        warn(f"Failed to restore some files from {stage_dir}: {e}")
+        die(f"Failed to restore staged data; recoverable copy retained at {stage_dir}: {e}")
 
-
-def resolve_live_conflicts(target_backend: str, mount_unit_name: str) -> Path | None:
-    return safely_unmount_and_stage(target_backend)
-
-# --- Backend Configurators ---
-def configure_tmpfs(mount_unit_name: str, mount_unit_path: Path) -> None:
-    info(f"Initializing Pure Tmpfs Mount for: {C.BOLD}{MOUNT_POINT}{C.RST}")
-    stage_dir = resolve_live_conflicts("tmpfs", mount_unit_name)
+def configure_tmpfs(size_override: str = "") -> None:
+    size_expr = parse_tmpfs_size_expression(size_override, default="100%")
+    info(f"Initializing Native tmpfs Mount for: {C.BOLD}{MOUNT_POINT}{C.RST} (Size: {size_expr})")
+    
+    # Updating an existing tmpfs needs a remount, not a copy/unmount cycle.
+    native_tmpfs = get_mount_fstype() == "tmpfs"
+    stage_dir = None if native_tmpfs else safely_unmount_and_stage()
 
     if ZRAM_CONF_FILE.exists():
         ZRAM_CONF_FILE.unlink()
-        run_cmd(["systemctl", "daemon-reload"])
-    run_cmd(["zramctl", "--reset", "/dev/zram1"], ignore_errors=True)
+    if LEGACY_ZRAM_CONF_FILE.exists():
+        LEGACY_ZRAM_CONF_FILE.unlink()
+    if SETUP_OVERRIDE_DIR.exists():
+        shutil.rmtree(SETUP_OVERRIDE_DIR, ignore_errors=True)
+    if LEGACY_MAKEFS_OVERRIDE_DIR.exists():
+        shutil.rmtree(LEGACY_MAKEFS_OVERRIDE_DIR, ignore_errors=True)
+    if PERMS_SERVICE_PATH.exists():
+        PERMS_SERVICE_PATH.unlink()
+    if PERMS_WANTS_SYMLINK.exists() or PERMS_WANTS_SYMLINK.is_symlink():
+        PERMS_WANTS_SYMLINK.unlink()
+    if PERMS_WANTS_DIR.exists():
+        shutil.rmtree(PERMS_WANTS_DIR, ignore_errors=True)
 
-    tmpfs_content = f"""# Managed by Elite Arch Linux Configurator
+    run_cmd(["zramctl", "--reset", "/dev/zram1"], ignore_errors=True)
+    run_cmd(["systemctl", "daemon-reload"])
+
+    tmpfs_content = f"""# Managed by 206_zram_tmpfs_mounts.py
 [Unit]
-Description=High-Performance tmpfs for {MOUNT_POINT}
+Description=High-Performance Native tmpfs on {MOUNT_POINT}
 Before=local-fs.target
-ConditionPathExists={MOUNT_POINT}
 
 [Mount]
 What=tmpfs
 Where={MOUNT_POINT}
 Type=tmpfs
-Options=rw,nosuid,nodev,relatime,size=100%,mode=1777,uid={TARGET_UID},gid={TARGET_GID}
+Options=rw,nosuid,nodev,noatime,size={size_expr},huge=never,mode=1777
 
 [Install]
 WantedBy=local-fs.target
 """
-    write_file_atomic(mount_unit_path, tmpfs_content)
-    ok(f"Tmpfs mount unit written atomically to {mount_unit_path}")
+    write_file_atomic(TMPFS_MOUNT_UNIT_PATH, tmpfs_content)
+    ok(f"Tmpfs mount unit written atomically to {TMPFS_MOUNT_UNIT_PATH}")
 
-    info("Reloading systemd daemon...")
     run_cmd(["systemctl", "daemon-reload"])
-    assert_unit_loaded(mount_unit_name)
+    MOUNT_POINT.mkdir(parents=True, exist_ok=True, mode=0o1777)
+    if native_tmpfs:
+        run_cmd(["mount", "-o", f"remount,rw,nosuid,nodev,noatime,size={size_expr},huge=never,mode=1777", str(MOUNT_POINT)])
+    run_cmd(["systemctl", "enable", "--now", "mnt-zram1.mount"])
 
-    info("Enabling systemd mount unit...")
-    run_cmd(["systemctl", "enable", "--now", mount_unit_name], ignore_errors=True)
-    
-    for _ in range(8):
-        if get_mount_source() == "tmpfs": break
-        time.sleep(0.3)
-    
-    if get_mount_source() != "tmpfs":
-        run_cmd(["mount", "-t", "tmpfs", "-o", f"rw,nosuid,nodev,relatime,size=100%,mode=1777,uid={TARGET_UID},gid={TARGET_GID}", "tmpfs", str(MOUNT_POINT)], ignore_errors=True)
-
+    if get_mount_fstype() != "tmpfs":
+        die(f"Failed to mount tmpfs; staged data retained at {stage_dir}.")
     fix_mount_permissions()
     restore_staged_files(stage_dir)
     fix_mount_permissions()
 
-    if get_mount_source() == "tmpfs":
-        ok(f"Live memory: Pure tmpfs successfully attached to {MOUNT_POINT} (Mode: 1777).")
-    else:
-        die(f"Failed to mount pure tmpfs. Check 'systemctl status {mount_unit_name}'.")
+    ok(f"Live memory: Native tmpfs attached to {MOUNT_POINT} (Mode: 1777, Size: {size_expr}, Huge: never).")
 
-def configure_zram(mount_unit_name: str, mount_unit_path: Path, size_override: str = "") -> None:
-    # Resolve size
-    size_expr = "ram"
-    if size_override:
-        size_expr = parse_size_expression(size_override)
-    elif ZRAM_CONF_FILE.exists():
-        m = re.search(r"zram-size\s*=\s*(.+)", ZRAM_CONF_FILE.read_text())
-        if m:
-            size_expr = m.group(1).strip()
-
-    info(f"Initializing Ext4 ZRAM Block Mount for: {C.BOLD}{MOUNT_POINT}{C.RST} (Size: {size_expr})")
-    stage_dir = resolve_live_conflicts("zram", mount_unit_name)
-
-    if mount_unit_path.exists():
-        run_cmd(["systemctl", "disable", "--now", mount_unit_name], ignore_errors=True)
-        mount_unit_path.unlink(missing_ok=True)
-        run_cmd(["systemctl", "daemon-reload"])
-
-    zram_content = f"""# Managed by Elite Arch Linux Configurator.
-[zram1]
-zram-size = {size_expr}
-zram-resident-limit = {ZRAM_RESIDENT_LIMIT_EXPR}
-fs-type = ext4
-mount-point = {MOUNT_POINT}
-compression-algorithm = {COMPRESSION_ALGORITHM}
-options = {FS_OPTIONS}
-"""
-
-    write_file_atomic(ZRAM_CONF_FILE, zram_content)
-    ok(f"ZRAM pool configuration written atomically to {ZRAM_CONF_FILE}")
-
-    fix_mount_permissions()
-
-    info("Reloading systemd generators...")
-    run_cmd(["systemctl", "daemon-reload"])
-    assert_unit_loaded("systemd-zram-setup@zram1.service")
-    
-    info("Engaging ZRAM generator pipeline...")
-    run_cmd(["systemctl", "restart", "systemd-zram-setup@zram1.service"], ignore_errors=True)
-    run_cmd(["systemctl", "restart", "mnt-zram1.mount"], ignore_errors=True)
-    run_cmd(["mount", str(MOUNT_POINT)], ignore_errors=True)
-
-    for _ in range(10):
-        if get_mount_source() in ("/dev/zram1", "zram1"): break
-        time.sleep(0.3)
-
-    fix_mount_permissions()
-    restore_staged_files(stage_dir)
-    fix_mount_permissions()
-
-    if get_mount_source() in ("/dev/zram1", "zram1"):
-        ok(f"Live memory: Ext4 ZRAM successfully attached to {MOUNT_POINT} (Mode: 1777).")
-    else:
-        warn("Live ZRAM configuration staged. Systemd generator will activate on next boot.")
-
-def configure_none(mount_unit_name: str, mount_unit_path: Path) -> None:
+def configure_none() -> None:
     info(f"Disabling secondary RAM disk for {C.BOLD}{MOUNT_POINT}{C.RST} (Minimal RAM mode)...")
-    safely_unmount_and_stage("none")
+    stage_dir = safely_unmount_and_stage()
 
-    if ZRAM_CONF_FILE.exists():
-        ZRAM_CONF_FILE.unlink()
+    for p in [ZRAM_CONF_FILE, LEGACY_ZRAM_CONF_FILE, TMPFS_MOUNT_UNIT_PATH, PERMS_SERVICE_PATH, TMPFILES_CONF]:
+        p.unlink(missing_ok=True)
 
-    if OVERRIDE_DIR.exists():
-        for child in OVERRIDE_DIR.glob("*"):
-            child.unlink()
-        OVERRIDE_DIR.rmdir()
+    if PERMS_WANTS_SYMLINK.exists() or PERMS_WANTS_SYMLINK.is_symlink():
+        PERMS_WANTS_SYMLINK.unlink(missing_ok=True)
 
-    if mount_unit_path.exists():
-        run_cmd(["systemctl", "disable", "--now", mount_unit_name], ignore_errors=True)
-        mount_unit_path.unlink()
+    for d in [SETUP_OVERRIDE_DIR, LEGACY_MAKEFS_OVERRIDE_DIR, PERMS_WANTS_DIR]:
+        if d.exists():
+            shutil.rmtree(d, ignore_errors=True)
 
+    run_cmd(["systemctl", "disable", "--now", "mnt-zram1.mount"], ignore_errors=True)
     run_cmd(["zramctl", "--reset", "/dev/zram1"], ignore_errors=True)
+    run_cmd(["systemctl", "reset-failed", "mnt-zram1.mount", "systemd-zram-setup@zram1.service"], ignore_errors=True)
     run_cmd(["systemctl", "daemon-reload"])
-    ok(f"Secondary RAM disk ({MOUNT_POINT}) disabled cleanly (zero RAM table overhead).")
+    restore_staged_files(stage_dir)
+    ok(f"Secondary RAM disk ({MOUNT_POINT}) disabled; any staged files restored to the underlying directory.")
 
-def ask_backend() -> str:
-    current = get_mount_source()
-    mount_unit_name = run_cmd(["systemd-escape", "--path", f"--suffix=mount", str(MOUNT_POINT)], ignore_errors=True)
-    mount_unit_path = Path("/etc/systemd/system") / mount_unit_name
-    
-    tmpfs_tag = f"{C.GRN} [LIVE & ACTIVE]{C.RST}" if current == "tmpfs" else ""
-    
-    if current in ("/dev/zram1", "zram1"):
-        zram_tag = f"{C.GRN} [LIVE & ACTIVE]{C.RST}"
-    elif ZRAM_CONF_FILE.exists() and current != "tmpfs":
-        zram_tag = f"{C.YLW} [STAGED - PENDING REBOOT]{C.RST}"
-    else:
-        zram_tag = ""
-
-    none_tag = f"{C.GRN} [CURRENTLY DISABLED]{C.RST}" if (not current and not ZRAM_CONF_FILE.exists() and not mount_unit_path.exists()) else ""
-
-    print(f"\n  {C.CYN}[ Select backend for {MOUNT_POINT} ]{C.RST}")
-    print(f"   {C.BOLD}1{C.RST}) tmpfs   (Pure RAM Mapping){tmpfs_tag}")
-    print(f"   {C.BOLD}2{C.RST}) zram    (Ext4 Compressed Block){zram_tag}")
-    print(f"   {C.BOLD}3{C.RST}) disable (No secondary RAM disk / Zero RAM overhead){none_tag}")
-    while True:
-        raw = input("  > ").strip().lower()
-        if raw in ("1", "tmpfs"): return "tmpfs"
-        if raw in ("2", "zram"): return "zram"
-        if raw in ("3", "none", "disable", "disabled", "off"): return "none"
-        if raw in ("q", "quit"): sys.exit(0)
-        print(f"  {C.RED}Invalid choice.{C.RST} Select 1, 2, or 3.")
-
-# --- Entry Point ---
 def main() -> None:
     pre_flight_checks()
 
-    match (args.tmpfs, args.zram, args.disable):
-        case (True, False, False): backend = "tmpfs"
-        case (False, True, False): backend = "zram"
-        case (False, False, True): backend = "none"
-        case _: backend = ask_backend()
-
-    for cmd in ["systemctl", "systemd-escape", "findmnt", "umount"]:
+    for cmd in ["systemctl", "findmnt", "umount"]:
         if shutil.which(cmd) is None:
             die(f"'{cmd}' is required but missing from system PATH.")
 
-    mount_unit_name = run_cmd(["systemd-escape", "--path", f"--suffix=mount", str(MOUNT_POINT)])
-    mount_unit_path = Path("/etc/systemd/system") / mount_unit_name
-
-    if backend != "none":
-        prepare_mount_directory()
-
-    match backend:
-        case "tmpfs": configure_tmpfs(mount_unit_name, mount_unit_path)
-        case "zram": configure_zram(mount_unit_name, mount_unit_path, args.size)
-        case "none": configure_none(mount_unit_name, mount_unit_path)
+    if args.disable:
+        configure_none()
+    else:
+        configure_tmpfs(args.size)
             
-    ok("Subsystem configured successfully.")
+    ok("Memory mount subsystem configured successfully.")
 
 if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        print(f"\n{C.YLW}aborted — operation cancelled by user.{C.RST}")
+        print(f"\n{C.YLW}Operation cancelled by user.{C.RST}")
         sys.exit(130)

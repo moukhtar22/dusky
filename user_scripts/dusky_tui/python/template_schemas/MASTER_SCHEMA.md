@@ -45,9 +45,19 @@ Optional module attributes:
 | `USER_PRESETS_TAB` | auto-detected | Must exactly match a tab name. Auto-falls back to a tab named `presets`/`theme`/`themes`/`appearance`/`profiles` (case-insensitive). |
 | `GLOBAL_POPUP` | `None` | `{"title": str, "message": str, "level": "info"\|"warning"\|"danger"\|"success", "require_confirm": bool (default False), "cancel_quits": bool (default False), "btn_text": str}` — shown once after first render; if `require_confirm` the Yes/No dialog quits when cancelled and `cancel_quits` is set. |
 | `TAB_NOTICES` | `None` | `{tab_index: {"level": "info"\|"warning"\|"danger"\|"success", "message": str, "position": "top"\|"bottom" (default top)}}` or `{tab_index: [{...}, ...]}` — persistent `NoticeBox` banner(s) rendered above/below the option list for that tab. |
-| `DEFERRED_LOAD` | `None` | Callable `() -> list[int] \| tuple[list[int], dict[int, list[ConfigItem]]]` run in a background thread after first paint. Return the tab indices to populate; optionally return `(indices, new_items)` to replace `SCHEMA[tab]` before state is re-loaded. Used for slow/dynamic tabs (systemd services, network scans). In headless mode the router just calls it for side-effects. |
+| `DEFERRED_LOAD` | `None` | Callable run in a background thread after first paint and again on F5. Return the tab indices to populate; optionally return `(indices, new_items)` to replace `SCHEMA[tab]`, or `(indices, new_items, default_engine_state)` if discovery already read the default engine state. `new_items` may be `None`. The UI re-reads state if a setting changed during discovery. Used for slow/dynamic tabs (systemd services, network scans). In headless mode the router calls it for side-effects. |
+| `HIDE_MISSING_ITEMS` | `False` | Opt in to hiding items absent from their engine state and `menu` folders with no visible children. Group headings are generated from visible rows, so empty groups also disappear. The schema stays intact; tab labels remain. Use only when an absent state key means the item is unavailable, including for every routed engine in a mixed-engine schema. Hidden items are excluded from edits and resets. |
 | `REQUIRE_ROOT` | `False` | Re-executes the whole router via `sudo`/`su` with real-user `HOME`/`XDG_*` reconstruction and `XDG_CONFIG_HOME` chown fix. |
-| `CUSTOM_VIEWS` | `None` | `{tab_index_or_name: view_spec}` — replaces that tab's `ConfigOptionList` with a custom renderable. `view_spec` may be a `Widget` subclass, a `Widget` instance, a callable `(app) -> renderable`, or `{"view": <above>, "interval": float_seconds}` for auto-refresh. `CustomRichTabWidget` handles `refresh_interval` and scroll bindings. See `tui_dusky_network.py` `render_network_dashboard_view`. |
+| `CUSTOM_VIEWS` | `None` | `{tab_index_or_name: view_spec}` — replaces that tab's `ConfigOptionList` with a custom renderable. `view_spec` may be a `Widget` subclass, a `Widget` instance, a callable `(app) -> renderable`, or `{"view": <above>, "interval": float_seconds}` for auto-refresh. `CustomRichTabWidget` handles `refresh_interval` and scroll bindings. F5 reruns callable views; custom `Widget` implementations can expose a no-argument `update_content()` method to reload their data, otherwise F5 repaints them. See `tui_dusky_network.py` `render_network_dashboard_view`. |
+
+After the first tab paints, the frontend prepares other ready option lists one
+per refresh. Tabs populated by `DEFERRED_LOAD` are prepared after that function
+returns. Their availability still depends on how long the schema's discovery
+work takes.
+
+F5 reloads engine state for every schema and refreshes custom tab views.
+Schemas with `DEFERRED_LOAD` rerun discovery first, so dynamic rows are updated
+as well. Unsaved edits remain pending; F5 does not discard them.
 
 ---
 
@@ -160,11 +170,13 @@ network engine's status/speed-test/hotspot tabs).
    (dynamic user profiles); never emit it. `key` prefixes like `action_`,
    `preset_`, `__user_preset_`, `__save_new_preset`, `__import_new_preset` are
    convention; the two `__` keys above are special-cased by the UI.
-8. **Missing values** — an item whose key is absent from the engine state is
-   rendered struck-through as `[Missing]` unless the engine bridges state
-   (bridged_ini, cmdline, systemd_boot) or virtualizes defaults (trackpad,
-   monitor, autostart). Write schemas against the engine's documented state
-   keys so items resolve.
+8. **Missing values** — by default, an absent engine state key uses the
+   item's schema default when one is provided; items with `default="nil"`
+   remain visible as `[Missing]`. With `HIDE_MISSING_ITEMS = True`, absent
+   items and empty `menu` folders are hidden instead. The engine must omit
+   only genuinely unavailable items for that schema. Engines that bridge
+   state (bridged_ini, cmdline, systemd_boot) or virtualize defaults
+   (trackpad, monitor, autostart) have their own state-key behavior.
 9. **Root privileges** — engines touching system files either fall back to
    `sudo -n tee` internally (returning `AUTH_REQUIRED`, which the TUI turns
    into a password prompt) or you set `REQUIRE_ROOT = True` on the schema.
@@ -183,7 +195,7 @@ network engine's status/speed-test/hotspot tabs).
 | `lua` | [engines/lua.md](./engines/lua.md) | `HyprlandLuaEngine` | `~/Documents/hyprland.lua` | `hl.config` table path (`a/b`); `hl.method` → `method/<id>` |
 | `autostart` | [engines/autostart.md](./engines/autostart.md) | `AutostartLuaEngine` | hyprland Lua | scope `autostart`, fixed key catalog |
 | `trackpad` | [engines/trackpad.md](./engines/trackpad.md) | `TrackpadLuaEngine` | hyprland Lua | scope `gestures`; gestures via `gesture/<f>/<dir>` |
-| `monitor` | [engines/monitor.md](./engines/monitor.md) | `MonitorLuaEngine` | `~/Documents/monitors.lua` | scope `monitor/<name>`; globals `misc`/`debug`/`render` |
+| `monitor` | [engines/monitor.md](./engines/monitor.md) | `MonitorLuaEngine` | `~/Documents/monitors.lua` | scope `monitor/<name>`; `workspace_rule/<1-10>`; globals `misc`/`debug`/`render` |
 | `systemd` | [engines/systemd.md](./engines/systemd.md) | `SystemdEngine` | (none) | scope `user`/`system`; key = unit name |
 | `hyprlang` | [engines/hyprlang.md](./engines/hyprlang.md) | `HyprlangEngine` | hypr*.conf | block name → scope; `cat:key` inline; `$var` → `DEFAULT` |
 | `cmdline` | [engines/cmdline.md](./engines/cmdline.md) | `CmdlineEngine` | `/etc/kernel/cmdline` | scope `DEFAULT`; kernel params, `:N` dupes |
@@ -205,6 +217,8 @@ network engine's status/speed-test/hotspot tabs).
 | `systemd_dns` | [engines/systemd_dns.md](./engines/systemd_dns.md) | `SystemdDnsEngine` | `/etc/systemd/resolved.conf.d/99-dns-tui.conf` | fixed `[Resolve]` keys |
 | `starship` | [engines/starship.md](./engines/starship.md) | `StarshipEngine` | `~/.config/starship.toml` | scope ignored; keys `active_prompt` (preset selector), `custom_prompt_name` (string), `action_save_custom` (trigger) — atomic whole-file TOML swap, hash-matched state file |
 | `hyprlock` | [engines/hyprlock.md](./engines/hyprlock.md) | `HyprlockEngine` | `~/.config/hypr/hyprlock.conf` | scope ignored; keys `hyprlock`/`active_theme_number` (int), `active_theme_folder` (str), `active_theme_name` (str), `toggle_forward`/`toggle_backward` (triggers) |
+| `systemd_power` | [engines/systemd_power.md](./engines/systemd_power.md) | `SystemdPowerEngine` | `/etc/systemd/logind.conf.d/99-power.conf` | scope `Login`; systemd-logind drop-in with base bridging, defaults virtualization, daemon reload |
+| `ufw` / `ufw_firewall` | [engines/ufw.md](./engines/ufw.md) | `UfwEngine` | `/etc/default/ufw` | scopes `status`, `builder`, `domains`, `framework`, `actions`, `reports`; complete rule lifecycle, DNS domain whitelisting/lockdown, NAT, Docker mitigation |
 
 > `engines/rich_speedtest.py` is **not** an engine — it is a Rich-based speed
 > test UI helper invoked by the `network` engine.
@@ -287,6 +301,7 @@ DEFAULT_MODE = "auto"
 THEME_FILE = "~/.config/matugen/generated/dusky_tui.json"
 ENABLE_USER_PRESETS = True
 USER_PRESETS_TAB = "Profiles"
+# HIDE_MISSING_ITEMS = True  # Opt in only if absent engine keys mean unavailable items.
 
 TABS = ["Core", "Profiles"]
 

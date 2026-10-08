@@ -1,0 +1,12 @@
+# Machine-local storage policy; kernel tuning belongs in kernel_profiles/*.toml.
+# Empty paths use XDG defaults. Environment path overrides still take precedence.
+[storage]
+persistent_dir = ""            # Default: $XDG_CACHE_HOME/dusky-kernel
+packages_dir = ""              # Default: persistent_dir/packages
+ccache_dir = ""                # Default: persistent_dir/ccache
+thinlto_dir = ""               # Default: persistent_dir/thinlto-cache
+zram_dir = "/mnt/zram1/dusky_kernel"
+ram_reserve_gib = 8             # Reserve for future RAM-filesystem growth when sizing jobs
+# Prefer RAM automatically; fall back to disk when mount/capacity is insufficient.
+# Only the selected build tree and shared caches are restored to RAM.
+# Changes are saved to disk after success/failure/Ctrl-C; other disk trees stay intact.

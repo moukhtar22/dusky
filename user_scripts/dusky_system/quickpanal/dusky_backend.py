@@ -6,8 +6,6 @@ Pure bleeding-edge implementation with zero legacy shims or backwards compatibil
 """
 
 from __future__ import annotations
-from datetime import datetime
-import contextvars
 import ctypes
 import gc
 import json
@@ -19,16 +17,16 @@ import shlex
 import shutil
 import signal
 import subprocess
-import sys
 import tempfile
 import threading
 import tomllib
 import time
 from collections.abc import Callable, Sequence
-from concurrent.futures import CancelledError, Future, ThreadPoolExecutor, as_completed
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Final, Self
+from typing import Any, Final
+from gi.repository import Gio, GLib
 
 # August 2026 Bleeding-Edge Constant declarations
 APP_ID: Final[str] = "org.dusky.quickpanal"
@@ -61,7 +59,7 @@ DDC_SET_TIMEOUT: Final[float] = 2.2
 SUNSET_READY_TIMEOUT: Final[float] = 2.0
 SUNSET_FALLBACK_READY_TIMEOUT: Final[float] = 1.0
 LIVE_REFRESH_INTERVAL_SECONDS: Final[int] = 2
-BRIGHTNESS_POST_SUBMIT_REFRESH_GRACE_SECONDS: Final[float] = max(1.2, QUERY_TIMEOUT + 0.3)
+BRIGHTNESS_POST_SUBMIT_REFRESH_GRACE_SECONDS: Final[float] = max(CONTROL_TIMEOUT * 2, DDC_SET_TIMEOUT) + 0.3
 SUNSET_STATE_WRITE_DEBOUNCE_SECONDS: Final[float] = 0.35
 NO_PENDING: Final[object] = object()
 
@@ -78,18 +76,14 @@ SYSTEMCTL: Final[str | None] = shutil.which("systemctl")
 _RE_MAKO_BADGE: Final[re.Pattern[str]] = re.compile(r"\d+")
 _RE_UPDATES_TOTAL: Final[re.Pattern[str]] = re.compile(r"Total:\s*(\d+)")
 
-# Direct Libc bindings for madvise and memory compaction
+# Return unused heap pages to the allocator's backing OS.
 try:
     _LIBC: Final[ctypes.CDLL] = ctypes.CDLL("libc.so.6", use_errno=True)
     _LIBC.malloc_trim.argtypes = [ctypes.c_size_t]
     _LIBC.malloc_trim.restype = ctypes.c_int
-    _LIBC.madvise.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int]
-    _LIBC.madvise.restype = ctypes.c_int
 except (OSError, AttributeError) as e:
     LOG.error(f"Failed to bind libc optimizations: {e}")
     _LIBC = None  # Fallback gracefully in simulated test suites
-
-_MADV_PAGEOUT: Final[int] = 21
 
 try:
     _PYTHONAPI = ctypes.pythonapi
@@ -118,16 +112,11 @@ def gi_object_c_pointer(gi_obj: object) -> ctypes.c_void_p | None:
 def _reclaim_idle_memory() -> None:
     """
     Active Memory Compaction & Trim
-    Purges regex caches, garbage collects, and invokes malloc_trim to return free heap
+    Collects cycles and invokes malloc_trim to return free heap
     to the OS safely and efficiently without triggering swap churn.
     """
-    re.purge()
-    if hasattr(sys, "_clear_internal_caches"):
-        sys._clear_internal_caches()
-    elif hasattr(sys, "_clear_type_cache"):
-        sys._clear_type_cache()
+    gc.unfreeze()
     gc.collect()
-    gc.freeze()
     
     if _LIBC is not None:
         try:
@@ -135,14 +124,7 @@ def _reclaim_idle_memory() -> None:
         except Exception as e:
             LOG.debug(f"malloc_trim failed: {e}")
             
-    # Proactively reap child processes to prevent zombie leak
-    try:
-        while True:
-            pid, _ = os.waitpid(-1, os.WNOHANG)
-            if pid <= 0:
-                break
-    except OSError:
-        pass
+    # Each child is reaped by its owner; waitpid(-1) steals subprocess results.
 
 def clamp(value: float, lower: float, upper: float) -> float:
     if not math.isfinite(value):
@@ -185,18 +167,37 @@ def run_command(
     env = COMMAND_ENV if extra_env is None else {**COMMAND_ENV, **extra_env}
     cmd_list = [os.fspath(a) for a in args]
     try:
-        return subprocess.run(
+        with subprocess.Popen(
             cmd_list,
-            capture_output=capture_stdout,
+            stdout=subprocess.PIPE if capture_stdout else None,
+            stderr=subprocess.PIPE if capture_stdout else None,
             text=True,
-            timeout=timeout,
-            check=False,
             env=env,
-            close_fds=True
-        )
-    except subprocess.TimeoutExpired:
-        LOG.warning("Command '%s' timed out after %.2fs", cmd_list[0], timeout)
-        return None
+            close_fds=True,
+            start_new_session=True,
+        ) as proc:
+            try:
+                stdout, stderr = proc.communicate(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                LOG.warning("Command '%s' timed out after %.2fs", cmd_list[0], timeout)
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except OSError as exc:
+                    if not isinstance(exc, ProcessLookupError):
+                        LOG.warning("Could not stop process group for '%s': %s", cmd_list[0], exc)
+                    if proc.poll() is None:
+                        proc.kill()
+                try:
+                    proc.communicate(timeout=0.5)
+                except subprocess.TimeoutExpired:
+                    # A descendant that created another session may still hold
+                    # the captured pipes; do not let it defeat this timeout.
+                    for stream in (proc.stdout, proc.stderr):
+                        if stream is not None:
+                            stream.close()
+                    proc.wait()
+                return None
+            return subprocess.CompletedProcess(cmd_list, proc.returncode, stdout, stderr)
     except FileNotFoundError:
         LOG.warning("Command '%s' not found on PATH", cmd_list[0])
         return None
@@ -204,36 +205,36 @@ def run_command(
         LOG.error("Failed executing '%s': %s", cmd_list[0], e)
         return None
 
-def execute_cmd(cmd: str) -> None:
-    """
-    Zero-overhead non-blocking detached process spawner.
-    Completely disconnects stdio and sets sid to prevent any pipeline/zombie freezing.
-    """
+def execute_cmd(cmd: str, *, detached: bool = False) -> None:
+    """Launch without blocking GTK or keeping a Python thread per child."""
     if not cmd or not cmd.strip():
         return
     try:
-        # Pre-expand paths if using standard home variable shorthand
-        if "~" in cmd:
-            cmd = os.path.expanduser(cmd)
-            
-        subprocess.Popen(
-            cmd,
-            shell=True,
-            executable="/usr/bin/bash",
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-            close_fds=True
+        # Let the shell handle quoting and tilde expansion. Launched applications
+        # get their own scope, outside the panel's memory limit and stop lifecycle.
+        argv = ['/usr/bin/bash', '-c', cmd]
+        if detached:
+            argv = ['/usr/bin/systemd-run', '--user', '--scope', '--collect',
+                    '--quiet', '--expand-environment=no', '--', *argv]
+        proc = Gio.Subprocess.new(
+            argv, Gio.SubprocessFlags.STDOUT_SILENCE | Gio.SubprocessFlags.STDERR_SILENCE
         )
-    except OSError as e:
+        proc.wait_async(None, _command_finished)
+    except GLib.Error as e:
         LOG.warning("Failed to fire-and-forget command '%s': %s", cmd, e)
+
+def _command_finished(proc: Gio.Subprocess, result: Gio.AsyncResult) -> None:
+    try:
+        proc.wait_finish(result)
+    except GLib.Error as exc:
+        LOG.warning('Failed waiting for launched command: %s', exc)
 
 def fetch_json_output(cmd: str) -> dict[str, Any] | None:
     r = run_command(shlex.split(cmd), timeout=1.2, capture_stdout=True)
     if r is not None and r.returncode == 0 and r.stdout.strip():
         try:
-            return json.loads(r.stdout.strip())
+            data = json.loads(r.stdout.strip())
+            return data if isinstance(data, dict) else None
         except json.JSONDecodeError:
             pass
     return None
@@ -261,6 +262,7 @@ STATE_FILE: Final[Path | None] = None if STATE_DIR is None else STATE_DIR / "hyp
 DDCUTIL_CACHE_FILE: Final[Path | None] = None if STATE_DIR is None else STATE_DIR / "ddcutil_displays.json"
 
 def atomic_write_text(path: Path, text: str, *, durable: bool = True) -> bool:
+    temp_path: str | None = None
     try:
         path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         fd, temp_path = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp", text=True)
@@ -273,37 +275,57 @@ def atomic_write_text(path: Path, text: str, *, durable: bool = True) -> bool:
         if durable:
             try:
                 dir_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
-                os.fsync(dir_fd)
-                os.close(dir_fd)
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
             except OSError:
                 pass
         return True
     except OSError as exc:
         LOG.warning("Failed to atomically write %s: %s", path, exc)
         return False
+    finally:
+        if temp_path is not None:
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass
 
 class RefreshPool:
-    __slots__ = ("_executor", "_max_workers", "_lock", "_suspended")
+    __slots__ = ("_executor", "_max_workers", "_lock", "_suspended", "_pending")
 
     def __init__(self, max_workers: int = 4) -> None:
         self._max_workers = max_workers
         self._executor: ThreadPoolExecutor | None = None
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._suspended = False
+        self._pending: dict[Callable[..., Any], Future[Any]] = {}
 
     def submit(self, func: Callable[..., Any], *args: Any, **kwargs: Any) -> Future[Any] | None:
         with self._lock:
             if self._suspended:
                 return None
+            previous = self._pending.get(func)
+            if previous is not None and not previous.done():
+                return previous
             if self._executor is None:
                 self._executor = ThreadPoolExecutor(
                     max_workers=self._max_workers,
                     thread_name_prefix="dusky-refresh"
                 )
             try:
-                return self._executor.submit(func, *args, **kwargs)
+                future = self._executor.submit(func, *args, **kwargs)
+                self._pending[func] = future
+                future.add_done_callback(lambda done: self._discard(func, done))
+                return future
             except RuntimeError:
                 return None
+
+    def _discard(self, func: Callable[..., Any], future: Future[Any]) -> None:
+        with self._lock:
+            if self._pending.get(func) is future:
+                del self._pending[func]
 
     def suspend(self) -> None:
         with self._lock:
@@ -335,8 +357,6 @@ class LatestValueWorker:
         self._busy = False
         self._running = True
         self._thread: threading.Thread | None = None
-        with self._condition:
-            self._ensure_thread_locked()
 
     def submit(self, value: float) -> None:
         with self._condition:
@@ -351,18 +371,16 @@ class LatestValueWorker:
             if self._running:
                 return
             self._running = True
-            self._ensure_thread_locked()
+
+    def is_busy(self) -> bool:
+        with self._condition:
+            return self._busy or self._pending is not NO_PENDING
 
     def stop(self, timeout: float = 1.5) -> None:
         with self._condition:
             self._running = False
-            self._pending = NO_PENDING
+            # Finish the last requested value even if the panel just closed.
             self._condition.notify_all()
-            thread = self._thread
-            self._thread = None
-        if thread is not None and thread.is_alive():
-            # Modern non-blocking thread termination strategy to prevent UI freezes
-            start_thread(f"{self._name}-join-reaper", lambda: thread.join(timeout=timeout))
 
     def _ensure_thread_locked(self) -> None:
         if self._thread is not None and self._thread.is_alive():
@@ -372,9 +390,8 @@ class LatestValueWorker:
     def _worker(self) -> None:
         while True:
             with self._condition:
-                while self._running and self._pending is NO_PENDING:
-                    self._condition.wait()
-                if not self._running:
+                if self._pending is NO_PENDING:
+                    self._thread = None
                     return
                 value = self._pending
                 self._pending = NO_PENDING
@@ -406,13 +423,10 @@ class DebouncedValueWriter:
         self._busy = False
         self._running = True
         self._thread: threading.Thread | None = None
-        with self._condition:
-            self._ensure_thread_locked()
 
     def schedule(self, value: float) -> None:
         with self._condition:
-            if not self._running:
-                return
+            self._running = True
             self._latest = float(value)
             self._deadline = time.monotonic() + self._delay_seconds
             self._pending = True
@@ -426,22 +440,23 @@ class DebouncedValueWriter:
                 self._deadline = time.monotonic()
                 self._ensure_thread_locked()
                 self._condition.notify()
-            while self._running and (self._pending or self._busy):
+            while self._pending or self._busy:
                 remaining = None if deadline is None else deadline - time.monotonic()
                 if remaining is not None and remaining <= 0.0:
                     return False
                 self._condition.wait(remaining)
         return True
 
+    def is_busy(self) -> bool:
+        with self._condition:
+            return self._busy or self._pending
+
     def stop(self, timeout: float = 1.5) -> None:
-        self.flush(timeout)
         with self._condition:
             self._running = False
+            if self._pending:
+                self._deadline = time.monotonic()
             self._condition.notify_all()
-            thread = self._thread
-            self._thread = None
-        if thread is not None and thread.is_alive():
-            start_thread(f"{self._name}-reap-join", lambda: thread.join(timeout=timeout))
 
     def _ensure_thread_locked(self) -> None:
         if self._thread is not None and self._thread.is_alive():
@@ -452,11 +467,9 @@ class DebouncedValueWriter:
         while True:
             with self._condition:
                 while True:
-                    if not self._running and not self._pending:
-                        return
                     if not self._pending:
-                        self._condition.wait()
-                        continue
+                        self._thread = None
+                        return
                     deadline = self._deadline
                     wait_time = 0.0 if deadline is None else deadline - time.monotonic()
                     if wait_time > 0.0:
@@ -527,22 +540,15 @@ def fetch_notifications() -> list[NotificationData]:
 
     def _fetch_mako_json(cmd: list[str]) -> list[dict[str, Any]]:
         r = run_command(cmd, timeout=0.8, capture_stdout=True)
-        if r is not None and r.returncode == 0:
-            try:
-                parsed = json.loads(r.stdout)
-                if isinstance(parsed, dict) and "data" in parsed:
-                    data = parsed["data"]
-                    if data and isinstance(data, list) and isinstance(data[0], list):
-                        return data[0]
-                    if data and isinstance(data, list):
-                        return data
-                if isinstance(parsed, list):
-                    if len(parsed) > 0 and isinstance(parsed[0], list):
-                        return parsed[0]
-                    return parsed
-            except json.JSONDecodeError:
-                pass
-        return []
+        if r is None or r.returncode != 0:
+            raise RuntimeError(f"Could not fetch notifications with {' '.join(cmd)}")
+        parsed = json.loads(r.stdout)
+        items = parsed.get("data") if isinstance(parsed, dict) else parsed
+        if isinstance(items, list) and items and isinstance(items[0], list):
+            items = items[0]
+        if not isinstance(items, list):
+            raise ValueError("Unexpected makoctl notification response")
+        return items
 
     active_items = _fetch_mako_json(["makoctl", "list", "-j"])
     history_items = _fetch_mako_json(["makoctl", "history", "-j"])
@@ -554,19 +560,19 @@ def fetch_notifications() -> list[NotificationData]:
                 nid = int(item.get("id", -1))
                 if nid < 0 or str(nid) in blacklist:
                     continue
-                app = item.get("app-name", item.get("app_name", ""))
+                app = item.get("app_name") or item.get("app-name") or ""
                 if is_app_ignored(app, ignored_apps):
                     continue
-                summary = item.get("summary", "")
+                summary = item.get("summary") or ""
                 if not summary:
                     continue
                 combined[nid] = NotificationData(
                     id=nid,
                     app_name=app,
                     summary=summary,
-                    body=item.get("body", ""),
+                    body=item.get("body") or "",
                     source=src,
-                    desktop_entry=item.get("desktop-entry", "")
+                    desktop_entry=item.get("desktop_entry") or item.get("desktop-entry") or ""
                 )
             except Exception:
                 pass
@@ -671,7 +677,7 @@ def _sysfs_backlight_candidates() -> tuple[BacklightDevice, ...]:
                 path=entry
             ))
             
-    candidates.sort(key=lambda d: (device := d, (device.priority, device.maximum)), reverse=True)
+    candidates.sort(key=lambda d: (d.priority, d.maximum, d.path.name), reverse=True)
     result = tuple(candidates)
     with _backlight_discovery_lock:
         _backlight_candidates_cache = (time.monotonic(), result)
@@ -728,7 +734,7 @@ def _read_brightnessctl() -> float | None:
     parts = lines[0].split(",")
     if len(parts) < 5:
         return None
-    value = parse_float(parts[4].rstrip("%"))
+    value = parse_float(parts[3].rstrip("%"))
     if value is None:
         return None
     return clamp(value, 0.0, 100.0)
@@ -819,8 +825,8 @@ class DdcManager:
     on multiple buses simultaneously, avoiding the massive sequential blockages of standard ddcutil.
     """
     __slots__ = (
-        "_cache_file", "_detect_thread", "_displays", "_last_requested", 
-        "_lock", "_started", "_workers", "_last_rescan_time", "_thread_pool"
+        "_cache_file", "_detect_thread", "_displays",
+        "_lock", "_started", "_workers", "_last_rescan_time", "_revision"
     )
 
     def __init__(self, cache_file: Path | None) -> None:
@@ -828,11 +834,10 @@ class DdcManager:
         self._lock = threading.Lock()
         self._displays: dict[int, DdcDisplay] = {}
         self._workers: dict[int, LatestValueWorker] = {}
-        self._last_requested: float | None = None
         self._started = False
         self._detect_thread: threading.Thread | None = None
         self._last_rescan_time = 0.0
-        self._thread_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="ddcutil-pool")
+        self._revision = 0
 
     def start(self) -> None:
         if DDCUTIL is None:
@@ -841,12 +846,10 @@ class DdcManager:
             if self._started:
                 return
             self._started = True
-            try:
-                if getattr(self._thread_pool, "_shutdown", False):
-                    self._thread_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="ddcutil-pool")
-            except Exception:
-                self._thread_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="ddcutil-pool")
-            self._load_cache_locked()
+            if not self._displays:
+                self._load_cache_locked()
+            for worker in self._workers.values():
+                worker.start()
         self.request_rescan()
 
     def request_rescan(self) -> None:
@@ -854,12 +857,12 @@ class DdcManager:
             return
         with self._lock:
             now = time.monotonic()
-            if now - self._last_rescan_time < 45.0:
+            if not self._started or (self._last_rescan_time and now - self._last_rescan_time < 45.0):
                 return
-            self._last_rescan_time = now
             thread = self._detect_thread
             if thread is not None and thread.is_alive():
                 return
+            self._last_rescan_time = now
             self._detect_thread = start_thread("ddcutil-detect", self._detect_worker, daemon=True)
 
     def submit(self, value: float) -> None:
@@ -867,37 +870,21 @@ class DdcManager:
             return
         percent = float(percent_int(value, lower=1))
         with self._lock:
-            self._last_requested = percent
-            workers = tuple(self._workers.values())
+            self._revision += 1
+            workers = tuple(worker for bus, worker in self._workers.items()
+                            if self._displays[bus].last_percent is not None)
         for worker in workers:
             worker.submit(percent)
 
     def current_percent(self) -> float | None:
-        with self._lock:
-            has_displays = bool(self._displays)
-            last_requested = self._last_requested
-            should_rescan = self._started if not has_displays else False
-            if not has_displays:
-                result = None
-            elif last_requested is not None:
-                result = last_requested
-            else:
-                result = NO_PENDING
-                
-        if should_rescan:
-            self.request_rescan()
-        if result is None:
-            return None
-        if result is not NO_PENDING:
-            return float(result)
-            
+        self.request_rescan()
         with self._lock:
             if not self._displays:
                 return None
             for bus in sorted(self._displays):
                 if (value := self._displays[bus].last_percent) is not None:
                     return value
-            return 50.0
+            return None
 
     def has_displays(self) -> bool:
         with self._lock:
@@ -907,13 +894,8 @@ class DdcManager:
         with self._lock:
             self._started = False
             workers = tuple(self._workers.values())
-            self._workers.clear()
         for worker in workers:
             worker.stop(timeout)
-        try:
-            self._thread_pool.shutdown(wait=False, cancel_futures=True)
-        except Exception:
-            pass
 
     def _load_cache_locked(self) -> None:
         if self._cache_file is None or not self._cache_file.is_file():
@@ -969,6 +951,10 @@ class DdcManager:
             self._detect_worker_impl()
         except Exception as e:
             LOG.error("Failed DDC display discovery sequence: %s", e)
+        finally:
+            with self._lock:
+                if not self._started:
+                    self._last_rescan_time = 0.0
 
     def _detect_worker_impl(self) -> None:
         if DDCUTIL is None:
@@ -976,48 +962,47 @@ class DdcManager:
         result = run_command([DDCUTIL, "detect", "--terse"], timeout=DDC_DETECT_TIMEOUT, capture_stdout=True)
         if result is None or result.returncode != 0:
             return
+        with self._lock:
+            if not self._started:
+                return
+            revision = self._revision
         buses = self._parse_detect_buses(result.stdout)
         
         # Bleeding-edge Optimization: Query all monitors concurrently via ThreadPool!
         discovered: dict[int, DdcDisplay] = {}
         futures: dict[Future[DdcDisplay | None], int] = {}
         
-        for bus in buses:
-            try:
-                fut = self._thread_pool.submit(self._query_display, bus)
+        with ThreadPoolExecutor(max_workers=4, thread_name_prefix="ddcutil-query") as pool:
+            for bus in buses:
+                fut = pool.submit(self._query_display, bus)
                 futures[fut] = bus
-            except (RuntimeError, AttributeError):
-                return
-            
-        for fut in as_completed(futures):
-            bus = futures[fut]
-            try:
-                display = fut.result()
-                if display is not None:
-                    discovered[bus] = display
-            except Exception as e:
-                LOG.warning("Failed querying DDC monitor on bus %d: %s", bus, e)
+            for fut in as_completed(futures):
+                bus = futures[fut]
+                try:
+                    display = fut.result()
+                    if display is not None:
+                        discovered[bus] = display
+                except Exception as e:
+                    LOG.warning("Failed querying DDC monitor on bus %d: %s", bus, e)
                 
         removed_workers: list[LatestValueWorker] = []
         with self._lock:
             if not self._started:
                 return
             old_buses = set(self._displays)
-            new_buses = set(discovered)
+            # A temporary getvcp failure must not remove a still-detected display.
+            new_buses = set(buses)
             for bus in old_buses - new_buses:
                 self._displays.pop(bus, None)
                 if (worker := self._workers.pop(bus, None)) is not None:
                     removed_workers.append(worker)
             for bus, display in discovered.items():
-                self._ensure_display_locked(bus, display.max_value, display.last_percent)
-            last_requested = self._last_requested
-            workers = tuple(self._workers.values())
+                # Do not overwrite a slider change made while discovery ran.
+                percent = display.last_percent if revision == self._revision or bus not in self._displays else None
+                self._ensure_display_locked(bus, display.max_value, percent)
             
         for worker in removed_workers:
             worker.stop(0.25)
-        if last_requested is not None:
-            for worker in workers:
-                worker.submit(last_requested)
         self._save_cache_snapshot()
 
     @staticmethod
@@ -1088,9 +1073,11 @@ HAS_BRIGHTNESS: Final[bool] = HAS_LOCAL_BRIGHTNESS or HAS_DDC_BRIGHTNESS
 HAS_SUNSET: Final[bool] = HYPRCTL is not None and HYPRSUNSET is not None and bool(os.environ.get("HYPRLAND_INSTANCE_SIGNATURE"))
 
 def get_brightness() -> float | None:
+    if DDC_MANAGER is not None:
+        DDC_MANAGER.request_rescan()
     if (value := _read_sysfs_brightness()) is not None:
         return value
-    if (value := _read_brightnessctl()) is not None:
+    if HAS_LOCAL_BRIGHTNESS and (value := _read_brightnessctl()) is not None:
         return value
     if DDC_MANAGER is None:
         return None
@@ -1106,30 +1093,40 @@ def apply_local_brightness(value: float) -> None:
         return
     run_command([*base_cmd, "--quiet", "set", f"{brightness}%"], timeout=CONTROL_TIMEOUT)
 
-_IS_SUNSET_SERVICE_ENABLED: bool | None = None
-_IS_NOTIF_TIME_SERVICE_ENABLED: bool | None = None
+_SERVICE_ENABLED_CACHE: dict[str, bool] = {}
+_SERVICE_ENABLED_LOCK = threading.Lock()
+_SERVICE_ENABLED_REVISION = 0
+
+def invalidate_service_enabled_cache() -> None:
+    """UnitFilesChanged invalidates cached enablement without hidden polling."""
+    global _SERVICE_ENABLED_REVISION
+    with _SERVICE_ENABLED_LOCK:
+        _SERVICE_ENABLED_CACHE.clear()
+        _SERVICE_ENABLED_REVISION += 1
+
+def _is_service_enabled(service: str, force_check: bool = False) -> bool:
+    with _SERVICE_ENABLED_LOCK:
+        cached = _SERVICE_ENABLED_CACHE.get(service)
+        revision = _SERVICE_ENABLED_REVISION
+    if cached is not None and not force_check:
+        return cached
+    if SYSTEMCTL is None:
+        return False
+    result = run_command([SYSTEMCTL, "--user", "is-enabled", service], timeout=0.5, capture_stdout=True)
+    if result is None or not result.stdout.strip():
+        return cached if cached is not None else False
+    enabled = result.returncode == 0
+    with _SERVICE_ENABLED_LOCK:
+        # A query that overlapped an enable/disable must not refill a stale cache.
+        if revision == _SERVICE_ENABLED_REVISION:
+            _SERVICE_ENABLED_CACHE[service] = enabled
+    return enabled
 
 def is_dusky_notif_time_service_enabled(force_check: bool = False) -> bool:
-    global _IS_NOTIF_TIME_SERVICE_ENABLED
-    if _IS_NOTIF_TIME_SERVICE_ENABLED is not None and not force_check:
-        return _IS_NOTIF_TIME_SERVICE_ENABLED
-    if SYSTEMCTL is None:
-        _IS_NOTIF_TIME_SERVICE_ENABLED = False
-        return False
-    result = run_command([SYSTEMCTL, "--user", "is-enabled", "dusky_notif_time.service"], timeout=0.5, capture_stdout=True)
-    _IS_NOTIF_TIME_SERVICE_ENABLED = result is not None and result.returncode == 0
-    return _IS_NOTIF_TIME_SERVICE_ENABLED
+    return _is_service_enabled("dusky_notif_time.service", force_check)
 
 def is_hyprsunset_service_enabled(force_check: bool = False) -> bool:
-    global _IS_SUNSET_SERVICE_ENABLED
-    if _IS_SUNSET_SERVICE_ENABLED is not None and not force_check:
-        return _IS_SUNSET_SERVICE_ENABLED
-    if SYSTEMCTL is None or HYPRSUNSET is None:
-        _IS_SUNSET_SERVICE_ENABLED = False
-        return False
-    result = run_command([SYSTEMCTL, "--user", "is-enabled", "hyprsunset.service"], timeout=0.5, capture_stdout=True)
-    _IS_SUNSET_SERVICE_ENABLED = result is not None and result.returncode == 0
-    return _IS_SUNSET_SERVICE_ENABLED
+    return HYPRSUNSET is not None and _is_service_enabled("hyprsunset.service", force_check)
 
 def get_hyprsunset_state(controller: HyprsunsetController | None = None) -> float | None:
     if not is_hyprsunset_service_enabled():
@@ -1166,7 +1163,9 @@ class HyprsunsetController:
         self._fallback_process: subprocess.Popen[bytes] | None = None
 
     def get_target_temperature(self) -> float | None:
-        return self._current_target
+        if self._worker.is_busy() or self._state_writer.is_busy():
+            return self._current_target
+        return None
 
     def submit(self, value: float) -> None:
         target = float(kelvin_value(value))
@@ -1194,10 +1193,12 @@ class HyprsunsetController:
         self._spawn_fallback_process(target)
         if self._wait_until_applied(target, SUNSET_FALLBACK_READY_TIMEOUT):
             return
+        if self._current_target == float(target):
+            self._current_target = None
+        LOG.warning('Failed to apply sunset temperature %d K', target)
 
     def _mark_applied(self, target: int) -> None:
         self._ready.set()
-        self._current_target = float(target)
         self._state_writer.schedule(float(target))
 
     def _wait_until_applied(self, target: int, timeout: float) -> bool:

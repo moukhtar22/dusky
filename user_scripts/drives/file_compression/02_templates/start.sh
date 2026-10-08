@@ -1,71 +1,92 @@
 #!/usr/bin/env bash
-# Universal Start — auto-detects native ELF vs Wine EXE, intelligent single template (Aug 2026)
-# Replaces start.native.sh + start.wine.sh — fully dynamic, no hardcoded user/cpu
-# Usage: cp 02_templates/start.sh /path/to/Game/start.sh && edit CMD auto-detected
-cd "$(dirname "$(readlink -f "$0")")" || exit 1
-cat << 'EOF'
-Support can be provided on our Matrix channel.
-Pain heals, chicks dig scars; Glory lasts forever!
-EOF
-source "$PWD/actions.sh"
-# Dynamic checks (no hardcoded HOME/USER)
-[ -z "${EXTRACT:-}" ] && echo "Delete ~/.jc141rc and re-run" && exit 1
-[ ! -d "${JC_DIRECTORY:-$HOME/Games/jc141}/native-docs" ] && mkdir -p "${JC_DIRECTORY:-$HOME/Games/jc141}/native-docs"
-[ "${TERMINAL_OUTPUT:-1}" = 0 ] && exec &> /dev/null
-[ "${EXTRACT:-0}" = 0 ] && dwarfs-mount || { dwarfs-extract && UNMOUNT=0; }
-# Trap respects GAMESCOPE vs plain
-if command -v gamescope &>/dev/null && [ "${GAMESCOPE:-0}" = 1 ]; then
-  [ "${UNMOUNT:-1}" = 1 ] && trap jc141-cleanup-gamescope EXIT INT SIGINT SIGTERM HUP
-else
-  [ "${UNMOUNT:-1}" = 1 ] && trap jc141-cleanup EXIT INT SIGINT SIGTERM HUP
-fi
-GAMEROOT="$PWD/files/game-root"
+# Copy beside actions.sh in a game directory; configure with local.config.
+GAME_DIR=$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")") || exit 1
+export GAME_DIR
+# shellcheck disable=SC1091
+source "$GAME_DIR/actions.sh" || exit 1
+[[ ${TERMINAL_OUTPUT:-1} != 0 ]] || exec &>/dev/null
+mount_lock --nonblock || exit 1
 
-# --- Auto-detect intelligent CMD ---
-# Priority: 1) ColdClientLoader/steamclient 2) native ELF 3) first .exe
-# Override via local.config: CUSTOM_CMD="./MyGame.x86_64 --flag"
-if [ -n "${CUSTOM_CMD:-}" ]; then
-  # shellcheck disable=SC2206
-  CMD=($CUSTOM_CMD)
-elif [ -f "$GAMEROOT/steamclient_loader_x64.exe" ] || [ -f "$GAMEDIR/files/game-root/steamclient_loader_x64.exe" ]; then
-  # Wine + ColdClientLoader (CRUEL, Crushed, etc.)
-  [ -z "${SYSWINE:-}" ] && echo "wine not found — edit ~/.jc141rc SYSWINE" >&2
-  export WINE="$SYSWINE"; export WINESERVER="${SYSWINE}server"; export WINEPREFIX="${JC_DIRECTORY:-$HOME/Games/jc141}/wine-prefix-ew"
-  export WINEDLLOVERRIDES="winemenubuilder.exe=d;mshtml=d;d3d9,d3d10core,d3d11,dxgi=n;d3d12,d3d12core=n"
-  export WINE_LARGE_ADDRESS_AWARE=1; export WINEDEBUG=fixme-all
-  [ ! -d "$WINEPREFIX" ] && wine-initiate_prefix
-  CMD=("$SYSWINE" "steamclient_loader_x64.exe" "$@")
-elif exe=$(find "$GAMEROOT" -maxdepth 3 -type f \( -name "*.x86_64" -o -name "*.bin.x86_64" \) -print -quit 2>/dev/null); [ -n "$exe" ]; then
-  # Native ELF (Hollow Knight, Darkwood, etc.) — ultra-fast -print -quit halts traversal instantly
-  CMD=("$exe" "$@")
-elif exe=$(find "$GAMEROOT" -maxdepth 3 -type f -name "*.exe" -print -quit 2>/dev/null); [ -n "$exe" ]; then
-  # Direct Wine EXE (universe.exe, Game.exe)
-  [ -z "${SYSWINE:-}" ] && echo "wine not found" >&2
-  export WINE="$SYSWINE"; export WINEPREFIX="${JC_DIRECTORY:-$HOME/Games/jc141}/wine-prefix-ew"
-  [ ! -d "$WINEPREFIX" ] && wine-initiate_prefix
-  CMD=("$SYSWINE" "$(basename "$exe")" "$@")
+mounted=0
+cleanup() {
+    local status=$?
+    trap - EXIT INT TERM HUP
+    if [[ $mounted == 1 && ${UNMOUNT:-1} == 1 ]]; then
+        cd -- "$GAME_DIR" || exit 1
+        dwarfs-unmount || { (( status != 0 )) || status=1; }
+    fi
+    exit "$status"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM HUP
+if [[ ${EXTRACT:-0} == 1 ]]; then
+    dwarfs-extract || exit 1
 else
-  echo "No executable detected in $GAMEROOT — set CUSTOM_CMD in local.config" >&2; exit 1
+    already_mounted=0
+    is_mounted "$GAME_ROOT" && already_mounted=1
+    if dwarfs-mount; then
+        if [[ $already_mounted == 0 ]] && is_mounted "$GAME_ROOT"; then mounted=1; fi
+    else
+        # A failed unmount must never be followed by extraction into that mount.
+        dwarfs-unmount || exit 1
+        dwarfs-extract || exit 1
+    fi
 fi
 
-# --- Build RUN pipeline (dynamic) ---
-declare -a RUN
-if command -v gamescope &>/dev/null && [ "${GAMESCOPE:-0}" = 1 ]; then RUN+=( gamescope-run_embedded ); fi
-if command -v bwrap &>/dev/null && [ "${ISOLATE:-0}" = 1 ]; then
-  # Auto-detect isolation type
-  if [[ " ${CMD[*]} " == *"wine"* ]] || [[ " ${CMD[*]} " == *".exe"* ]]; then export ISOLATION_TYPE='wine'; else export ISOLATION_TYPE='native'; fi
-  RUN+=( bash 'actions.sh' bwrap-run_in_sandbox --chdir "$GAMEROOT" )
+CMD=()
+wine_game=0
+if [[ $(declare -p CUSTOM_CMD 2>/dev/null) == 'declare -a '* ]]; then
+    CMD=("${CUSTOM_CMD[@]}")
+elif [[ -n ${CUSTOM_CMD:-} ]]; then
+    parse_words "$CUSTOM_CMD" || exit 1
+    CMD=("${WORDS[@]}")
+elif [[ -f $GAME_ROOT/steamclient_loader_x64.exe ]]; then
+    exe=$GAME_ROOT/steamclient_loader_x64.exe
+    wine_game=1
 else
-  cd "$GAMEROOT" || exit 1
+    exe=
+    IFS= read -r -d '' exe < <(find "$GAME_ROOT" -maxdepth 3 -type f -name '*.x86_64' -executable -print0 -quit)
+    if [[ -n $exe ]]; then
+        CMD=("$exe")
+    else
+        IFS= read -r -d '' exe < <(find "$GAME_ROOT" -maxdepth 3 -type f -iname '*.exe' -print0 -quit)
+        [[ -n $exe ]] || { log_error "No executable in $GAME_ROOT; set CUSTOM_CMD in local.config."; exit 1; }
+        wine_game=1
+    fi
 fi
-# Env override (ENV="...")
-if [ -n "${ENV:-}" ]; then RUN+=( bash -c "$ENV" ); fi
-RUN+=( "${CMD[@]}" )
-
-# Gamescope wineserver quirk (Aug 2026)
-if command -v gamescope &>/dev/null && [ "${GAMESCOPE:-0}" = 1 ] && [[ "${ISOLATION_TYPE:-}" == "wine" ]]; then
-  "$SYSWINE"server -p -f & wineserver_pid=$!
-  "${RUN[@]}"
+if [[ $wine_game == 1 ]]; then
+    SYSWINE=${SYSWINE:-wine}
+    wine_path=$(command -v "$SYSWINE") || { log_error "Wine executable missing: $SYSWINE"; exit 1; }
+    SYSWINE=$wine_path
+    [[ $SYSWINE != */* ]] || SYSWINE=$(realpath -e -- "$SYSWINE") || exit 1
+    WINEPREFIX=${WINEPREFIX:-$JC_DIRECTORY/wine-prefix-ew}
+    export WINEDEBUG=${WINEDEBUG:-fixme-all}
+    export WINEDLLOVERRIDES=${WINEDLLOVERRIDES:-'winemenubuilder.exe=d;mshtml=d;d3d9,d3d10core,d3d11,dxgi=n;d3d12,d3d12core=n'}
+    # Wine initializes a missing prefix itself. Keep the absolute executable path.
+    CMD=("$SYSWINE" "$exe")
+    export ISOLATION_TYPE=wine
 else
-  "${RUN[@]}"
+    export ISOLATION_TYPE=${ISOLATION_TYPE:-native}
+fi
+if [[ -n ${WINEPREFIX:-} || ${ISOLATION_TYPE:-native} == wine ]]; then
+    WINEPREFIX=$(game_path "${WINEPREFIX:-$JC_DIRECTORY/wine-prefix-ew}") || exit 1
+    export WINEPREFIX
+fi
+(( ${#CMD[@]} )) || { log_error 'CUSTOM_CMD is empty.'; exit 1; }
+CMD+=("$@")
+cd -- "$GAME_ROOT" || exit 1
+RUN=("${CMD[@]}")
+if [[ ${ISOLATE:-0} == 1 ]]; then
+    RUN=(bash "$GAME_DIR/actions.sh" bwrap-run_in_sandbox "${RUN[@]}")
+fi
+if [[ -n ${ENV:-} ]]; then
+    # ENV is trusted shell setup from the user's configuration; arguments remain
+    # positional parameters rather than being interpolated into shell code.
+    RUN=(bash -c "$ENV"$'\nexec "$@"' bash "${RUN[@]}")
+fi
+if [[ ${GAMESCOPE:-0} == 1 ]]; then
+    run_managed gamescope-run_embedded "${RUN[@]}"
+else
+    run_managed "${RUN[@]}"
 fi

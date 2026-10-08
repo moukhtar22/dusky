@@ -20,8 +20,10 @@ Everything you need to write, edit, and debug updater `.toml` profiles.
 
 Profiles are `*.toml` files in `profiles/` (or `$DUSKY_UPDATER_PROFILES_DIR`).
 `--profile` takes a filename stem, a full filename, or an explicit path.
-If the requested profile is missing, the updater silently falls back to the
-first file in alphabetical order; if none exist it exits with a fatal error.
+An unknown or ambiguous explicit profile is a fatal error listing available
+profiles; the updater never silently runs a different profile. Malformed TOML
+reports the file and parse error; missing-comma auto-repair is in-memory only
+for `--dry-run` and otherwise warns with the repair location.
 
 ---
 
@@ -148,6 +150,8 @@ re-evaluated on every future run).
 
 Multiple `if:` flags are AND'd. Both colon forms and bare keywords work together:
 a bare keyword (`wayland`, `battery`, `x11`, …) is treated as its own condition.
+Condition values are case-sensitive (env vars, paths, units); repeated `if:`
+flags express AND.
 
 ```toml
 "U | if:gpu:nvidia,if:not:vm | 380_nvidia_open_source.sh --auto"   # ✓ all parts carry a value
@@ -156,15 +160,18 @@ a bare keyword (`wayland`, `battery`, `x11`, …) is treated as its own conditio
 
 > A comma inside a single condition value (`command:ls,battery`) is not
 > currently supported — commas separate conditions, and a value is not split
-> back. Keep condition values comma-free.
+> back. Keep condition values comma-free. Unknown conditions/modes/flags and
+> malformed quoting are fatal manifest errors; `not:<unknown>` is false (never
+> true via negation).
 
 ### Evaluation Caching
 
 Stable hardware/session conditions (`wayland`, `x11`, `graphical`, `ssh`,
-`desktop`, `battery`, `btrfs`, `vm`, `baremetal`, `gpu`, `group`, `env`) are
-evaluated once per run and cached. Everything else (`package`, `command`,
-`path`, `file`, `dir`, `missing`, `service_active`, `user_service_active`) is
-re-checked for every task, so earlier tasks can satisfy them.
+`desktop`, `battery`, `btrfs`, `vm`, `baremetal`, `gpu`) are evaluated once
+per run and cached. Everything else (`package`, `command`, `path`, `file`,
+`dir`, `missing`, `service_active`, `user_service_active`, `group`, `env`) is
+re-checked for every task, so earlier tasks can satisfy them (e.g. group
+membership changed mid-run).
 
 ---
 
@@ -280,6 +287,7 @@ python3 update_dusky.py [OPTIONS]
 | `--stop-on-fail` | Abort on the first failure, even `ignore-fail` ones |
 | `--allow-diverged-reset` | In non-interactive mode, allow a hard reset on diverged or unrelated git history |
 | `--post-self-update` | Internal: re-entry after the updater itself was updated by sync |
+| `--handoff PATH` | Internal: bound restart-handoff file consumed once after a self-update restart |
 
 ---
 
@@ -287,12 +295,15 @@ python3 update_dusky.py [OPTIONS]
 
 **Phase 1 — Git sync.** Five GIT tasks are always injected at the start of the
 sequence: `Git Bare Repo Validation`, `Fetch Upstream & Diff`,
-`Forensic Collision Backup`, `Atomic Snapshot (CoW)`,
+`Forensic Collision Backup`, `Snapshot`,
 `Apply Bare Updates (Reset)`. A failure here **halts the entire update** to
 protect the system. `--skip-sync` and `--dry-run` bypass the phase (tasks shown
 skipped). `--sync-only` ends after this phase. If the updater script itself was
-changed by the sync, the updater re-executes itself with the new version before
-starting Phase 2.
+changed by the sync, the updater validates the new files first and then
+restarts into the new version before starting Phase 2, preserving the
+operation lock across exec and carrying exact git outcomes plus the sudo
+askpass (never password bytes) in a bound single-use handoff file. A missing
+or invalid handoff runs a normal sync instead of trusting skipped tasks.
 
 **Phase 2 — Sequence.** For each task: condition check (§4 — a false condition
 defers the task and it is re-checked in later passes up to `max_defer_passes`),
@@ -313,14 +324,57 @@ group and is reported as exit 124.
 **Sudo.** If any task is `S` mode, a sudo preflight runs before the sequence
 (sudoers drop-in `99_dusky_*` in `/etc/sudoers.d`, temporary askpass helper in
 the runtime dir, credential keep-alive heartbeat — 60 s per the shipped
-settings, `[sudo] heartbeat_interval`). Sudo password prompts are auto-answered
-from the cached credential, and sudo inherits `DUSKY_*` and other environment
+settings, `[sudo] heartbeat_interval`). Sudo runs non-interactively (`-A` with
+the askpass helper, or `-n` fail-fast). By default, child-output password
+prompts are ignored (routing auth through askpass only), but can be automatically
+fed from the cached sudo credential if `allow_insecure_password_autofeed = true`
+is enabled in `[prompts]` (§12). Sudo inherits `DUSKY_*` and other environment
 variables via `env_keep` (§12).
+Invalid or timed-out drop-ins are never installed live: content is staged
+outside the include directory, validated with `visudo` first, installed
+atomically, and the install exit status is reported truthfully.
 
-Main log files (`dusky_update_*.log`) and backup directories older than the
-retention window (`[paths] log_retention_days` / `backup_retention_days`,
-default 14 days) are pruned automatically at the start of a run. Per-run log
-folders are kept indefinitely.
+**Recovery data.** Invalid incoming scripts are blocked at the syntax gate and
+restored from the previous working local commit to ensure the updater never leaves
+a broken machine state. Staged/index content is preserved under
+`your_changes_<ts>/.meta/staged/` with modes; staging is never auto-restored
+(intentional policy: any staged blob, mode change, or staged deletion keeps
+the backup as `pending-staged`; byte equality with the worktree never resolves
+staging alone), so backups holding unrestored staging are retained and
+never auto-pruned. Unexpected directories are preserved in conflict backups, never deleted.
+File restores preserve executable modes (`0755`/`0644`) and are verified
+(content/type/mode) before the backup is deleted; failures leave both
+destination and payload recoverable.
+
+**Child-input keys.** During PTY work, `Ctrl+O` toggles child-input mode. In
+this mode ONLY `Ctrl+O` (exit mode) and `Ctrl+Q` (emergency abort) are
+reserved; every other key — including `Escape` (`\x1b`), `Ctrl+F`/`Ctrl+L`,
+function keys, `Tab`, arrows, and printable characters — is forwarded to the
+child. Unrelated app bindings are disabled in this mode; search inputs and
+modals still receive keys normally.
+
+**Dependencies.** No auto-installation. If `textual`/`rich` are missing, the
+updater exits with the exact `sudo pacman -S` command before any mutation.
+`--help`/`--version`/`--doctor`/`--list`/`--list-once`/`--forget-once` and
+`--dry-run` never install packages.
+
+**Settings.** `DUSKY_UPDATER_SETTINGS` selects an explicit settings file; a
+malformed or invalid explicitly selected file is rejected (exit 2) before any
+mutation — never silently replaced by defaults. Invalid table types are
+reported by `validate_global_config`, never traceback at import.
+
+**Reports.** Final reports derive verdicts/counters from real outcomes:
+missing required scripts or failures never appear as full success
+(`WARNINGS`), aborts show `ABORTED`, dry-runs show `DRY-RUN`. Git/resolution
+aborts, cancellations (130), and unexpected exceptions all finalize tails,
+write reports, and set exit codes consistently.
+
+Main log files (`dusky_update_*.log`) and *completed* `your_changes_*`
+backups older than the retention window (`[paths] log_retention_days` /
+`backup_retention_days`, default 14 days) are pruned automatically at the
+start of a run. Collision, manual-merge, history, snapshot, staged, and
+quarantine recovery data is never auto-pruned. Per-run log folders are kept
+indefinitely.
 
 ---
 
@@ -341,11 +395,11 @@ environment (there are no per-task `DUSKY_*` exports):
 | What | Path |
 | :--- | :--- |
 | Profiles | `~/user_scripts/update_dusky/python/profiles/` |
-| Per-profile run state DB | `~/Documents/state/<Profile_Name>.db` |
+| Per-profile run state DB | `~/Documents/state/<profile-file-identity>.db` (identity = resolved profile file; legacy display-name DBs migrate once by rename) |
 | Persistent once markers | `~/Documents/state/once.db` |
-| Run logs | `~/Documents/logs/` — main log `dusky_update_<ts>_*.log` plus a per-run folder `<ts>_<Profile>_<run_id>/` with `dusky_update.log`, per-task `NNN_<script>.log`, and `report.json` / `report.md` |
-| Git sync backups | `~/Documents/dusky_backups/` (`moved_aside_*`, `your_changes_*`, `full_snapshot_*`, `repo_history_*`, `manual_merge_*`) |
-| Runtime dir (lock, askpass) | `/run/user/<UID>/dusky-updater/` (lock file, `askpass/`; falls back to `/tmp/dusky-updater-<UID>`) |
+| Run logs | `~/Documents/logs/` — main log `dusky_update_<ts>_*.log` plus a per-run folder `<ts>_<Profile>_<run_id>/` with `dusky_update.log`, per-task `NNN_<script>.log`, and `report.json` / `report.md` (reports carry outcome/reason/exit-code/attempts/duration per task) |
+| Git sync backups | `~/Documents/dusky_backups/` (`moved_aside_*`, `your_changes_*`, `full_snapshot_*`, `repo_history_*`, `manual_merge_*`; payload under `payload/`, metadata under `.meta/`) |
+| Runtime dir (lock, askpass, restart handoff) | `/run/user/<UID>/dusky-updater/` (lock file, `askpass/`; falls back to `/tmp/dusky-updater-<UID>`) |
 | Git bare repo | `~/dusky` (work tree: `~`) |
 
 > These are the **defaults** — every path is overridable in
@@ -369,7 +423,7 @@ the file only needs to exist when you want to change something.
 | `[notifications]` | Desktop notifications, audio cues, audio players, sound files |
 | `[sudo]` | Heartbeat interval, sudoers drop-in dir/prefix/timeout, `env_keep` |
 | `[git]` | Upstream branch/repo defaults, fetch/clone timeouts & retries, env strip/inject |
-| `[prompts]` | Auto-answer rules for interactive prompts (sudo password, pacman `[Y/n]`) |
+| `[prompts]` | Auto-answer rules for interactive prompts (sudo password, pacman `[Y/n]`), `allow_insecure_password_autofeed`, prompt cooldown |
 
 ---
 

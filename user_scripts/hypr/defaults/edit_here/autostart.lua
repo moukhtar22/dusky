@@ -42,7 +42,6 @@ hl.on("hyprland.start", function()
 
     -- --- OPTIONAL / USER INTERFACE ---
     hl.exec_cmd("$HOME/user_scripts/waybar/waybar_toggle.sh")
-    -- hl.exec_cmd("$HOME/user_scripts/waybar/toggle_timer_waybar.sh")
     -- hl.exec_cmd("nm-applet")
 
 

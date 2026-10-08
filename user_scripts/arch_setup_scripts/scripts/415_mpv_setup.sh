@@ -1,326 +1,121 @@
 #!/usr/bin/env bash
-#d: Configure MPV with modern controls
+#d: Configure Dusky Player (offline, system fonts)
 
 set -euo pipefail
-shopt -s nullglob  # Globs that match nothing expand to nothing
+shopt -s globstar nullglob
 
-# --- Configuration ---
-readonly XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
-readonly MPV_CONFIG_DIR="$XDG_CONFIG_HOME/mpv"
-readonly SCRIPTS_DIR="$MPV_CONFIG_DIR/scripts"
+SCRIPT_PATH=$(readlink -f -- "${BASH_SOURCE[0]}")
+SETUP_DIR=$(cd -- "${SCRIPT_PATH%/*}/../../mpv/setup" && pwd)
+readonly SETUP_DIR
+readonly ASSETS_DIR="$SETUP_DIR/assets"
+readonly MPV_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/mpv"
+readonly DEPENDENCIES=(mpv yt-dlp mpv-mpris)
+BACKUP_ID=$(date +%Y%m%d_%H%M%S_%N)
+readonly BACKUP_ID
 
-readonly UOSC_URL="https://github.com/tomasklaen/uosc/releases/latest/download/uosc.zip"
-readonly THUMBFAST_REPO="https://github.com/po5/thumbfast.git"
+log_info() { printf '[INFO] %s\n' "$1"; }
+log_warn() { printf '[WARN] %s\n' "$1" >&2; }
+die() { printf '[ERROR] %s\n' "$1" >&2; exit 1; }
 
-readonly DEPENDENCIES=(mpv unzip git curl yt-dlp mpv-mpris)
-
-# --- Colors ---
-if [[ -t 1 ]]; then
-    readonly C_RESET=$'\033[0m'
-    readonly C_GREEN=$'\033[1;32m'
-    readonly C_BLUE=$'\033[1;34m'
-    readonly C_RED=$'\033[1;31m'
-    readonly C_YELLOW=$'\033[1;33m'
-else
-    readonly C_RESET='' C_GREEN='' C_BLUE='' C_RED='' C_YELLOW=''
-fi
-
-# --- Logging ---
-log_info()    { printf "${C_BLUE}[INFO]${C_RESET} %s\n" "$1"; }
-log_success() { printf "${C_GREEN}[OK]${C_RESET} %s\n" "$1"; }
-log_warn()    { printf "${C_YELLOW}[WARN]${C_RESET} %s\n" "$1" >&2; }
-log_error()   { printf "${C_RED}[ERROR]${C_RESET} %s\n" "$1" >&2; }
-
-# --- Cleanup Trap ---
-TEMP_DIR=""
+TEMP_FILE=''
 cleanup() {
-    if [[ -n "${TEMP_DIR:-}" && -d "$TEMP_DIR" ]]; then
-        rm -rf -- "$TEMP_DIR"
+    if [[ -n "$TEMP_FILE" ]]; then
+        rm -f -- "$TEMP_FILE"
     fi
 }
 trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
-# --- Function: Smart File Update ---
-install_config_file() {
-    local target_path="$1"
-    local new_content="$2"
-    local temp_file="$TEMP_DIR/$(basename "$target_path").tmp"
+# Replace changed files atomically on the destination filesystem. Backups stay
+# outside scripts/ so mpv cannot accidentally load a backed-up Lua script.
+install_file() {
+    local source=$1 relative=$2
+    local target="$MPV_CONFIG_DIR/$relative" backup
 
-    printf "%s\n" "$new_content" > "$temp_file"
-
-    if [[ -f "$target_path" ]]; then
-        if cmp -s -- "$target_path" "$temp_file"; then
-            log_info "Configuration for $(basename "$target_path") is up to date."
-            return
+    if [[ ! -L "$target" ]] && cmp -s -- "$source" "$target"; then
+        # Restore executable permission if it was lost on an existing helper.
+        if [[ -x "$source" && ! -x "$target" ]]; then
+            chmod --reference="$source" -- "$target"
         fi
-        local timestamp
-        timestamp=$(date +%Y%m%d_%H%M%S)
-        local backup="${target_path}.bak.${timestamp}"
-        cp -- "$target_path" "$backup"
-        log_warn "Changes detected. Backed up $(basename "$target_path") -> $(basename "$backup")"
+        return
     fi
 
-    mv -- "$temp_file" "$target_path"
-    log_success "Updated $(basename "$target_path")."
+    mkdir -p -- "${target%/*}"
+    TEMP_FILE=$(mktemp "${target%/*}/.mpv-setup.XXXXXXXX")
+    cp -- "$source" "$TEMP_FILE"
+    chmod --reference="$source" -- "$TEMP_FILE"
+
+    if [[ -e "$target" || -L "$target" ]]; then
+        backup="$MPV_CONFIG_DIR/setup-backups/$BACKUP_ID/$relative"
+        mkdir -p -- "${backup%/*}"
+        cp -a -- "$target" "$backup"
+        log_warn "Backed up $relative to setup-backups/$BACKUP_ID/$relative"
+    fi
+
+    mv -fT -- "$TEMP_FILE" "$target"
+    TEMP_FILE=''
+    log_info "Installed $relative"
 }
 
-# ==============================================================================
-# Main Execution
-# ==============================================================================
+log_info 'Starting Dusky Player setup.'
 
-log_info "Starting MPV Setup..."
-TEMP_DIR=$(mktemp -d)
+# Detect an incomplete ISO bundle before changing the installed configuration.
+for relative in scripts/dusky_player/main.lua scripts/dusky_player/lib/icons.lua scripts/dusky_thumbnails.lua; do
+    [[ -s "$ASSETS_DIR/$relative" ]] || die "Missing bundled asset: $relative"
+done
+for relative in mpv.conf input.conf script-opts/dusky_player.conf; do
+    [[ -s "$SETUP_DIR/config/$relative" ]] || die "Missing configuration: $relative"
+done
 
-# --- Network Detection ---
-NETWORK_AVAILABLE=true
-# Fast, dependency-free Bash native TCP check to ensure connectivity
-if ! timeout 2 bash -c '</dev/tcp/github.com/443' 2>/dev/null; then
-    NETWORK_AVAILABLE=false
-    log_warn "No internet connection detected. Operating in offline mode."
-fi
-
-# ------------------------------------------------------------------------------
-# Step 1: Smart Dependency Check
-# ------------------------------------------------------------------------------
-log_info "Checking installed packages..."
 MISSING_PKGS=()
 for pkg in "${DEPENDENCIES[@]}"; do
-    if ! pacman -Qi "$pkg" &>/dev/null; then
+    if ! pacman -Q "$pkg" &>/dev/null; then
         MISSING_PKGS+=("$pkg")
     fi
 done
-
-if [[ ${#MISSING_PKGS[@]} -gt 0 ]]; then
-    log_warn "Missing packages detected: ${MISSING_PKGS[*]}"
-    if [[ "$NETWORK_AVAILABLE" == false ]]; then
-        log_warn "Cannot install packages in offline mode. Exiting gracefully."
-        exit 0
-    fi
-    if ! sudo pacman -S --needed --noconfirm "${MISSING_PKGS[@]}"; then
-        log_error "Failed to install packages."
-        exit 1
-    fi
-    log_success "Dependencies installed."
-else
-    log_success "All dependencies already installed."
-fi
-
-# ------------------------------------------------------------------------------
-# Step 2: Directory Setup
-# ------------------------------------------------------------------------------
-mkdir -p "$SCRIPTS_DIR"
-
-# ------------------------------------------------------------------------------
-# Step 3: Install UOSC
-# ------------------------------------------------------------------------------
-if [[ -d "$MPV_CONFIG_DIR/scripts/uosc" && -f "$MPV_CONFIG_DIR/script-opts/uosc.conf" ]]; then
-    log_info "UOSC appears to be installed."
-else
-    if [[ "$NETWORK_AVAILABLE" == false ]]; then
-        log_warn "Cannot download UOSC in offline mode. Exiting gracefully."
-        exit 0
-    fi
-    if ! curl -fsSL --connect-timeout 30 --retry 3 --retry-delay 2 "$UOSC_URL" -o "$TEMP_DIR/uosc.zip"; then
-        log_error "Failed to download UOSC."
-        exit 1
-    fi
-    if ! unzip -qo "$TEMP_DIR/uosc.zip" -d "$MPV_CONFIG_DIR"; then
-        log_error "Failed to unzip UOSC."
-        exit 1
-    fi
-    log_success "UOSC installed."
-fi
-
-# ------------------------------------------------------------------------------
-# Step 4: Install Thumbfast
-# ------------------------------------------------------------------------------
-log_info "Checking Thumbfast..."
-TARGET_THUMBFAST_DIR="$SCRIPTS_DIR/thumbfast_repo"
-TARGET_THUMBFAST_LINK="$SCRIPTS_DIR/thumbfast.lua"
-
-if [[ -d "$TARGET_THUMBFAST_DIR/.git" ]]; then
-    if [[ "$NETWORK_AVAILABLE" == true ]]; then
-        if git -C "$TARGET_THUMBFAST_DIR" pull --quiet; then
-            log_success "Thumbfast repo updated."
-        else
-            log_warn "Thumbfast update failed."
-        fi
+if (( ${#MISSING_PKGS[@]} )); then
+    log_info "Installing missing packages: ${MISSING_PKGS[*]}"
+    # pacman can use its local cache offline; a failed install must report failure.
+    if (( EUID == 0 )); then
+        pacman -S --needed --noconfirm "${MISSING_PKGS[@]}" || die 'Package installation failed.'
     else
-        log_info "Offline mode: Skipping Thumbfast repository pull."
+        sudo pacman -S --needed --noconfirm "${MISSING_PKGS[@]}" || die 'Package installation failed.'
     fi
+fi
+
+for source in "$ASSETS_DIR"/**; do
+    [[ -f "$source" ]] || continue
+    install_file "$source" "${source#"$ASSETS_DIR"/}"
+done
+
+# Preserve thumbnail settings when migrating the previous worker.
+if [[ -f "$MPV_CONFIG_DIR/script-opts/thumbfast.conf" &&
+    ! -e "$MPV_CONFIG_DIR/script-opts/dusky_thumbnails.conf" &&
+    ! -L "$MPV_CONFIG_DIR/script-opts/dusky_thumbnails.conf" ]]; then
+    install_file "$MPV_CONFIG_DIR/script-opts/thumbfast.conf" script-opts/dusky_thumbnails.conf
+fi
+
+# Retire the previous UI and fonts to avoid loading two controllers. Preserve
+# everything in a dated backup, including user modifications to the old scripts.
+for relative in scripts/uosc scripts/uosc.lua scripts/uosc_shared scripts/thumbfast.lua scripts/thumbfast_repo \
+    fonts/uosc_icons.otf fonts/uosc_textures.ttf script-opts/uosc.conf script-opts/thumbfast.conf; do
+    target="$MPV_CONFIG_DIR/$relative"
+    if [[ -e "$target" || -L "$target" ]]; then
+        backup="$MPV_CONFIG_DIR/setup-backups/$BACKUP_ID/$relative"
+        mkdir -p -- "${backup%/*}"
+        mv -T -- "$target" "$backup"
+        log_info "Retired $relative to setup-backups/$BACKUP_ID/$relative"
+    fi
+done
+
+install_file "$SETUP_DIR/config/mpv.conf" mpv.conf
+install_file "$SETUP_DIR/config/input.conf" input.conf
+# Preserve existing Dusky Player customization.
+if [[ ! -e "$MPV_CONFIG_DIR/script-opts/dusky_player.conf" && ! -L "$MPV_CONFIG_DIR/script-opts/dusky_player.conf" ]]; then
+    install_file "$SETUP_DIR/config/script-opts/dusky_player.conf" script-opts/dusky_player.conf
 else
-    if [[ "$NETWORK_AVAILABLE" == false ]]; then
-        log_warn "Cannot clone Thumbfast in offline mode. Exiting gracefully."
-        exit 0
-    fi
-    rm -rf -- "$TARGET_THUMBFAST_DIR"
-    if ! git clone --quiet --depth 1 "$THUMBFAST_REPO" "$TARGET_THUMBFAST_DIR"; then
-        log_error "Failed to clone Thumbfast."
-        exit 1
-    fi
-    log_success "Thumbfast cloned."
+    log_info 'Preserved existing script-opts/dusky_player.conf.'
 fi
 
-if [[ -f "$TARGET_THUMBFAST_DIR/thumbfast.lua" ]]; then
-    if [[ -L "$TARGET_THUMBFAST_LINK" && "$(readlink -f "$TARGET_THUMBFAST_LINK")" == "$(readlink -f "$TARGET_THUMBFAST_DIR/thumbfast.lua")" ]]; then
-        log_success "Thumbfast link is correct."
-    else
-        ln -sf -- "$TARGET_THUMBFAST_DIR/thumbfast.lua" "$TARGET_THUMBFAST_LINK"
-        log_success "Thumbfast linked."
-    fi
-else
-    log_error "Missing thumbfast.lua in repo."
-    exit 1
-fi
-
-# ------------------------------------------------------------------------------
-# Step 5: Intelligent Hardware Detection
-# ------------------------------------------------------------------------------
-log_info "Detecting Graphics Hardware..."
-
-GPU_CONFIG=""
-SELECTED_RENDER_NODE=""
-
-# --- Logic: Find the target Render Node ---
-ENV_DRM_DEVICE="${AQ_DRM_DEVICES:-}"
-ENV_DRM_DEVICE="${ENV_DRM_DEVICE%%:*}"
-
-if [[ -n "$ENV_DRM_DEVICE" && -e "$ENV_DRM_DEVICE" ]]; then
-    log_info "Environment preference detected: $ENV_DRM_DEVICE"
-    
-    if [[ -L "/sys/class/drm/$(basename "$ENV_DRM_DEVICE")/device" ]]; then
-        PREFERRED_PHYS_PATH=$(readlink -f "/sys/class/drm/$(basename "$ENV_DRM_DEVICE")/device")
-        
-        for dev in /dev/dri/renderD*; do
-            if [[ ! -e "$dev" ]]; then continue; fi
-            DEV_PHYS_PATH=$(readlink -f "/sys/class/drm/$(basename "$dev")/device")
-            
-            if [[ "$PREFERRED_PHYS_PATH" == "$DEV_PHYS_PATH" ]]; then
-                SELECTED_RENDER_NODE="$dev"
-                log_success "Mapped environment $ENV_DRM_DEVICE -> $SELECTED_RENDER_NODE"
-                break
-            fi
-        done
-    fi
-fi
-
-if [[ -z "$SELECTED_RENDER_NODE" ]]; then
-    log_info "No environment preference found. Scanning for primary GPU..."
-    for dev in /dev/dri/renderD*; do
-        if [[ ! -e "$dev" ]]; then continue; fi
-        
-        sys_path="/sys/class/drm/$(basename "$dev")/device/driver"
-        if [[ -L "$sys_path" ]]; then
-            driver=$(basename "$(readlink -f "$sys_path")")
-            if [[ "$driver" == "vfio-pci" ]]; then
-                log_warn "Skipping VFIO device: $dev"
-                continue
-            fi
-        fi
-        
-        SELECTED_RENDER_NODE="$dev"
-        break
-    done
-fi
-
-# --- Logic: Generate Config for Selected Node ---
-if [[ -n "$SELECTED_RENDER_NODE" ]]; then
-    sys_path="/sys/class/drm/$(basename "$SELECTED_RENDER_NODE")/device/driver"
-    if [[ -L "$sys_path" ]]; then
-        driver_name=$(basename "$(readlink -f "$sys_path")")
-    else
-        driver_name="unknown"
-    fi
-
-    log_info "Configuring MPV for: $SELECTED_RENDER_NODE ($driver_name)"
-
-    if [[ "$driver_name" == "nvidia" ]]; then
-        log_success "NVIDIA Driver detected."
-        GPU_CONFIG="hwdec=auto"
-    elif [[ "$driver_name" == "i915" || "$driver_name" == "amdgpu" || "$driver_name" == "xe" || "$driver_name" == "radeon" ]]; then
-        log_success "Mesa/Legacy Driver ($driver_name) detected."
-        GPU_CONFIG="hwdec=vaapi
-vaapi-device=$SELECTED_RENDER_NODE"
-    else
-        log_info "Generic/Unknown Driver ($driver_name). Using safe defaults."
-        GPU_CONFIG="hwdec=auto-safe"
-    fi
-else
-    log_warn "No suitable GPU found (All VFIO?). Falling back to Software."
-    GPU_CONFIG="hwdec=no"
-fi
-
-# ------------------------------------------------------------------------------
-# Step 6: Generate mpv.conf
-# ------------------------------------------------------------------------------
-read -r -d '' MPV_CONF_CONTENT <<EOF || true
-# --- General ---
-keep-open=yes
-save-position-on-quit=yes
-autofit-larger=90%x90%
-
-# --- UI / UOSC Requirements ---
-osc=no
-osd-bar=no
-border=no
-
-# --- Video / Wayland Optimization ---
-vo=gpu
-gpu-context=wayland
-
-# --- Hardware Decoding (Auto-Generated) ---
-$GPU_CONFIG
-
-# --- Quality ---
-scale=spline36
-cscale=spline36
-dscale=mitchell
-correct-downscaling=yes
-linear-downscaling=yes
-dither-depth=auto
-
-# --- Screenshots ---
-screenshot-format=png
-screenshot-directory=~/Pictures/Screenshots
-
-# --- Thumbfast Worker Profile ---
-[thumbfast]
-network=no
-audio=no
-sub=no
-video=no
-hwdec=no 
-profile=fast
-EOF
-
-install_config_file "$MPV_CONFIG_DIR/mpv.conf" "$MPV_CONF_CONTENT"
-
-# ------------------------------------------------------------------------------
-# Step 7: Generate input.conf
-# ------------------------------------------------------------------------------
-read -r -d '' INPUT_CONF_CONTENT <<'EOF' || true
-# --- UOSC Bindings ---
-SPACE        cycle pause; script-binding uosc/flash-pause-indicator
-m            no-osd cycle mute; script-binding uosc/flash-volume
-RIGHT        seek  5
-LEFT         seek -5
-Shift+RIGHT  seek  30; script-binding uosc/flash-timeline
-Shift+LEFT   seek -30; script-binding uosc/flash-timeline
-MENU         script-binding uosc/menu
-MBTN_RIGHT   script-binding uosc/menu
-TAB          script-binding uosc/toggle-ui
-Ctrl+o       script-binding uosc/open-file
-
-# --- Extra Utils ---
-s            screenshot
-EOF
-
-install_config_file "$MPV_CONFIG_DIR/input.conf" "$INPUT_CONF_CONTENT"
-
-# ------------------------------------------------------------------------------
-# Completion
-# ------------------------------------------------------------------------------
-printf '\n%s====================================================%s\n' "$C_GREEN" "$C_RESET"
-printf '%s   MPV Setup Complete!                             %s\n' "$C_GREEN" "$C_RESET"
-printf '%s====================================================%s\n' "$C_GREEN" "$C_RESET"
-log_info "Configuration finished."
+log_info "Dusky Player setup complete: $MPV_CONFIG_DIR"

@@ -1,86 +1,16 @@
 #!/usr/bin/env python3
 """
-Dusky Btrfs & Snapper Master Controller  --  v3.2.0 "journalled exchange"
+Dusky Btrfs and Snapper controller.
 
-Target platform (hard requirement, no compatibility shims, no fallbacks):
-    * Arch Linux, kernel >= 7.1
-    * btrfs-progs >= 6.19   (global --format=json for subvolume list/show/get-default)
-    * snapper   >= 0.13     (--jsonout, --utc, --iso, list --disable-used-space)
-    * util-linux >= 2.42    (findmnt --json, mount --mkdir)
-    * systemd   >= 259
-    * coreutils, fzf >= 0.6x
-    * Python    >= 3.16
+Target: Arch Linux, kernel >= 7.3, Python >= 3.14.7, btrfs-progs >= 7.1,
+snapper >= 0.13.2, util-linux >= 2.42.4, systemd >= 262 and fzf >= 0.74.4.
+Subvolume commands use the installed btrfs text interface; these commands do
+not support --format=json. Snapper and findmnt use their JSON interfaces.
 
-WHAT CHANGED VERSUS v3.0.0 (all of these were live defects, see AUDIT below)
----------------------------------------------------------------------------
-A1  Private-mount reaper no longer unmounts *sibling live* private mounts.
-    v3.0.0 called sweep_stale_mounts() from inside top_level(); a root+home
-    restore spanning two filesystems opened two nested top_level() contexts
-    and the second one tore down the first one's mount mid-transaction.
-    Mount directories are now PID-tagged and an in-process registry plus a
-    liveness check makes reaping provably safe.
-
-A2  Cross-subvolume transactions are now durable.  A single RENAME_EXCHANGE is
-    atomic, but TWO of them (root + home) are two independent btrfs
-    transactions.  Power loss between them left a half-restored machine with
-    no record of intent.  Dusky now writes an fsync'd intent journal into the
-    FS_TREE (subvolid=5, i.e. outside every subvolume it is about to swap) and
-    ships --recover / --undo plus a boot unit to finish or unwind.
-
-A3  All btrfs output is parsed from 'btrfs --format=json'.  The v3.0.0 regex
-    scraper silently produced uuid="" for every subvolume (it never passed
-    -u to 'subvolume list'), and its 'is btrfs root' header sniffing is a
-    btrfs-progs string that has changed more than once.
-
-A4  The generated boot-cleanup unit can no longer wedge a machine into
-    permanent unit failure: deletion is idempotent ('test ! -e' is the success
-    gate), the unit file and its enablement symlink are fsync'd, and the unit
-    refuses to run if the victim is the filesystem default subvolume.
-
-A5  Read-only intent is honoured.  v3.0.0's top_level(writable=False) silently
-    re-mounted READ-WRITE when the ro mount failed, so '--sweep' (a dry run)
-    could obtain a writable handle on the live root filesystem.
-
-A6  --sweep* now takes the global lock and matches Dusky's transient names
-    with an anchored grammar.  v3.0.0 matched the substring '_dusky_new_'
-    anywhere in a path with no lock held, so a concurrent '--sweep-apply'
-    would delete the staged clone of an in-flight restore, and a user
-    subvolume merely *containing* '_to_delete_' was eligible for deletion.
-
-A7  set-default is repointed inside the signal-blocked critical section,
-    before any deletion is scheduled.
-
-A8  Live reactivation of a non-root target goes through systemd
-    ('systemctl restart <escaped>.mount'), never a bare umount/mount pair
-    that desynchronises systemd's mount unit state machine.
-
-AUDIT INVARIANTS
-----------------
-1.  ACTIVATION IS ONE SYSCALL.  renameat2(RENAME_EXCHANGE) swaps the live
-    subvolume with the staged clone.  fs/btrfs/inode.c::btrfs_rename_exchange()
-    permits this explicitly:
-
-        if (root != dest &&
-            (old_ino != BTRFS_FIRST_FREE_OBJECTID ||
-             new_ino != BTRFS_FIRST_FREE_OBJECTID))
-                return -EXDEV;
-
-    i.e. two subvolume roots may be exchanged from any parents, because a
-    subvolume directory entry is a logical link with a fixed inode number
-    (commit 3f79f6f6247c).  There is no instant at which the live path is
-    absent.
-
-2.  EVERY RENAME IS *AT*-RELATIVE.  Parent directory descriptors are captured
-    during preflight and reused for the exchange, so nothing between
-    validation and commit can substitute a different directory under us.
-
-3.  NOTHING DESTRUCTIVE WITHOUT PROOF.  Every private subvolid=5 mount must
-    report the expected fsid AND subvolume id 5 (strictly, not "5 or
-    unknown"), and every victim is matched by subvolume id, not by name.
-
-4.  THE DEFERRED CLEANUP UNIT NEVER RE-ENTERS THIS SCRIPT.  It is systemd +
-    coreutils + /usr/bin/btrfs only, so a restored root that predates Dusky
-    still reclaims its own garbage.
+Restore exchanges are atomic per subvolume, not across multiple subvolumes.
+Durable journals support explicit --recover / --recover --abort after an
+interruption. No automatic boot recovery is installed. Reboot is required
+for root restores; the currently mounted root continues serving the old state.
 """
 
 from __future__ import annotations
@@ -116,7 +46,7 @@ from typing import Any, Final, NoReturn
 
 type JSONDict = dict[str, Any]
 
-DUSKY_VERSION: Final = "3.2.0"
+DUSKY_VERSION: Final = "3.3.2"
 JOURNAL_FORMAT: Final = 2
 
 SCRIPT_PATH: Final = (
@@ -126,7 +56,6 @@ SCRIPT_PATH: Final = (
 RUN_DIR: Final = Path("/run/dusky")
 MNT_ROOT: Final = RUN_DIR / "mnt"
 LOCK_PATH: Final = RUN_DIR / "dusky.lock"
-STATE_DIR: Final = Path("/var/lib/dusky")
 LOG_PATH: Final = Path("/var/log/dusky.log")
 UNIT_DIR_REL: Final = "etc/systemd/system"
 
@@ -134,7 +63,7 @@ UNIT_DIR_REL: Final = "etc/systemd/system"
 JOURNAL_DIR_NAME: Final = ".dusky"
 # States in which a transaction is still open and MUST be recovered before any
 # other destructive operation is allowed to start.
-OPEN_TXN_STATES: Final = frozenset({"prepared", "activating", "activated", "failed"})
+OPEN_TXN_STATES: Final = frozenset({"prepared", "activating", "activated", "failed", "unwinding"})
 
 TAG_RETIRED: Final = "_to_delete_"
 TAG_STAGED: Final = "_dusky_new_"
@@ -176,7 +105,7 @@ SUBPROCESS_ENV: Final = {
     "HOME": "/root",
     "SHELL": "/usr/bin/bash",
 }
-# btrfs/snapper/findmnt are all parsed as JSON now, so no COLUMNS hack.
+# Snapper/findmnt use JSON; Btrfs uses its explicit C-locale subvolume fields.
 
 C_RESET = "\x1b[0m"
 C_ERR = "\x1b[1;38;5;196m"
@@ -213,6 +142,8 @@ def die(message: str, exit_code: int = 1) -> NoReturn:
 
 
 def _build_logger() -> logging.Logger:
+    # Logging transport failures must not print internal tracebacks in the UI.
+    logging.raiseExceptions = bool(os.environ.get("DUSKY_DEBUG"))
     log = logging.getLogger("dusky")
     log.setLevel(logging.DEBUG if os.environ.get("DUSKY_DEBUG") else logging.INFO)
     log.propagate = False
@@ -323,10 +254,7 @@ def pause(message: str = "Press Enter to return...") -> None:
 
 
 def say(text: str = "") -> None:
-    try:
-        print(text, flush=True)
-    except BrokenPipeError:
-        raise DuskyAbort("[*] Output pipe closed.") from None
+    print(text, flush=True)
 
 
 def warn(text: str) -> None:
@@ -540,8 +468,6 @@ def _load_libc() -> ctypes.CDLL:
         die("[!] glibc does not export renameat2(); atomic activation is unavailable.")
     lib.renameat2.restype = ctypes.c_int
     lib.renameat2.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
-    lib.syncfs.restype = ctypes.c_int
-    lib.syncfs.argtypes = [ctypes.c_int]
     return lib
 
 
@@ -585,12 +511,11 @@ def open_dir(path: Path) -> Iterator[int]:
 
 def fsync_path(path: Path, *, is_dir: bool = False) -> None:
     flags = os.O_RDONLY | os.O_CLOEXEC | (os.O_DIRECTORY if is_dir else 0)
-    with suppress(OSError):
-        fd = os.open(path, flags)
-        try:
-            os.fsync(fd)
-        finally:
-            os.close(fd)
+    fd = os.open(path, flags)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
 
 def write_file_durable(path: Path, content: str, mode: int = 0o644) -> None:
@@ -598,56 +523,30 @@ def write_file_durable(path: Path, content: str, mode: int = 0o644) -> None:
     tmp = path.with_name(f".{path.name}.dusky-tmp")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_CLOEXEC, mode)
     try:
-        os.write(fd, content.encode("utf-8"))
+        data = memoryview(content.encode("utf-8"))
+        while data:
+            written = os.write(fd, data)
+            if written <= 0:
+                raise OSError(errno.EIO, "short write to journal")
+            data = data[written:]
+        os.fchmod(fd, mode)
         os.fsync(fd)
     finally:
         os.close(fd)
-    os.chmod(tmp, mode)
     os.replace(tmp, path)
     fsync_path(path.parent, is_dir=True)
 
 
 # =============================================================================
-# btrfs JSON layer  (btrfs(8): --format json; supported by subvolume
-# list / show / get-default, filesystem df, qgroup show, device stats)
+# btrfs subvolume text interface (C locale; explicit UUID columns)
 # =============================================================================
 def _norm_key(key: object) -> str:
     return re.sub(r"[^a-z0-9]+", "_", str(key).lower()).strip("_")
 
 
-def _norm(obj: Any) -> Any:
-    if isinstance(obj, dict):
-        return {_norm_key(k): _norm(v) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [_norm(v) for v in obj]
-    return obj
-
-
-def btrfs_json(*argv: str, check: bool = True) -> Any:
-    """
-    Run 'btrfs --format=json ...' and return the normalised payload.
-    If '--format=json' is unsupported by the installed btrfs-progs binary,
-    falls back cleanly to plain text parsing.
-    """
-    proc = run("btrfs", "--format=json", *argv)
-    if proc.ok and proc.stdout and proc.stdout.strip().startswith("{"):
-        try:
-            raw = json.loads(proc.stdout)
-            if isinstance(raw, dict) and "__header" in raw:
-                data = _norm(raw)
-                data.pop("header", None)
-                for value in data.values():
-                    if value is not None:
-                        return value
-                return None
-        except Exception:
-            pass
-
-    # Fallback to standard btrfs output
+def btrfs_records(*argv: str, check: bool = True) -> Any:
+    """Parse the C-locale subvolume interface of btrfs-progs 7.1."""
     proc_plain = run("btrfs", *argv)
-    if not proc_plain.ok and "--" in argv:
-        clean_argv = [a for a in argv if a != "--"]
-        proc_plain = run("btrfs", *clean_argv)
     if not proc_plain.ok:
         if check:
             die(f"[!] btrfs {' '.join(argv)} failed:\n    {proc_plain.message}")
@@ -658,16 +557,19 @@ def btrfs_json(*argv: str, check: bool = True) -> Any:
     if "subvolume" in argv and "list" in argv:
         rows: list[JSONDict] = []
         for line in stdout.splitlines():
-            line = line.strip()
             if not line:
                 continue
-            m_id = re.search(r"\bID\s+(\d+)\b", line)
-            m_gen = re.search(r"\bgen\s+(\d+)\b", line)
-            m_top = re.search(r"\btop level\s+(\d+)\b", line)
-            m_uuid = re.search(r"\buuid\s+([0-9a-fA-F-]{36})\b", line)
-            m_puuid = re.search(r"\bparent_uuid\s+([0-9a-fA-F-]{36})\b", line)
-            m_ruuid = re.search(r"\breceived_uuid\s+([0-9a-fA-F-]{36})\b", line)
-            m_path = re.search(r"\bpath\s+(.+)$", line)
+            # Paths are arbitrary names, not metadata. A name containing
+            # 'parent_uuid ...' must never supply a missing UUID column.
+            metadata, separator, path = line.partition(" path ")
+            m_id = re.search(r"\bID\s+(\d+)\b", metadata)
+            m_gen = re.search(r"\bgen\s+(\d+)\b", metadata)
+            m_top = re.search(r"\btop level\s+(\d+)\b", metadata)
+            m_uuid = re.search(r"\buuid\s+([0-9a-fA-F-]{36})\b", metadata)
+            m_puuid = re.search(r"\bparent_uuid\s+([0-9a-fA-F-]{36})\b", metadata)
+            m_ruuid = re.search(r"\breceived_uuid\s+([0-9a-fA-F-]{36})\b", metadata)
+            if not all((m_id, m_gen, m_top, separator, path)) or ("-u" in argv and not m_uuid):
+                die(f"[!] Unrecognised btrfs subvolume list record: {line!r}")
             if m_id:
                 row = {
                     "subvolume_id": int(m_id.group(1)),
@@ -676,7 +578,7 @@ def btrfs_json(*argv: str, check: bool = True) -> Any:
                     "uuid": m_uuid.group(1) if m_uuid else "",
                     "parent_uuid": m_puuid.group(1) if m_puuid else "",
                     "received_uuid": m_ruuid.group(1) if m_ruuid else "",
-                    "path": m_path.group(1).strip() if m_path else "",
+                    "path": path,
                 }
                 rows.append(row)
         return {"subvolumes": rows}
@@ -684,7 +586,11 @@ def btrfs_json(*argv: str, check: bool = True) -> Any:
     if "subvolume" in argv and "show" in argv:
         kv: dict[str, str] = {}
         for line in stdout.splitlines():
-            if ":" in line:
+            # The first line and deeper-indented snapshot paths can contain
+            # colons and field names too. Only parse metadata at one tab.
+            if line.startswith("\tSnapshot(s):"):
+                break
+            if line.startswith("\t") and not line.startswith("\t\t") and ":" in line:
                 k, v = line.split(":", 1)
                 k_norm = _norm_key(k.strip())
                 v_val = v.strip()
@@ -700,7 +606,7 @@ def btrfs_json(*argv: str, check: bool = True) -> Any:
                 "received_uuid": kv.get("received_uuid", ""),
                 "generation": _as_int(kv.get("generation")) or 0,
                 "flags": kv.get("flags", ""),
-                "path": stdout.splitlines()[0].strip() if stdout.splitlines() else "",
+                "path": stdout.splitlines()[0] if stdout.splitlines() else "",
             }
         return None
 
@@ -756,7 +662,7 @@ def _flags_readonly(record: JSONDict) -> bool:
 
 
 def subvol_show(path: str | Path) -> SubvolInfo | None:
-    payload = btrfs_json("subvolume", "show", "--", str(path), check=False)
+    payload = btrfs_records("subvolume", "show", "--", str(path), check=False)
     if payload is None:
         return None
     record: JSONDict | None = None
@@ -788,8 +694,8 @@ def subvol_show(path: str | Path) -> SubvolInfo | None:
     )
 
 
-def _json_rows(payload: Any) -> list[JSONDict]:
-    """Extract the row array from a btrfs JSON payload, whatever it is keyed by."""
+def _record_rows(payload: Any) -> list[JSONDict]:
+    """Extract records from the parsed btrfs output."""
     if isinstance(payload, list):
         return [r for r in payload if isinstance(r, dict)]
     if isinstance(payload, dict):
@@ -810,9 +716,9 @@ def subvol_list(mount_target: str | Path) -> list[SubvolInfo]:
     therefore reported uuid="" for every subvolume, which silently defeated
     every UUID comparison built on top of it.
     """
-    rows = _json_rows(btrfs_json("subvolume", "list", "-a", "-u", "-q", "-R", "--", str(mount_target)))
+    rows = _record_rows(btrfs_records("subvolume", "list", "-a", "-u", "-q", "-R", "--", str(mount_target)))
     ro_ids: set[int] = set()
-    for record in _json_rows(btrfs_json("subvolume", "list", "-a", "-r", "--", str(mount_target), check=False)):
+    for record in _record_rows(btrfs_records("subvolume", "list", "-a", "-r", "--", str(mount_target))):
         sid = _as_int(_pick(record, "id", "subvolid", "subvolume_id"))
         if sid is not None:
             ro_ids.add(sid)
@@ -840,13 +746,13 @@ def subvol_list(mount_target: str | Path) -> list[SubvolInfo]:
     return out
 
 
-def get_default_subvolid(mount_target: str | Path) -> int | None:
-    payload = btrfs_json("subvolume", "get-default", "--", str(mount_target), check=False)
-    for record in _json_rows(payload):
+def get_default_subvolid(mount_target: str | Path) -> int:
+    payload = btrfs_records("subvolume", "get-default", str(mount_target), check=False)
+    for record in _record_rows(payload):
         sid = _as_int(_pick(record, "id", "subvolid", "subvolume_id"))
         if sid is not None:
             return sid
-    return None
+    die(f"[!] Could not determine the default subvolume of {mount_target}.")
 
 
 def subvol_path_by_id(mount_target: str | Path, subvolid: int) -> str | None:
@@ -861,7 +767,7 @@ def set_default_subvolid(subvolid: int, mount_target: str | Path) -> None:
 
 
 def btrfs_sync(path: str | Path) -> None:
-    run("btrfs", "filesystem", "sync", str(path), timeout=NO_TIMEOUT)
+    run("btrfs", "filesystem", "sync", str(path), check=True, timeout=NO_TIMEOUT)
 
 
 def subvol_set_ro(path: Path, value: bool) -> None:
@@ -902,11 +808,13 @@ def findmnt_entries(target: str | None = None) -> list[JSONDict]:
         argv += ["--mountpoint", target]
     proc = run(*argv, timeout=60.0)
     if not proc.ok or not proc.text:
-        return []
+        if target is not None and proc.returncode == 1 and not proc.stderr.strip():
+            return []
+        die(f"[!] Cannot read mount table: {proc.message}")
     try:
         payload = json.loads(proc.stdout)
-    except json.JSONDecodeError:
-        return []
+    except json.JSONDecodeError as exc:
+        die(f"[!] Invalid findmnt output: {exc}")
     entries: list[JSONDict] = []
 
     def _walk(items: Sequence[Any]) -> None:
@@ -937,14 +845,14 @@ def effective_mount(target: str) -> JSONDict | None:
 
 
 def subvol_from_options(options: str) -> str | None:
-    match = re.search(r"(?:\A|,)subvol=([^,]+)(?:,|\Z)", options.strip())
+    match = re.search(r"(?:\A|[,\s=])subvol=([^,\s]+)(?=[,\s]|\Z)", options.strip())
     if not match:
         return None
     return match.group(1).strip().strip('"').lstrip("/") or None
 
 
 def subvolid_from_options(options: str) -> int | None:
-    match = re.search(r"(?:\A|,)subvolid=(\d+)(?:,|\Z)", options.strip())
+    match = re.search(r"(?:\A|[,\s=])subvolid=(\d+)(?=[,\s]|\Z)", options.strip())
     return int(match.group(1)) if match else None
 
 
@@ -1103,7 +1011,7 @@ def multidevice_ready(fs: Filesystem) -> tuple[bool, str]:
     if total is None:
         # Unparseable output degrades to permissive, never to a false "ready".
         LOG.warning("Could not parse 'btrfs filesystem show %s' device count", fs.uuid)
-        return True, "device count unknown"
+        return False, "device count unknown"
     if int(total.group(1)) != seen:
         return False, f"{seen}/{total.group(1)} member devices visible (run: btrfs device scan)"
     return True, f"{seen} device(s)"
@@ -1148,7 +1056,7 @@ def top_level(fs: Filesystem, *, writable: bool = True, quiet: bool = False,
     try:
         seen = effective_mount(str(mnt)) or {}
         seen_uuid = str(seen.get("uuid") or "").strip()
-        if seen_uuid and seen_uuid != fs.uuid:
+        if seen_uuid != fs.uuid:
             die(f"[!] REFUSING TO CONTINUE: mounted UUID={seen_uuid} but expected UUID={fs.uuid}.")
         info = subvol_show(str(mnt))
         if info is None or info.subvolid != BTRFS_FS_TREE_OBJECTID:
@@ -1262,7 +1170,7 @@ def btrfs_filesystems() -> dict[str, tuple[Filesystem, str]]:
 
     def build() -> dict[str, tuple[Filesystem, str]]:
         result: dict[str, tuple[Filesystem, str]] = {}
-        for entry in findmnt_entries():
+        for entry in cached("mount_entries", findmnt_entries):
             if str(entry.get("fstype")) != "btrfs":
                 continue
             target = str(entry.get("target") or "")
@@ -1280,22 +1188,23 @@ def btrfs_filesystems() -> dict[str, tuple[Filesystem, str]]:
     return cached("filesystems", build)
 
 
-def mounted_subvol_paths() -> dict[str, str]:
-    """relative subvolume path -> mount point, for every live btrfs mount."""
+def mounted_subvol_paths() -> dict[tuple[str, str], str]:
+    """(filesystem UUID, relative subvolume path) -> live mount point."""
 
-    def build() -> dict[str, str]:
-        mapping: dict[str, str] = {}
-        for entry in findmnt_entries():
+    def build() -> dict[tuple[str, str], str]:
+        mapping: dict[tuple[str, str], str] = {}
+        for entry in cached("mount_entries", findmnt_entries):
             if str(entry.get("fstype")) != "btrfs":
                 continue
+            fs_uuid = str(entry.get("uuid") or "")
             target = str(entry.get("target") or "")
             sv = subvol_from_options(str(entry.get("options") or ""))
             if sv:
-                mapping.setdefault(sv.strip("/"), target)
+                mapping.setdefault((fs_uuid, sv.strip("/")), target)
             elif target:
                 info = subvol_show(target)
                 if info and info.path:
-                    mapping.setdefault(info.path.strip("/"), target)
+                    mapping.setdefault((fs_uuid, info.path.strip("/")), target)
         return mapping
 
     return cached("mounted_subvols", build)
@@ -1318,7 +1227,7 @@ def snapshot_roots() -> set[str]:
                 resolved = active_subvol(snaps, required=False)
                 if resolved:
                     roots.add(resolved[0].strip("/"))
-        for path in mounted_subvol_paths():
+        for _fs_uuid, path in mounted_subvol_paths():
             if path.endswith("_snapshots") or path == ".snapshots" or path.endswith("/.snapshots"):
                 roots.add(path)
         return {r for r in roots if r}
@@ -1379,7 +1288,7 @@ def enumerate_subvolumes(*, include_snapshots: bool = False, include_transient: 
                     fs_uuid=fs_uuid,
                     readonly=info.readonly,
                     mount_target=mount_target,
-                    mounted_at=live.get(info.path, ""),
+                    mounted_at=live.get((fs_uuid, info.path), ""),
                     kind=kind,
                 )
             )
@@ -1409,7 +1318,7 @@ def protected_subvolumes() -> set[str]:
     deleted, bricks the boot even though nothing has it mounted
     (btrfs-subvolume(8), 'set-default').
     """
-    protected: set[str] = set(mounted_subvol_paths().keys())
+    protected: set[str] = {path for _fs_uuid, path in mounted_subvol_paths()}
     protected |= snapshot_roots()
     protected_ids: dict[str, set[int]] = {}
 
@@ -1446,24 +1355,20 @@ def protected_subvolumes() -> set[str]:
 # =============================================================================
 def snapper_configs() -> list[dict[str, str]]:
     def build() -> list[dict[str, str]]:
-        configs: list[dict[str, str]] = []
-        config_dir = Path("/etc/snapper/configs")
-        if not config_dir.is_dir():
+        proc = run("snapper", "--jsonout", "list-configs", "--columns", "config,subvolume", check=True)
+        try:
+            rows = json.loads(proc.stdout)["configs"]
+            if not isinstance(rows, list):
+                raise ValueError("configs is not a list")
+            configs = []
+            for row in rows:
+                name, subvolume = row["config"], row["subvolume"]
+                if not isinstance(name, str) or not isinstance(subvolume, str) or not subvolume.startswith("/"):
+                    raise ValueError("invalid config or subvolume")
+                configs.append({"config": name, "subvolume": os.path.normpath(subvolume)})
             return configs
-        for cfg_file in sorted(config_dir.iterdir()):
-            if not cfg_file.is_file() or cfg_file.name.startswith("."):
-                continue
-            if cfg_file.name.endswith((".pacnew", ".pacsave", ".bak", ".old", "~")):
-                continue
-            subvolume = "/"
-            with suppress(OSError):
-                match = re.search(
-                    r'^SUBVOLUME="?([^"\n]+)"?', cfg_file.read_text(errors="replace"), re.MULTILINE
-                )
-                if match:
-                    subvolume = os.path.normpath(match.group(1).strip())
-            configs.append({"config": cfg_file.name, "subvolume": subvolume})
-        return configs
+        except (ValueError, TypeError, KeyError) as exc:
+            die(f"[!] Cannot parse Snapper configurations: {exc}")
 
     return cached("snapper_configs", build)
 
@@ -1536,49 +1441,31 @@ def parse_userdata(raw: object) -> dict[str, str]:
     return data
 
 
-def _snapper_records(payload: Any, depth: int = 0) -> list[JSONDict]:
-    """Locate the snapshot array in snapper --jsonout output."""
-    if depth > 6:
-        return []
-    if isinstance(payload, list):
-        rows = [r for r in payload if isinstance(r, dict)]
-        if rows and any(_pick(r, "number", "id", "num") is not None for r in rows):
-            return rows
-        for item in payload:
-            found = _snapper_records(item, depth + 1)
-            if found:
-                return found
-        return []
-    if isinstance(payload, dict):
-        for value in payload.values():
-            found = _snapper_records(value, depth + 1)
-            if found:
-                return found
-    return []
-
-
 def snapshot_rows(config: str) -> list[dict[str, Any]]:
     """
     Snapshot rows for one snapper config.
 
-    Always queried with --jsonout --utc.  snapper(8) states that ISO format is
-    always used for machine-readable output, but NOT that it is UTC; local
-    time is ambiguous for one hour every autumn, and the pair matcher compares
-    timestamps across configs against a hard second threshold, so a DST fold
-    could shift a candidate by 3600s and either reject a correct pair or
-    accept a wrong one.
+    Query with --iso and --utc: Snapper's JSON dates otherwise use the
+    human-readable local format. UTC avoids ambiguous local times during a
+    daylight-saving transition when matching snapshots across configs.
     """
 
     def build() -> list[dict[str, Any]]:
-        proc = run("snapper", "--jsonout", "--utc", "--iso", "-c", config, "list", "--disable-used-space")
+        proc = run("snapper", "--jsonout", "--utc", "--iso", "-c", config, "list", "--disable-used-space",
+                   "--columns", "number,type,pre-number,date,user,cleanup,description,userdata")
         if not proc.ok:
             LOG.error("snapper list failed for %s: %s", config, proc.message)
             die(f"[!] snapper could not list config {config!r}:\n    {proc.message}")
         try:
-            payload = json.loads(proc.stdout or "{}")
-        except json.JSONDecodeError as exc:
-            die(f"[!] snapper --jsonout returned invalid JSON for {config!r}: {exc}")
-        records = _snapper_records(payload)
+            payload = json.loads(proc.stdout)
+            records = payload[config]
+            if not isinstance(records, list) or any(
+                not isinstance(row, dict) or _as_int(row.get("number")) is None
+                for row in records
+            ):
+                raise ValueError("expected a snapshot array with numeric snapshot numbers")
+        except (ValueError, TypeError, KeyError) as exc:
+            die(f"[!] snapper --jsonout returned invalid snapshot data for {config!r}: {exc}")
         target = snapper_config_subvolume(config)
         snaps_mnt = snapshots_mountpoint(target)
         snaps_live = Path(snaps_mnt).is_mount()
@@ -1642,7 +1529,7 @@ class PairMatch:
 
     @property
     def exact(self) -> bool:
-        return self.method in ("dusky_pair", "identical timestamp")
+        return self.method == "dusky_pair"
 
 
 def find_pair(
@@ -1705,10 +1592,16 @@ def find_pair(
             die(f"[!] No {left_cfg} snapshot matches {target_date!r}.")
         left = matches[0]
 
+    if target_desc is not None and left["description"] != target_desc:
+        die(f"[!] Snapshot {left['id']} does not have description {target_desc!r}.")
     if left["dead"]:
         die(f"[!] {left_cfg} snapshot {left['id']} is dead (its subvolume is missing).")
 
-    userdata = dict(target_userdata or left.get("userdata_dict") or {})
+    userdata = dict(left.get("userdata_dict") or {})
+    if target_userdata is not None and target_userdata != userdata:
+        die("[!] Snapshot pairing metadata changed since selection; refresh and select again.")
+    if userdata.get("dusky_role", left_cfg) != left_cfg:
+        die(f"[!] Snapshot {left['id']} has the wrong dusky_role for {left_cfg!r}.")
     pair_id = userdata.get("dusky_pair")
     if pair_id:
         tagged = [
@@ -1723,9 +1616,11 @@ def find_pair(
             if tagged[0]["dead"]:
                 die(f"[!] Paired {right_cfg} snapshot {tagged[0]['id']} is dead.")
             return PairMatch(left["id"], tagged[0]["id"], "dusky_pair", 0.0)
-        warn(f"[!] {left_cfg} snapshot {left['id']} carries dusky_pair={pair_id} but no {right_cfg} half exists.")
+        die(f"[!] {left_cfg} snapshot {left['id']} carries dusky_pair={pair_id} but no {right_cfg} half exists.")
 
-    same_time = [r for r in right_rows if r["raw_date"] == left["raw_date"] and not r["dead"]]
+    same_time = [r for r in right_rows if left["epoch"] is not None and r["epoch"] == left["epoch"]
+                 and r["type"] == left["type"] and r["description"] == left["description"]
+                 and not r["dead"] and not r.get("userdata_dict", {}).get("dusky_pair")]
     if len(same_time) == 1:
         return PairMatch(left["id"], same_time[0]["id"], "identical timestamp", 0.0)
     if len(same_time) > 1 and left["description"]:
@@ -1741,8 +1636,9 @@ def find_pair(
         for r in right_rows
         if not r["dead"]
         and r["epoch"] is not None
-        and (not left["type"] or not r["type"] or r["type"].lower() == left["type"].lower())
-        and (not left["description"] or r["description"] == left["description"])
+        and r["type"] == left["type"]
+        and r["description"] == left["description"]
+        and not r.get("userdata_dict", {}).get("dusky_pair")
     ]
     if not candidates:
         die(
@@ -1785,43 +1681,18 @@ def systemd_quote(value: str) -> str:
 
 CLEANUP_UNIT_TEMPLATE: Final = """[Unit]
 Description=Dusky deferred Btrfs cleanup of {display}
-Documentation=man:btrfs-subvolume(8) man:dusky(8)
-DefaultDependencies=yes
-After=local-fs.target systemd-udev-settle.service
-Wants=local-fs.target systemd-udev-settle.service
-# Ordering against a unit that may not exist is a no-op in systemd, so this is
-# safe on a restored root that predates Dusky.  Where it does exist, the
-# journal must be resolved before anything is reclaimed.
-After=dusky-recover.service
-ConditionVirtualization=!container
+After=local-fs.target
+Requires=local-fs.target
 X-Dusky-Version={version}
 X-Dusky-FsUuid={fs_uuid_plain}
 X-Dusky-Subvolid={subvolid}
-X-Dusky-Subvol={display}
 
 [Service]
 Type=oneshot
-RemainAfterExit=no
 Nice=15
 IOSchedulingClass=idle
-CPUSchedulingPolicy=idle
 TimeoutStartSec=infinity
-ProtectSystem=false
-ExecStartPre=/usr/bin/mkdir -p {mnt}
-ExecStartPre=/usr/bin/mount -t btrfs -o subvolid=5,nodev,nosuid,noexec,noatime /dev/disk/by-uuid/{fs_uuid_plain} {mnt}
-ExecStartPre=/usr/bin/mountpoint -q {mnt}
-# 1. Refuse to delete the filesystem default subvolume: doing so bricks the
-#    boot even though nothing has it mounted (btrfs-subvolume(8) set-default).
-ExecStartPre=/usr/bin/test {subvolid} != {default_subvolid}
-# 2. Delete tolerantly; '-' means "ignore the exit status".
-ExecStart=-/usr/bin/btrfs subvolume delete --commit-after -- {victim}
-# 3. The REAL success gate: the victim must be gone.  Already-gone counts as
-#    success, so a redundant run cannot wedge the unit into permanent failure.
-ExecStart=/usr/bin/test ! -e {victim}
-# 4. Self-removal only on success, so a genuine failure retries next boot.
-ExecStartPost=/usr/bin/rm -f /etc/systemd/system/%n /etc/systemd/system/multi-user.target.wants/%n
-ExecStopPost=-/usr/bin/umount --lazy {mnt}
-ExecStopPost=-/usr/bin/rmdir {mnt}
+ExecStart=/usr/bin/python3 {helper} --cleanup-subvol {fs_uuid} {relative} --expected-id {subvolid}
 
 [Install]
 WantedBy=multi-user.target
@@ -1836,21 +1707,7 @@ def cleanup_unit_name(fs_uuid: str, subvol_rel: str) -> str:
 def schedule_boot_cleanup(
     *, fs_uuid: str, subvol_rel: str, subvolid: int, default_subvolid: int, offline_root: Path | None
 ) -> str:
-    """
-    Emit a one-shot unit that deletes 'subvol_rel' on the next boot.
-
-    Design notes versus v2/v3.0.0:
-      * No Python and no staged script copy.  The restored root may be older
-        than Dusky or carry a different interpreter path; requiring it to run
-        our script merely to free disk space was a needless dependency, and the
-        v2 copy was written into the doomed subvolume anyway.
-      * No systemd-escape round trip (see systemd_quote's docstring).
-      * Idempotent: 'test ! -e' is the success gate, so a stale unit whose
-        victim already vanished succeeds and removes itself instead of failing
-        on every subsequent boot forever.
-      * Durable: unit file and enablement symlink are fsync'd, and so is the
-        containing directory.
-    """
+    """Install checked cleanup and its interpreter-independent script location."""
     rel = subvol_rel.strip("/")
     if not rel or rel.startswith("/") or ".." in Path(rel).parts:
         raise DuskyBug(f"[!] Refusing to schedule cleanup for the unsafe relative path {subvol_rel!r}.")
@@ -1858,22 +1715,18 @@ def schedule_boot_cleanup(
         raise DuskyBug("[!] Refusing to schedule cleanup for a path containing control characters.")
 
     unit_name = cleanup_unit_name(fs_uuid, rel)
-    digest = unit_name.removeprefix("dusky-cleanup-").removesuffix(".service")
-    mnt = f"/run/dusky/cleanup-{digest}"
-    victim = f"{mnt}/{rel}"
-
+    root = offline_root if offline_root is not None else Path("/")
+    helper_rel = f"usr/local/lib/dusky/cleanup-{DUSKY_VERSION}.py"
+    helper = root / helper_rel
+    helper.parent.mkdir(parents=True, exist_ok=True)
+    write_file_durable(helper, Path(__file__).read_text(encoding="utf-8"), 0o644)
     content = CLEANUP_UNIT_TEMPLATE.format(
-        display=rel.replace("%", "%%"),
-        version=DUSKY_VERSION,
-        fs_uuid_plain=fs_uuid,
-        subvolid=subvolid,
-        default_subvolid=default_subvolid,
-        mnt=systemd_quote(mnt),
-        fs_uuid=systemd_quote(fs_uuid),
-        victim=systemd_quote(victim),
+        display=rel.replace("%", "%%"), version=DUSKY_VERSION,
+        fs_uuid_plain=fs_uuid, subvolid=subvolid,
+        helper=systemd_quote("/" + helper_rel),
+        fs_uuid=systemd_quote(fs_uuid), relative=systemd_quote(rel),
     )
-
-    base = (offline_root / UNIT_DIR_REL) if offline_root else Path("/") / UNIT_DIR_REL
+    base = root / UNIT_DIR_REL
     base.mkdir(parents=True, exist_ok=True)
     write_file_durable(base / unit_name, content, 0o644)
 
@@ -1988,6 +1841,8 @@ class Journal:
     started: str
     entries: list[JournalEntry]
     path: Path | None = None
+    tops: dict[str, Path] = field(default_factory=dict, repr=False)
+    operation: str = "restore"
 
     def to_json(self) -> JSONDict:
         return {
@@ -1996,6 +1851,7 @@ class Journal:
             "txn": self.txn,
             "fs_uuid": self.fs_uuid,
             "state": self.state,
+            "operation": self.operation,
             "started": self.started,
             "entries": [e.to_json() for e in self.entries],
         }
@@ -2009,21 +1865,31 @@ class Journal:
         """
         if state is not None:
             self.state = state
-        directory = top / JOURNAL_DIR_NAME
-        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-        os.chmod(directory, 0o700)
-        self.path = directory / f"txn-{self.txn}.json"
-        write_file_durable(self.path, json.dumps(self.to_json(), indent=1, sort_keys=True), 0o600)
-        btrfs_sync(top)
+        # Commit every participant before publishing the coordinator's state.
+        # The coordinator is authoritative; replicas block independent cleanup.
+        locations = self.tops or {self.fs_uuid: top}
+        for location in locations.values():
+            btrfs_sync(location)
+        ordered = [p for k, p in locations.items() if k != self.fs_uuid] + [top]
+        for location in ordered:
+            directory = location / JOURNAL_DIR_NAME
+            directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+            target = directory / f"txn-{self.txn}.json"
+            write_file_durable(target, json.dumps(self.to_json(), indent=1, sort_keys=True), 0o600)
+            btrfs_sync(location)
+        self.path = top / JOURNAL_DIR_NAME / f"txn-{self.txn}.json"
 
     def discard(self, top: Path) -> None:
-        directory = top / JOURNAL_DIR_NAME
-        target = directory / f"txn-{self.txn}.json"
-        with suppress(OSError):
-            target.unlink()
-            fsync_path(directory, is_dir=True)
-        with suppress(OSError):
-            directory.rmdir()
+        locations = self.tops or {self.fs_uuid: top}
+        ordered = [p for k, p in locations.items() if k != self.fs_uuid] + [top]
+        for location in ordered:
+            directory = location / JOURNAL_DIR_NAME
+            target = directory / f"txn-{self.txn}.json"
+            target.unlink(missing_ok=True)
+            if directory.is_dir():
+                fsync_path(directory, is_dir=True)
+                btrfs_sync(location)
+
 
 
 def load_journals(top: Path) -> list[Journal]:
@@ -2032,21 +1898,30 @@ def load_journals(top: Path) -> list[Journal]:
         return []
     out: list[Journal] = []
     for path in sorted(directory.glob("txn-*.json")):
-        with suppress(OSError, json.JSONDecodeError, ValueError, TypeError):
+        try:
             raw = json.loads(path.read_text(encoding="utf-8"))
-            if int(raw.get("format", 0)) != JOURNAL_FORMAT:
-                warn(f"[!] Ignoring journal {path.name}: unsupported format {raw.get('format')!r}.")
-                continue
-            out.append(
-                Journal(
-                    txn=str(raw["txn"]),
-                    fs_uuid=str(raw["fs_uuid"]),
-                    state=str(raw["state"]),
-                    started=str(raw.get("started", "")),
-                    entries=[JournalEntry.from_json(e) for e in raw.get("entries", [])],
-                    path=path,
-                )
-            )
+            if raw["format"] != JOURNAL_FORMAT:
+                raise ValueError(f"unsupported format {raw['format']!r}")
+            if raw["state"] not in OPEN_TXN_STATES | {"finalised"}:
+                raise ValueError("unknown transaction state")
+            if raw.get("operation", "restore") not in {"restore", "undo"}:
+                raise ValueError("unknown operation")
+            entries = [JournalEntry.from_json(e) for e in raw["entries"]]
+            if not entries or not UUID_RE.fullmatch(raw["fs_uuid"]):
+                raise ValueError("missing transaction identities")
+            for e in entries:
+                if not UUID_RE.fullmatch(e.fs_uuid) or e.old_subvolid <= 5:
+                    raise ValueError("invalid filesystem/subvolume identity")
+                for name in (e.live_name, e.staged_name, e.retired_name):
+                    if not name or name in (".", "..") or "/" in name:
+                        raise ValueError("invalid transaction name")
+                if Path(e.parent_rel).is_absolute() or ".." in Path(e.parent_rel).parts:
+                    raise ValueError("invalid parent path")
+            out.append(Journal(txn=str(raw["txn"]), fs_uuid=raw["fs_uuid"],
+                               state=raw["state"], started=str(raw.get("started", "")),
+                               entries=entries, path=path, operation=raw.get("operation", "restore")))
+        except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
+            die(f"[!] Cannot read transaction {path}: {exc}. Resolve it before modifying this filesystem.")
     return out
 
 
@@ -2074,13 +1949,11 @@ class RestorePlan:
     retired_name: str
     source_rel: str
     dirfd: int = -1
-    staged_created: bool = False
     exchanged: bool = False
     retired_named: bool = False
     new_subvol_id: int = 0
     default_before: int = 0
     scheduled_unit: str = ""
-    notes: list[str] = field(default_factory=list)
 
     @property
     def parent(self) -> Path:
@@ -2135,6 +2008,9 @@ def resolve_target(config: str, snap_id: str) -> RestoreTarget:
     if resolved is None:
         die(f"[!] Could not resolve the active subvolume for {mountpoint}.")
     active_path, active_id = resolved
+    if any(transient_kind(part) for part in Path(active_path).parts):
+        die(f"[!] {mountpoint} still serves retired/staged state {active_path!r}. "
+            "Reboot or activate the committed restore before restoring again.")
 
     snaps_mnt = snapshots_mountpoint(mountpoint)
     snaps = active_subvol(snaps_mnt, required=False)
@@ -2200,6 +2076,8 @@ def assert_flat_topology(plan: RestorePlan) -> None:
 def preflight(plans: Sequence[RestorePlan], stack: ExitStack, *, allow_default_fixup: bool) -> None:
     seen: set[str] = set()
     for plan in plans:
+        if any(transient_kind(part) for part in Path(plan.target.active_path).parts):
+            die("[!] Reboot or remount the committed restore before restoring again.")
         key = f"{plan.target.fs.uuid}:{plan.target.active_path}"
         if key in seen:
             die(f"[!] Two restore targets resolve to the same subvolume: {key}")
@@ -2231,8 +2109,31 @@ def preflight(plans: Sequence[RestorePlan], stack: ExitStack, *, allow_default_f
             die(f"[!] Refusing to generate transient names outside the safe charset for {plan.live_name!r}.")
 
         assert_flat_topology(plan)
+        fstab = Path("/etc/fstab")
+        if fstab.is_file():
+            for line in fstab.read_text(errors="replace").splitlines():
+                fields = line.split()
+                if fields and not fields[0].startswith("#") and len(fields) >= 4:
+                    if fields[1] == plan.target.mountpoint and subvolid_from_options(fields[3]) is not None:
+                        die(f"[!] fstab pins {fields[1]} to subvolid=. Replace it with subvol= before restoring.")
+        for unit_file in _fstab_like_files()[1:]:
+            text = unit_file.read_text(errors="replace")
+            where = re.search(r"^Where=(.*)$", text, re.MULTILINE)
+            options = re.search(r"^Options=(.*)$", text, re.MULTILINE)
+            if where and options and where.group(1).strip() == plan.target.mountpoint:
+                if subvolid_from_options(options.group(1)) is not None:
+                    die(f"[!] {unit_file} pins {plan.target.mountpoint} to subvolid=. Use subvol= before restoring.")
+        if plan.target.mountpoint == "/":
+            fstab = plan.source / "etc/fstab"
+            if fstab.is_file():
+                for line in fstab.read_text(errors="replace").splitlines():
+                    fields = line.split()
+                    if not fields or fields[0].startswith("#") or len(fields) < 4:
+                        continue
+                    if fields[1] in {p.target.mountpoint for p in plans} and subvolid_from_options(fields[3]) is not None:
+                        die(f"[!] Snapshot fstab pins {fields[1]} to subvolid=. Use subvol= paths before restoring.")
 
-        plan.default_before = get_default_subvolid(plan.top) or BTRFS_FS_TREE_OBJECTID
+        plan.default_before = get_default_subvolid(plan.top)
         if plan.default_before == plan.target.active_id and not allow_default_fixup:
             die(
                 f"[!] The filesystem default subvolume is id {plan.target.active_id}, exactly the subvolume "
@@ -2252,144 +2153,75 @@ def preflight(plans: Sequence[RestorePlan], stack: ExitStack, *, allow_default_f
 
 
 def activate(plans: Sequence[RestorePlan], journal: Journal, top: Path, *, fix_default: bool) -> None:
-    """
-    One RENAME_EXCHANGE per plan, all inside one signal-blocked window.
-
-    Failure at plan N unwinds plans 0..N-1 with the inverse exchange, so the
-    filesystem is never left half-restored and never left without the live
-    subvolume path.  Progress is journalled between exchanges so that SIGKILL
-    or power loss is recoverable by --recover (v3.0.0 had no such record).
-    """
-    committed: list[RestorePlan] = []
+    """Exchange each verified clone; retain the journal on any partial failure."""
     try:
         with critical_section():
-            # Mark the window OPEN before the first rename.  A crash between
-            # the rename and the following commit must not look like "prepared"
-            # (which unwinds); recovery additionally re-derives the true state
-            # from subvolume ids, so the label is belt and braces.
             journal.commit(top, "activating")
             for plan in plans:
-                # Re-verify inside the window: the id must still be the one we
-                # validated.  Cheap, and it closes the preflight->commit gap.
-                current = subvol_show(plan.live)
+                current, staged = subvol_show(plan.live), subvol_show(plan.staged)
                 if current is None or current.subvolid != plan.target.active_id:
-                    raise OSError(errno.ESTALE, "live subvolume changed between preflight and activation")
-                staged_info = subvol_show(plan.staged)
-                if staged_info is None:
-                    raise OSError(errno.ENOENT, "staged clone vanished before activation")
-                if staged_info.readonly:
-                    raise OSError(errno.EROFS, "staged clone is read-only; activating it would yield an unbootable system")
-                plan.new_subvol_id = staged_info.subvolid
-
-                note(f"[*] Activating {plan.target.config!r}: RENAME_EXCHANGE {plan.live_name} <-> staged clone")
+                    die("[!] Live subvolume changed after preflight.")
+                if staged is None or staged.subvolid != plan.new_subvol_id or staged.readonly:
+                    die("[!] Staged clone changed after preflight.")
+                note(f"[*] Activating {plan.target.config!r}...")
                 rename_exchange_at(plan.dirfd, plan.live_name, plan.staged_name)
                 plan.exchanged = True
-                committed.append(plan)
                 journal.entries = [p.journal_entry() for p in plans]
                 journal.commit(top, "activated")
-
-            # plan.staged now holds the previous live subvolume; give it the
-            # retired name so the sweeper and the boot unit can find it.
             for plan in plans:
-                try:
-                    rename_noreplace_at(plan.dirfd, plan.staged_name, plan.retired_name)
-                    plan.retired_named = True
-                except OSError as exc:
-                    plan.notes.append(f"could not rename retired subvolume: {exc}")
-                    plan.retired_name = plan.staged_name
-                    plan.retired_named = True
-
-            # set-default must happen HERE: inside the same blocked-signal
-            # window and strictly before any deletion is scheduled.  v3.0.0 did
-            # it afterwards, leaving a crash window in which the default id
-            # pointed at a subvolume already queued for boot-time deletion.
-            if fix_default:
-                for plan in plans:
-                    # Per-plan top: a root+home transaction may span two
-                    # filesystems, each with its own default subvolume.
-                    current_default = get_default_subvolid(plan.top)
-                    if current_default == plan.target.active_id and plan.new_subvol_id:
-                        note(f"[*] Repointing the default subvolume of {plan.target.fs.uuid} "
-                             f"to id {plan.new_subvol_id}...")
-                        set_default_subvolid(plan.new_subvol_id, plan.top)
-
+                rename_noreplace_at(plan.dirfd, plan.staged_name, plan.retired_name)
+                plan.retired_named = True
+                if fix_default and plan.default_before == plan.target.active_id:
+                    set_default_subvolid(plan.new_subvol_id, plan.top)
             journal.entries = [p.journal_entry() for p in plans]
             journal.commit(top, "activated")
-    except OSError as exc:
-        failures: list[str] = []
-        for plan in reversed(committed):
-            try:
-                if plan.retired_named and plan.retired_name != plan.staged_name:
-                    rename_noreplace_at(plan.dirfd, plan.retired_name, plan.staged_name)
-                    plan.retired_named = False
-                rename_exchange_at(plan.dirfd, plan.live_name, plan.staged_name)
-                plan.exchanged = False
-            except OSError as unwind_exc:
-                # v3.0.0 swallowed this with suppress(OSError) and then told
-                # the user the rollback had succeeded.  Never lie about state.
-                failures.append(f"{plan.target.config}: {unwind_exc}")
-        journal.entries = [p.journal_entry() for p in plans]
-        journal.commit(top, "failed")
-        if failures:
-            detail = "\n      ".join(failures)
-            die(
-                f"[!] ACTIVATION FAILED ({exc}) AND THE UNWIND ALSO FAILED:\n      {detail}\n"
-                f"[!] The filesystem is in a MIXED state. Do NOT reboot. Run:  dusky --recover\n"
-                f"[!] Journal: {JOURNAL_DIR_NAME}/txn-{journal.txn}.json on UUID={journal.fs_uuid}",
-                70,
-            )
-        die(f"[!] Activation failed and was rolled back atomically: {exc}")
+    except (OSError, DuskyError) as exc:
+        die(f"[!] Restore interrupted: {exc}\n"
+            f"    Transaction {journal.txn} remains journalled. Run --recover to complete "
+            "or --recover --abort to unwind before rebooting.", 75)
 
 
 def audit_boot_consistency(root_dir: Path) -> list[str]:
-    """
-    A restored @ carries /usr/lib/modules from the snapshot, but the ESP still
-    holds whatever kernel was installed last.  If they disagree the machine
-    boots into a kernel with no modules: no disk, no network, no keyboard.
-    Cheap to check, catastrophic to miss.
-    """
+    """Check external kernel images against images shipped with restored modules."""
     problems: list[str] = []
     modules_dir = root_dir / "usr/lib/modules"
     if not modules_dir.is_dir():
         return ["restored root has no /usr/lib/modules directory"]
-    available = {p.name for p in modules_dir.iterdir() if p.is_dir()}
-    for release in sorted(available):
-        if not (modules_dir / release / "modules.dep").exists():
-            problems.append(f"modules tree {release} has no modules.dep (depmod never ran)")
+    available = [p for p in modules_dir.iterdir()
+                 if p.is_dir() and re.match(r"\d+\.\d+", p.name)]
+    if not available:
+        return ["restored root has no installed kernel modules"]
+    for tree in available:
+        if not (tree / "modules.dep").is_file():
+            problems.append(f"modules tree {tree.name} has no modules.dep")
 
-    # Only *separately mounted* boot partitions can disagree with the restored
-    # tree; a /boot inside the subvolume is consistent by definition.
-    esps = [p for p in (Path("/efi"), Path("/boot"), Path("/boot/efi")) if p.is_dir() and is_mountpoint(p)]
+    def digest(path: Path) -> bytes:
+        with path.open("rb") as stream:
+            return hashlib.file_digest(stream, "sha256").digest()
+
+    kernels = {digest(p / "vmlinuz") for p in available if (p / "vmlinuz").is_file()}
+    esps = [p for p in (Path("/efi"), Path("/boot"), Path("/boot/efi"))
+            if p.is_dir() and is_mountpoint(p)]
     for esp in esps:
-        for vmlinuz in sorted(esp.glob("vmlinuz-*")):
-            release = vmlinuz.name.removeprefix("vmlinuz-")
-            # Exact match only.  v3.0.0's startswith() fallback accepted
-            # 6.12.1-arch1 for a 6.12.1-arch1-rc kernel and vice versa.
-            if release and release not in available:
-                problems.append(f"{vmlinuz} has no matching modules in the restored root ({release})")
-        entries_dir = esp / "loader/entries"
-        if entries_dir.is_dir():
-            for entry in sorted(entries_dir.glob("*.conf")):
-                with suppress(OSError):
-                    text = entry.read_text(errors="replace")
-                    for match in re.finditer(r"^\s*linux\s+(\S+)", text, re.MULTILINE):
-                        release = match.group(1).rsplit("/", 1)[-1].removeprefix("vmlinuz-")
-                        if release and release not in available:
-                            problems.append(
-                                f"boot entry {entry.name} references {release}, absent from the restored root"
-                            )
-                    for match in re.finditer(r"^\s*initrd\s+(\S+)", text, re.MULTILINE):
-                        initrd = esp / match.group(1).lstrip("/")
-                        if not initrd.exists():
-                            problems.append(f"boot entry {entry.name} references a missing initrd {initrd.name}")
-                    for match in re.finditer(r"^\s*options\s+(.*)$", text, re.MULTILINE):
-                        # A boot entry pinning subvolid= survives no rollback:
-                        # the restored subvolume always has a NEW numeric id.
-                        opts = match.group(1).replace(" ", ",")
-                        if subvolid_from_options(opts) is not None and subvol_from_options(opts) is None:
-                            problems.append(
-                                f"boot entry {entry.name} pins rootflags=subvolid=, which every rollback invalidates"
-                            )
+        images = set(esp.glob("vmlinuz-*"))
+        for entry in sorted((esp / "loader/entries").glob("*.conf")):
+            text = entry.read_text(errors="replace")
+            for match in re.finditer(r"^\s*(linux|initrd)\s+(\S+)", text, re.MULTILINE):
+                image = esp / match.group(2).lstrip("/")
+                if not image.is_file():
+                    problems.append(f"boot entry {entry.name} references missing {image}")
+                elif match.group(1) == "linux":
+                    images.add(image)
+            for match in re.finditer(r"^\s*options\s+(.*)$", text, re.MULTILINE):
+                if subvolid_from_options(match.group(1)) is not None:
+                    problems.append(f"boot entry {entry.name} pins subvolid=; rollback changes that ID")
+        for image in images:
+            if not kernels:
+                problems.append(f"cannot verify {image}: restored modules have no vmlinuz images")
+            elif digest(image) not in kernels:
+                problems.append(f"{image} does not match any kernel in the restored modules tree")
+        if any((esp / "EFI/Linux").glob("*.efi")):
+            problems.append(f"UKIs on {esp} require a separate kernel/modules consistency check")
     return sorted(set(problems))
 
 
@@ -2409,13 +2241,7 @@ def perform_restore(
         invalidate_cache()
         tops = {fs_uuid: stack.enter_context(top_level(fs)) for fs_uuid, fs in by_uuid.items()}
         for fs_uuid, top in tops.items():
-            for journal in load_journals(top):
-                if journal.state in OPEN_TXN_STATES:
-                    die(
-                        f"[!] UUID={fs_uuid} has an unfinished Dusky transaction ({journal.txn}, "
-                        f"state={journal.state}). Run 'dusky --recover' before starting a new restore.",
-                        75,
-                    )
+            assert_no_open_transactions(top)
             if not probe_exchange(top):
                 die(
                     f"[!] RENAME_EXCHANGE is not usable on UUID={fs_uuid}. Dusky will not perform a "
@@ -2442,6 +2268,7 @@ def perform_restore(
             state="prepared",
             started=datetime.now(UTC).isoformat(),
             entries=[p.journal_entry() for p in plans],
+            tops=tops,
         )
         journal.commit(tops[primary_uuid], "prepared")
 
@@ -2453,16 +2280,18 @@ def perform_restore(
                 )
                 if not created.ok:
                     die(f"[!] Failed to stage clone for {plan.target.config!r}:\n    {created.message}")
-                plan.staged_created = True
+                staged_info = subvol_show(plan.staged)
+                if staged_info is None:
+                    die("[!] Cannot identify the staged snapshot.")
+                plan.new_subvol_id = staged_info.subvolid
                 if subvol_is_ro(plan.staged):
                     subvol_set_ro(plan.staged, False)
-            for top in tops.values():
-                btrfs_sync(top)
+            journal.entries = [p.journal_entry() for p in plans]
+            journal.commit(tops[primary_uuid], "prepared")
         except BaseException:
-            for done in plans:
-                if done.staged_created:
-                    run("btrfs", "subvolume", "delete", "--", str(done.staged), timeout=NO_TIMEOUT)
-            journal.discard(tops[primary_uuid])
+            # Retain the prepared journal. Recovery can identify and remove
+            # an interrupted snapshot even if its ID was not yet recorded.
+            warn("[!] Staging interrupted. Run --recover --abort before retrying.")
             raise
 
         activate(plans, journal, tops[primary_uuid], fix_default=fix_default)
@@ -2476,7 +2305,7 @@ def perform_restore(
                 for issue in issues:
                     warn(f"      - {issue}")
                 warn("    Regenerate the initramfs / reinstall the matching kernel BEFORE rebooting, e.g.")
-                warn("      arch-chroot <restored-root> pacman -S linux && mkinitcpio -P")
+                warn("      Mount the restored root and its boot partition, then run kernel/initramfs repair inside arch-chroot.")
         return plans
 
 
@@ -2491,7 +2320,12 @@ def finalise(plans: Sequence[RestorePlan], journal: Journal, tops: dict[str, Pat
         top = plan.top
         rel = plan.retired_rel
         old_id = plan.target.active_id
-        default_now = get_default_subvolid(top) or BTRFS_FS_TREE_OBJECTID
+        if not os.path.lexists(plan.retired):
+            continue
+        info = subvol_show(plan.retired)
+        if info is None or info.subvolid != old_id:
+            die(f"[!] Retired subvolume identity changed at {rel}.")
+        default_now = get_default_subvolid(top)
         if default_now == old_id:
             die(
                 f"[!] REFUSING to schedule deletion of {rel}: it is still the filesystem default "
@@ -2547,8 +2381,10 @@ def live_mount_of_subvolid(fs_uuid: str, subvolid: int) -> str | None:
         target = str(entry.get("target") or "")
         if not target:
             continue
-        info = subvol_show(target)
-        if info is not None and info.subvolid == subvolid:
+        mounted_id = subvolid_from_options(str(entry.get("options") or ""))
+        if mounted_id is None:
+            die(f"[!] Cannot identify the mounted subvolume at {target}.")
+        if mounted_id == subvolid:
             return target
     return None
 
@@ -2562,7 +2398,7 @@ def systemd_mount_unit(mountpoint: str) -> str | None:
     return unit if state.ok and state.text == "loaded" else None
 
 
-def reactivate_mount(mountpoint: str) -> bool:
+def reactivate_mount(mountpoint: str, expected_id: int) -> bool:
     """
     Swap a non-root mount onto the restored subvolume without rebooting.
 
@@ -2592,24 +2428,19 @@ def reactivate_mount(mountpoint: str) -> bool:
         return False
 
     unit = systemd_mount_unit(mountpoint)
-    note(f"[*] Remounting {mountpoint} onto the restored subvolume via {unit or 'mount(8)'}...")
-    if unit:
-        result = run("systemctl", "restart", unit, timeout=120.0)
-        ok = result.ok
-        message = result.message
-    else:
-        if not run("umount", "--", mountpoint, timeout=120.0).ok:
-            ok, message = False, "umount failed"
-        elif not run("mount", "--", mountpoint, timeout=120.0).ok:
-            die(f"[!] CRITICAL: {mountpoint} was unmounted but could not be remounted. Fix before rebooting.")
-        else:
-            ok, message = True, ""
-
+    if not unit:
+        warn(f"[!] No systemd mount unit for {mountpoint}; reboot to activate the restore.")
+        return False
+    note(f"[*] Remounting {mountpoint} via {unit}...")
+    result = run("systemctl", "restart", unit, timeout=120.0)
+    ok, message = result.ok, result.message
+    current = subvol_show(mountpoint) if is_mountpoint(mountpoint) else None
+    if ok and (current is None or current.subvolid != expected_id):
+        ok, message = False, "mount did not select the restored subvolume; check its subvol/subvolid options"
     if not ok:
         warn(
-            f"[!] {mountpoint} is busy ({message}), so the live filesystem still points at the RETIRED\n"
-            f"[!] subvolume. The restore IS committed on disk. Anything written to {mountpoint} between\n"
-            "[!] now and the next reboot will be discarded. Reboot as soon as possible."
+            f"[!] Could not activate {mountpoint}: {message}.\n"
+            "[!] The restore is committed on disk. Check the mount before further writes; reboot to activate it."
         )
         return False
 
@@ -2628,7 +2459,8 @@ def reclaim_after_remount(fs_uuid: str, retired_rel: str, old_subvolid: int, uni
     if live_mount_of_subvolid(fs_uuid, old_subvolid) is not None:
         return
     fs = Filesystem(uuid=fs_uuid, source="")
-    with top_level(fs, quiet=True) as top:
+    with dusky_lock(), top_level(fs, quiet=True) as top:
+        assert_no_open_transactions(top)
         victim = top / retired_rel
         if not os.path.lexists(victim):
             cancel_boot_cleanup(unit_name)
@@ -2679,32 +2511,46 @@ def _inspect_entry(entry: JournalEntry, top: Path) -> EntryState:
         info = subvol_show(path)
         return info.subvolid if info else None
 
-    live_id = id_of(entry.live_name)
-    old_at = ""
-    new_at = ""
-    for name in (entry.live_name, entry.staged_name, entry.retired_name):
-        sid = id_of(name)
-        if sid is None:
-            continue
-        if sid == entry.old_subvolid:
-            old_at = old_at or name
-        elif not new_at:
-            new_at = name
-    exchanged = live_id is not None and live_id != entry.old_subvolid
-    return EntryState(entry=entry, top=top, parent=parent, exchanged=exchanged, old_at=old_at, new_at=new_at)
+    identities = {name: id_of(name) for name in
+                  (entry.live_name, entry.staged_name, entry.retired_name)}
+    if not entry.new_subvolid:
+        # A crash during staging may precede recording the clone ID.
+        candidate = subvol_show(parent / entry.staged_name)
+        source = subvol_show(top / entry.source_rel)
+        if candidate and source and candidate.parent_uuid == source.uuid:
+            entry.new_subvolid = candidate.subvolid
+    allowed = {entry.old_subvolid, entry.new_subvolid}
+    if identities[entry.live_name] is None:
+        die(f"[!] Recovery cannot find live subvolume {entry.live_name}.")
+    for name, sid in identities.items():
+        if sid is not None and sid not in allowed:
+            die(f"[!] Recovery found unexpected subvolume id {sid} at {name}; leaving it untouched.")
+    old_at = next((n for n, sid in identities.items() if sid == entry.old_subvolid), "")
+    new_at = next((n for n, sid in identities.items() if sid == entry.new_subvolid), "")
+    exchanged = identities[entry.live_name] == entry.new_subvolid
+    entry.exchanged = exchanged
+    entry.retired_named = bool(old_at == entry.retired_name and exchanged)
+    return EntryState(entry=entry, top=top, parent=parent, exchanged=exchanged,
+                      old_at=old_at, new_at=new_at)
 
 
 def _recover_journal(
     primary_top: Path, primary_fs: Filesystem, journal: Journal, *, abort: bool, assume_yes: bool
 ) -> None:
-    say(f"{C_WARN}[*] Transaction {journal.txn} on UUID={journal.fs_uuid} state={journal.state}{C_RESET}")
-
-    if journal.state == "finalised":
-        # finalise() completed but its discard() lost the race with a crash.
-        # Unwinding here would be catastrophically wrong.
-        journal.discard(primary_top)
-        good(f"[+] Transaction {journal.txn} was already finalised; stale journal removed.")
+    if primary_fs.uuid != journal.fs_uuid:
+        coordinator = Filesystem(journal.fs_uuid, "")
+        with top_level(coordinator, quiet=True) as coordinator_top:
+            records = [j for j in load_journals(coordinator_top) if j.txn == journal.txn]
+            if not records and journal.state == "prepared":
+                # Initial replica writes precede the coordinator and all staging.
+                # Inspect identities and unwind this unstarted transaction.
+                _recover_journal(coordinator_top, coordinator, journal, abort=True, assume_yes=assume_yes)
+                return
+            if len(records) != 1:
+                die(f"[!] Missing coordinator journal for {journal.txn}; manual inspection required.")
+            _recover_journal(coordinator_top, coordinator, records[0], abort=abort, assume_yes=assume_yes)
         return
+    say(f"{C_WARN}[*] Transaction {journal.txn} on UUID={journal.fs_uuid} state={journal.state}{C_RESET}")
 
     with ExitStack() as stack:
         tops: dict[str, Path] = {primary_fs.uuid: primary_top}
@@ -2712,6 +2558,12 @@ def _recover_journal(
             uuid = entry.fs_uuid or primary_fs.uuid
             if uuid not in tops:
                 tops[uuid] = stack.enter_context(top_level(Filesystem(uuid, ""), quiet=True))
+
+        journal.tops = tops
+        if journal.state == "finalised":
+            journal.discard(primary_top)
+            good(f"[+] Removed completed transaction {journal.txn}.")
+            return
 
         states = [_inspect_entry(e, tops[e.fs_uuid or primary_fs.uuid]) for e in journal.entries]
         for st in states:
@@ -2756,35 +2608,39 @@ def _recover_journal(
                         live = subvol_show(st.parent / entry.live_name)
                         if live is not None:
                             set_default_subvolid(live.subvolid, st.top)
+            plans = []
             for st in states:
-                btrfs_sync(st.top)
                 entry = st.entry
-                rel = entry.rel_of(entry.retired_name if entry.retired_named else entry.staged_name)
-                target = st.top / rel
-                if not os.path.lexists(target):
-                    continue
-                info = subvol_show(target)
-                if info is None or info.subvolid != entry.old_subvolid:
-                    continue
-                if live_mount_of_subvolid(entry.fs_uuid, entry.old_subvolid) is None:
-                    run("btrfs", "subvolume", "delete", "--commit-after", "--", str(target), timeout=NO_TIMEOUT)
-                else:
-                    with suppress(OSError, DuskyBug):
-                        schedule_boot_cleanup(
-                            fs_uuid=entry.fs_uuid,
-                            subvol_rel=rel,
-                            subvolid=entry.old_subvolid,
-                            default_subvolid=get_default_subvolid(st.top) or BTRFS_FS_TREE_OBJECTID,
-                            offline_root=None,
-                        )
-            journal.discard(primary_top)
+                current = _inspect_entry(entry, st.top)
+                target = RestoreTarget(entry.config, "", entry.mountpoint,
+                                       Filesystem(entry.fs_uuid, ""),
+                                       entry.rel_of(entry.live_name), entry.old_subvolid, "")
+                plans.append(RestorePlan(
+                    target=target, top=st.top, parent_rel=entry.parent_rel,
+                    live_name=entry.live_name, staged_name=entry.staged_name,
+                    retired_name=current.old_at or entry.retired_name,
+                    source_rel=entry.source_rel, new_subvol_id=entry.new_subvolid,
+                    default_before=entry.default_before, exchanged=True, retired_named=True))
+            if journal.operation == "undo":
+                for st in states:
+                    unit = cleanup_unit_name(st.entry.fs_uuid, st.entry.rel_of(st.entry.retired_name))
+                    cancel_boot_cleanup(unit)
+                    if st.entry.mountpoint == "/":
+                        cancel_boot_cleanup(unit, offline_root=st.parent / st.entry.live_name)
+                journal.commit(primary_top, "finalised")
+                journal.discard(primary_top)
+            else:
+                finalise(plans, journal, tops)
             good("[+] Transaction completed. Reboot to run on the restored subvolume(s).")
             return
 
         # ---- unwind -------------------------------------------------------
         if not confirm("Unwind this transaction to the pre-restore state?", assume_yes=assume_yes):
             raise DuskyAbort("[*] Left untouched.")
+        if any(st.exchanged and not st.old_at for st in states):
+            die("[!] Cannot unwind: a pre-restore subvolume has already been reclaimed.")
         with critical_section():
+            journal.commit(primary_top, "unwinding")
             for st in reversed(states):
                 entry = st.entry
                 if st.exchanged:
@@ -2807,12 +2663,12 @@ def _recover_journal(
         # Dusky transient name whose id is NOT old_subvolid is a staged clone.
         for st in states:
             entry = st.entry
-            for name in (entry.staged_name, entry.retired_name):
+            for name in (() if journal.operation == "undo" else (entry.staged_name, entry.retired_name)):
                 path = st.parent / name
                 if not os.path.lexists(path) or transient_kind(name) is None:
                     continue
                 info = subvol_show(path)
-                if info is None or info.subvolid == entry.old_subvolid:
+                if info is None or info.subvolid != entry.new_subvolid:
                     continue
                 if live_mount_of_subvolid(entry.fs_uuid, info.subvolid) is not None:
                     warn(f"[!] {name} is serving a live mount; leaving it in place.")
@@ -2820,7 +2676,7 @@ def _recover_journal(
                 run("btrfs", "subvolume", "delete", "--", str(path), timeout=NO_TIMEOUT)
             btrfs_sync(st.top)
         journal.discard(primary_top)
-        good("[+] Transaction unwound; the pre-restore state is live again.")
+        good("[+] Pre-restore paths restored. Existing mounts are unchanged; reboot to use them.")
 
 
 def cmd_recover(*, abort: bool, assume_yes: bool) -> None:
@@ -2855,7 +2711,7 @@ def cmd_undo(*, assume_yes: bool) -> None:
         if not candidates:
             die("[!] Nothing to undo: no retired subvolume from a previous restore is on disk.")
     # Retired names embed an ISO-8601 UTC stamp, so lexical order is chronological.
-    candidates.sort(key=lambda c: c[2], reverse=True)
+    candidates.sort(key=lambda c: c[2].rsplit(TAG_RETIRED, 1)[-1], reverse=True)
 
     say(f"{C_WARN}[*] Retired subvolumes available for undo (most recent first):{C_RESET}")
     for index, (fs, _top, rel, sub) in enumerate(candidates, 1):
@@ -2865,7 +2721,7 @@ def cmd_undo(*, assume_yes: bool) -> None:
         die("[!] Invalid selection.")
     fs, _top, rel, sub = candidates[int(choice) - 1]
 
-    live_name = rel.rsplit("/", 1)[-1].split(TAG_RETIRED)[0]
+    live_name = rel.rsplit("/", 1)[-1].rsplit(TAG_RETIRED, 1)[0]
     parent_rel = rel.rpartition("/")[0]
     if not confirm_phrase(
         f"This will swap {live_name} back to the pre-restore subvolume id {sub.subvolid} "
@@ -2876,6 +2732,7 @@ def cmd_undo(*, assume_yes: bool) -> None:
         raise DuskyAbort("[*] Aborted.")
 
     with dusky_lock(), top_level(fs) as top:
+        assert_no_open_transactions(top)
         parent = top / parent_rel if parent_rel else top
         retired_name = rel.rsplit("/", 1)[-1]
         if not os.path.lexists(parent / live_name) or not os.path.lexists(parent / retired_name):
@@ -2891,9 +2748,28 @@ def cmd_undo(*, assume_yes: bool) -> None:
         live_info = subvol_show(parent / live_name)
         if live_info is None or live_info.subvolid == sub.subvolid:
             die(f"[!] {live_name} does not look like the post-restore subvolume. Refusing to swap.")
-        cancel_boot_cleanup(cleanup_unit_name(fs.uuid, rel))
+        default_before = get_default_subvolid(top)
+        entry = JournalEntry("undo", live_mount_of_subvolid(fs.uuid, sub.subvolid) or
+                             live_mount_of_subvolid(fs.uuid, live_info.subvolid) or "", fs.uuid, parent_rel, live_name,
+                             retired_name, retired_name, rel, live_info.subvolid,
+                             sub.subvolid, default_before)
+        journal = Journal(uuidlib.uuid4().hex, fs.uuid, "prepared",
+                          datetime.now(UTC).isoformat(), [entry], operation="undo")
         with critical_section(), open_dir(parent) as dfd:
+            journal.commit(top, "activating")
             rename_exchange_at(dfd, live_name, retired_name)
+            entry.exchanged = True
+            entry.retired_named = True
+            if default_before == live_info.subvolid:
+                set_default_subvolid(sub.subvolid, top)
+            journal.commit(top, "activated")
+            # The restored root may also carry the old cleanup unit.
+            unit = cleanup_unit_name(fs.uuid, rel)
+            cancel_boot_cleanup(unit)
+            if (parent / live_name / UNIT_DIR_REL).is_dir():
+                cancel_boot_cleanup(unit, offline_root=parent / live_name)
+            journal.commit(top, "finalised")
+            journal.discard(top)
         btrfs_sync(top)
     good(f"[+] Undo committed: {live_name} is the pre-restore subvolume again. Reboot to run on it.")
 
@@ -2901,15 +2777,33 @@ def cmd_undo(*, assume_yes: bool) -> None:
 # =============================================================================
 # BACKUP (btrfs send | btrfs receive)
 # =============================================================================
-def _purge_staging(staging: Path) -> None:
+def _purge_staging(staging: Path, *, fs_uuid: str | None = None) -> bool:
+    """Remove idle received subvolumes; never traverse or erase ordinary data."""
     if not staging.exists():
-        return
-    for item in sorted(staging.iterdir()):
-        run("btrfs", "subvolume", "delete", "--", str(item), timeout=NO_TIMEOUT)
-        if item.exists():
-            shutil.rmtree(item, ignore_errors=True)
+        return True
+    if staging.is_symlink() or not staging.is_dir():
+        return False
+    items = list(staging.iterdir())
+    if items:
+        if fs_uuid is None:
+            fs_uuid = run("findmnt", "--noheadings", "--output", "UUID", "--target",
+                          str(staging), check=True).text
+        default_id = get_default_subvolid(staging)
+        for item in items:
+            info = None if item.is_symlink() else subvol_show(item)
+            if info is None:
+                warn(f"[!] Unrecognised receive staging object {item}; leaving it intact.")
+                continue
+            if info.subvolid == default_id or live_mount_of_subvolid(fs_uuid, info.subvolid) is not None:
+                warn(f"[!] Receive staging subvolume {item} is mounted or default; leaving it intact.")
+                continue
+            result = run("btrfs", "subvolume", "delete", "--commit-after", "--", str(item),
+                         timeout=NO_TIMEOUT)
+            if not result.ok:
+                warn(f"[!] Could not remove {item}: {result.message}")
     with suppress(OSError):
         staging.rmdir()
+    return not staging.exists()
 
 
 def backup_subvolume(fs: Filesystem, src_rel: str, destination: str, *, parent_rel: str | None = None) -> Path:
@@ -2919,21 +2813,20 @@ def backup_subvolume(fs: Filesystem, src_rel: str, destination: str, *, parent_r
     fstype = run("stat", "-f", "-c", "%T", str(dest))
     if not fstype.ok or "btrfs" not in fstype.text.lower():
         die(f"[!] Destination {dest} is not btrfs; 'btrfs receive' requires a btrfs target.")
-    dest_uuid = run("findmnt", "-n", "-o", "UUID", "-T", str(dest)).text.strip()
+    mount_data = run("findmnt", "--json", "--target", str(dest),
+                     "--output", "UUID,TARGET,FSROOT", check=True)
+    try:
+        dest_mount = json.loads(mount_data.stdout)["filesystems"][0]
+        dest_uuid = dest_mount["uuid"]
+        dest_relative = Path(dest_mount["fsroot"].lstrip("/")) / dest.relative_to(dest_mount["target"])
+    except (ValueError, KeyError, IndexError, TypeError) as exc:
+        die(f"[!] Cannot resolve the backup destination mount: {exc}")
     if dest_uuid == fs.uuid:
         warn("[!] Destination is the SAME btrfs filesystem as the source. This is a reflink copy, not a backup.")
 
-    # The global lock is taken only for the short setup phase.  A multi-hour
-    # send must not block '--doctor' or a snapshot create (v3.0.0 held the lock
-    # for the whole stream).
-    with dusky_lock():
+    # Keep temporary send/receive objects protected from every Dusky sweeper.
+    with dusky_lock(), top_level(fs) as top, ExitStack() as stack:
         invalidate_cache()
-
-    with top_level(fs) as top, ExitStack() as stack:
-        for orphan in sorted(top.iterdir()):
-            if transient_kind(orphan.name) == "ephemeral":
-                LOG.info("Sweeping orphaned send snapshot %s", orphan.name)
-                run("btrfs", "subvolume", "delete", "--", str(orphan), timeout=NO_TIMEOUT)
 
         source = top / src_rel.strip("/")
         if not source.exists():
@@ -2966,26 +2859,40 @@ def backup_subvolume(fs: Filesystem, src_rel: str, destination: str, *, parent_r
             # btrfs-receive(8): the parent must already exist at the
             # destination and be identifiable by received_uuid, otherwise
             # receive aborts with 'cannot find parent subvolume'.
-            if not _destination_has_parent(dest, parent_info.uuid):
+            parent_stream_uuid = parent_info.received_uuid or parent_info.uuid
+            if not _destination_has_parent(dest, parent_stream_uuid):
                 die(
-                    f"[!] The destination has no subvolume whose received_uuid is {parent_info.uuid} "
+                    f"[!] The destination has no subvolume matching stream UUID {parent_stream_uuid} "
                     f"(the uuid of {parent_rel}). An incremental send would be unreceivable."
                 )
             argv += ["-p", str(parent_abs)]
         argv.append(str(send_source))
 
+        receive_top = stack.enter_context(top_level(Filesystem(dest_uuid, ""), quiet=True, allow_empty=True))
         staging = Path(tempfile.mkdtemp(dir=str(dest), prefix=TAG_RECV))
-        stack.callback(lambda: _purge_staging(staging))
+        stack.callback(lambda: _purge_staging(staging, fs_uuid=dest_uuid))
+        receive_staging = receive_top / dest_relative / staging.name
 
-        note(f"[*] {shlex.join(argv)} | btrfs receive {staging}")
+        receive_argv = ["btrfs", "receive", "-m", str(receive_top), str(receive_staging)]
+        note(f"[*] {shlex.join(argv)} | {shlex.join(receive_argv)}")
         send_err = stack.enter_context(tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace"))
 
         # send's stderr goes to a FILE, never a pipe: a pipe that nobody reads
         # while receive is still consuming stdout deadlocks at 64 KiB.
+        def reap(proc: subprocess.Popen) -> None:
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()
+
         send_proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=send_err, env=SUBPROCESS_ENV)
+        stack.callback(reap, send_proc)
         assert send_proc.stdout is not None
         recv_proc = subprocess.Popen(
-            ["btrfs", "receive", str(staging)],
+            receive_argv,
             stdin=send_proc.stdout,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -2994,6 +2901,7 @@ def backup_subvolume(fs: Filesystem, src_rel: str, destination: str, *, parent_r
             errors="replace",
             env=SUBPROCESS_ENV,
         )
+        stack.callback(reap, recv_proc)
         send_proc.stdout.close()
         try:
             _, recv_err = recv_proc.communicate()
@@ -3024,8 +2932,9 @@ def backup_subvolume(fs: Filesystem, src_rel: str, destination: str, *, parent_r
             die("[!] The received object is not a btrfs subvolume.")
         if not got.received_uuid:
             die("[!] The received subvolume has no received_uuid: the stream did not complete cleanly.")
-        if got.received_uuid != send_info.uuid:
-            die(f"[!] Integrity check failed: received_uuid {got.received_uuid} != source uuid {send_info.uuid}.")
+        stream_uuid = send_info.received_uuid or send_info.uuid
+        if got.received_uuid != stream_uuid:
+            die(f"[!] Integrity check failed: received_uuid {got.received_uuid} != stream UUID {stream_uuid}.")
         if not got.readonly:
             die("[!] The received subvolume is not read-only; 'btrfs receive' did not finalise it.")
 
@@ -3036,16 +2945,28 @@ def backup_subvolume(fs: Filesystem, src_rel: str, destination: str, *, parent_r
         final = dest / f"dusky_backup_{label}_{stamp}"
         if os.path.lexists(final):
             die(f"[!] Backup target already exists: {final}")
-        rename_noreplace(item, final)
+        # Give received temporary send snapshots a permanent, non-transient name.
+        if item.name != "snapshot":
+            rename_noreplace(item, staging / "snapshot")
+            item = staging / "snapshot"
+        # A read-only subvolume cannot move between parent directories.
+        # Publish its containing directory instead, preserving received_uuid.
+        rename_noreplace(staging, final)
+        final = final / item.name
         fsync_path(dest, is_dir=True)
         btrfs_sync(dest)
         good(f"[+] Backup complete: {final}")
-        say(f"{C_DIM}    received_uuid {got.received_uuid} (use as -p parent for the next incremental send){C_RESET}")
+        if info.readonly:
+            say(f"{C_DIM}    received_uuid {got.received_uuid}; keep {src_rel} for --parent{C_RESET}")
+        else:
+            say(f"{C_DIM}    received_uuid {got.received_uuid}; temporary source removed (full backup){C_RESET}")
         return final
 
 
 def _destination_has_parent(dest: Path, parent_uuid: str) -> bool:
     for info in subvol_list(dest):
+        if not info.readonly:
+            continue
         if info.received_uuid and info.received_uuid == parent_uuid:
             return True
         if info.uuid == parent_uuid:
@@ -3067,20 +2988,18 @@ def sweep_orphans(*, apply: bool) -> int:
     skipped.
     """
     count = 0
+    seen_staging: set[tuple[int, int]] = set()
     with dusky_lock():
         invalidate_cache()
         for fs_uuid, (fs, _mount) in btrfs_filesystems().items():
             with top_level(fs, writable=apply, quiet=True) as top:
-                for journal in load_journals(top):
-                    if journal.state in OPEN_TXN_STATES:
-                        die(
-                            f"[!] UUID={fs_uuid} has an unfinished transaction ({journal.txn}); "
-                            "run 'dusky --recover' before sweeping.",
-                            75,
-                        )
+                assert_no_open_transactions(top)
                 for info in sorted(subvol_list(top), key=lambda i: i.path):
                     kind = transient_kind(info.path)
                     if kind is None:
+                        continue
+                    if info.subvolid == get_default_subvolid(top):
+                        say(f"  default   UUID={fs_uuid} {info.path}; skipped")
                         continue
                     if live_mount_of_subvolid(fs_uuid, info.subvolid) is not None:
                         say(f"  {C_ERR}in use{C_RESET} UUID={fs_uuid} {info.path} (serving a live mount)")
@@ -3095,18 +3014,23 @@ def sweep_orphans(*, apply: bool) -> int:
                     btrfs_sync(top)
 
             for entry in findmnt_entries():
-                if str(entry.get("fstype")) != "btrfs":
+                if str(entry.get("fstype")) != "btrfs" or entry.get("uuid") != fs_uuid:
                     continue
                 target = Path(str(entry.get("target") or ""))
                 if not target.is_dir():
                     continue
                 for staging in sorted(target.iterdir()):
-                    if not staging.is_dir() or not RECV_STAGING_RE.fullmatch(staging.name):
+                    if staging.is_symlink() or not staging.is_dir() or not RECV_STAGING_RE.fullmatch(staging.name):
                         continue
+                    stat = staging.stat()
+                    identity = (stat.st_dev, stat.st_ino)
+                    if identity in seen_staging:
+                        continue
+                    seen_staging.add(identity)
                     count += 1
                     say(f"  {C_WARN}recv-stg {C_RESET} {staging}")
-                    if apply:
-                        _purge_staging(staging)
+                    if apply and not _purge_staging(staging, fs_uuid=fs_uuid):
+                        die(f"[!] Staging cleanup incomplete at {staging}; remaining objects were preserved.")
     return count
 
 
@@ -3122,7 +3046,7 @@ def cmd_list(config: str, as_json: bool) -> int:
 
 def cmd_create(config: str, description: str) -> None:
     with dusky_lock():
-        run("snapper", "-c", config, "create", "-d", description, check=True)
+        run("snapper", "-c", config, "create", "-d", description, check=True, timeout=NO_TIMEOUT)
         invalidate_cache()
     good(f"[+] Snapshot created for {config!r}.")
 
@@ -3135,22 +3059,32 @@ def cmd_create_pair(left: str, right: str, description: str) -> None:
     with dusky_lock():
         invalidate_cache()
         common = f"dusky_pair={pair_id},dusky_ts={stamp}"
-        run("snapper", "-c", left, "create", "-d", description,
-            "--userdata", f"{common},dusky_role={left}", check=True)
-        second = run("snapper", "-c", right, "create", "-d", description,
-                     "--userdata", f"{common},dusky_role={right}")
-        invalidate_cache()
-        if not second.ok:
-            warn(f"[!] {right} snapshot failed; rolling back the {left} half so no half-pair is left behind.")
-            for row in snapshot_rows(left):
-                if row.get("userdata_dict", {}).get("dusky_pair") == pair_id:
-                    run("snapper", "-c", left, "delete", row["id"])
+        try:
+            run("snapper", "-c", left, "create", "-d", description,
+                "--userdata", f"{common},dusky_role={left}", check=True, timeout=NO_TIMEOUT)
+            run("snapper", "-c", right, "create", "-d", description,
+                "--userdata", f"{common},dusky_role={right}", check=True, timeout=NO_TIMEOUT)
+        except BaseException:
+            # A command may create its snapshot before losing its reply. Find
+            # both halves by the operation's tag, never by a guessed number.
+            warn(f"[!] Pair creation interrupted (dusky_pair={pair_id}); removing any created halves.")
+            with critical_section():
+                invalidate_cache()
+                for config in (left, right):
+                    try:
+                        for row in snapshot_rows(config):
+                            if row.get("userdata_dict", {}).get("dusky_pair") == pair_id:
+                                run("snapper", "-c", config, "delete", row["id"],
+                                    check=True, timeout=NO_TIMEOUT)
+                    except (DuskyError, OSError) as exc:
+                        warn(f"[!] Could not verify/remove {config!r} half of {pair_id}: {exc}")
+            raise
+        finally:
             invalidate_cache()
-            die(f"[!] Coordinated create failed:\n    {second.message}")
     good(f"[+] Coordinated snapshots created (dusky_pair={pair_id}).")
 
 
-_SNAPPER_META_ALLOWED = re.compile(r"\A(?:info\.xml|filelist-\d+\.txt)\Z")
+_SNAPPER_META_ALLOWED = re.compile(r"\A(?:info\.xml|filelist-\d+\.txt(?:\.(?:gz|zst))?)\Z")
 
 
 def cmd_delete(config: str, snap_id: str) -> None:
@@ -3160,6 +3094,10 @@ def cmd_delete(config: str, snap_id: str) -> None:
         result = run("snapper", "-c", config, "delete", snap_id, timeout=NO_TIMEOUT)
         invalidate_cache()
         if result.ok:
+            # Snapper filters active/default snapshots out of the delete set
+            # and can still exit zero. Verify the requested postcondition.
+            if any(row["id"] == snap_id for row in snapshot_rows(config)):
+                die(f"[!] Snapper left snapshot {snap_id} of {config!r} intact: {result.message}")
             good(f"[+] Deleted snapshot {snap_id} of {config!r}.")
             return
 
@@ -3170,25 +3108,38 @@ def cmd_delete(config: str, snap_id: str) -> None:
         meta_dir = Path(snaps_mnt) / snap_id
         subvol = meta_dir / "snapshot"
         if meta_dir.is_dir() and not os.path.lexists(subvol):
-            # snapper writes info.xml plus filelist-<pre-number>.txt; v3.0.0's
-            # allowlist only knew filelist-0.txt and therefore refused to purge
-            # the metadata of any pre/post pair.
-            leftovers = {p.name for p in meta_dir.iterdir()}
+            # Snapper comparison caches may be plain, gzip or zstd files.
+            metadata = list(meta_dir.iterdir())
+            leftovers = {p.name for p in metadata}
             unexpected = {n for n in leftovers if not _SNAPPER_META_ALLOWED.fullmatch(n)}
-            if unexpected:
+            if unexpected or any(not p.is_file() for p in metadata):
                 die(f"[!] Refusing to purge {meta_dir}: unexpected content {sorted(unexpected)}")
-            shutil.rmtree(meta_dir, ignore_errors=True)
-            if not meta_dir.exists():
-                good(f"[+] Purged dead snapshot metadata {snap_id} of {config!r}.")
-                return
+            for path in metadata:
+                path.unlink()
+            # Keep the number reserved, as Snapper does for UNIQUE_NUMBERS.
+            # Removing the highest numbered directory permits ID reuse.
+            fsync_path(meta_dir, is_dir=True)
+            good(f"[+] Purged dead snapshot metadata {snap_id} of {config!r} (number reserved).")
+            return
         die(f"[!] Failed to delete snapshot {snap_id} of {config!r}:\n    {result.message}")
 
 
 def cmd_delete_pair(left: str, left_id: str, right: str, right_id: str) -> None:
     if left == right:
         die("[!] A coordinated delete requires two distinct configs.")
-    cmd_delete(left, left_id)
-    cmd_delete(right, right_id)
+    left_id, right_id = validate_snap_id(left_id), validate_snap_id(right_id)
+    with dusky_lock():
+        invalidate_cache()
+        for config, number in ((left, left_id), (right, right_id)):
+            if not any(row["id"] == number for row in snapshot_rows(config)):
+                die(f"[!] {config!r} has no snapshot {number}; neither half was deleted.")
+        cmd_delete(left, left_id)
+        try:
+            cmd_delete(right, right_id)
+        except (DuskyError, OSError):
+            warn(f"[!] Partial deletion: {left!r} snapshot {left_id} was deleted; "
+                 f"{right!r} snapshot {right_id} could not be deleted.")
+            raise
     good("[+] Coordinated deletion complete.")
 
 
@@ -3199,7 +3150,7 @@ def _post_restore(plans: Sequence[RestorePlan], *, remount: bool) -> None:
         if not remount:
             warn(f"[!] {plan.target.mountpoint} still serves the retired subvolume until you remount or reboot.")
             continue
-        if reactivate_mount(plan.target.mountpoint):
+        if reactivate_mount(plan.target.mountpoint, plan.new_subvol_id):
             reclaim_after_remount(
                 plan.target.fs.uuid, plan.retired_rel, plan.target.active_id, plan.scheduled_unit
             )
@@ -3231,7 +3182,16 @@ def cmd_restore_pair(
     _post_restore(plans, remount=remount)
 
 
-def cmd_cleanup_subvol(fs_uuid: str, subvol_rel: str) -> None:
+def assert_no_open_transactions(top: Path) -> None:
+    # A finalised replica may precede the coordinator's final commit. Only
+    # recovery can reconcile and remove it; it must still block new changes.
+    journals = load_journals(top)
+    if journals:
+        die(f"[!] Transaction {journals[0].txn} is unfinished or awaiting reconciliation; "
+            "run --recover before modifying this filesystem.", 75)
+
+
+def cmd_cleanup_subvol(fs_uuid: str, subvol_rel: str, *, expected_id: int | None = None) -> None:
     """
     Manual counterpart of the generated boot unit.
 
@@ -3243,7 +3203,7 @@ def cmd_cleanup_subvol(fs_uuid: str, subvol_rel: str) -> None:
     out from under the running system.
     """
     rel = subvol_rel.strip("/")
-    if transient_kind(rel) is None:
+    if ".." in Path(rel).parts or transient_kind(rel) is None:
         die(f"[!] Refusing to delete {rel!r}: it does not match Dusky's transient-artefact grammar.")
     fs_uuid = fs_uuid.strip()
     if not UUID_RE.match(fs_uuid):
@@ -3251,6 +3211,7 @@ def cmd_cleanup_subvol(fs_uuid: str, subvol_rel: str) -> None:
 
     fs = Filesystem(uuid=fs_uuid, source="")
     with dusky_lock(), top_level(fs, quiet=True) as top:
+        assert_no_open_transactions(top)
         victim = top / rel
         if not os.path.lexists(victim):
             LOG.info("Cleanup target already gone: %s", rel)
@@ -3260,6 +3221,8 @@ def cmd_cleanup_subvol(fs_uuid: str, subvol_rel: str) -> None:
         info = subvol_show(victim)
         if info is None:
             die(f"[!] {rel} is not a subvolume.")
+        if expected_id is not None and info.subvolid != expected_id:
+            die(f"[!] {rel} has id {info.subvolid}, expected {expected_id}; cleanup cancelled.")
         default_id = get_default_subvolid(top)
         if default_id == info.subvolid:
             die(f"[!] Refusing to delete {rel}: it is the filesystem default subvolume (id {info.subvolid}).")
@@ -3340,16 +3303,17 @@ def cmd_doctor() -> int:
 
     kernel = run("uname", "-r").text
     ktuple = _kernel_tuple()
-    say(f"  kernel           {C_DIM}{kernel}{C_RESET}" + ("" if ktuple >= (7, 1) else f"  {C_WARN}(< 7.1){C_RESET}"))
+    say(f"  kernel           {C_DIM}{kernel}{C_RESET}" + ("" if ktuple >= (7, 3) else f"  {C_WARN}(< 7.3){C_RESET}"))
     say(f"  btrfs-progs      {C_DIM}{run('btrfs', '--version').text}{C_RESET}")
     snap_version = run("snapper", "--version")
     say(f"  snapper          {C_DIM}{snap_version.text.splitlines()[0] if snap_version.ok and snap_version.text else 'unknown'}{C_RESET}")
     say(f"  python           {C_DIM}{sys.version.split()[0]}{C_RESET}")
     say(f"  renameat2 (libc) {C_OK}exported{C_RESET}")
 
-    json_ok = btrfs_json("subvolume", "get-default", "--", "/", check=False) is not None
-    say(f"  btrfs json       {(C_OK + 'supported') if json_ok else (C_ERR + 'UNSUPPORTED - upgrade btrfs-progs')}{C_RESET}")
-    problems += 0 if json_ok else 1
+    metadata_ok = btrfs_records("subvolume", "get-default", "/", check=False) is not None
+    say(f"  btrfs metadata   {(C_OK + 'readable') if metadata_ok else (C_ERR + 'unreadable')}{C_RESET}")
+    problems += 0 if metadata_ok else 1
+    problems += int(ktuple < (7, 3))
 
     say()
     for fs_uuid, (fs, mount_target) in btrfs_filesystems().items():
@@ -3359,12 +3323,12 @@ def cmd_doctor() -> int:
         problems += 0 if ready else 1
         default_id = get_default_subvolid(mount_target)
         say(f"  default subvolume : {default_id if default_id is not None else 'unknown'}")
-        with suppress(DuskyError):
+        try:
             with top_level(fs, quiet=True) as top:
                 supported = probe_exchange(top)
                 say(f"  RENAME_EXCHANGE   : {(C_OK + 'supported') if supported else (C_ERR + 'NOT SUPPORTED')}{C_RESET}")
                 problems += 0 if supported else 1
-                journals = [j for j in load_journals(top) if j.state in OPEN_TXN_STATES]
+                journals = load_journals(top)
                 if journals:
                     problems += len(journals)
                     for journal in journals:
@@ -3373,6 +3337,10 @@ def cmd_doctor() -> int:
                 transients = [i.path for i in subvol_list(top) if transient_kind(i.path)]
                 if transients:
                     say(f"  {C_WARN}transient debris  : {', '.join(transients)}{C_RESET}")
+
+        except (DuskyError, OSError) as exc:
+            problems += 1
+            warn(f"[!] Filesystem audit failed: {exc}")
 
     say()
     for cfg in snapper_configs():
@@ -3385,7 +3353,7 @@ def cmd_doctor() -> int:
         say(f"{C_INFO}snapper config {cfg['config']!r}{C_RESET} -> {mountpoint}")
         say(f"  active subvolume  : {resolved[0] if resolved else C_ERR + 'unresolved' + C_RESET}")
         say(f"  snapshot store    : {snaps_mnt} {'(mounted subvolume)' if live else C_WARN + '(NOT a mounted subvolume)' + C_RESET}")
-        if not live:
+        if not live or resolved is None:
             problems += 1
         if resolved:
             prefix = resolved[0].strip("/") + "/"
@@ -3402,9 +3370,9 @@ def cmd_doctor() -> int:
         for line in Path("/etc/fstab").read_text(errors="replace").splitlines():
             if line.strip().startswith("#") or "btrfs" not in line:
                 continue
-            if subvolid_from_options(line) is not None and subvol_from_options(line) is None:
+            if subvolid_from_options(line) is not None:
                 problems += 1
-                say(f"{C_ERR}fstab uses subvolid= without subvol= : {line.strip()}{C_RESET}")
+                say(f"{C_ERR}fstab pins subvolid= : {line.strip()}{C_RESET}")
                 say(f"{C_DIM}    A numeric subvolid is invalidated by every rollback. Use subvol=@name.{C_RESET}")
 
     pending = list_pending_cleanups()
@@ -3463,10 +3431,37 @@ def decode_meta(blob: str) -> JSONDict:
     return {}
 
 
-def panel(title: str, rows: Sequence[str], width: int = 52) -> None:
+def _fit_panel_text(value: str, limit: int) -> str:
+    """Clip coloured preview text by terminal cells without splitting an SGR code."""
+    if display_width(value) <= limit:
+        return value
+    if limit <= 0:
+        return ""
+    used = 0
+    parts: list[str] = []
+    for token in re.findall(r"\x1b\[[0-9;]*[A-Za-z]|[^\x1b]", value):
+        if token.startswith("\x1b["):
+            parts.append(token)
+            continue
+        cells = display_width(token)
+        if used + cells > limit - 1:
+            break
+        parts.append(token)
+        used += cells
+    return "".join(parts) + C_RESET + "…"
+
+
+def panel(title: str, rows: Sequence[str]) -> None:
+    width = max(6, display_width(title) + 5,
+                *(display_width(row) + 4 for row in rows))
+    preview_columns = os.environ.get("FZF_PREVIEW_COLUMNS", "")
+    if preview_columns.isdecimal() and int(preview_columns) >= 6:
+        width = min(width, int(preview_columns))
+    title = _fit_panel_text(title, width - 5)
     dash = "\u2500"
     say(f"{C_WARN}\u256d{dash} {title} {C_WARN}{dash * max(0, width - display_width(title) - 5)}\u256e{C_RESET}")
     for row in rows:
+        row = _fit_panel_text(row, width - 4)
         pad = max(0, width - display_width(row) - 4)
         say(f"{C_WARN}\u2502{C_RESET} {row}{' ' * pad} {C_WARN}\u2502{C_RESET}")
     say(f"{C_WARN}\u2570{dash * (width - 2)}\u256f{C_RESET}\n")
@@ -3772,7 +3767,9 @@ def launch_tui() -> None:
         except OSError as exc:
             die(f"[!] Failed to launch fzf: {exc}")
 
-        if process.returncode in (2, 130):
+        if process.returncode == 2:
+            die("[!] fzf failed; see its diagnostic above.")
+        if process.returncode == 130:
             say(f"\n{C_DIM}[*] Bye.{C_RESET}")
             return
         if not stdout.strip():
@@ -3782,7 +3779,7 @@ def launch_tui() -> None:
             continue
         empty_cycles = 0
 
-        output = stdout.strip().split("\n")
+        output = stdout.rstrip("\n").split("\n")
         key = output[0]
         if key in ("tab", "btab"):
             view_index = (view_index + (1 if key == "tab" else -1)) % len(VIEWS)
@@ -3975,6 +3972,9 @@ def _dispatch(view: str, key: str, selected: list[JSONDict]) -> bool:
                 with dusky_lock():
                     for fs_uuid, metas in grouped.items():
                         with top_level(Filesystem(fs_uuid, "")) as top:
+                            assert_no_open_transactions(top)
+                            invalidate_cache()
+                            protected_now = protected_subvolumes()
                             for meta in metas:
                                 rel = str(meta["path"])
                                 victim = top / rel
@@ -3985,6 +3985,8 @@ def _dispatch(view: str, key: str, selected: list[JSONDict]) -> bool:
                                 if info is None or str(info.subvolid) != str(meta.get("id")):
                                     say(f"{C_ERR}[!] {rel} changed identity since the listing; skipping.{C_RESET}")
                                     continue
+                                if rel in protected_now or live_mount_of_subvolid(fs_uuid, info.subvolid) is not None:
+                                    die(f"[!] {rel} is now protected or mounted; refusing deletion.")
                                 run("btrfs", "subvolume", "delete", "--", str(victim),
                                     check=True, timeout=NO_TIMEOUT)
                             btrfs_sync(top)
@@ -4015,6 +4017,7 @@ def build_parser() -> argparse.ArgumentParser:
                         help=f"seconds allowed between paired snapshots (default {PAIR_STRICT_SECONDS})")
     parser.add_argument("--parent", help="parent subvolume (relative to fs root) for an incremental send")
     parser.add_argument("--abort", action="store_true", help="with --recover: unwind instead of rolling forward")
+    parser.add_argument("--expected-id", type=int, help=argparse.SUPPRESS)
     parser.add_argument("--cleanup-subvol", nargs=2, metavar=("UUID", "SUBVOL"), help=argparse.SUPPRESS)
     parser.add_argument("--tui-preview", nargs=2, metavar=("VIEW", "B64"), help=argparse.SUPPRESS)
     parser.add_argument("--show-diff", action="store_true", help=argparse.SUPPRESS)
@@ -4060,6 +4063,14 @@ def main(argv: Sequence[str]) -> int:
         tui_preview(view, blob, show_diff=args.show_diff)
         return 0
 
+    if args.remount and args.no_remount:
+        parser.error("--remount and --no-remount cannot be combined")
+    if args.abort and not args.recover:
+        parser.error("--abort requires --recover")
+    if args.pair_threshold < 0:
+        parser.error("--pair-threshold must be nonnegative")
+    if args.expected_id is not None and not args.cleanup_subvol:
+        parser.error("--expected-id requires --cleanup-subvol")
     ensure_root()
     with suppress(OSError):
         os.chdir("/")
@@ -4067,10 +4078,11 @@ def main(argv: Sequence[str]) -> int:
     remount = args.remount or not args.no_remount
 
     if args.cleanup_subvol:
-        cmd_cleanup_subvol(args.cleanup_subvol[0], args.cleanup_subvol[1])
+        cmd_cleanup_subvol(args.cleanup_subvol[0], args.cleanup_subvol[1], expected_id=args.expected_id)
         return 0
     if args.doctor:
-        return cmd_doctor()
+        with dusky_lock():
+            return cmd_doctor()
     if args.recover:
         cmd_recover(abort=args.abort, assume_yes=args.yes)
         return 0
@@ -4146,6 +4158,11 @@ def entrypoint() -> int:
     # Restore the default SIGPIPE disposition for children only; inside this
     # process a closed stdout must raise BrokenPipeError so that '| head' does
     # not silently truncate a --json export.
+    def interrupted(signum: int, _frame: Any) -> None:
+        raise DuskyAbort(f"[!] Interrupted by {signal.Signals(signum).name}; use --recover after a restore interruption.")
+
+    for signum in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(signum, interrupted)
     try:
         if len(sys.argv) == 1:
             ensure_root()
@@ -4178,6 +4195,9 @@ def entrypoint() -> int:
         os.dup2(devnull, sys.stdout.fileno())
         os.close(devnull)
         return 128 + int(signal.SIGPIPE)
+    except OSError as exc:
+        print(f"[!] Operating system error: {exc}", file=sys.stderr)
+        return 1
     finally:
         with suppress(Exception):
             sys.stdout.flush()

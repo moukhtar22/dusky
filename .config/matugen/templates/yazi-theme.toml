@@ -39,6 +39,7 @@ padding = { open = "█", close = "█" }
 active    = { fg = "{{colors.primary.default.hex}}", bold = true, bg = "{{colors.surface.default.hex}}" }
 inactive  = { fg = "{{colors.secondary.default.hex}}", bg = "{{colors.surface.default.hex}}" }
 sep_inner = { open = "[", close = "]" }
+sep_outer = { open = "[", close = "]" }
 
 # : ]]]
 
@@ -86,9 +87,10 @@ progress_error  = { fg = "{{colors.error.default.hex}}", bg = "{{colors.surface_
 
 [which]
 cols = 3
-mask = { bg = "{{colors.surface_bright.default.hex}}" }
+mask = {}
+border = { fg = "{{colors.primary.default.hex}}" }
 cand = { fg = "{{colors.primary.default.hex}}" }
-rest = { fg = "{{colors.on_primary.default.hex}}" }
+rest = { fg = "{{colors.on_surface_variant.default.hex}}" }
 desc = { fg = "{{colors.on_surface.default.hex}}" }
 separator = " ▶ "
 separator_style = { fg = "{{colors.on_surface.default.hex}}" }
@@ -120,7 +122,9 @@ inactive = {}
 
 [input]
 border = { fg = "{{colors.primary.default.hex}}" }
+title = { fg = "{{colors.primary.default.hex}}" }
 value  = { fg = "{{colors.on_surface.default.hex}}" }
+selected = { bg = "{{colors.primary_container.default.hex}}", fg = "{{colors.on_primary_container.default.hex}}" }
 
 # : ]]]
 
@@ -143,12 +147,32 @@ hovered = { fg = "{{colors.tertiary_fixed.default.hex}}", underline = true }
 # : ]]]
 
 
+# : Confirm [[[
+
+[confirm]
+border = { fg = "{{colors.primary.default.hex}}" }
+title  = { fg = "{{colors.primary.default.hex}}" }
+
+# : ]]]
+
+
+# : Spot [[[
+
+[spot]
+border  = { fg = "{{colors.primary.default.hex}}" }
+title   = { fg = "{{colors.primary.default.hex}}" }
+tbl_col = { fg = "{{colors.primary.default.hex}}" }
+
+# : ]]]
+
+
 # : Help [[[
 
 [help]
-on     = { fg = "{{colors.on_surface.default.hex}}" }
-run    = { fg = "{{colors.on_surface.default.hex}}" }
-footer = { fg = "{{colors.on_secondary.default.hex}}", bg = "{{colors.secondary.default.hex}}" }
+border  = { fg = "{{colors.primary.default.hex}}" }
+chord   = { fg = "{{colors.primary.default.hex}}" }
+action  = {}
+hovered = { reversed = true, bold = true }
 
 # : ]]]
 

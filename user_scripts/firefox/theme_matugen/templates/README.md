@@ -1,148 +1,152 @@
-# Dusky Sites — Architecture & Variable Maintenance Guide
+# Dusky Sites: Firefox theme maintenance
 
-> **Notice for AI Assistants & Maintainers**: This document explains how Matugen CSS variables, WebExtension theme rules, and native Firefox profile stylesheets are configured and how to update them in the future.
+Target: native Linux Firefox **157+**, Python **3.14.7+**, and Wayland.
+The setup handles the traditional `~/.mozilla/firefox` and current
+`~/.config/mozilla/firefox` profile registries, including external profiles.
+Forks and Flatpak installations are outside this verified installation path.
 
----
+## Color flow
 
-## 🏛️ System Architecture
+1. Matugen renders `~/.config/matugen/templates/dusky_sites.css` into
+   `~/.config/matugen/generated/dusky_sites.css`. Its CSS variables use the
+   `--dusky-palette-` prefix so other userChrome palettes (including an older
+   `colors.css`) cannot override them. The host converts these private names to
+   the existing palette keys sent to the signed extension.
+2. The native host reads color declarations and sends palette changes to the
+   extension. Its source is
+   `~/.config/firefox_extentions/dusky_sites/dusky_sites_host.py`; setup copies
+   it to `$XDG_DATA_HOME/dusky-sites/dusky_sites_host.py` (default:
+   `~/.local/share/dusky-sites/dusky_sites_host.py`).
+3. `extension/background.js` maps seven palette roles to Firefox's theme API.
+   Firefox owns toolbar, tab, sidebar, new-tab and URL-bar selection colors.
+4. Setup imports `dusky_menu.css` from each profile's `userChrome.css` to theme
+   native menu defaults, current browser design tokens, and the address-bar
+   search button's shadow-host tokens. It preserves popup parts, checkbox/radio indicators, disabled states, status icons, tab-group
+   colors, URL-bar row layout, and direction-aware autoscroll icons.
+5. `~/.config/dusky_sites/about.css` supplies current design tokens for internal
+   documents. Setup copies it to `chrome/dusky_about.css`, imports that from
+   both `userChrome.css` and `userContent.css`, and links `dusky_palette.css`
+   to the configured palette.
+   This includes the print settings panel, common confirmation dialogs, and the
+   Library (history/bookmarks/downloads), and Developer Tools. DevTools panels,
+   toolbars, inputs, selections, borders and links follow the palette; native
+   syntax highlighting, HTTP status, errors and warnings retain their meaning.
+   Matugen also emits its light/dark mode so those native diagnostic colors stay
+   readable against either palette, including in a detached DevTools window.
+   Exact chrome document URLs keep the
+   print preview document separate. Both the palette and internal-page rules
+   exclude ordinary webpages and `about:blank` / `about:srcdoc` frames.
 
-```
-                          ┌──────────────────────────────────────────────┐
-                          │   Matugen Wallpaper Palette Generator        │
-                          │   (~/.config/matugen/generated/dusky_sites.css)│
-                          └──────────────────────┬───────────────────────┘
-                                                 │
-                                                 ▼
-┌───────────────────────────────┐   ┌───────────────────────────────────────────┐
-│     Dusky TUI / CLI Tools     │   │     Linux C-Library Inotify Watcher       │
-│  - tui_dusky_sites.py         ├──►│  (dusky_sites_host.py Native Host Daemon)  │
-│  - templates/dusky_sites.py   │   └─────────────────────┬─────────────────────┘
-└───────────────────────────────┘                         │
-                                                          │ Native Messaging (stdio)
-                                                          ▼
-                                            ┌───────────────────────────┐
-                                            │ Firefox WebExtension      │
-                                            │ (extension/background.js) │
-                                            └─────────────┬─────────────┘
-                                                          │
-                             ┌────────────────────────────┴───────────────────────────┐
-                             ▼                                                        ▼
-           ┌───────────────────────────────────┐                    ┌──────────────────────────────────┐
-           │ browser.theme.update()            │                    │ content.js                       │
-           │ (Native Chrome, Menus & Sidebars) │                    │ (Webpage CSS Variable Injection) │
-           └───────────────────────────────────┘                    └──────────────────────────────────┘
-```
+Chrome palette updates are live. Profile stylesheets, including the internal
+page palette, are loaded at browser startup; restart Firefox after regenerating
+colors to refresh internal pages. Re-run setup after changing the setup CSS,
+internal-page template, or `colorsPath`; wallpaper-only changes need no setup
+re-run. The `toolkit.legacyUserProfileCustomizations.stylesheets` preference
+retains that exact name in Firefox 157 and is still required.
 
----
+## Webpage opt-in
 
-## 📂 File Map & Key Paths
+The primary settings file is
+`~/.config/dusky/settings/dusky_sites/config.json`. New setup, the native host,
+and extension source all default `webThemeEnabled` to **false**.
+Existing configuration is preserved, including an explicit opt-in.
 
-| Component | Path | Description |
-| :--- | :--- | :--- |
-| **Main Config** | `~/.config/dusky/settings/dusky_sites/config.json` | Active extension configuration file |
-| **Matugen Template** | `~/.config/matugen/templates/dusky_sites.css` | Matugen template input file |
-| **Matugen Generated** | `~/.config/matugen/generated/dusky_sites.css` | Raw generated CSS color palette variables |
-| **Website Templates** | `~/.config/dusky_sites/*.css` | Per-domain CSS files for webpage color injection |
-| **Native Host Source** | `~/.config/firefox_extentions/dusky_sites/dusky_sites_host.py` | Event-driven inotify file watcher host daemon |
-| **Installed Native Host** | `~/.local/share/dusky-sites/dusky_sites_host.py` | Installed host executable launched by Firefox |
-| **Setup Script** | `~/user_scripts/firefox/theme_matugen/dusky_sites_setup.py` | Single unified setup & profile provisioner script |
-| **WebExtension Dir** | `~/.config/firefox_extentions/dusky_sites/extension/` | WebExtension files (`background.js`, `manifest.json`) |
-| **Audit Script** | `~/user_scripts/firefox/theme_matugen/templates/audit_variables.py` | Automated variable verification script |
-| **Guide & README** | `~/user_scripts/firefox/theme_matugen/templates/README.md` | This documentation file |
+Setting `webThemeEnabled` to `true` enables matching domain templates in
+`~/.config/dusky_sites`. `forceUnthemedWebsites` separately enables fallback
+rules for other websites and defaults to false. Turning webpage theming off
+rolls back the extension's injected palette and rules. `defaults.js` can
+explicitly override host-owned settings; it is optional.
 
----
+`contentColorScheme` controls the extension's separate theme API
+`content_color_scheme` setting. Its existing default is `dark`: this can affect
+websites' own `prefers-color-scheme` behavior even with CSS injection off.
+Set it to `system` in `defaults.js` to follow the system, or `auto` to follow
+the browser palette. This setting does not enable webpage CSS injection.
 
-## 🎨 How Theme Variables Flow into Firefox
+## Installation and signed packages
 
-The WebExtension maps colors in two stages inside `~/.config/firefox_extentions/dusky_sites/extension/background.js`:
-
-### 1. `paletteTemplate` (Matugen Variable ➔ Abstract Role)
-```javascript
-paletteTemplate: {
-    background: '--background',
-    backgroundLight: '--surface',
-    backgroundExtra: '--surface_container',
-    accentPrimary: '--primary',
-    accentSecondary: '--secondary',
-    text: '--on_background',
-    textFocus: '--on_surface',
-}
-```
-
-### 2. `browserTemplate` (Abstract Role ➔ Firefox LWT Element)
-```javascript
-browserTemplate: {
-    frame: 'background',
-    frame_inactive: 'background',
-    tab_text: 'textFocus',
-    tab_background_text: 'text',
-    tab_selected: 'backgroundLight',
-    tab_line: 'accentPrimary',
-    tab_loading: 'accentPrimary',
-    toolbar: 'backgroundLight',
-    toolbar_text: 'textFocus',
-    toolbar_field: 'backgroundExtra',
-    toolbar_field_text: 'textFocus',
-    toolbar_field_border: 'backgroundExtra',
-    toolbar_field_focus: 'backgroundLight',
-    toolbar_field_text_focus: 'textFocus',
-    toolbar_field_border_focus: 'accentPrimary',
-    toolbar_field_highlight: 'accentPrimary',
-    toolbar_field_highlight_text: 'background',
-    icons: 'text',
-    icons_attention: 'accentPrimary',
-    sidebar: 'backgroundLight',
-    sidebar_text: 'textFocus',
-    sidebar_border: 'backgroundExtra',
-    sidebar_highlight: 'accentPrimary',
-    sidebar_highlight_text: 'background',
-    popup: 'backgroundLight',
-    popup_text: 'textFocus',
-    popup_border: 'backgroundExtra',
-    popup_highlight: 'accentPrimary',
-    popup_highlight_text: 'background',
-    ntp_background: 'background',
-    ntp_card_background: 'backgroundLight',
-    ntp_text: 'text',
-    bookmark_text: 'textFocus',
-    toolbar_top_separator: 'backgroundExtra',
-    toolbar_bottom_separator: 'backgroundExtra',
-    button_background_hover: 'backgroundExtra',
-    button_background_active: 'backgroundExtra',
-}
+```sh
+python3 ~/user_scripts/firefox/theme_matugen/dusky_sites_setup.py
 ```
 
----
+Setup enables profile stylesheets, installs the host and manifests, and copies
+an XPI when its extension ID and signature metadata match. Firefox performs
+cryptographic signature and compatibility checks and manages its own add-on
+state. Setup never edits `extensions.json` or marks an incompatible add-on active.
+Setup requires a signed package and rejects packages whose manifest or runtime
+JavaScript differs from the shipped source before writing installation files.
+Restart Firefox to discover copied extensions and load stylesheets. Missing
+profiles or profile write failures produce a nonzero setup exit status.
 
-## 🛠️ Step-by-Step: How to Add or Update Variables in the Future
+Both Dusky update sequences run setup with `--update-installed` after refreshing
+Matugen output, so pulling new source and its signed XPI also updates existing
+profiles and the native host. This mode skips installations whose native host is
+absent, preserving an explicit uninstall and leaving new installations to the
+TUI's Install / Update action or a normal setup run.
+The setup task runs on every update, including updates where only the XPI changes.
+Restart Firefox after the update; a running browser retains its loaded extension.
+The audit checks each registered profile's XPI against the current signed package.
+Setup always registers the host under `~/.mozilla/native-messaging-hosts`,
+Firefox 157's native-manifest lookup path, even with profiles only in the XDG
+registry. Profile location does not determine the native-host lookup location.
 
-### Scenario A: You want to map a new Matugen variable to Firefox UI
+The signed XPI under `~/.config/firefox_extentions/dusky_sites/xpi` is a separate
+artifact. Source edits do **not** update it. Rebuild and re-sign the extension
+before deploying JavaScript changes; modifying its ZIP contents invalidates its
+signature. The audit reports source/package differences. For development,
+load `extension/manifest.json` as a temporary add-on through `about:debugging`.
 
-1. **Open `~/.config/firefox_extentions/dusky_sites/extension/background.js`**:
-   - Add your new role to `paletteTemplate` (e.g. `myRole: '--surface_container_high'`).
-   - Assign `myRole` to target elements in `browserTemplate` (e.g. `popup: 'myRole'`).
+Extension 6.2.1 repairs page-overwritten root palette properties and removed
+fallback style elements in the mutation observer, before paint. Deferring this
+repair to another animation frame could briefly expose the white page canvas
+when returning to a themed page such as Discord. Palette revisions still use
+the existing frame scheduler; repeated page mutations retain the repair limit.
+This JavaScript fix requires rebuilding and re-signing the XPI.
 
-2. **Update `dusky_menu.css` in Setup Scripts**:
-   - If the element requires custom CSS overrides (like popups, context menus, or scrollbars), open both `~/user_scripts/firefox/theme_matugen/dusky_sites_setup.py` and `~/.config/firefox_extentions/dusky_sites/setup.py`.
-   - Add your CSS rules into `MENU_CSS_CONTENT`.
+The Matugen palette template must remain document-scoped. Regenerate its output
+through the normal wallpaper/color workflow after changing its scope or variable
+names. Setup refuses an unscoped or non-private palette. An alternate `colorsPath`
+must provide the same scoped declarations with `--dusky-palette-` variable names;
+the native host reads declarations regardless of their document wrapper.
 
-3. **Re-Run the Setup Script**:
-   ```bash
-   python3 ~/user_scripts/firefox/theme_matugen/dusky_sites_setup.py
-   ```
-   *This automatically updates `dusky_menu.css` across all browser profiles in `~/.mozilla/firefox/` and `~/.zen/`.*
+Uninstall remains available with `--uninstall` (or `--purge`) and optional
+`--yes`. It removes Dusky-owned imports, stylesheets, extension copies, host,
+and settings; it retains site templates and development sources. It removes
+installer preference lines only when they still match the installer values;
+it does not reconstruct values from before installation.
 
----
+## Verification after Firefox updates
 
-## 🧪 Automated Audit & Verification
+```sh
+# Development source contracts; no deployment needed:
+python3 ~/user_scripts/firefox/theme_matugen/templates/audit_variables.py --source-only
 
-To verify that all variables, paths, and profile stylesheets are correct and unbroken, run the automated verification script:
-
-```bash
+# Also check current installed files, prefs, imports, links and host:
 python3 ~/user_scripts/firefox/theme_matugen/templates/audit_variables.py
 ```
 
-### Checking Live in Firefox:
-1. Open Firefox ➔ go to `about:debugging#/runtime/this-firefox`.
-2. Click **"Load Temporary Add-on..."** and select `~/.config/firefox_extentions/dusky_sites/extension/manifest.json`.
-3. Press **`Ctrl + Alt + Shift + I`** to open Firefox Browser Toolbox to inspect live computed `--lwt-*` CSS variables on `:root`.
+The audit reads the **installed** Firefox's `omni.ja` files and identifies its
+version, build and source revision. For an alternate application directory use
+`--firefox-dir /path/to/firefox`. It checks theme keys against
+`LightweightThemeManager`, CSS variables against shipped consumers, palette
+references, default opt-in settings, and installation drift. A stale stylesheet,
+missing import, broken link or mismatched installed host is a failure. Cached
+`live_theme_cache.json` data is displayed as a timestamped snapshot, never as a
+live query. Successful checks are source/file checks, not proof of rendering.
+
+Useful Mozilla references:
+
+- [Theme API colors and properties](https://developer.mozilla.org/en-US/docs/Mozilla/Add-ons/WebExtensions/manifest.json/theme)
+- [LightweightThemeConsumer](https://searchfox.org/firefox-main/source/toolkit/modules/LightweightThemeConsumer.sys.mjs)
+- [Browser color rules](https://searchfox.org/firefox-main/source/browser/themes/shared/browser-colors.css)
+- [Marionette protocol for isolated runtime tests](https://firefox-source-docs.mozilla.org/remote/marionette/Protocol.html)
+
+Verify colors in a disposable Firefox profile after source changes. Check actual
+popup content parts, keyboard selection, disabled and checked menu items, focused
+and failed findbar searches, sidebar/tab layouts, notification severity colors,
+internal pages, print settings and preview, window-modal confirmations, Library
+tree selection and search, and an ordinary HTTP page with blank/srcdoc frames.
+Test explicit webpage opt-in and opt-out. Check both Firefox console messages and native-host
+stderr. Internal Firefox CSS is not a stable public interface: repeat the source
+and runtime checks when upgrading; do not add speculative selectors or old-version
+fallbacks.

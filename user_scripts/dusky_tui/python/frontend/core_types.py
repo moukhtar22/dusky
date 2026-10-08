@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 import re
 import copy
+import math
+from functools import lru_cache
 from dataclasses import dataclass, field
 from typing import Any, Literal
 from abc import ABC, abstractmethod
@@ -33,8 +35,8 @@ def _get_css_named() -> frozenset[str]:
     if _css_named_cache is None:
         try:
             import webcolors
-            _css_named_cache = frozenset(name.lower() for name in webcolors.names("css4"))
-        except (ImportError, Exception):
+            _css_named_cache = frozenset(webcolors.names(webcolors.CSS3)) | {"rebeccapurple", "transparent"}
+        except ImportError:
             _css_named_cache = _LOWER_KNOWN_COLORS
     return _css_named_cache
 
@@ -44,8 +46,9 @@ _RE_HEX = re.compile(r"^#?(?:[a-f0-9]{3}|[a-f0-9]{4}|[a-f0-9]{6}|[a-f0-9]{8})$")
 _RE_HEX_LOWER = re.compile(r"^0x[a-f0-9]{6,8}$")
 _RE_CSS_FUNC = re.compile(r"^(?:rgba?|hsla?|oklch)\s*\(")
 
+@lru_cache(maxsize=2048)
 def is_theme_variable(val: str) -> bool:
-    """Validates if a string is a custom theme variable in O(1) checks."""
+    """Distinguish literal colors from variables; cache repeated render checks."""
     val = str(val).strip()
     if not val:
         return False
@@ -54,11 +57,11 @@ def is_theme_variable(val: str) -> bool:
     
     if _RE_THEME_VAR.search(val_lower):
         return True
-    if val_lower in _get_css_named():
-        return False
     if _RE_HEX.match(val_lower) or _RE_HEX_LOWER.match(val_lower):
         return False
     if _RE_CSS_FUNC.match(val_lower):
+        return False
+    if val_lower in _get_css_named():
         return False
         
     return True
@@ -125,6 +128,7 @@ class ConfigItem:
     target_file_override: str | None = None
     engine_type_override: str | None = None
     force_interactive: bool | None = None
+    read_only: bool = False
 
     _ratio_cache: float | None = field(default=None, repr=False, compare=False)
 
@@ -154,12 +158,20 @@ class ConfigItem:
             case "bool":
                 if isinstance(raw_val, bool): 
                     return raw_val
-                return str(raw_val).lower() in {"true", "1", "yes", "on"}
+                return str(raw_val).strip().lower() in {"true", "1", "yes", "on", "t", "y"}
             case "int" | "float":
                 try:
-                    return float(raw_val) if self.type_ == "float" else int(float(raw_val))
-                except (ValueError, TypeError): 
-                    return self.default
+                    if self.type_ == "int":
+                        if isinstance(raw_val, str):
+                            try:
+                                return int(raw_val, 10)
+                            except ValueError:
+                                return int(float(raw_val))
+                        return int(raw_val)
+                    value = float(raw_val)
+                    return value if math.isfinite(value) else clone_value(self.default)
+                except (ValueError, TypeError, OverflowError):
+                    return clone_value(self.default)
             case "string" | "picker" | "cycle" | "color" if isinstance(raw_val, str):
                 if raw_val.startswith("__VAR__"):
                     return raw_val[7:]
@@ -196,6 +208,8 @@ class BaseEngine(ABC):
                 success_count += 1
             else:
                 failed_keys.append(key)
+                if "AUTH_REQUIRED" in msg:
+                    return False, msg, debug
             last_debug = debug
             
         if success_count == len(changes):

@@ -1,15 +1,15 @@
 [Unit]
 Description=Battery Status Notification Service (Hyprland Event-Driven)
 Documentation=man:upower(1)
-After=hyprland-session.target dbus.socket
+After=dbus.socket
 PartOf=hyprland-session.target
 
 [Service]
-Type=simple
+Type=exec
 ExecStart=%h/user_scripts/battery/notify/battery_notify.sh
 Restart=on-failure
 RestartSec=5
-RestartPreventExitStatus=0
+RestartPreventExitStatus=2
 TimeoutStopSec=5
 MemoryMax=80M
 CPUQuota=20%
@@ -19,7 +19,7 @@ SyslogIdentifier=battery-notify
 NoNewPrivileges=false
 ProtectSystem=true
 ProtectHome=read-only
-ReadWritePaths=%t %h/.cache
+ReadWritePaths=%t
 PrivateTmp=true
 Environment=PATH=/usr/bin:/bin
 

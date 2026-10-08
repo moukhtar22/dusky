@@ -1,159 +1,119 @@
 #!/usr/bin/env bash
-# Dusky RAM Monitor - Pure Bash Real-Time Memory HUD Daemon
-# Forensic Optimization: Zero forks, zero subshells, synchronous D-Bus repaint, IPC Snooze.
+# Live RAM/ZRAM HUD for the graphical user session. Bash 5.3+, Linux 7.3+.
 
-# ==============================================================================
-# CONFIGURATION SETTINGS
-# ==============================================================================
-
-# Critical physical RAM threshold (% used).
-# Triggers warning unconditionally if RAM goes above this limit, even if ZRAM is empty.
+# Percentages are integer values rounded down. Critical RAM bypasses recovery
+# grace; an explicit right-click snooze suppresses all alerts.
 THRESHOLD_RAM_CRITICAL=95
-
-# High physical RAM threshold (% used).
-# Combined with THRESHOLD_ZRAM_HIGH; both must be met to trigger the warning.
 THRESHOLD_RAM_HIGH=90
-
-# High ZRAM Swap occupancy threshold (% used).
-# Combined with THRESHOLD_RAM_HIGH; both must be met to trigger the warning.
 THRESHOLD_ZRAM_HIGH=90
-
-# RAM Recovery Hysteresis Threshold (% used).
-# The HUD dissolves and cooldown starts ONLY if physical RAM drops below this percentage.
 THRESHOLD_RAM_RECOVERY=80
-
-# Polling Interval (seconds)
-# The wait time between memory scans (supports floating-point sub-second values).
 POLL_INTERVAL=0.5
-
-# Cooldown / Grace Interval (seconds)
-# The post-recovery grace period during which non-critical alerts are suppressed.
 COOLDOWN_SECS=120
 
-# ==============================================================================
-# INTERNAL STATE TRACKING (Do not modify)
-# ==============================================================================
 hud_active=false
 grace_expire_time=0
 snooze_expire_time=0
 
-# ==============================================================================
-# IPC SIGNAL TRAP (Right-Click Snooze Handler)
-# ==============================================================================
-handle_snooze() {
-    hud_active=false
-    snooze_expire_time=$(( EPOCHSECONDS + COOLDOWN_SECS ))
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] USER SNOOZED HUD FOR ${COOLDOWN_SECS}s" >&2
+log() {
+    printf '[%(%Y-%m-%d %H:%M:%S)T] %s\n' -1 "$*" >&2
 }
 
-# Catch SIGUSR1 sent by Mako's on-button-right
-trap 'handle_snooze' USR1
+read_time() {
+    local uptime
+    read -r uptime _ < /proc/uptime || return 1
+    now=${uptime%%.*}
+}
 
-# ==============================================================================
-# ENVIRONMENT PREPARATION
-# ==============================================================================
+handle_snooze() {
+    read_time || return
+    snooze_expire_time=$((now + COOLDOWN_SECS))
+    hud_active=false
+    log "USER SNOOZED HUD FOR ${COOLDOWN_SECS}s"
+}
 
-# Load Bash's internal C-compiled sleep to prevent forking /usr/bin/sleep
-if [[ -f /usr/lib/bash/sleep ]]; then
-    enable -f /usr/lib/bash/sleep sleep 2>/dev/null
-fi
+read_memory() {
+    local key val mem_total=0 available=-1 device type size used
+    local zram_total=0 zram_used=0
 
-echo "[$(date '+%Y-%m-%d %H:%M:%S')] Dusky RAM HUD started. Config: CriticalRAM=${THRESHOLD_RAM_CRITICAL}%, HighRAM=${THRESHOLD_RAM_HIGH}%, HighZRAM=${THRESHOLD_ZRAM_HIGH}%, RecoveryRAM=${THRESHOLD_RAM_RECOVERY}%, PollInterval=${POLL_INTERVAL}s" >&2
-
-# ==============================================================================
-# MAIN POLLING & HUD LOOP
-# ==============================================================================
-
-while true; do
-    MemTotal=0
-    MemFree=0
-    InactiveFile=0
-    SReclaimable=0
-    
-    # 1. Parse RAM stats (Short-circuits at SReclaimable to save CPU cycles)
     while read -r key val _; do
-        case "$key" in
-            MemTotal:)          MemTotal=$val ;;
-            MemFree:)           MemFree=$val ;;
-            "Inactive(file):")  InactiveFile=$val ;;
-            SReclaimable:)      SReclaimable=$val; break ;;
+        case $key in
+            MemTotal:) mem_total=$val ;;
+            MemAvailable:) available=$val ;;
         esac
+        (( mem_total > 0 && available >= 0 )) && break
     done < /proc/meminfo
-    
-    Available=$(( MemFree + InactiveFile + SReclaimable ))
-    if (( MemTotal > 0 )); then
-        RamUsedPct=$(( (MemTotal - Available) * 100 / MemTotal ))
-    else
-        RamUsedPct=0
-    fi
-    
-    # 2. Parse ZRAM stats (Direct SysFS reads, zero pipes)
-    ZramTotal=0
-    ZramUsed=0
-    
-    if [[ -f "/sys/block/zram0/disksize" && -f "/sys/block/zram0/mm_stat" ]]; then
-        read -r ZramTotal < /sys/block/zram0/disksize
-        read -r ZramUsed _ < /sys/block/zram0/mm_stat
-    fi
-    
-    if (( ZramTotal > 0 )); then
-        ZramUsedPct=$(( ZramUsed * 100 / ZramTotal ))
-    else
-        ZramUsedPct=0
-    fi
-    
-    # 3. State Machine & Threshold Evaluation
-    is_breached=0
-    if (( RamUsedPct >= THRESHOLD_RAM_CRITICAL || (RamUsedPct >= THRESHOLD_RAM_HIGH && ZramUsedPct >= THRESHOLD_ZRAM_HIGH) )); then
-        is_breached=1
+    # Missing statistics must not be interpreted as a recovered system.
+    (( mem_total > 0 && available >= 0 && available <= mem_total )) || return 1
+    RamUsedPct=$(((mem_total - available) * 100 / mem_total))
+
+    # Count swap slots, rather than compressed bytes or non-swap ZRAM data.
+    # Re-reading the active list also handles swap devices added/removed at runtime.
+    while read -r device type size used _; do
+        [[ $type == partition && ${device##*/} =~ ^zram[0-9]+$ ]] || continue
+        zram_total=$((zram_total + size))
+        zram_used=$((zram_used + used))
+    done < /proc/swaps || return 1
+    ZramUsedPct=0
+    (( zram_total > 0 )) && ZramUsedPct=$((zram_used * 100 / zram_total))
+    return 0
+}
+
+update_hud() {
+    if (( now < snooze_expire_time )); then
+        return
     fi
 
-    # 4. State Machine Execution
-    if (( EPOCHSECONDS < snooze_expire_time )); then
-        # User explicitly right-clicked to snooze. Absolute silence enforced.
-        :
-    elif (( is_breached )); then
-        if [[ "$hud_active" == false ]]; then
-            # Evaluate post-recovery grace period
-            if (( EPOCHSECONDS < grace_expire_time && RamUsedPct < THRESHOLD_RAM_CRITICAL )); then
-                # Suppress non-critical fluctuations while system stabilizes
-                :
-            else
-                hud_active=true
-                echo "[$(date '+%Y-%m-%d %H:%M:%S')] HUD ACTIVATED: RAM=${RamUsedPct}%, ZRAM=${ZramUsedPct}%" >&2
-            fi
-        fi
-    elif (( RamUsedPct <= THRESHOLD_RAM_RECOVERY )); then
-        if [[ "$hud_active" == true ]]; then
-            echo "[$(date '+%Y-%m-%d %H:%M:%S')] SYSTEM RECOVERED: RAM=${RamUsedPct}% (below ${THRESHOLD_RAM_RECOVERY}%)" >&2
-            
-            # Step A: Instantly kill active red HUD surface (frees Mako left-click lock)
-            /usr/bin/notify-send -a "dusky-high-ram-alert" \
-                -h string:x-canonical-private-synchronous:dusky-ram-hud \
-                -t 1 " " " "
-                
-            # Step B: Spawn fresh, independent green recovery notification
-            /usr/bin/notify-send -a "dusky-ram-recovered" \
-                -u normal \
-                -t 3000 \
-                "SYSTEM RECOVERED" \
-                "RAM: ${RamUsedPct}% | Memory Stabilized"
-                
-            hud_active=false
-            grace_expire_time=$(( EPOCHSECONDS + COOLDOWN_SECS ))
-        fi
-    fi
-
-    # 5. Render Live HUD Frame (Fires twice a second while active)
-    if [[ "$hud_active" == true ]]; then
-        /usr/bin/notify-send -a "dusky-high-ram-alert" \
+    if [[ $hud_active == true ]] && (( RamUsedPct <= THRESHOLD_RAM_RECOVERY )); then
+        # Replace the red HUD with a short-lived frame; low urgency avoids the
+        # global Mako critical-timeout override. The recovery notice is separate.
+        notify-send -a dusky-high-ram-alert \
             -h string:x-canonical-private-synchronous:dusky-ram-hud \
-            -u critical \
-            -t 1500 \
-            "CRITICAL MEMORY LOW" \
-            "RAM: ${RamUsedPct}% | ZRAM: ${ZramUsedPct}%"
+            -u low -t 1 ' ' ' '
+        notify-send -a dusky-ram-recovered -u normal -t 3000 \
+            'SYSTEM RECOVERED' "RAM: ${RamUsedPct}% | Memory Stabilized"
+        hud_active=false
+        grace_expire_time=$((now + COOLDOWN_SECS))
+        log "SYSTEM RECOVERED: RAM=${RamUsedPct}% (at or below ${THRESHOLD_RAM_RECOVERY}%)"
+        return
     fi
-    
-    # Pure Bash sleep (if loaded), falling back to binary gracefully
-    sleep "$POLL_INTERVAL"
-done
+
+    if [[ $hud_active == false ]]; then
+        (( RamUsedPct >= THRESHOLD_RAM_CRITICAL ||
+            (RamUsedPct >= THRESHOLD_RAM_HIGH && ZramUsedPct >= THRESHOLD_ZRAM_HIGH) )) || return
+        (( now >= grace_expire_time || RamUsedPct >= THRESHOLD_RAM_CRITICAL )) || return
+    fi
+
+    # Keep the HUD alive through the hysteresis band. Retry failed delivery on
+    # the next scan rather than recording an activation that never appeared.
+    if notify-send -a dusky-high-ram-alert \
+        -h string:x-canonical-private-synchronous:dusky-ram-hud \
+        -u critical -t 1500 'CRITICAL MEMORY LOW' \
+        "RAM: ${RamUsedPct}% | ZRAM: ${ZramUsedPct}%"; then
+        # A snooze may arrive while notify-send is running.
+        if (( now >= snooze_expire_time )) && [[ $hud_active == false ]]; then
+            hud_active=true
+            log "HUD ACTIVATED: RAM=${RamUsedPct}%, ZRAM=${ZramUsedPct}%"
+        fi
+    fi
+}
+
+main() {
+    # Optional Bash loadable builtin: no child process on idle polling scans.
+    if [[ -f /usr/lib/bash/sleep ]]; then
+        enable -f /usr/lib/bash/sleep sleep 2>/dev/null || :
+    fi
+    trap handle_snooze USR1
+    log "Dusky RAM HUD started: CriticalRAM=${THRESHOLD_RAM_CRITICAL}%, HighRAM=${THRESHOLD_RAM_HIGH}%, HighZRAM=${THRESHOLD_ZRAM_HIGH}%, RecoveryRAM=${THRESHOLD_RAM_RECOVERY}%, PollInterval=${POLL_INTERVAL}s"
+    while true; do
+        if ! read_memory || ! read_time; then
+            log 'Cannot read valid memory/time statistics; exiting for service restart.'
+            return 1
+        fi
+        update_hud
+        sleep "$POLL_INTERVAL" || return 1
+    done
+}
+
+if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
+    main
+fi

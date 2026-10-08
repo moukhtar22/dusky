@@ -1,0 +1,72 @@
+PROFILE battery
+── Module pruning (strict) ───────────────────────────────────────────────────────────────────────
+  ✓ localmodconfig: modules 6294 -> 347
+── Apply Kconfig matrix ──────────────────────────────────────────────────────────────────────────
+  ✓ Applied 589 Kconfig operations in 3 batched scripts/config invocations
+  12 symbols not offered by this tree were skipped: DEBUG_TIMEKEEPING, HZ_500, HZ_600, HZ_750, LEGACY_VSYSCALL_EMULATE, READ_ONLY_THP_FOR_FS, SCHED_ALT, SCHED_BMQ, SCHED_BORE, SCHED_PDS, SLUB_CPU_PARTIAL, TCP_CONG_RENO
+── Resolve dependencies (olddefconfig) ───────────────────────────────────────────────────────────
+  ✓ .config resolved
+── Verify .config contract ───────────────────────────────────────────────────────────────────────
+  kernel 7.3-rc4 | LOCALVERSION -dusky-battery | HZ 300 | preempt lazy +dynamic
+  scheduler eevdf | sched_ext y | CAS y | BORE absent
+  toolchain llvm | LTO thin | kCFI n | Rust n | BTF y | AutoFDO n
+  memory: THP never | SLUB_TINY n | MGLRU y | ZRAM y multi-comp n | ZSWAP n | DAMON n | LOG_BUF_SHIFT 16 | NR_CPUS 14
+  cpu: native y | X86_64_VERSION absent | mitigations n | amd_pstate mode 3 | NTSYNC m
+  modules: 366 =m, 2206 =y | compress zstd | TRIM_UNUSED_KSYMS n
+  4 soft (dependency-gated) entries differ: THP_SWAP, PAGE_REPORTING, MODULE_SIG, CPU_THERMAL
+  ✓ Contract satisfied: 589 operations verified against the resolved .config
+PROFILE PASS battery
+PROFILE performance
+── Module pruning (strict) ───────────────────────────────────────────────────────────────────────
+  ✓ localmodconfig: modules 6294 -> 347
+── Apply Kconfig matrix ──────────────────────────────────────────────────────────────────────────
+  ✓ Applied 542 Kconfig operations in 3 batched scripts/config invocations
+  12 symbols not offered by this tree were skipped: DEBUG_TIMEKEEPING, HZ_500, HZ_600, HZ_750, LEGACY_VSYSCALL_EMULATE, READ_ONLY_THP_FOR_FS, SCHED_ALT, SCHED_BMQ, SCHED_BORE, SCHED_PDS, SLUB_CPU_PARTIAL, TCP_CONG_RENO
+── Resolve dependencies (olddefconfig) ───────────────────────────────────────────────────────────
+  ✓ .config resolved
+── Verify .config contract ───────────────────────────────────────────────────────────────────────
+  kernel 7.3-rc4 | LOCALVERSION -dusky-performance | HZ 1000 | preempt full +dynamic
+  scheduler eevdf | sched_ext n | CAS y | BORE absent
+  toolchain llvm | LTO thin | kCFI n | Rust n | BTF n | AutoFDO n
+  memory: THP madvise | SLUB_TINY n | MGLRU y | ZRAM y multi-comp n | ZSWAP n | DAMON n | LOG_BUF_SHIFT 16 | NR_CPUS 14
+  cpu: native y | X86_64_VERSION absent | mitigations n | amd_pstate mode 3 | NTSYNC m
+  modules: 356 =m, 2195 =y | compress zstd | TRIM_UNUSED_KSYMS n
+  3 soft (dependency-gated) entries differ: PAGE_REPORTING, MODULE_SIG, CPU_THERMAL
+  ✓ Contract satisfied: 542 operations verified against the resolved .config
+PROFILE PASS performance
+PROFILE extreme_power
+── Module pruning (strict) ───────────────────────────────────────────────────────────────────────
+  ✓ localmodconfig: modules 6294 -> 347
+── Apply Kconfig matrix ──────────────────────────────────────────────────────────────────────────
+  ✓ Applied 546 Kconfig operations in 3 batched scripts/config invocations
+  12 symbols not offered by this tree were skipped: DEBUG_TIMEKEEPING, HZ_500, HZ_600, HZ_750, LEGACY_VSYSCALL_EMULATE, READ_ONLY_THP_FOR_FS, SCHED_ALT, SCHED_BMQ, SCHED_BORE, SCHED_PDS, SLUB_CPU_PARTIAL, TCP_CONG_RENO
+── Resolve dependencies (olddefconfig) ───────────────────────────────────────────────────────────
+  ✓ .config resolved
+── Verify .config contract ───────────────────────────────────────────────────────────────────────
+  kernel 7.3-rc4 | LOCALVERSION -dusky-extreme-power | HZ 100 | preempt lazy +dynamic
+  scheduler eevdf | sched_ext n | CAS y | BORE absent
+  toolchain llvm | LTO thin | kCFI n | Rust n | BTF n | AutoFDO n
+  memory: THP never | SLUB_TINY n | MGLRU y | ZRAM y multi-comp n | ZSWAP n | DAMON n | LOG_BUF_SHIFT 16 | NR_CPUS 14
+  cpu: native y | X86_64_VERSION absent | mitigations n | amd_pstate mode 3 | NTSYNC n
+  modules: 355 =m, 2177 =y | compress zstd | TRIM_UNUSED_KSYMS n
+  4 soft (dependency-gated) entries differ: THP_SWAP, PAGE_REPORTING, MODULE_SIG, CPU_THERMAL
+  ✓ Contract satisfied: 546 operations verified against the resolved .config
+PROFILE PASS extreme_power
+PROFILE low_memory
+── Module pruning (strict) ───────────────────────────────────────────────────────────────────────
+  ✓ localmodconfig: modules 6294 -> 347
+── Apply Kconfig matrix ──────────────────────────────────────────────────────────────────────────
+  ✓ Applied 539 Kconfig operations in 3 batched scripts/config invocations
+  12 symbols not offered by this tree were skipped: DEBUG_TIMEKEEPING, HZ_500, HZ_600, HZ_750, LEGACY_VSYSCALL_EMULATE, READ_ONLY_THP_FOR_FS, SCHED_ALT, SCHED_BMQ, SCHED_BORE, SCHED_PDS, SLUB_CPU_PARTIAL, TCP_CONG_RENO
+── Resolve dependencies (olddefconfig) ───────────────────────────────────────────────────────────
+  ✓ .config resolved
+── Verify .config contract ───────────────────────────────────────────────────────────────────────
+  kernel 7.3-rc4 | LOCALVERSION -dusky-low-memory | HZ 250 | preempt lazy +dynamic
+  scheduler eevdf | sched_ext n | CAS y | BORE absent
+  toolchain llvm | LTO thin | kCFI n | Rust n | BTF n | AutoFDO n
+  memory: THP never | SLUB_TINY n | MGLRU y | ZRAM y multi-comp n | ZSWAP n | DAMON n | LOG_BUF_SHIFT 15 | NR_CPUS 14
+  cpu: native y | X86_64_VERSION absent | mitigations n | amd_pstate mode 3 | NTSYNC n
+  modules: 355 =m, 2171 =y | compress zstd | TRIM_UNUSED_KSYMS n
+  4 soft (dependency-gated) entries differ: THP_SWAP, PAGE_REPORTING, MODULE_SIG, CPU_THERMAL
+  ✓ Contract satisfied: 539 operations verified against the resolved .config
+PROFILE PASS low_memory

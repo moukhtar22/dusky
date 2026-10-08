@@ -7,6 +7,7 @@ Validates socket ownership/modes before connecting; never trusts permissions alo
 
 import argparse
 import json
+import math
 import os
 import socket
 import stat
@@ -25,7 +26,7 @@ type JsonObject = dict[str, Any]
 
 
 def app_config_path() -> Path:
-    return Path.home() / ".local" / "lib" / "dusky-stt" / "config.json"
+    return Path(os.environ.get("DUSKY_CONFIG", str(Path(os.environ.get("DUSKY_APP_DIR", Path.home() / ".local/lib/dusky-stt")) / "config.json"))).expanduser()
 
 
 def transcripts_dir() -> Path:
@@ -80,8 +81,9 @@ def ensure_service() -> None:
     raise TimeoutError("Dusky STT socket did not appear; check `dusky_trigger --logs`.")
 
 
-def send_command(payload: JsonObject, timeout: float = DEFAULT_TIMEOUT) -> JsonObject:
-    ensure_service()
+def send_command(payload: JsonObject, timeout: float = DEFAULT_TIMEOUT, *, start_service: bool = True) -> JsonObject:
+    if start_service:
+        ensure_service()
     p = control_path()
     if not is_socket_secure(p):
         raise RuntimeError(f"Control socket missing/insecure: {p}")
@@ -97,10 +99,13 @@ def send_command(payload: JsonObject, timeout: float = DEFAULT_TIMEOUT) -> JsonO
             raise RuntimeError("Response truncated")
         if not data:
             raise RuntimeError("Daemon closed connection")
-    return json.loads(data.decode())
+    response = json.loads(data.decode())
+    if not isinstance(response, dict):
+        raise ValueError("Daemon response must be an object")
+    return response
 
 
-def wait_for_transcript(baseline: float) -> JsonObject:
+def wait_for_transcript(baseline: float, job: str | None = None) -> JsonObject:
     """Poll until the daemon returns to idle, then print the transcript.
 
     Ctrl-C aborts only this client; the daemon keeps transcribing.
@@ -111,10 +116,23 @@ def wait_for_transcript(baseline: float) -> JsonObject:
     missed = 0
     try:
         while time.monotonic() < deadline:
+            if job:
+                result_file = transcripts_dir().parent / "jobs" / f"{job}.json"
+                try:
+                    result = json.loads(result_file.read_text())
+                except FileNotFoundError:
+                    result = None
+                if result is not None:
+                    if result.get("ok") is not True:
+                        return result
+                    path = Path(result["path"])
+                    text = path.read_text(encoding="utf-8")
+                    print(text, end="" if text.endswith("\n") else "\n")
+                    return {**result, "chars": len(text), "words": len(text.split())}
             try:
-                st = send_command({"command": "status"}, timeout=DEFAULT_TIMEOUT)
+                st = send_command({"command": "status"}, timeout=DEFAULT_TIMEOUT, start_service=False)
                 missed = 0
-            except (OSError, ValueError, TimeoutError):
+            except (OSError, ValueError, RuntimeError):
                 st = None
                 missed += 1
             if st is None:
@@ -122,13 +140,13 @@ def wait_for_transcript(baseline: float) -> JsonObject:
                 # self-stopped after finishing (transcript decides below).
                 # A crash mid-job looks the same, so give up after ~30 s of
                 # continuous silence with no transcript to show for it.
-                if newest_transcript(after=baseline) is not None:
+                if not job and newest_transcript(after=baseline) is not None:
                     break
                 if missed >= 15:
                     return {"ok": False, "error": "daemon unreachable for 30s (crashed mid-job?)"}
                 time.sleep(2.0)
                 continue
-            if st.get("state", "idle") == "idle":
+            if not job and st.get("state", "idle") == "idle":
                 break
             time.sleep(2.0)
         else:
@@ -150,35 +168,8 @@ def wait_for_transcript(baseline: float) -> JsonObject:
 def main() -> int:
     ap = argparse.ArgumentParser(
         prog="dusky_trigger",
-        description="Control client for Dusky STT (Parakeet speech-to-text).",
-        epilog="""USAGE
-  dusky_trigger                         toggle realtime dictation (bind this to a hotkey)
-  dusky_trigger --file ~/audio.m4a        transcribe an audio/video file
-  dusky_trigger --file ~/ep.mp3 --wait    transcribe and print the transcript when done
-  dusky_trigger --ACTION
-
-ACTIONS
-  (none) / --toggle   start if idle, else stop and finalize
-                      (tap again mid-drain to chain a fresh take; --stop cancels)
-  --start [--realtime|--push]   begin capture (realtime live-types as you speak)
-  --stop              stop capture and finalize (waits for the last phrase)
-  --pause             pause / resume capture (keeps the session)
-  --status            daemon status
-  --file PATH         transcribe any ffmpeg-readable file (2 h+ supported)
-  --wait              with --file: block until idle, then print the transcript
-  --unload            free GPU VRAM / RAM now (worker exits; respawns on demand)
-  --restart           restart the service
-  --kill              stop the service
-  --logs              follow the daemon log
-
-POWER MODES (follow the systemd unit)
-  enabled   warm-resident: instant dictation, VRAM held, dGPU awake
-  disabled  on-demand: hotkey still works, VRAM mid-job only, auto-offload after
-
-HOTKEY EXAMPLES
-  hyprland:  bind = SUPER, S, exec, dusky_trigger
-  sway:      bindsym $mod+s exec dusky_trigger""",
-        formatter_class=argparse.RawDescriptionHelpFormatter)
+        usage="%(prog)s [OPTIONS]", add_help=False)
+    ap.add_argument("-h", "--help", action="store_true")
     g = ap.add_mutually_exclusive_group()
     g.add_argument("--start", action="store_true")
     g.add_argument("--stop", action="store_true")
@@ -198,6 +189,36 @@ HOTKEY EXAMPLES
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT)
     args = ap.parse_args()
+    if args.help:
+        print("""Dusky Parakeet · transcribe speech
+
+  Usage  dusky_trigger [OPTIONS]
+  Default: toggle realtime dictation
+
+Capture
+  --start --realtime     Start live typing
+  --start --push         Record, then transcribe
+  --toggle              Start or stop; default hotkey action
+  --stop / --pause       Finalize, or toggle pause
+
+Files
+  --file PATH --wait     Transcribe and print the exact job's result
+  --file PATH            Transcribe in the background
+
+Control
+  --status / --unload    Show state or release the ASR worker
+  --restart / --kill     Restart or stop the service
+  --logs                Follow the daemon log
+  --json                Print structured responses
+  --timeout SECONDS     Control request timeout
+  -h, --help            Show this help
+
+  Hotkey  bind = SUPER, S, exec, dusky_trigger
+  Enabled service keeps ASR warm; disabled service starts on demand.
+""", end="")
+        return 0
+    if not math.isfinite(args.timeout) or args.timeout <= 0:
+        ap.error("--timeout must be finite and positive")
 
     if args.wait and args.file is None:
         print("--wait needs --file", file=sys.stderr)
@@ -229,7 +250,7 @@ HOTKEY EXAMPLES
         baseline = time.time()
         resp = send_command({"command": "file", "path": str(src.resolve())}, timeout=max(args.timeout, 300.0))
         if args.wait and resp.get("ok"):
-            resp = wait_for_transcript(baseline)
+            resp = wait_for_transcript(baseline, resp.get("job"))
     elif args.unload:
         resp = send_command({"command": "unload"}, timeout=args.timeout)
     else:  # default: toggle (bare hotkey invocation)
@@ -249,4 +270,8 @@ HOTKEY EXAMPLES
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
+        print(f"dusky_trigger: {exc}", file=sys.stderr)
+        sys.exit(1)

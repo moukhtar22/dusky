@@ -4,14 +4,13 @@
 DUSKY TUI: MATUGEN THEME CONFIGURATOR SCHEMA
 ===============================================================================
 Target: Arch Linux / Hyprland / Matugen dynamic TOML template manager.
-Python 3.14.6 implementation replacing legacy bash script dusky_matugen_config_tui.sh.
+Python 3.14.7 implementation replacing legacy bash script dusky_matugen_config_tui.sh.
 """
 
 import sys
 import shutil
-import argparse
+import subprocess
 from pathlib import Path
-from typing import Any
 
 # Inject dusky_tui root into sys.path
 _DUSKY_ROOT = Path.home() / "user_scripts" / "dusky_tui"
@@ -47,6 +46,7 @@ CHECK_CMDS: dict[str, str] = {
     "wlogout": "wlogout",
     "rofi": "rofi",
     "mako": "mako",
+    "dusky_cursor": "hyprctl",
     "kitty": "kitty",
     "foot": "foot",
     "opencode": "opencode",
@@ -209,6 +209,15 @@ SCHEMA: dict[int, list[ConfigItem]] = {
             default=True,
             group="Screen Lock",
             extended_help="**Hyprlock Theming**\n\nGenerates color definitions for the Hyprlock lock screen."
+        ),
+        ConfigItem(
+            label="Dusky Cursor",
+            key="dusky_cursor",
+            scope="DEFAULT",
+            type_="bool",
+            default=True,
+            group="Compositor",
+            extended_help="**Dusky Cursor (Accent-Themed Bibata)**\n\nRecolors Bibata-Modern-Classic bitmaps with the Matugen accent (fill) + mode-aware outline into the `Dusky` XCursor theme and applies it live (`hyprctl setcursor`, gsettings, D-Bus env, Hyprland Lua env, GTK settings). Rebuilds automatically on every theme switch; disable to keep your current cursor untouched."
         ),
         ConfigItem(
             label="Waybar",
@@ -582,7 +591,7 @@ SCHEMA: dict[int, list[ConfigItem]] = {
             type_="preset",
             default=None,
             group="Built-in Presets",
-            confirm_message="Reset **all** 52 templates to their factory defaults?",
+            confirm_message="Reset **all** templates to their factory defaults?",
             preset_payload={"__ALL_DEFAULTS__": True},
             extended_help="**Factory Reset**\n\nReverts every template toggle to its `default` (true → enabled, false → disabled). Uses `{\"__ALL_DEFAULTS__\": True}` so omitted keys are correctly handled and the match ratio tracks defaults."
         ),
@@ -597,6 +606,7 @@ SCHEMA: dict[int, list[ConfigItem]] = {
             preset_payload={
                 "alacritty": False, "beeper": False, "btop": True, "cava": True,
                 "dusky_control_center": False, "dusky_quickpanal": False,
+                "dusky_cursor": True,
                 "dusky_sites": True, "dusky_tui": True, "dusky_visualizer_colors": True,
                 "fastfetch": True, "foot": True, "gtk3": True, "gtk4": True,
                 "gtksourceview": True, "hyprland": True, "hyprlock": True,
@@ -612,7 +622,7 @@ SCHEMA: dict[int, list[ConfigItem]] = {
                 "vscode": False, "waybar": True, "wlogout": True, "yazi": True,
                 "zathura": False, "zed": False, "zellij": False
             },
-            extended_help="**Standard Workstation**\n\nCurated Dusky suite: GTK 3/4, Icons, Qt5/6, KDE (kdeglobals + kate_syntax + konsole), Hyprland stack (hyprland, hyprlock, waybar, wlogout, rofi, mako), theme_notify, dusky_tui/visualizer, kitty/foot, neovim/yazi, cava/btop/fastfetch, pywalfox/dusky_sites/papirus-folders, standalone_commands. All 51 keys listed explicitly so strict-snapshot semantics are predictable."
+            extended_help="**Standard Workstation**\n\nCurated Dusky suite: GTK 3/4, Icons, Qt5/6, KDE (kdeglobals + kate_syntax + konsole), Hyprland stack (hyprland, hyprlock, waybar, wlogout, rofi, mako), theme_notify, dusky_tui/visualizer, kitty/foot, neovim/yazi, cava/btop/fastfetch, pywalfox/dusky_sites/papirus-folders, standalone_commands. All known keys listed explicitly so strict-snapshot semantics are predictable."
         ),
         ConfigItem(
             label="Minimal — Core Only",
@@ -625,6 +635,7 @@ SCHEMA: dict[int, list[ConfigItem]] = {
             preset_payload={
                 "alacritty": False, "beeper": False, "btop": False, "cava": False,
                 "dusky_control_center": False, "dusky_quickpanal": False,
+                "dusky_cursor": False,
                 "dusky_sites": False, "dusky_tui": True, "dusky_visualizer_colors": False,
                 "fastfetch": False, "foot": True, "gtk3": False, "gtk4": False,
                 "gtksourceview": False, "hyprland": True, "hyprlock": False,
@@ -640,7 +651,7 @@ SCHEMA: dict[int, list[ConfigItem]] = {
                 "vscode": False, "waybar": True, "wlogout": False, "yazi": False,
                 "zathura": False, "zed": False, "zellij": False
             },
-            extended_help="**Minimal Core**\n\nUltra-light profile for performance or debugging: only `hyprland`, `waybar`, `kitty`/`foot`, `rofi`, `mako`, and `dusky_tui` stay enabled; everything else is disabled. Full 52-key strict snapshot."
+            extended_help="**Minimal Core**\n\nUltra-light profile for performance or debugging: only `hyprland`, `waybar`, `kitty`/`foot`, `rofi`, `mako`, and `dusky_tui` stay enabled; everything else is disabled. Full strict snapshot."
         ),
         ConfigItem(
             label="Enable All Templates",
@@ -649,10 +660,11 @@ SCHEMA: dict[int, list[ConfigItem]] = {
             type_="preset",
             default=None,
             group="Built-in Presets",
-            confirm_message="Enable **all** 52 templates? This will uncomment every `[templates.*]` block.",
+            confirm_message="Enable **all** templates? This will uncomment every `[templates.*]` block.",
             preset_payload={
                 "alacritty": True, "beeper": True, "btop": True, "cava": True,
                 "dusky_control_center": True, "dusky_quickpanal": True,
+                "dusky_cursor": True,
                 "dusky_sites": True, "dusky_tui": True, "dusky_visualizer_colors": True,
                 "fastfetch": True, "foot": True, "gtk3": True, "gtk4": True,
                 "gtksourceview": True, "hyprland": True, "hyprlock": True,
@@ -666,9 +678,9 @@ SCHEMA: dict[int, list[ConfigItem]] = {
                 "spicetify": True, "standalone_commands": True, "starship": True,
                 "steam": True, "theme_notify": True, "tmux": True, "vesktop": True,
                 "vscode": True, "waybar": True, "wlogout": True, "yazi": True,
-                "zathura": True, "zed": True, "zellij": True, "gimp": True
+                "zathura": True, "zed": True, "zellij": True
             },
-            extended_help="**Enable Everything**\n\nTurns **on** every known template block (all 52 keys → `true`)."
+            extended_help="**Enable Everything**\n\nTurns **on** every known template block."
         ),
     ]
 }
@@ -704,7 +716,7 @@ def DEFERRED_LOAD() -> tuple[list[int], dict[int, list[ConfigItem]]]:
                 type_="action",
                 default=":",
                 group="Auto-Discovered",
-                extended_help="**Auto-Discovered Templates**\n\nNo undiscovered `[templates.*]` blocks were found. All templates in `config.toml` are already covered by the static tabs. New templates you add to `config.toml` will appear here after a TUI restart."
+                extended_help="**Auto-Discovered Templates**\n\nNo undiscovered `[templates.*]` blocks were found. All templates in `config.toml` are already covered by the static tabs. Press F5 after adding templates to refresh this tab."
             )
         ]
         for it in placeholder:
@@ -725,7 +737,6 @@ def DEFERRED_LOAD() -> tuple[list[int], dict[int, list[ConfigItem]]]:
             extended_help=f"**Auto-Discovered Template: {key}**\n\nFound `[templates.{key}]` block in `config.toml` that is not covered by static tabs. Toggle to comment/uncomment the block."
         )
         disc_items.append(item)
-        REGISTERED_KEYS.add(key)
 
     # Return tuple form per MASTER_SCHEMA: indices + new_items dict
     return [4], {4: disc_items}
@@ -734,106 +745,57 @@ def DEFERRED_LOAD() -> tuple[list[int], dict[int, list[ConfigItem]]]:
 # =============================================================================
 # 6. HEADLESS AUTONOMOUS CLI HANDLERS (--smart / --default)
 # =============================================================================
-def run_smart_scan() -> int:
-    """
-    Autonomously scans system binaries for templates with registered check_cmd.
-    If binary is installed, enables template; otherwise disables it.
-    Unchecked templates retain their default state.
-    Discovered templates (if any) are handled after DEFERRED_LOAD populates them.
-    """
+def apply_headless(*, smart: bool) -> int:
+    """Apply defaults or installed-package toggles using one configuration snapshot."""
     cfg_file = Path(TARGET_FILE).expanduser().resolve()
     engine = MatugenEngine(config_path=cfg_file)
-    engine.load_state()
+    state = engine.load_state()
+    items = [item for tab in SCHEMA.values() for item in tab if item.type_ == "bool"]
+    items.extend(
+        ConfigItem(label=key, key=key, type_="bool", default=True, scope="DEFAULT")
+        for key in sorted(state)
+        if key not in REGISTERED_KEYS and "/" not in key
+    )
+    changes = []
+    for item in items:
+        if item.key not in state:
+            continue
+        command = CHECK_CMDS.get(item.key) if smart else None
+        enabled = shutil.which(command) is not None if command else bool(item.default)
+        changes.append((item.key, "DEFAULT", "true" if enabled else "false", "bool"))
 
-    # Ensure discovered keys are considered in headless mode
-    # (router calls DEFERRED_LOAD() for side-effects before engine load; we mimic)
-    try:
-        indices, new_items = DEFERRED_LOAD()
-        if new_items:
-            for idx, items in new_items.items():
-                if idx in SCHEMA:
-                    # Avoid duplicating placeholder action row when real items exist
-                    if len(items) == 1 and items[0].key == "discovered_placeholder":
-                        continue
-                    SCHEMA[idx] = items
-    except Exception:
-        pass
-
-    changes: list[tuple[str, str, str, str]] = []
-
-    for tab_idx, items in SCHEMA.items():
-        for item in items:
-            if item.type_ in ("preset", "action", "menu"):
-                continue
-
-            key = item.key
-            check_cmd = CHECK_CMDS.get(key)
-
-            if check_cmd:
-                is_installed = shutil.which(check_cmd) is not None
-                final_val = "true" if is_installed else "false"
-            else:
-                final_val = "true" if item.default else "false"
-
-            changes.append((key, "DEFAULT", final_val, "bool"))
-
-    ok, msg, debug = engine.write_batch(changes)
-    if ok:
-        print(f"[+] Smart package scan applied successfully to {cfg_file.name}.")
-        return 0
-    else:
-        print(f"[-] Smart scan failed: {msg}")
+    if not state:
+        print(f"[-] No template blocks found in {cfg_file}.", file=sys.stderr)
         return 1
+    ok, message, _ = engine.write_batch(changes)
+    if not ok:
+        print(f"[-] Configuration update failed: {message}", file=sys.stderr)
+        return 1
+    print(f"[+] {'Smart package scan applied' if smart else 'Restored defaults'}: {cfg_file}.")
+    return 0
+
+
+def run_smart_scan() -> int:
+    return apply_headless(smart=True)
 
 
 def run_default_reset() -> int:
-    """Resets all registered items to schema defaults."""
-    cfg_file = Path(TARGET_FILE).expanduser().resolve()
-    engine = MatugenEngine(config_path=cfg_file)
-    engine.load_state()
-
-    # Same headless DEFERRED_LOAD handling as run_smart_scan
-    try:
-        indices, new_items = DEFERRED_LOAD()
-        if new_items:
-            for idx, items in new_items.items():
-                if idx in SCHEMA and not (len(items) == 1 and items[0].key == "discovered_placeholder"):
-                    SCHEMA[idx] = items
-    except Exception:
-        pass
-
-    changes: list[tuple[str, str, str, str]] = []
-
-    for tab_idx, items in SCHEMA.items():
-        for item in items:
-            if item.type_ in ("preset", "action", "menu"):
-                continue
-            val_str = "true" if item.default else "false"
-            changes.append((item.key, "DEFAULT", val_str, "bool"))
-
-    ok, msg, debug = engine.write_batch(changes)
-    if ok:
-        print(f"[+] Restored default Matugen template configuration to {cfg_file.name}.")
-        return 0
-    else:
-        print(f"[-] Default reset failed: {msg}")
-        return 1
+    return apply_headless(smart=False)
 
 
 # =============================================================================
 # 7. DIRECT EXECUTION ROUTER
 # =============================================================================
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] == "--smart":
+    if sys.argv[1:] == ["--smart"]:
         sys.exit(run_smart_scan())
 
-    if len(sys.argv) > 1 and sys.argv[1] == "--default":
+    if sys.argv[1:] == ["--default"]:
         sys.exit(run_default_reset())
 
-    import subprocess
     main_script = _DUSKY_ROOT / "python" / "main" / "main.py"
     if main_script.exists():
-        subprocess.run([sys.executable, str(main_script), str(Path(__file__).resolve())] + sys.argv[1:])
+        sys.exit(subprocess.run([sys.executable, str(main_script), str(Path(__file__).resolve()), *sys.argv[1:]]).returncode)
     else:
         print(f"[-] Error: Could not find Dusky TUI master router at {main_script}")
         sys.exit(1)

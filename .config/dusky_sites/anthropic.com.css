@@ -1,0 +1,6 @@
+@-moz-document domain("anthropic.com") {
+    /* >>> dusky:picks - managed by the Visual Picker, one rule per line */
+    html > body { background-color: var(--surface) !important; color: var(--on_surface) !important; border-color: var(--outline_variant) !important; } /* dusky key=sel%1Fhtml%20%3E%20body%1Fbg | bg: surface */
+    .serif { color: var(--on_surface) !important; } /* dusky key=sel%1F.serif%1Ftext | text: on_surface */
+    /* <<< dusky:picks */
+}

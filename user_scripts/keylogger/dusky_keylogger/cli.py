@@ -14,7 +14,9 @@ Subcommands:
 import argparse
 import asyncio
 import json
+import os
 import random
+import sqlite3
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -31,10 +33,11 @@ from .daemon import (
     get_transcript_dir,
     get_transcript_format,
     load_config,
+    resolve_path,
 )
 from .listener import KeyListener, KeyPress
 from .stats import daily_series, period_range, summarize
-from .storage import EventRow, KeyStore, row_from_press
+from .storage import SCHEMA_VERSION, EventRow, KeyStore, row_from_press
 
 console = Console()
 
@@ -42,13 +45,8 @@ console = Console()
 def _get_store(args: argparse.Namespace) -> KeyStore:
     data_dir = getattr(args, "data_dir", None)
     # Resolve via env/default; allow explicit override for testing.
-    base = Path(data_dir) if data_dir else default_data_dir()
-    base.mkdir(parents=True, exist_ok=True)
-    try:
-        import os
-        os.chmod(base, 0o700)
-    except OSError:
-        pass
+    base = resolve_path(data_dir) if data_dir else default_data_dir()
+    base.mkdir(parents=True, exist_ok=True, mode=0o700)
     db_path = base / "keys.db"
     store = KeyStore(db_path)
     if not store.path.exists():
@@ -62,22 +60,27 @@ def _get_store(args: argparse.Namespace) -> KeyStore:
             pass
         # If an old-schema (v1) DB is present, migrate before readers query
         # columns that only exist in v2. Cheap read-only check first.
+        conn = sqlite3.connect(store.path.absolute().as_uri() + "?mode=ro", uri=True)
         try:
-            import sqlite3
-
-            conn = sqlite3.connect(f"file:{store.path.as_posix()}?mode=ro", uri=True)
-            try:
-                uv = int(conn.execute("PRAGMA user_version").fetchone()[0])
-            finally:
-                conn.close()
-            if uv < 2:
-                store.init_db()
-        except sqlite3.Error:
-            pass
+            version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+        finally:
+            conn.close()
+        if version > SCHEMA_VERSION:
+            raise sqlite3.OperationalError(f"unsupported schema version: {version}")
+        if version < SCHEMA_VERSION:
+            store.init_db()
     return store
 
 
 def cmd_daemon(args: argparse.Namespace) -> int:
+    import grp
+    import os
+    if os.geteuid() != 0 and grp.getgrnam("input").gr_gid not in {os.getgid(), *os.getgroups()}:
+        from .maintenance import ensure_input_group
+        ensure_input_group()
+        console.print("Log out/in, then run the foreground daemon again.")
+        return 1
+
     async def _run() -> int:
         daemon = Daemon(data_dir=args.data_dir)
         await daemon.run()
@@ -182,11 +185,7 @@ def cmd_stats(args: argparse.Namespace) -> int:
 
 
 def cmd_dashboard(args: argparse.Namespace) -> int:
-    # New canonical: dashboard_tui.py (Rich + matugen). Fallback to old dashboard for compat.
-    try:
-        from .dashboard_tui import main as dashboard_main
-    except ImportError:
-        from .dashboard import main as dashboard_main  # type: ignore
+    from .dashboard_tui import main as dashboard_main
 
     store = _get_store(args)
     dashboard_main(store.path)
@@ -281,7 +280,7 @@ def cmd_events(args: argparse.Namespace) -> int:
 
 
 def _resolve_transcript_path(
-    args: argparse.Namespace, period: str, fmt: str
+    args: argparse.Namespace, period: str, fmt: str, config: dict | None = None
 ) -> Path:
     """Resolve transcript output path respecting CLI > env > config > /tmp.
 
@@ -292,23 +291,21 @@ def _resolve_transcript_path(
     if getattr(args, "out", None):
         p = Path(args.out).expanduser()
         if not p.is_absolute():
-            p = (Path.cwd() / p).resolve()
+            p = Path.cwd() / p
         return p
     # --transcript-dir explicit CLI override (if present)
     cli_tdir = getattr(args, "transcript_dir", None)
     if cli_tdir:
-        base = Path(cli_tdir).expanduser()
-        if not base.is_absolute():
-            base = Path.home() / base
+        base = resolve_path(cli_tdir)
     else:
         # config + env (load_config already folds env)
-        cfg = load_config()
+        cfg = config if config is not None else load_config()
         base = get_transcript_dir(cfg)
     # Normalize extension by format
     ext = ".md" if fmt == "markdown" else ".txt"
     day = datetime.now().strftime("%Y-%m-%d")
     # Sanitize period (already validated)
-    filename = f"dusky-typed-{period}-{day}{ext}"
+    filename = f"dusky-typed-{period}-{day}-{os.getuid()}{ext}"
     return base / filename
 
 
@@ -323,23 +320,23 @@ def _format_markdown(
         f"- **Range:** `{start.strftime('%Y-%m-%d %H:%M')}` → `{end.strftime('%Y-%m-%d %H:%M')}`  \n"
         f"- **Generated:** `{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`  \n"
         f"- **Characters:** `{len(text):,}`  \n"
-        f"- **Note:** Backspace rendered as `⌫`, Enter as newline, Tab as tab.  \n"
-        f"  This file lives in an ephemeral directory (e.g., `/tmp`) and is cleared on reboot.  \n"
-        f"  Persistent counts stay in `{db_note}` until you delete them.\n\n"
+        f"- **Note:** Backspace rendered as `⌫`, Delete as `⌦`, Enter as newline, Tab as tab.  \n"
+        f"  Default exports live in `/tmp`; custom directories may persist.  \n"
+        f"  Source events and characters stay in `{db_note}` until you delete them.\n\n"
         f"---\n\n"
     )
-    # Ensure markdown code fence doesn't break if transcript contains ```
-    safe = text.replace("```", "\\`\\`\\`")
-    return header + "```text\n" + safe + "\n```\n"
+    # Choose a longer fence without altering any recorded text.
+    import re
+    fence = "`" * max(3, 1 + max((len(m.group()) for m in re.finditer(r"`+", text)), default=0))
+    return header + fence + "text\n" + text + "\n" + fence + "\n"
 
 
 def cmd_text(args: argparse.Namespace) -> int:
     """Stitch everything typed in a period into readable text / markdown.
 
     Read-only: derives the transcript from the event store and writes it
-    to an ephemeral directory (default /tmp, cleared on reboot) so it never
-    accumulates in the persistent database. Persistent stats remain in
-    DATA_DIR until you manually delete them.
+    to a configured directory (default /tmp). The source event rows and
+    recorded characters remain in the persistent database until deleted.
 
     The output directory is configurable via:
       1. --out / --transcript-dir CLI flags (highest priority)
@@ -349,6 +346,10 @@ def cmd_text(args: argparse.Namespace) -> int:
     Similarly format via --format / env DUSKY_TRANSCRIPT_FORMAT / config.
     The directory is auto-created on first use (fresh install).
     """
+    cfg = load_config()
+    if not cfg["ephemeral_enabled"] and not getattr(args, "out", None):
+        console.print("Transcript generation is disabled; use --out to export explicitly.")
+        return 0
     store = _get_store(args)
     try:
         start, end = period_range(args.period)
@@ -361,7 +362,7 @@ def cmd_text(args: argparse.Namespace) -> int:
     if cli_fmt:
         fmt = "markdown" if str(cli_fmt).lower() in {"markdown", "md"} else "text"
     else:
-        fmt = get_transcript_format()
+        fmt = get_transcript_format(cfg)
 
     parts: list[str] = []
     for row in store.iter_between(start, end):
@@ -369,6 +370,8 @@ def cmd_text(args: argparse.Namespace) -> int:
             parts.append(row.char)
         elif row.kind == kc.KIND_BACKSPACE:
             parts.append("\u232b")  # ⌫
+        elif row.kind == kc.KIND_DELETE:
+            parts.append("⌦")
         elif row.kind == kc.KIND_ENTER:
             parts.append("\n")
         elif row.kind == kc.KIND_TAB:
@@ -381,20 +384,12 @@ def cmd_text(args: argparse.Namespace) -> int:
         else raw_text
     )
 
-    out_path = _resolve_transcript_path(args, args.period, fmt)
+    out_path = _resolve_transcript_path(args, args.period, fmt, cfg)
     try:
         # Auto-create transcript dir for fresh installs; don't chmod the system
         # tmp root itself, only the file (and leaf dir if we created it).
-        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         import os
-        import tempfile
-
-        # Only chmod leaf if it's not the system tmp root (keep 1777 semantics).
-        try:
-            if out_path.parent.resolve() != Path(tempfile.gettempdir()).resolve():
-                os.chmod(out_path.parent, 0o700)
-        except OSError:
-            pass
         # Create with 0600 from the start: no world-readable window, and
         # O_NOFOLLOW refuses to write through a pre-planted symlink in /tmp.
         fd = os.open(
@@ -403,15 +398,17 @@ def cmd_text(args: argparse.Namespace) -> int:
             0o600,
         )
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            os.fchmod(fh.fileno(), 0o600)
             fh.write(output_text)
     except OSError as exc:
         console.print(f"[red]Could not write transcript to {out_path}: {exc}[/]")
         return 1
-    console.print(
-        f"[green]Typed transcript ({args.period}, {fmt}) — {len(raw_text):,} chars → {out_path}[/]"
+    Console(stderr=True).print(
+        f"Typed transcript ({args.period}, {fmt}) — {len(raw_text):,} chars → {out_path}",
+        markup=False,
     )
     # Also echo to stdout for piping; use raw_text for text, full markdown for md
-    print(output_text)
+    sys.stdout.write(output_text)
     return 0
 
 
@@ -533,7 +530,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_text.add_argument(
         "--out",
         default=None,
-        help="Output path (default $DUSKY_TRANSCRIPT_DIR or config transcript_dir or /tmp/dusky-typed-<period>-<date>.[txt|md])",
+        help="Output path (default $DUSKY_TRANSCRIPT_DIR or config transcript_dir or /tmp/dusky-typed-<period>-<date>-<uid>.[txt|md])",
     )
     p_text.add_argument(
         "--transcript-dir",

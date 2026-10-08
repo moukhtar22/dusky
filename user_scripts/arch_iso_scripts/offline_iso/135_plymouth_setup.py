@@ -251,13 +251,7 @@ def patch_mkinitcpio():
     console.print(Panel(f"[bold cyan]Patching mkinitcpio drop-in {MKINITCPIO_DROPIN} for Plymouth 26.134.222-2 (2026-05-30)[/bold cyan]", box=box.ROUNDED))
 
     if not MKINITCPIO_DROPIN.exists():
-        console.print(f"[yellow]WARN: {MKINITCPIO_DROPIN} not found, run 120 before 135[/yellow]")
-        MKINITCPIO_DROPIN.parent.mkdir(parents=True, exist_ok=True)
-        MKINITCPIO_DROPIN.write_text(
-            'MODULES=(btrfs)\nBINARIES=(/usr/bin/btrfs)\nHOOKS=(base systemd plymouth keyboard autodetect microcode modconf kms sd-vconsole sd-encrypt block filesystems)\nFILES=(/etc/vconsole.conf)\n'
-        )
-        console.print("[green]Created minimal drop-in with plymouth + vconsole.conf[/green]")
-        return
+        raise RuntimeError(f"{MKINITCPIO_DROPIN} not found; run 120 before 135 to detect filesystem and encryption topology")
 
     text = MKINITCPIO_DROPIN.read_text()
 
@@ -267,8 +261,7 @@ def patch_mkinitcpio():
 
     hooks_info = _parse_last_array(text, "HOOKS")
     if not hooks_info:
-        console.print("[yellow]No HOOKS found, creating modern HOOKS[/yellow]")
-        text = text.rstrip() + f"\nHOOKS=({' '.join(canonical_order)})\n"
+        raise RuntimeError(f"No HOOKS found in {MKINITCPIO_DROPIN}; rerun 120 before 135")
     else:
         _, _, _, tokens, _ = hooks_info
         seen = set()
@@ -280,7 +273,8 @@ def patch_mkinitcpio():
             if t not in seen:
                 cleaned.append(t)
                 seen.add(t)
-        for req in ["base", "systemd", "plymouth", "keyboard", "sd-vconsole", "sd-encrypt", "block", "filesystems"]:
+        # 120 decides whether sd-encrypt is required; preserve that decision.
+        for req in ["base", "systemd", "plymouth", "keyboard", "sd-vconsole", "block", "filesystems"]:
             if req not in seen:
                 cleaned.append(req)
                 seen.add(req)
@@ -329,7 +323,7 @@ def main():
     ensure_plymouth()
     deploy_theme()
     patch_mkinitcpio()
-    console.print(Panel("[bold green]Plymouth deployment successful.\n- Hook: plymouth only (sd-plymouth removed Jan 2024)\n- Order: base systemd plymouth keyboard autodetect microcode modconf kms sd-vconsole sd-encrypt block filesystems\n- Fix: FILES=(/etc/vconsole.conf) exact token (PR #6183)\n- Parser: anchored ^HOOKS, last-wins, comment-aware, shlex, idempotent, fixes # HOOKS= poisoning and inline # brick\n- Deferred: initramfs generation to 150[/bold green]", box=box.ROUNDED))
+    console.print(Panel("[bold green]Plymouth deployment successful.\n- Hook: plymouth; encryption hooks preserved from 120\n- FILES includes /etc/vconsole.conf for keyboard layout\n- Deferred: initramfs generation to 150[/bold green]", box=box.ROUNDED))
 
 if __name__ == "__main__":
     main()

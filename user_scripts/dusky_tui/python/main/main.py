@@ -13,13 +13,14 @@ import shutil
 import logging
 import hashlib
 import pwd
-import subprocess
 import shlex
 import atexit
 import tempfile
 import re
 from datetime import datetime
 from pathlib import Path
+from functools import lru_cache
+from threading import get_ident
 
 
 # =============================================================================
@@ -108,7 +109,8 @@ if os.geteuid() == 0:
                 except Exception:
                     pass
 
-            _fix_permissions()
+            # Root can access these directories already. Repair ownership on
+            # exit instead of scanning the entire backup/cache tree at startup.
             atexit.register(_fix_permissions)
 
         except KeyError:
@@ -168,11 +170,18 @@ def setup_logging(module_name: str, enable_logging: bool) -> logging.Logger:
         fh = logging.FileHandler(log_file)
         fh.setFormatter(logging.Formatter("[%(asctime)s] %(levelname)s - %(message)s"))
         logger.addHandler(fh)
+        handler = fh
 
         print(f"[*] Logging enabled: {log_file}")
 
     else:
-        logger.addHandler(logging.NullHandler())
+        handler = logging.NullHandler()
+        logger.addHandler(handler)
+
+    for name in ("dusky_network_engine", "python.frontend.ui"):
+        related = logging.getLogger(name)
+        related.setLevel(logging.DEBUG if enable_logging else logging.WARNING)
+        related.addHandler(handler)
 
     return logger
 
@@ -192,7 +201,7 @@ def manage_backup(target_file: Path, action: str, logger: logging.Logger) -> boo
     parent_bits = re.sub(r"[^\w.-]+", "_", parent_bits)[:64]
     stem = f"{parent_bits}_{path_hash}_{resolved.name}"
 
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     backup_path = backup_dir / f"{stem}.{timestamp}.bak"
     latest_link = backup_dir / f"{stem}.latest.bak"
 
@@ -202,6 +211,7 @@ def manage_backup(target_file: Path, action: str, logger: logging.Logger) -> boo
         tmp_path = Path(tmp_name)
         try:
             with os.fdopen(fd, "wb") as out_f, src.open("rb") as in_f:
+                os.fchmod(out_f.fileno(), os.fstat(in_f.fileno()).st_mode & 0o7777)
                 while chunk := in_f.read(1024 * 1024):
                     out_f.write(chunk)
                 out_f.flush()
@@ -259,53 +269,62 @@ class LazyEnginePool(dict):
     def __init__(self, factory_func):
         super().__init__()
         self._factory = factory_func
-        self._registered_keys: set[tuple[str, str]] = set()
+        self._registered_keys: dict[tuple[str, str], None] = {}
+        self._app = None
+        self._owner_thread = get_ident()
+
+    def bind_app(self, app) -> None:
+        self._app = app
+        self._owner_thread = get_ident()
+        for engine in super().values():
+            if hasattr(engine, "set_app"):
+                engine.set_app(app)
 
     def register(self, e_type: str, config_path: str) -> tuple[str, str]:
         key = (e_type, config_path)
-        self._registered_keys.add(key)
+        self._registered_keys[key] = None
         return key
 
     def __getitem__(self, key: tuple[str, str]):
         if not super().__contains__(key):
-            self[key] = self._factory(key[0], key[1])
+            engine = self._factory(key[0], key[1])
+            if self._app is not None and hasattr(engine, "set_app"):
+                if get_ident() != self._owner_thread and self._app.is_running:
+                    self._app.call_from_thread(engine.set_app, self._app)
+                else:
+                    engine.set_app(self._app)
+            self[key] = engine
         return super().__getitem__(key)
 
     def get(self, key: tuple[str, str], default=None):
         if super().__contains__(key):
             return super().__getitem__(key)
         if key in self._registered_keys:
-            try:
-                return self[key]
-            except Exception:
-                return default
+            return self[key]
         return default
 
     def __contains__(self, key: object) -> bool:
         return super().__contains__(key) or key in self._registered_keys
 
     def values(self):
-        for key in list(self._registered_keys):
-            self[key]
-        return super().values()
+        return (self[key] for key in self)
 
     def items(self):
-        for key in list(self._registered_keys):
-            self[key]
-        return super().items()
+        return ((key, self[key]) for key in self)
 
     def keys(self):
-        for key in list(self._registered_keys):
-            self[key]
-        return super().keys()
+        return (self._registered_keys | dict.fromkeys(super().keys())).keys()
 
     def __iter__(self):
-        for key in list(self._registered_keys):
-            self[key]
-        return super().__iter__()
+        return iter(self.keys())
 
     def __len__(self):
-        return len(self._registered_keys | set(super().keys()))
+        return len(self.keys())
+
+
+@lru_cache(maxsize=1024)
+def resolve_target(path: str) -> str:
+    return str(Path(path).expanduser().resolve())
 
 
 
@@ -402,9 +421,10 @@ EXAMPLES:
         schema_path = direct_path
 
     else:
-        clean_arg = target_arg.replace(".", "/").lstrip("/")
-        if not clean_arg.endswith(".py"):
-            clean_arg += ".py"
+        clean_arg = target_arg.removesuffix(".py")
+        if "/" not in clean_arg:
+            clean_arg = clean_arg.replace(".", "/")
+        clean_arg = clean_arg.lstrip("/") + ".py"
 
         for base_dir in SCHEMA_SEARCH_PATHS:
             potential_path = base_dir / clean_arg
@@ -425,7 +445,8 @@ EXAMPLES:
     module_name = schema_path.stem
     logger = setup_logging(module_name, args.log)
 
-    spec = importlib.util.spec_from_file_location(module_name, schema_path)
+    safe_module_namespace = f"dusky_schema_{module_name}"
+    spec = importlib.util.spec_from_file_location(safe_module_namespace, schema_path)
 
     if spec is None or spec.loader is None:
         print(f"[-] Failed to load schema module: Invalid module spec for '{schema_path}'.")
@@ -433,7 +454,6 @@ EXAMPLES:
 
     schema_module = importlib.util.module_from_spec(spec)
 
-    safe_module_namespace = f"dusky_schema_{module_name}"
     sys.modules[safe_module_namespace] = schema_module
 
     spec.loader.exec_module(schema_module)
@@ -451,6 +471,7 @@ EXAMPLES:
         GLOBAL_POPUP = getattr(schema_module, "GLOBAL_POPUP", None)
         TAB_NOTICES = getattr(schema_module, "TAB_NOTICES", None)
         DEFERRED_LOAD = getattr(schema_module, "DEFERRED_LOAD", None)
+        HIDE_MISSING_ITEMS = getattr(schema_module, "HIDE_MISSING_ITEMS", False)
         REQUIRE_ROOT = getattr(schema_module, "REQUIRE_ROOT", False)
         CUSTOM_VIEWS = getattr(schema_module, "CUSTOM_VIEWS", None)
 
@@ -498,19 +519,6 @@ EXAMPLES:
 
         target_cmd = [sys.executable, os.path.realpath(sys.argv[0])] + escalated_args
 
-        has_silent_sudo = False
-
-        if shutil.which("sudo"):
-            try:
-                if subprocess.run(["sudo", "-n", "true"], capture_output=True, timeout=2).returncode == 0:
-                    has_silent_sudo = True
-            except Exception:
-                pass
-
-        if has_silent_sudo:
-            cmd = ["sudo", "env"] + env_args + target_cmd
-            os.execvp(cmd[0], cmd)
-
         if shutil.which("sudo"):
             cmd = ["sudo", "env"] + env_args + target_cmd
             os.execvp(cmd[0], cmd)
@@ -547,6 +555,10 @@ EXAMPLES:
         elif e_type == "ini":
             from python.engines.ini import IniConfigEngine
             return IniConfigEngine(config_path=config_path)
+
+        elif e_type == "tlp":
+            from python.engines.tlp import TlpConfigEngine
+            return TlpConfigEngine(config_path=config_path)
 
         elif e_type == "bridged_ini":
             from python.engines.bridged_ini import BridgedIniEngine
@@ -618,7 +630,15 @@ EXAMPLES:
 
         elif e_type == "fontconfig":
             from python.engines.fontconfig import FontconfigEngine
-            return FontconfigEngine(config_path=config_path)
+            defaults = {
+                item.key: item.default
+                for items in SCHEMA.values() for item in items
+                if item.type_ not in ("action", "preset", "menu")
+                and (item.engine_type_override or ENGINE_TYPE).lower() == e_type
+                and (resolve_target(item.target_file_override) if item.target_file_override
+                     else str(TARGET_FILE)) == config_path
+            }
+            return FontconfigEngine(config_path=config_path, defaults=defaults)
 
         elif e_type in ("toml", "toml_engine"):
             from python.engines.toml import TomlEngine
@@ -632,6 +652,10 @@ EXAMPLES:
             from python.engines.dns_systemd import SystemdDnsEngine
             return SystemdDnsEngine(config_path=config_path)
 
+        elif e_type in ("systemd_power", "systemd_logind", "power_engine"):
+            from python.engines.systemd_power import SystemdPowerEngine
+            return SystemdPowerEngine(config_path=config_path)
+
         elif e_type == "starship":
             from python.engines.starship import StarshipEngine
             return StarshipEngine(config_path=config_path)
@@ -640,13 +664,17 @@ EXAMPLES:
             from python.engines.hyprlock import HyprlockEngine
             return HyprlockEngine(config_path=config_path)
 
+        elif e_type in ("ufw", "ufw_firewall"):
+            from python.engines.ufw import UfwEngine
+            return UfwEngine(config_path=config_path)
+
         else:
             print(f"[-] Fatal: Unknown ENGINE_TYPE '{e_type}' specified in schema '{schema_path.name}'.")
             print(
-                "[i] Supported engines are: 'lua', 'ini', 'bridged_ini', 'systemd', 'systemd_dns', 'hyprlang', "
+                "[i] Supported engines are: 'lua', 'ini', 'tlp', 'bridged_ini', 'systemd', 'systemd_dns', 'systemd_power', 'hyprlang', "
                 "'trackpad', 'monitor', 'cmdline', 'systemd_boot', 'flatdotconfig', 'env', "
                 "'waybar', 'network', 'pkg_throttle', 'cpu_core', 'fstab', 'shell_fallback', 'json', "
-                "'dusky_sites', 'locale_gen', 'matugen', 'fontconfig', 'toml', 'kokoro', 'starship', 'hyprlock'"
+                "'dusky_sites', 'locale_gen', 'matugen', 'fontconfig', 'toml', 'kokoro', 'starship', 'hyprlock', 'ufw'"
             )
             sys.exit(1)
 
@@ -659,7 +687,7 @@ EXAMPLES:
             if getattr(item, "engine_type_override", None) or getattr(item, "target_file_override", None):
                 override_etype = (item.engine_type_override or ENGINE_TYPE).lower()
                 override_tfile = (
-                    str(Path(item.target_file_override).expanduser().resolve())
+                    resolve_target(item.target_file_override)
                     if item.target_file_override
                     else str(TARGET_FILE)
                 )
@@ -670,10 +698,11 @@ EXAMPLES:
 
     unique_targets = {TARGET_FILE}
 
-    for items in SCHEMA.values():
-        for item in items:
-            if getattr(item, "target_file_override", None):
-                unique_targets.add(Path(item.target_file_override).expanduser().resolve())
+    if args.restore or args.backup:
+        for items in SCHEMA.values():
+            for item in items:
+                if item.target_file_override:
+                    unique_targets.add(Path(resolve_target(item.target_file_override)))
 
     if args.restore:
         can_restore_all = True
@@ -683,7 +712,7 @@ EXAMPLES:
                 can_restore_all = False
 
         if not can_restore_all:
-            print("[-] Atomic restore aborted: One or more required backup files are missing.")
+            print("[-] Restore aborted: One or more required backup files are missing.")
             sys.exit(1)
 
         for t_file in unique_targets:
@@ -702,17 +731,24 @@ EXAMPLES:
     # --- 4. HEADLESS OPERATIONS ---
     if is_headless:
         if DEFERRED_LOAD:
-            DEFERRED_LOAD()
-
-        for ekey in list(engine_pool):
-            engine_pool[ekey].load_state()
+            deferred_result = DEFERRED_LOAD()
+            if isinstance(deferred_result, tuple) and len(deferred_result) >= 2:
+                _, discovered_items = deferred_result[:2]
+                if discovered_items:
+                    SCHEMA.update(discovered_items)
+            for items in SCHEMA.values():
+                for item in items:
+                    engine_pool.register(
+                        (item.engine_type_override or ENGINE_TYPE).lower(),
+                        resolve_target(item.target_file_override) if item.target_file_override else str(TARGET_FILE),
+                    )
 
         if args.export_state:
             merged_state = {}
 
             for ekey in list(engine_pool):
                 eng = engine_pool[ekey]
-                st = eng.cache if hasattr(eng, "cache") else eng.load_state()
+                st = eng.load_state()
 
                 if ekey == default_engine_key:
                     merged_state.update(st)
@@ -741,6 +777,8 @@ EXAMPLES:
                     print(f"### `{item.key}`")
                     print(f"- **Type:** `{item.type_}`")
                     print(f"- **Default:** `{item.default}`")
+                    if item.read_only:
+                        print("- **Read only:** yes")
 
                     if item.extended_help:
                         print(f"\n> {item.extended_help.replace('**', '')}\n")
@@ -755,19 +793,25 @@ EXAMPLES:
 
         flat_schema = {}
 
+        def setting_identity(item):
+            return (
+                item.scope, item.key,
+                (item.engine_type_override or ENGINE_TYPE).lower(),
+                resolve_target(item.target_file_override) if item.target_file_override else str(TARGET_FILE),
+            )
+
         for items in SCHEMA.values():
             for item in items:
                 if item.type_ in ("action", "preset", "menu"):
                     continue
 
                 scoped_key = f"{item.scope}.{item.key}"
-                flat_schema[scoped_key] = item
-
-                if item.key in flat_schema:
-                    if flat_schema[item.key] is not item:
-                        flat_schema[item.key] = None
-                else:
-                    flat_schema[item.key] = item
+                for lookup_key in (scoped_key, item.key):
+                    if lookup_key not in flat_schema:
+                        flat_schema[lookup_key] = item
+                    elif (previous := flat_schema[lookup_key]) is not None:
+                        if setting_identity(previous) != setting_identity(item):
+                            flat_schema[lookup_key] = None
 
         if args.set:
             if "=" not in args.set:
@@ -799,17 +843,18 @@ EXAMPLES:
             item = flat_schema[matched_key]
 
             if item is None:
-                print(f"[-] Key '{matched_key}' is ambiguous across multiple scopes. Please specify using 'scope.{matched_key}'.")
+                print(f"[-] Key '{matched_key}' is ambiguous across scopes or target files. Use an unambiguous schema key.")
                 sys.exit(1)
 
             e_type = (item.engine_type_override or ENGINE_TYPE).lower()
             t_file = (
-                str(Path(item.target_file_override).expanduser().resolve())
+                resolve_target(item.target_file_override)
                 if item.target_file_override
                 else str(TARGET_FILE)
             )
 
             target_engine = engine_pool[(e_type, t_file)]
+            target_engine.load_state()
             val_str = item.serialize(val_str)
 
             logger.info(f"Headless Injection: {matched_key} -> {val_str}")
@@ -827,17 +872,18 @@ EXAMPLES:
             item = flat_schema[args.reset_key]
 
             if item is None:
-                print(f"[-] Key '{args.reset_key}' is ambiguous across multiple scopes. Please specify using 'scope.{args.reset_key}'.")
+                print(f"[-] Key '{args.reset_key}' is ambiguous across scopes or target files. Use an unambiguous schema key.")
                 sys.exit(1)
 
             e_type = (item.engine_type_override or ENGINE_TYPE).lower()
             t_file = (
-                str(Path(item.target_file_override).expanduser().resolve())
+                resolve_target(item.target_file_override)
                 if item.target_file_override
                 else str(TARGET_FILE)
             )
 
             target_engine = engine_pool[(e_type, t_file)]
+            target_engine.load_state()
             val = item.serialize(item.default)
 
             logger.info(f"Headless Reset Key: {args.reset_key} -> {val}")
@@ -850,7 +896,7 @@ EXAMPLES:
         if args.default:
             logger.info("Initiating Full Headless Default Restoration")
 
-            unique_items = {id(item): item for item in flat_schema.values() if item is not None}.values()
+            unique_items = (item for items in SCHEMA.values() for item in items if item.type_ not in ("action", "preset", "menu") and not item.read_only)
             changes_by_engine = {}
 
             for item in unique_items:
@@ -858,7 +904,7 @@ EXAMPLES:
 
                 e_type = (item.engine_type_override or ENGINE_TYPE).lower()
                 t_file = (
-                    str(Path(item.target_file_override).expanduser().resolve())
+                    resolve_target(item.target_file_override)
                     if item.target_file_override
                     else str(TARGET_FILE)
                 )
@@ -866,13 +912,24 @@ EXAMPLES:
                 ekey = (e_type, t_file)
 
                 if ekey not in changes_by_engine:
-                    changes_by_engine[ekey] = []
+                    changes_by_engine[ekey] = {}
 
-                changes_by_engine[ekey].append((item.key, item.scope, val, item.type_))
+                changes_by_engine[ekey][(item.key, item.scope)] = (item.key, item.scope, val, item.type_)
 
             all_success = True
 
-            for ekey, changes in changes_by_engine.items():
+            for ekey, indexed_changes in changes_by_engine.items():
+                changes = list(indexed_changes.values())
+                engine_pool[ekey].load_state()
+                if hasattr(engine_pool[ekey], "write_batch_results"):
+                    results = engine_pool[ekey].write_batch_results(changes)
+                    failures = [result.message for result in results.values() if not result.ok]
+                    if failures:
+                        all_success = False
+                        print(f"[-] {ekey[0]} reset: {len(results) - len(failures)} applied; {len(failures)} failed. First error: {failures[0]}")
+                    else:
+                        print(f"[*] Restoration Complete for {ekey[0]} backend. Reset {len(results)} items successfully.")
+                    continue
                 success, msg, _ = engine_pool[ekey].write_batch(changes)
 
                 if success:
@@ -916,11 +973,10 @@ EXAMPLES:
         global_popup=GLOBAL_POPUP,
         tab_notices=TAB_NOTICES,
         deferred_load=DEFERRED_LOAD,
+        hide_missing_items=HIDE_MISSING_ITEMS,
         custom_views=CUSTOM_VIEWS
     )
 
-    for engine in list(engine_pool.values()):
-        if hasattr(engine, "set_app"):
-            engine.set_app(app)
+    engine_pool.bind_app(app)
 
     app.run()

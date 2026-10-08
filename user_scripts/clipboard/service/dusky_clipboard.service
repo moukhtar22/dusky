@@ -8,7 +8,7 @@ StartLimitIntervalSec=0
 
 [Service]
 Type=simple
-EnvironmentFile=-%h/.config/dusky/settings/cliphist_db_env
+# The daemon reads the authoritative file under XDG_CONFIG_HOME itself.
 ExecStart=%h/user_scripts/clipboard/dusky_clipboard_daemon.sh
 ExecReload=/usr/bin/kill -HUP $MAINPID
 Restart=always

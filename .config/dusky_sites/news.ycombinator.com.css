@@ -1,0 +1,15 @@
+@-moz-document domain("news.ycombinator.com") {
+    /* >>> dusky:picks - managed by the Visual Picker, one rule per line */
+    html { background-color: var(--background) !important; color: var(--on_background) !important; border-color: var(--outline_variant) !important; } /* dusky key=sel%1Fhtml%1Fbg | bg: background */
+    tbody { background-color: var(--background) !important; color: var(--on_background) !important; border-color: var(--outline_variant) !important; } /* dusky key=sel%1Ftbody%1Fbg | bg: background */
+    a { color: var(--inverse_surface) !important; } /* dusky key=sel%1Fa%1Ftext | text: inverse_surface */
+    table { background-color: var(--background) !important; color: var(--on_background) !important; border-color: var(--outline_variant) !important; } /* dusky key=sel%1Ftable%1Fbg | bg: background */
+    input[name="q"] { background-color: var(--primary) !important; color: var(--on_primary) !important; border-color: var(--outline_variant) !important; } /* dusky key=sel%1Finput%5Bname%3D%22q%22%5D%1Fbg | bg: primary */
+    div { color: var(--on_surface) !important; } /* dusky key=sel%1Fdiv%1Ftext | text: on_surface */
+    textarea[name="text"] { background-color: var(--background) !important; color: var(--on_background) !important; border-color: var(--outline_variant) !important; } /* dusky key=sel%1Ftextarea%5Bname%3D%22text%22%5D%1Fbg | bg: background */
+    td:nth-of-type(2) > form > input:nth-of-type(4) { background-color: var(--surface_container_lowest) !important; color: var(--on_surface) !important; border-color: var(--outline_variant) !important; } /* dusky key=sel%1Ftd%3Anth-of-type(2)%20%3E%20form%20%3E%20input%3Anth-of-type(4)%1Fbg | bg: surface_container_lowest */
+    span.pagetop > b.hnname > a { color: var(--primary) !important; } /* dusky key=sel%1Fspan.pagetop%20%3E%20b.hnname%20%3E%20a%1Ftext | text: primary */
+    td:nth-of-type(3) > span.pagetop > a { color: var(--secondary) !important; } /* dusky key=sel%1Ftd%3Anth-of-type(3)%20%3E%20span.pagetop%20%3E%20a%1Ftext | text: secondary */
+    div.votearrow { background-color: var(--tertiary_container) !important; color: var(--on_tertiary_container) !important; border-color: var(--outline_variant) !important; } /* dusky key=sel%1Fdiv.votearrow%1Fbg | bg: tertiary_container */
+    /* <<< dusky:picks */
+}

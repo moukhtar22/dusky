@@ -1,18 +1,19 @@
 # local.config — per-game overrides for actions.sh + start.sh (remove # to enable)
-# This overrides ~/.jc141rc for this game only. Copy from here.
+# This overrides ~/.jc141rc for this game only. Paths are relative to GAME_DIR.
+# Explicit mkdwarfs_auto.sh CLI choices override these defaults. Copy from here.
 
 # --- Core ---
 #UNMOUNT=1                # 1 = auto-unmount on exit, 0 = keep mounted
 #EXTRACT=0                # 1 = extract to files/game-root instead of mount (fallback if fuse-overlayfs missing)
 #TERMINAL_OUTPUT=1        # 1 = show logs, 0 = silent
-#CUSTOM_CMD=""            # Override auto-detect: e.g. "./Game.x86_64 -windowed" or "wine Game.exe"
+#CUSTOM_CMD=("./Game.x86_64" "-windowed") # Bash array preserves argument boundaries; quoted strings also work
 
 # --- Wine ---
 #SYSWINE="$(command -v wine)"  # Path to wine binary (or wine-tkg, proton)
-#WINEPREFIX=""            # Overridden by JC_DIRECTORY/wine-prefix-ew when ISOLATE=1
+#WINEPREFIX=""            # Default: JC_DIRECTORY/wine-prefix-ew; use a custom prefix when needed
 
 # --- Sandboxing (bubblewrap) ---
-#ISOLATE=0                # 1 = sandbox in bwrap (recommended), 0 = none
+#ISOLATE=0                # 1 = run in bwrap, 0 = none
 #BLOCK_NET=1              # 1 = block network (only if ISOLATE=1)
 #JC_DIRECTORY="$HOME/Games/jc141"  # Sandbox home + Wine prefix base
 
@@ -27,13 +28,17 @@
 #ADDITIONAL_FLAGS=""      # Extra gamescope flags
 
 # --- DwarFS Universal (new) ---
-#ENV=""                   # Extra env injected before game launch
+#ENV=""                   # Trusted shell setup before launch, e.g. export MY_OPTION=1
 #DWARFS_PROFILE="balanced" # Profile from 03_tools/profiles/ (fast/balanced/max/reproducible/game/game_ue/audio)
 #DWARFS_REPRODUCIBLE=0    # 1 = bit-identical (fixed time, single worker)
 #DWARFS_AUTOCATEGORIZE=0  # 1 = auto-detect pcmaudio/incompressible
-#DWARFS_OWNER=1000        # Owner for image (1000 for sharing, or $(id -u) for personal)
-#DWARFS_GROUP=1000
+#DWARFS_OWNER="$(id -u)"  # Default: current UID; override for sharing
+#DWARFS_GROUP="$(id -g)"
 #DWARFS_FILTER=""         # mkdwarfs filter, e.g. "-*.tmp"
 #DWARFS_PAR2=0            # 1 = create par2 for bit-rot
 #DWARFS_ANALYSIS_FILE=""  # Path for hotness analysis
 #DWARFS_EXTRA_OPTS=""     # Extra dwarfs mount opts, e.g. "-o mlock=try"
+
+#DWARFS_PROFILES_DIR=""  # Required when copied actions.sh cannot find the toolkit profiles
+#DWARFSEXTRACT_EXTRA=""  # Quoted extraction arguments, e.g. --num-disk-writers 2
+#DWARFS_VERIFY_CHECKSUM=0 # 1 = also print SHA-256 checksums of image contents

@@ -21,15 +21,13 @@ trap '' HUP
 # -----------------------------------------------------------------------------
 readonly APP_NAME="Dusky quickpanal"
 readonly SERVICE_NAME="dusky_quickpanal.service"
-readonly PROCESS_PATTERN='dusky_quickpanal\.py'
-readonly GUI_SCRIPT_PATH="${HOME}/user_scripts/dusky_system/quickpanal/dusky_quickpanal.py"
+readonly PROCESS_PATTERN='^([^[:space:]]*/)?python[0-9.]*([[:space:]]+-[^[:space:]]+)*[[:space:]]+([^[:space:]]*/)?dusky_quickpanal[.]py([[:space:]]|$)'
 
 # Timing Constants (Seconds)
 readonly GRACE_PERIOD_LOOPS=20
 readonly GRACE_SLEEP_SEC=0.1
 readonly POST_KILL_SETTLE_SEC=0.2
 readonly SERVICE_INIT_DELAY_SEC=0.3
-readonly DBUS_REGISTRATION_DELAY_SEC=1
 
 readonly SELF_PID=$$
 
@@ -58,7 +56,7 @@ preflight_checks() {
     fi
 
     local -a missing=()
-    for cmd in pgrep systemctl journalctl python3; do
+    for cmd in pgrep systemctl journalctl gdbus flock; do
         command -v "$cmd" &>/dev/null || missing+=("$cmd")
     done
 
@@ -77,7 +75,7 @@ get_target_pids() {
         if [[ "$pid" =~ ^[0-9]+$ ]] && ((pid != SELF_PID)); then
             printf '%s\n' "$pid"
         fi
-    done < <(pgrep -f -- "$PROCESS_PATTERN" 2>/dev/null || true)
+    done < <(pgrep -u "$UID" -f -- "$PROCESS_PATTERN" 2>/dev/null || true)
 }
 
 terminate_processes() {
@@ -145,20 +143,11 @@ start_and_verify_service() {
 # UI Activation
 # -----------------------------------------------------------------------------
 activate_ui() {
-    if [[ ! -f "$GUI_SCRIPT_PATH" ]]; then
-        log_warn "UI script not found at: $GUI_SCRIPT_PATH"
-        return 0
-    fi
-
     log_info "Activating UI window via D-Bus..."
-
-    # GTK4 Adw.Application natively handles D-Bus activation.
-    # Running it sends the signal to the primary daemon and exits immediately.
-    if [[ -x "$GUI_SCRIPT_PATH" ]]; then
-        "$GUI_SCRIPT_PATH" >/dev/null 2>&1
-    else
-        python3 -- "$GUI_SCRIPT_PATH" >/dev/null 2>&1
-    fi
+    # Avoid importing Python/GTK in a second process just to activate the daemon.
+    gdbus call --session --dest org.dusky.quickpanal \
+        --object-path /org/dusky/quickpanal \
+        --method org.freedesktop.Application.Activate '{}' >/dev/null
 }
 
 # -----------------------------------------------------------------------------
@@ -176,7 +165,17 @@ main() {
 
     preflight_checks || return 1
 
+    local reload_lock_fd
+    exec {reload_lock_fd}>"${XDG_RUNTIME_DIR:-/run/user/$UID}/dusky-quickpanel-reload.lock"
+    if ! flock --nonblock "$reload_lock_fd"; then
+        log_info "A restart is already in progress."
+        return 0
+    fi
+
     log_info "Initiating restart for ${C_BOLD}${APP_NAME}${C_RESET}..."
+
+    # Stop first so Restart=on-failure cannot race manual process cleanup.
+    systemctl --user stop -- "$SERVICE_NAME" || return 1
 
     local -a target_pids
     mapfile -t target_pids < <(get_target_pids)
@@ -189,8 +188,7 @@ main() {
 
     start_and_verify_service || return 1
 
-    log_info "Waiting for DBus registration (${DBUS_REGISTRATION_DELAY_SEC}s)..."
-    sleep "$DBUS_REGISTRATION_DELAY_SEC"
+    # Type=dbus makes systemctl start wait for bus-name registration.
     
     if (( quiet_mode == 0 )); then
         activate_ui

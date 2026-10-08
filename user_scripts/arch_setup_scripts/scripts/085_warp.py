@@ -14,6 +14,7 @@ import select
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -302,6 +303,40 @@ def pkg_installed(name: str = PKG_NAME) -> bool:
     return run_root(["pacman", "-Qi", name], capture=True).ok
 
 
+def _locate_built_packages(build_dir: pathlib.Path) -> list[pathlib.Path]:
+    """Locate built package files, honouring the user's PKGDEST.
+
+    makepkg honours PKGDEST — e.g. the ArchWiki-recommended per-user override
+    ``PKGDEST="${XDG_CACHE_HOME:-$HOME/.cache}/makepkg/pkg"`` in
+    ``~/.config/pacman/makepkg.conf`` (also set by paru/yay-style setups).
+    In that case the artifact lands in the cache dir, NOT in *build_dir*,
+    so a plain ``build_dir.glob("*.pkg.tar.*")`` finds nothing and the setup
+    dies with "No .pkg.tar.* artifact produced by makepkg." even though the
+    build succeeded. Ask makepkg where it put the files, falling back to a
+    local glob for stock configs.
+    """
+    pkgs: list[pathlib.Path] = []
+    r = run_as_user(
+        ["makepkg", "--packagelist"],
+        cwd=build_dir,
+        capture=True,
+        timeout=30,
+    )
+    if r.ok:
+        for line in r.stdout.splitlines():
+            line = line.strip()
+            if line:
+                p = pathlib.Path(line)
+                if p.is_file():
+                    pkgs.append(p)
+    if not pkgs:
+        # Fallback for stock makepkg.conf (PKGDEST unset → artifact in cwd).
+        # NB: "*.pkg.tar*" not "*.pkg.tar.*" so an uncompressed
+        # PKGEXT='.pkg.tar' still matches.
+        pkgs = sorted(build_dir.glob("*.pkg.tar*"))
+    return sorted(pkgs)
+
+
 def install_package(auto: bool) -> None:
     log_step("Package Installation")
 
@@ -327,10 +362,11 @@ def install_package(auto: bool) -> None:
         if not r.ok:
             die(f"Failed to install build deps: {r.stderr.strip()}")
 
-    build_dir = pathlib.Path(f"/tmp/warp_build_{os.getpid()}")
+    # tempfile.mkdtemp guarantees a fresh empty dir (no PID-reuse collisions).
+    build_dir = pathlib.Path(tempfile.mkdtemp(prefix="warp_build_"))
     try:
-        build_dir.mkdir(parents=True, exist_ok=True)
         # Hand the directory to REAL_USER before any work in it
+        # (mkdtemp created it as root).
         pw = pwd.getpwnam(real_user())
         os.chown(build_dir, pw.pw_uid, pw.pw_gid)
 
@@ -352,21 +388,30 @@ def install_package(auto: bool) -> None:
                 timeout=600,
             )
             if not r.ok:
+                # NB: makepkg logs the build to stdout, not stderr — showing
+                # only stderr yields "(no stderr)" and hides the real error.
+                combined = (r.stdout or "")
+                if r.stderr:
+                    combined += ("\n" if combined else "") + r.stderr
                 tail = (
-                    "\n".join(r.stderr.strip().splitlines()[-5:])
-                    if r.stderr
-                    else "(no stderr)"
+                    "\n".join(combined.strip().splitlines()[-15:])
+                    if combined.strip()
+                    else "(no output)"
                 )
                 die(f"makepkg failed:\n{tail}")
 
-        pkgs = sorted(build_dir.glob("*.pkg.tar.*"))
+        pkgs = _locate_built_packages(build_dir)
         if not pkgs:
-            die("No .pkg.tar.* artifact produced by makepkg.")
+            die(
+                "No .pkg.tar.* artifact produced by makepkg "
+                "(checked build dir and `makepkg --packagelist`; "
+                "is PKGDEST unwritable or disk full?)."
+            )
         pkg_file = pkgs[0]
 
         with spinner(f"Installing {pkg_file.name} via pacman..."):
             r = run_root(
-                ["pacman", "-U", "--noconfirm", str(pkg_file)],
+                ["pacman", "-U", "--noconfirm", *[str(p) for p in pkgs]],
                 capture=True,
                 timeout=120,
             )
@@ -386,11 +431,17 @@ def install_package(auto: bool) -> None:
 def _wait_for_socket(timeout: int = 15) -> bool:
     """Poll warp-cli status until the daemon socket responds."""
     for _ in range(timeout):
-        r = run_as_user(
-            ["warp-cli", "--accept-tos", "status"],
-            capture=True,
-            timeout=5,
-        )
+        try:
+            r = run_as_user(
+                ["warp-cli", "--accept-tos", "status"],
+                capture=True,
+                timeout=5,
+            )
+        except RuntimeError:
+            # A single hung/slow warp-cli call (e.g. daemon restarting after
+            # an upgrade) must not abort setup — treat as "not ready yet".
+            time.sleep(1)
+            continue
         if r.ok:
             return True
         time.sleep(1)
@@ -400,6 +451,10 @@ def _wait_for_socket(timeout: int = 15) -> bool:
 def configure_service() -> None:
     log_step("Service Initialisation")
 
+    # daemon-reload first: upgrades can change the unit file (this PKGBUILD
+    # rewrites ExecStart), and a stale unit keeps pointing at deleted binaries.
+    run_root(["systemctl", "daemon-reload"], capture=True)
+
     with spinner(f"Enabling & starting {SERVICE_NAME}..."):
         r = run_root(
             ["systemctl", "enable", "--now", SERVICE_NAME],
@@ -407,6 +462,18 @@ def configure_service() -> None:
         )
         if not r.ok:
             die(f"Failed to enable {SERVICE_NAME}: {r.stderr.strip()}")
+
+    # An upgrade replaces /usr/bin/warp-svc underneath an already-running
+    # daemon; `enable --now` is then a no-op and the old process (possibly
+    # incompatible with the new warp-cli) keeps serving the socket until it
+    # hangs. Restart unconditionally so the just-installed binaries are live.
+    with spinner(f"Restarting {SERVICE_NAME} to load installed binaries..."):
+        r = run_root(
+            ["systemctl", "restart", SERVICE_NAME],
+            capture=True,
+        )
+        if not r.ok:
+            die(f"Failed to (re)start {SERVICE_NAME}: {r.stderr.strip()}")
 
     with spinner("Waiting for service activation..."):
         active = False

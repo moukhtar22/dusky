@@ -1,241 +1,108 @@
 #!/usr/bin/env bash
-#==============================================================================
-# Enhanced Rofi Clipboard Manager - ARCH/HYPRLAND EDITION
-#==============================================================================
+# Rofi frontend for the shared Dusky Wayland clipboard operations.
+set -o nounset -o pipefail
+shopt -s nullglob extglob
+umask 077
+export LC_ALL=C.UTF-8
 
-set -o nounset
-set -o pipefail
-shopt -s nullglob
-
-#--- CONFIGURATION ---
-readonly XDG_DATA_HOME="${XDG_DATA_HOME:-${HOME}/.local/share}"
-readonly XDG_CACHE_HOME="${XDG_CACHE_HOME:-${HOME}/.cache}"
-readonly PINS_DIR="${XDG_DATA_HOME}/rofi-cliphist/pins"
-readonly THUMB_DIR="${XDG_CACHE_HOME}/rofi-cliphist/thumbs"
-
-# --- Persistence Integration - FIXED ---
-readonly DB_ENV_FILE="${HOME}/.config/dusky/settings/cliphist_db_env"
-
-# Critical: unset stale inherited value from Hyprland/systemd, then re-source authoritative file
-unset CLIPHIST_DB_PATH 2>/dev/null || true
-if [[ -f "$DB_ENV_FILE" ]]; then
-    # shellcheck source=/dev/null
-    source "$DB_ENV_FILE"
-fi
-# Fallback safety: if file missing/empty, use standard cache location
-if [[ -z "${CLIPHIST_DB_PATH:-}" ]]; then
-    export CLIPHIST_DB_PATH="${XDG_CACHE_HOME:-$HOME/.cache}/cliphist/db"
-fi
-export CLIPHIST_DB_PATH
-
-readonly PIN_ICON=" "
-readonly IMG_ICON=" "
-
-readonly MAX_PREVIEW_LENGTH=80
-readonly THUMB_SIZE="256x256"
-
-#--- DEPENDENCY CHECK ---
-validate_dependencies() {
-    local missing=() cmd
-    for cmd in cliphist wl-copy; do
-        command -v "${cmd}" &>/dev/null || missing+=("${cmd}")
-    done
-
-    if ((${#missing[@]} > 0)); then
-        printf 'Error: Missing dependencies: %s\n' "${missing[*]}" >&2
-        return 1
-    fi
-    return 0
-}
-
-#--- SETUP ---
-validate_dependencies || exit 1
-mkdir -p "${PINS_DIR}" "${THUMB_DIR}"
-chmod 700 "${PINS_DIR}" "${THUMB_DIR}"
-
-#--- UTILS ---
-generate_hash() {
-    local input="$1"
-    if command -v b2sum &>/dev/null; then
-        printf '%s' "${input}" | b2sum | cut -c1-16
-    else
-        printf '%s' "${input}" | md5sum | cut -c1-16
-    fi
-}
-
-create_preview() {
-    local content="$1"
-    local preview
-
-    if ((${#content} > MAX_PREVIEW_LENGTH * 2)); then
-        content="${content:0:$((MAX_PREVIEW_LENGTH * 2))}"
-    fi
-
-    # Native Bash cleanup (No external `tr`)
-    preview="${content//[$'\n\r\t\v\f\x00\x1f']/ }"
-
-    while [[ "${preview}" == *"  "* ]]; do
-        preview="${preview//  / }"
-    done
-
-    preview="${preview#"${preview%%[![:space:]]*}"}"
-    preview="${preview%"${preview##*[![:space:]]}"}"
-
-    if ((${#preview} > MAX_PREVIEW_LENGTH)); then
-        preview="${preview:0:MAX_PREVIEW_LENGTH}…"
-    fi
-
-    printf '%s' "${preview:-[empty]}"
-}
+SELF=$(realpath -e -- "${BASH_SOURCE[0]}") || exit 1
+readonly MENU="${SELF%/*}/../clipboard/terminal_clipboard.sh"
+readonly THUMB_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/rofi-cliphist/thumbs"
+readonly SEP=$'\x1f'
+[[ -x $MENU ]] || { printf 'Clipboard backend missing: %s\n' "$MENU" >&2; exit 1; }
+mkdir -p -- "$THUMB_DIR" || exit 1
+# Bound orphaned thumbnails without touching active menu scratch directories.
+find "$THUMB_DIR" -maxdepth 1 -type f -name '*.png' -mmin +1440 -delete 2>/dev/null || :
+SESSION=$(mktemp -d -- "$THUMB_DIR/.menu.XXXXXXXX") || exit 1
+trap 'rm -rf -- "$SESSION"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+THUMB_KEY=''
 
 ensure_thumbnail() {
-    local id="$1"
-    local thumb_path="${THUMB_DIR}/${id}.png"
-
-    if [[ -f "${thumb_path}" ]]; then
-        printf '%s' "${thumb_path}"
-        return 0
+    local id="$1" db="$2" generation="$3" digest path decoded="$SESSION/image" temp="$SESSION/thumb.png"
+    REPLY=''
+    command -v magick &>/dev/null || return 1
+    if [[ -z $THUMB_KEY ]]; then
+        # IDs remain unique within a database generation; ordinary stores
+        # must not invalidate every existing thumbnail.
+        digest=$(printf '%s\0%s\0' "$db" "$generation" | b2sum --length=256) || return 1
+        THUMB_KEY="${digest%% *}"
     fi
-
-    if ! command -v magick &>/dev/null; then
-        return 1
-    fi
-
-    local tmp_path="${thumb_path}.tmp.$$"
-    
-    if cliphist decode "${id}" 2>/dev/null \
-        | magick - -background none -resize "${THUMB_SIZE}" "${tmp_path}" 2>/dev/null; then
-        mv -f "${tmp_path}" "${thumb_path}" 2>/dev/null && {
-            printf '%s' "${thumb_path}"
-            return 0
-        }
-    fi
-
-    rm -f "${tmp_path}" 2>/dev/null
-    return 1
+    path="$THUMB_DIR/$THUMB_KEY-$id.png"
+    if [[ -s $path ]]; then REPLY="$path"; return 0; fi
+    # Decode the database represented by this list, even if storage switches
+    # while the optional thumbnails are being rendered.
+    "$MENU" --decode "$id" "$db" "$generation" >"$decoded" 2>/dev/null || return 1
+    magick "$decoded" -background none -resize 256x256 "PNG:$temp" 2>/dev/null || return 1
+    mv -f -- "$temp" "$path" || return 1
+    REPLY="$path"
 }
 
-#--- MAIN DISPLAY ---
 display_menu() {
-    # Added ALT+T instruction to header
-    printf '\000message\x1f<b>Alt+T</b>: Wipe | <b>Alt+U</b>: Pin | <b>Alt+Y</b>: UnPin\n'
+    local display type id db='' generation='' listed_db='' listed_generation='' thumb
+    "$MENU" --list >"$SESSION/items" || return 1
+    # History rows carry their originating database; pins are shared by both
+    # storage modes. This token is returned by Rofi on its next invocation.
+    while IFS="$SEP" read -r display type id db generation; do
+        if [[ -n $db ]]; then listed_db="$db"; listed_generation="$generation"; break; fi
+    done <"$SESSION/items"
+    [[ -n $listed_db ]] || listed_db=$("$MENU" --backend) || return 1
+    # Base64 keeps whitespace and punctuation in XDG paths out of Rofi's
+    # header grammar. The generation remains plain numeric/timestamp text.
+    printf '\000data\x1f'
+    printf '%s' "$listed_db" | base64 --wrap=0
+    printf ':%s\n' "$listed_generation"
+    printf '\000message\x1f<b>Alt+T</b>: Wipe | <b>Alt+U</b>: Pin | <b>Alt+Y</b>: UnPin/Delete\n'
+    printf '\000no-custom\x1ftrue\n'
     printf '\000use-hot-keys\x1ftrue\n'
     printf '\000keep-selection\x1ftrue\n'
 
-    # --- 1. Pinned Items ---
-    local pin_file filename content preview
-    while IFS= read -r pin_file; do
-        [[ -r "${pin_file}" ]] || continue
-
-        filename="${pin_file##*/}"
-        content=$(<"${pin_file}") || continue
-        preview=$(create_preview "${content}")
-
-        printf '%s %s\000info\x1fpin:%s\n' "${PIN_ICON}" "${preview}" "${filename}"
-    done < <(
-        find "${PINS_DIR}" -maxdepth 1 -name '*.pin' -type f \
-            -printf '%T@\t%p\n' 2>/dev/null \
-        | sort -t$'\t' -k1 -rn \
-        | cut -f2
-    )
-
-    # --- 2. History Items ---
-    local line id rest rest_lower thumb_path display_text
-    while IFS= read -r line; do
-        [[ -z "${line}" ]] && continue
-
-        id="${line%%$'\t'*}"
-        rest="${line#*$'\t'}"
-
-        rest_lower="${rest,,}"
-        if [[ "${rest_lower}" =~ binary.*(png|jpg|jpeg|bmp|webp) ]]; then
-            thumb_path=$(ensure_thumbnail "${id}") || thumb_path=""
-
-            if [[ -n "${thumb_path}" ]]; then
-                printf '%s: %s [Image]\000icon\x1f%s\x1finfo\x1fhist:%s\n' \
-                    "${id}" "${IMG_ICON}" "${thumb_path}" "${line}"
-            else
-                printf '%s: [Binary] (No Preview)\000info\x1fhist:%s\n' \
-                    "${id}" "${line}"
-            fi
-        else
-            display_text=$(create_preview "${rest}")
-            printf '%s: %s\000info\x1fhist:%s\n' "${id}" "${display_text}" "${line}"
-        fi
-    done < <(cliphist list 2>/dev/null)
+    while IFS="$SEP" read -r display type id db generation; do
+        # The shared list already bounds and sanitizes content. Strip only the
+        # ANSI decoration added by its image formatter, then shorten for Rofi.
+        display="${display//$'\e[36m'/}"
+        display="${display//$'\e[0m'/}"
+        (( ${#display} <= 80 )) || display="${display:0:80}…"
+        thumb=''
+        if [[ $type == img ]] && ensure_thumbnail "$id" "$db" "$generation"; then thumb="$REPLY"; fi
+        case $type in
+            pin|txt|img|bin)
+                printf '%s\000info\x1f%s:%s' "$display" "$type" "$id"
+                [[ -z $thumb ]] || printf '\x1ficon\x1f%s' "$thumb"
+                printf '\n'
+                ;;
+            *) printf '%s\000nonselectable\x1ftrue\n' "$display" ;;
+        esac
+    done <"$SESSION/items"
 }
 
-#--- ACTION HANDLERS ---
 handle_selection() {
-    local selection="${1:-}"
-    local action="${ROFI_RETV:-0}"
-    local info="${ROFI_INFO:-}"
-
-    # --- GLOBAL ACTION: WIPE CLIPBOARD (Alt+T / Custom Key 3) ---
-    # We handle this first so it works regardless of what row is highlighted
-    if ((action == 12)); then
-        # Wipe cliphist database
-        cliphist wipe 2>/dev/null
-        # Clear image cache to stay in sync and save space
-        rm -f "${THUMB_DIR}"/*.png
-        # Do NOT touch PINS_DIR
+    local action="${ROFI_RETV:-0}" info="${ROFI_INFO:-}"
+    local type="${info%%:*}" id="${info#*:}" context="${ROFI_DATA:-}" db='' generation=''
+    if [[ -n $context ]]; then
+        db=$(base64 --decode <<<"${context%%:*}") || return 1
+        generation="${context#*:}"
+    fi
+    if [[ $action == 12 ]]; then
+        if "$MENU" --wipe "$db" "$generation"; then rm -f -- "$THUMB_DIR"/*.png; fi
         display_menu
-        return 0
+        return
     fi
-
-    # If nothing selected (and not a global action), just show menu
-    if [[ -z "${selection}" ]]; then
-        display_menu
-        return 0
-    fi
-
-    local type="${info%%:*}"
-    local data="${info#*:}"
-
-    # Handle Pins
-    if [[ "${type}" == "pin" ]]; then
-        case "${action}" in
-            1)  # Enter: Copy using input redirection
-                [[ -r "${PINS_DIR}/${data}" ]] && wl-copy < "${PINS_DIR}/${data}"
-                ;;
-            10|11) # Alt+U/Y: Delete pin
-                rm -f "${PINS_DIR}/${data}"
-                display_menu
-                ;;
-            *) display_menu ;;
-        esac
-    
-    # Handle History
-    else
-        local id="${data%%$'\t'*}"
-        case "${action}" in
-            1)  # Enter: Decode and copy
-                cliphist decode "${id}" 2>/dev/null | wl-copy
-                ;;
-            10) # Alt+U: Pin (Text only)
-                local txt hash
-                txt=$(cliphist decode "${id}" 2>/dev/null) || txt=""
-                if [[ -n "${txt}" ]]; then
-                    hash=$(generate_hash "${txt}")
-                    printf '%s' "${txt}" > "${PINS_DIR}/${hash}.pin"
-                fi
-                display_menu
-                ;;
-            11) # Alt+Y: Delete from history + cache
-                # FIX: Force stdin format to prevent the cliphist positional argument bug
-                printf '%s\t\n' "${id}" | cliphist delete 2>/dev/null
-                rm -f "${THUMB_DIR}/${id}.png"
-                display_menu
-                ;;
-            *) display_menu ;;
-        esac
-    fi
+    case $type in pin|txt|img|bin) ;; *) display_menu; return ;; esac
+    case $action in
+        1) "$MENU" --copy "$type" "$id" "$db" "$generation" ;;
+        10|11)
+            printf '%s%s%s%s%s%s%s%s\n' "$SEP" "$type" "$SEP" "$id" "$SEP" "$db" "$SEP" "$generation" >"$SESSION/selection" || return 1
+            if [[ $type == pin || ( $action == 10 && $type == txt ) ]]; then
+                "$MENU" --batch-pin "$SESSION/selection"
+            elif [[ $action == 11 ]]; then
+                "$MENU" --batch-delete "$SESSION/selection"
+            fi
+            display_menu
+            ;;
+        *) display_menu ;;
+    esac
 }
 
-#--- ENTRY POINT ---
-# Check for arguments. Rofi passes the selection as $1.
-if (($# == 0)); then
-    display_menu
-else
-    handle_selection "${1:-}"
-fi
+if (( $# == 0 )); then display_menu; else handle_selection; fi

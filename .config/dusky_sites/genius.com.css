@@ -1,0 +1,10 @@
+@-moz-document domain("genius.com") {
+    /* >>> dusky:picks - managed by the Visual Picker, one rule per line */
+    body { background-color: var(--surface) !important; color: var(--on_surface) !important; border-color: var(--outline_variant) !important; } /* dusky key=sel%1Fbody%1Fbg | bg: surface */
+    div { background-color: var(--surface) !important; color: var(--on_surface) !important; border-color: var(--outline_variant) !important; } /* dusky key=sel%1Fdiv%1Fbg | bg: surface */
+    #sticky-nav { background-color: var(--surface) !important; color: var(--on_surface) !important; border-color: var(--outline_variant) !important; } /* dusky key=sel%1F%23sticky-nav%1Fbg | bg: surface */
+    form.StickyNavSearch-desktop__Form-sc-212872c2-0.gDkJXT.ng-pristine { background-color: var(--surface_container_highest) !important; color: var(--on_surface) !important; border-color: var(--outline_variant) !important; } /* dusky key=sel%1Fform.StickyNavSearch-desktop__Form-sc-212872c2-0.gDkJXT.ng-pristine%1Fbg | bg: surface_container_highest */
+    input.StickyNavSearch-desktop__Input-sc-212872c2-2.dDDWOS { background-color: var(--surface_variant) !important; color: var(--on_surface) !important; border-color: var(--outline_variant) !important; } /* dusky key=sel%1Finput.StickyNavSearch-desktop__Input-sc-212872c2-2.dDDWOS%1Fbg | bg: surface_variant */
+    a { background-color: var(--surface) !important; color: var(--on_surface) !important; border-color: var(--outline_variant) !important; } /* dusky key=sel%1Fa%1Fbg | bg: surface */
+    /* <<< dusky:picks */
+}

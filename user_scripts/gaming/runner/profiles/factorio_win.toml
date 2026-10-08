@@ -1,0 +1,61 @@
+# ==============================================================================
+# Factorio (Windows) Profile
+# ==============================================================================
+# Windows build 2.1.17 via Wine-Staging + DXVK (D3D11 -> Vulkan).
+# Target: bin/x64/factorio.exe (uncompressed, no DwarFS layer).
+# Mirrors native factorio.toml (integrated GPU, 60 FPS cap, no gamescope)
+# but uses base_wine_dxvk runtime instead of native ELF.
+
+extends = "base_wine_dxvk"
+
+[meta]
+id = "factorio_win"
+name = "Factorio (Windows)"
+version = "2.1.17"
+icon = "applications-games"
+developer = "Wube Software"
+genre = "Automation / Strategy"
+description = "Build and maintain automated factories on an alien planet. Windows build via Wine + DXVK."
+
+[paths]
+game_dir = "/mnt/media/games/more_windows/Factorio_2.1.17"
+executable = "bin/x64/factorio.exe"
+arguments = []
+
+[runtime]
+type = "wine"
+
+[runtime.wine]
+prefix_dir = "files/wine-prefix"
+arch = "win64"
+sync_mode = "auto"
+large_address_aware = true
+debug = "fixme-all"
+dxvk = true
+vkd3d = true
+dxvk_nvapi = false
+disable_menubuilder = true
+redistributables = []
+winetricks = []
+
+[runtime.wine.dll_overrides]
+"winemenubuilder.exe" = "d"
+mshtml = "d"
+dxgi = "n,b"
+d3d11 = "n,b"
+d3d12 = "n,b"
+d3d9 = "n,b"
+
+[graphics]
+gpu = "integrated"
+wayland_native = true
+prefer_xwayland = false
+vulkan_icd = "auto"
+
+[graphics.gamescope]
+enabled = false
+
+[performance]
+gamemode = true
+mangohud = false
+fps_limit = 60

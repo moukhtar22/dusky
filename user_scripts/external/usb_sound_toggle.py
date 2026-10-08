@@ -6,8 +6,6 @@ usb_sound.sh (both copies) before playing any USB connect/disconnect sounds.
 No root privileges needed — the udev rule always stays active.
 """
 
-from __future__ import annotations
-
 import argparse
 from pathlib import Path
 
@@ -21,7 +19,12 @@ def cmd_status() -> str:
 
 def cmd_on() -> None:
     FLAG_FILE.parent.mkdir(parents=True, exist_ok=True)
-    FLAG_FILE.touch()
+    # Never open existing special files or modify an already-enabled flag.
+    try:
+        FLAG_FILE.touch(exist_ok=False)
+    except FileExistsError:
+        if not FLAG_FILE.is_file():
+            raise
 
 
 def cmd_off() -> None:
@@ -38,12 +41,15 @@ def main() -> None:
     group.add_argument("--status", action="store_true", help="Check state")
     args = parser.parse_args()
 
-    if args.status:
-        print(cmd_status())
-    elif args.on:
-        cmd_on()
-    elif args.off:
-        cmd_off()
+    try:
+        if args.status:
+            print(cmd_status())
+        elif args.on:
+            cmd_on()
+        elif args.off:
+            cmd_off()
+    except OSError as error:
+        parser.exit(1, f"{parser.prog}: {error}\n")
 
 
 if __name__ == "__main__":

@@ -12,7 +12,7 @@ local function is_target_app_active()
     local w = hl.get_active_window()
     if not w then return false end
     local class = w.class or ""
-    return class == "dusky_tui" or class == "wallpaper_selector.py" or class == "factorio" or class == "terminal_clipboard.sh" or class == "dusky_snapshot_manager.py"
+    return class == "dusky_tui" or class == "wallpaper_selector.py" or class == "dusky-papers" or class == "factorio" or class == "terminal_clipboard.sh" or class == "dusky_snapshot_manager.py"
 end
 
 local function cond_bind(key, default_dsp, flags)
@@ -105,11 +105,11 @@ hl.bind(
     { description = "Matugen Theme Config" }
 )
 
-hl.bind(
-    "CTRL + SPACE",
-    hl.dsp.exec_cmd(dusky_scripts .. "images/wallpaper_selector.py"),
-    { description = "Rofi Wallpaper Selector" }
-)
+-- hl.bind(
+--     "CTRL + SPACE",
+--     hl.dsp.exec_cmd(dusky_scripts .. "images/wallpaper_selector.py"),
+--     { description = "Rofi Wallpaper Selector" }
+-- )
 
 hl.bind(
     "SUPER + SPACE",
@@ -126,7 +126,7 @@ hl.bind(
 -- Rofi Powermenu
 hl.bind(
     "ALT + SHIFT + SPACE",
-    hl.dsp.exec_cmd("pkill rofi; rofi -show power-menu -modi power-menu:" .. dusky_scripts .. "rofi/powermenu.sh"),
+    hl.dsp.exec_cmd("pkill rofi; rofi -show power-menu -modi power-menu:" .. dusky_scripts .. "rofi/powermenu.sh -no-fixed-num-lines -i"),
     { description = "Power Menu" }
 )
 
@@ -160,11 +160,14 @@ cond_bind(
     { description = "Audio Mixer" }
 )
 
-cond_bind(
-    "ALT + 4",
-    hl.dsp.exec_cmd(dusky_scripts .. "images/wallpaper_selector.py"),
-    { description = "Dusky Wallpaper Selector" }
-)
+-- alt + 4 and ctrl space to open Dusky Papers
+for _, key in ipairs({ "ALT + 4", "CTRL + SPACE" }) do
+    cond_bind(
+        key,
+        hl.dsp.exec_cmd(HOME .. "/.local/bin/dusky-papers"),
+        { description = "Dusky Papers" }
+    )
+end
 
 hl.bind(
     "SUPER + apostrophe",
@@ -438,16 +441,60 @@ hl.bind(
     { description = "Reset Zoom", locked = true }
 )
 
+-- --- Accessibility: Cursor Size (companion to Zoom above) ---
+-- equal is the =/+ key, so SUPER+SHIFT+equal IS Super+Shift+Plus.
+-- NOTE: plain SUPER+scroll is taken by workspace cycling (see below),
+-- so scrolling uses SHIFT here to match the keybinds above.
+hl.bind(
+    "SUPER + SHIFT + equal",
+    hl.dsp.exec_cmd(dusky_scripts .. "cursor/size/cursor_size.py +"),
+    { description = "Cursor Size Up", repeating = true }
+)
+
+hl.bind(
+    "SUPER + SHIFT + minus",
+    hl.dsp.exec_cmd(dusky_scripts .. "cursor/size/cursor_size.py -"),
+    { description = "Cursor Size Down", repeating = true }
+)
+
+hl.bind(
+    "SUPER + SHIFT + mouse_up",
+    hl.dsp.exec_cmd(dusky_scripts .. "cursor/size/cursor_size.py +"),
+    { description = "Cursor Size Up (Scroll)" }
+)
+
+hl.bind(
+    "SUPER + SHIFT + mouse_down",
+    hl.dsp.exec_cmd(dusky_scripts .. "cursor/size/cursor_size.py -"),
+    { description = "Cursor Size Down (Scroll)" }
+)
+
+hl.bind(
+    "SUPER + SHIFT + BACKSPACE",
+    hl.dsp.exec_cmd(dusky_scripts .. "cursor/size/cursor_size.py --reset"),
+    { description = "Cursor Size Reset", locked = true }
+)
+
 
 -- --- Clipboard & Screenshot ---
-local clipboard_state_file = os.getenv("HOME") .. "/.config/dusky/settings/clipboard_state"
+local clipboard_config_home = os.getenv("XDG_CONFIG_HOME")
+if not clipboard_config_home or clipboard_config_home == "" then
+    clipboard_config_home = os.getenv("HOME") .. "/.config"
+end
+local clipboard_state_file = clipboard_config_home .. "/dusky/settings/clipboard_state"
 local use_terminal_clipboard = true
 local f_state = io.open(clipboard_state_file, "r")
 if f_state then
     local content = f_state:read("*all")
     f_state:close()
-    if content:match("False") then
-        use_terminal_clipboard = false
+    -- Read only standalone frontend markers; comments and other settings may
+    -- mention True/False. Last marker wins, matching the frontend switcher.
+    for line in content:gmatch("[^\r\n]+") do
+        if line:match("^%s*False%s*$") then
+            use_terminal_clipboard = false
+        elseif line:match("^%s*True%s*$") then
+            use_terminal_clipboard = true
+        end
     end
 end
 
@@ -456,7 +503,7 @@ if use_terminal_clipboard then
         os.execute("pkill -15 -f '^foot.*terminal_clipboard'")
         hl.dispatch(hl.dsp.exec_cmd(
             "foot --app-id=terminal_clipboard.sh " ..
-            os.getenv("HOME") .. "/user_scripts/clipboard/terminal_clipboard.sh"
+            "'" .. (os.getenv("HOME") .. "/user_scripts/clipboard/terminal_clipboard.sh"):gsub("'", "'\\''") .. "'"
         ))
     end, { description = "Clipboard History (Terminal)" })
 else
@@ -517,7 +564,7 @@ cond_bind(
 
 -- Google Image Search
 hl.bind(
-    "SUPER + G",
+    "SUPER + SHIFT + G",
     hl.dsp.exec_cmd(dusky_scripts .. "google_image_search/google_image_search.sh"),
     { description = "Image Search (Select and search)" }
 )
@@ -675,6 +722,18 @@ hl.bind(
     { description = "Window Maximize" }
 )
 
+-- Leave fullscreen even when an application inhibits shortcuts or captures input.
+hl.bind(
+    "SUPER + Escape",
+    hl.dsp.window.fullscreen({ mode = "fullscreen", action = "unset" }),
+    {
+        description = "Leave Fullscreen",
+        dont_inhibit = true,
+        allow_input_capture = true,
+        submap_universal = true,
+    }
+)
+
 hl.bind(
     "SUPER + X",
     hl.dsp.window.pin(),
@@ -716,6 +775,69 @@ hl.bind(
     "SUPER + SHIFT + D",
     hl.dsp.window.pseudo({ action = "toggle" }),
     { description = "Toggle Pseudo" }
+)
+
+
+-- -------------------------------------------------------------------------------------------------
+-- GROUPED (TABBED) WINDOWS - i3-style tabs in one tile
+-- Wiki: Window-Rules #group-window-rule-options (auto-group) + Dispatchers hl.dsp.group.* (manual)
+-- Behavior: togglegroup alone only makes the ACTIVE window a single-tab group.
+-- New windows then auto-join that unlocked focused group (what you saw with SUPER+Q).
+-- To merge two EXISTING windows, use Move Into / Create Group toward the other window.
+-- -------------------------------------------------------------------------------------------------
+
+hl.bind(
+    "SUPER + G",
+    hl.dsp.group.toggle(),
+    { description = "Group Toggle (tabbed)" }
+)
+
+hl.bind(
+    "SUPER + ALT + H",
+    hl.dsp.group.prev(),
+    { description = "Group Prev Tab" }
+)
+
+hl.bind(
+    "SUPER + ALT + L",
+    hl.dsp.group.next(),
+    { description = "Group Next Tab" }
+)
+
+hl.bind(
+    "SUPER + ALT + SHIFT + H",
+    hl.dsp.window.move({ into_or_create_group = "l" }),
+    { description = "Group Merge Left (create if none)" }
+)
+
+hl.bind(
+    "SUPER + ALT + SHIFT + L",
+    hl.dsp.window.move({ into_or_create_group = "r" }),
+    { description = "Group Merge Right (create if none)" }
+)
+
+hl.bind(
+    "SUPER + ALT + SHIFT + K",
+    hl.dsp.window.move({ into_or_create_group = "u" }),
+    { description = "Group Merge Up (create if none)" }
+)
+
+hl.bind(
+    "SUPER + ALT + SHIFT + J",
+    hl.dsp.window.move({ into_or_create_group = "d" }),
+    { description = "Group Merge Down (create if none)" }
+)
+
+hl.bind(
+    "SUPER + ALT + U",
+    hl.dsp.window.move({ out_of_group = true }),
+    { description = "Group Move Out (ungroup)" }
+)
+
+hl.bind(
+    "SUPER + ALT + K",
+    hl.dsp.group.lock_active({ action = "toggle" }),
+    { description = "Group Lock Toggle" }
 )
 
 
